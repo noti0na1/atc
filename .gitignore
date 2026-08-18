@@ -1,6 +1,58 @@
+### Scala ###
 *.class
-*.tasty
 *.log
+*.tasty
+
+# IDE
+.idea/
+.vscode/
+.metals/
+.bloop/
+.bsp/
+
+# OS
+.DS_Store
+
+### SBT ###
+# Simple Build Tool
+# http://www.scala-sbt.org/release/docs/Getting-Started/Directories.html#configuring-version-control
+
+dist/*
+target/
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/
+.history
+.cache
+.lib/
+*.jar
+
+### SBT Patch ###
+.bsp/
+
+# Scala cli
+.scala-build/
+
+# mill
+out/
 
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
+
+# mill
+out/
+.bsp/
+.idea/
+.metals/
+.bloop/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# atc project-local config (may contain keys)
+.atc/
+
+# local environment (API keys)
+.env

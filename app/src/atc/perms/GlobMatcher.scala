@@ -1,0 +1,31 @@
+package atc.perms
+
+import java.util.regex.Pattern
+
+/** Simple glob matching for command lines and host names: `*` matches any
+  * sequence of characters, everything else is literal. Adapted from TACIT. */
+object GlobMatcher:
+  def compile(pattern: String): Pattern =
+    val sb = StringBuilder()
+    pattern.foreach:
+      case '*' => sb.append(".*")
+      case c if "\\^$.|?+(){}[]".contains(c) => sb.append('\\').append(c)
+      case c => sb.append(c)
+    Pattern.compile(sb.toString)
+
+  def matches(value: String, pattern: String): Boolean =
+    compile(pattern).matcher(value).matches()
+
+  /** Command-line matching. A pattern matches the command line if it matches
+    * as a glob, or — when it contains no `*` — if it equals the command line
+    * or is a word-prefix of it: `"ls"` permits `ls -la`, `"git status"`
+    * permits `git status --short`, `"git diff*"` also permits `git difftool`. */
+  def matchesCommand(commandLine: String, pattern: String): Boolean =
+    val p = pattern.trim
+    if p.isEmpty then false
+    else if p.contains('*') then matches(commandLine, p)
+    else commandLine == p || commandLine.startsWith(p + " ")
+
+  /** Host matching: plain glob on the host name (case-insensitive). */
+  def matchesHost(host: String, pattern: String): Boolean =
+    matches(host.toLowerCase, pattern.trim.toLowerCase)

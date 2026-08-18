@@ -1,0 +1,275 @@
+package atc
+
+import atc.host.*
+import atc.lib.{Classified, FileEntry, FileSystem}
+import atc.perms.*
+
+import java.nio.file.{Files, Path}
+import scala.util.Success
+
+/** `Classified` semantics: the host implementation as a value, and the file
+  * system / output / LLM sinks that enforce the classified boundary
+  * (migrated from TACIT's ClassifiedSuite, adapted to ATC's policy model). */
+class ClassifiedSuite extends munit.FunSuite:
+
+  // ── ClassifiedImpl as a value ────────────────────────────────────
+
+  test("wrap creates a classified value whose toString hides the content"):
+    val c = ClassifiedImpl.wrap("secret-password")
+    assertEquals(c.toString, "Classified(***)")
+    assertEquals(s"$c", "Classified(***)")
+    assertEquals(ClassifiedImpl.get(c), "secret-password")
+
+  test("map transforms with a pure function and stays classified"):
+    val upper = ClassifiedImpl.wrap("hello").map(_.toUpperCase)
+    assertEquals(upper.toString, "Classified(***)")
+    assertEquals(ClassifiedImpl.get(upper), "HELLO")
+
+  test("flatMap chains classified computations"):
+    val r = ClassifiedImpl.wrap(21).flatMap(x => ClassifiedImpl.wrap(x * 2))
+    assertEquals(r.toString, "Classified(***)")
+    assertEquals(ClassifiedImpl.get(r), 42)
+
+  test("zip combines two classified values"):
+    val z = ClassifiedImpl.wrap("a").zip(ClassifiedImpl.wrap(1))
+    assertEquals(ClassifiedImpl.get(z), ("a", 1))
+
+  test("an exception thrown inside map does not leak the value"):
+    val secret = ClassifiedImpl.wrap("super-secret-password")
+    val failed = secret.map(s => throw RuntimeException(s"leaked: $s"))
+    assertEquals(failed.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(failed).isFailure)
+    // the sink accessor raises a sanitized error, never the original one
+    val e = intercept[IllegalStateException](ClassifiedImpl.get(failed))
+    assert(!e.getMessage.nn.contains("super-secret"), e.getMessage)
+    assert(e.getMessage.nn.toLowerCase.contains("failed computation"), e.getMessage)
+
+  test("an exception thrown inside flatMap does not leak the value"):
+    val failed = ClassifiedImpl.wrap("s3cret").flatMap(s => throw RuntimeException(s"leaked: $s"))
+    assertEquals(failed.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(failed).isFailure)
+
+  test("map on a failed value short-circuits without running the function"):
+    val failed = ClassifiedImpl.wrap("secret").map(_ => throw RuntimeException("boom"))
+    var executed = false
+    val r = failed.map { _ =>
+      executed = true; "should not run"
+    }
+    assert(!executed)
+    assert(ClassifiedImpl.unwrap(r).isFailure)
+
+  test("fromTry classifies a failed effect"):
+    val c = ClassifiedImpl.fromTry(scala.util.Try(throw IllegalArgumentException("nope")))
+    assert(ClassifiedImpl.unwrap(c).isFailure)
+    assertEquals(c.toString, "Classified(***)")
+
+  test("classified values compare by reference only (no equality oracle)"):
+    val a = ClassifiedImpl.wrap("guess")
+    val b = ClassifiedImpl.wrap("guess")
+    assert(a != b)
+    assert(a == a)
+
+  test("a foreign Classified implementation is rejected at the sinks"):
+    val foreign = new Classified[String]:
+      def map[B](op: String => B): Classified[B] = this.asInstanceOf[Classified[B]]
+      def flatMap[B](op: String => Classified[B]): Classified[B] = this.asInstanceOf[Classified[B]]
+    intercept[SecurityException](ClassifiedImpl.unwrap(foreign))
+    intercept[SecurityException](ClassifiedImpl.get(foreign))
+
+  // ── Host-level enforcement ──────────────────────────────────────
+
+  val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-classified")
+  import env.given
+  import env.host.*
+  given fs: FileSystem = env.host.defaultFiles
+
+  env.file("public.txt", "public data")
+  env.file("secrets/data.txt", "TOP SECRET DATA")
+  env.file("secrets/docs/deep.txt", "DEEPER SECRET")
+  env.file(".env", "API_KEY=abc")
+  env.file("config/.env", "NESTED=1")
+
+  private def secret(rel: String): FileEntry = access(env.root.resolve(rel).toString)
+
+  test("isClassified reflects the policy"):
+    assert(secret("secrets/data.txt").isClassified)
+    assert(secret("secrets/docs/deep.txt").isClassified)
+    assert(secret("secrets").isClassified)
+    assert(secret(".env").isClassified)
+    assert(secret("config/.env").isClassified)
+    assert(!secret("public.txt").isClassified)
+    assert(!secret("config").isClassified)
+
+  test("content-revealing operations on a classified file throw and name the alternative"):
+    val f = secret("secrets/data.txt")
+    for op <- List[() => Any](
+        () => f.read(),
+        () => f.readBytes(),
+        () => f.readLines(),
+        () => f.size,
+        () => f.forEachLine((_, _) => ()),
+        () => read("secrets/data.txt"),
+        () => readLines("secrets/data.txt"),
+        () => grep("secrets/data.txt", "SECRET")
+      )
+    do
+      val e = intercept[SecurityException](op())
+      assert(e.getMessage.nn.contains("classified"), e.getMessage)
+      assert(e.getMessage.nn.contains("readClassified"), e.getMessage)
+
+  test("plain writes into a classified path are refused"):
+    val f = secret("secrets/data.txt")
+    val e1 = intercept[SecurityException](f.write("nope"))
+    assert(e1.getMessage.nn.contains("writeClassified"), e1.getMessage)
+    intercept[SecurityException](f.append("nope"))
+    intercept[SecurityException](write("secrets/other.txt", "x"))
+    intercept[SecurityException](append("secrets/other.txt", "x"))
+    assertEquals(env.contents("secrets/data.txt"), "TOP SECRET DATA")
+    assert(!env.existsOnDisk("secrets/other.txt"))
+
+  test("structure of a classified directory is hidden from plain listings"):
+    val d = secret("secrets")
+    val e = intercept[SecurityException](d.children)
+    assert(e.getMessage.nn.contains("childrenClassified"), e.getMessage)
+    intercept[SecurityException](d.walk())
+    intercept[SecurityException](ls("secrets"))
+    intercept[SecurityException](walk("secrets"))
+    // ... but its existence in the parent is visible, and it is not entered
+    val top = ls(".").map(p => Path.of(p).getFileName.toString)
+    assert(top.contains("secrets"), top.toString)
+    val walked = walk(".").map(env.rel)
+    assert(walked.contains("secrets"))
+    assert(!walked.exists(_.startsWith("secrets/")), walked.toString)
+    // classified files under a non-classified directory are listed but unreadable
+    assert(walked.contains(".env"), walked.toString)
+    assert(walked.contains("config/.env"), walked.toString)
+    intercept[SecurityException](read(".env"))
+
+  test("grepRecursive and find skip / respect classified files"):
+    val matches = grepRecursive(".", "SECRET|API_KEY|public")
+    assert(matches.exists(_.file.endsWith("public.txt")), matches.toString)
+    assert(!matches.exists(_.line.contains("SECRET")), matches.toString)
+    assert(!matches.exists(_.line.contains("API_KEY")), matches.toString)
+    val found = find(".", "*.txt").map(env.rel)
+    assert(found.contains("public.txt"))
+    assert(!found.exists(_.startsWith("secrets/")), found.toString)
+
+  test("metadata operations work on classified paths"):
+    val f = secret("secrets/data.txt")
+    assert(f.exists)
+    assert(!f.isDirectory)
+    assertEquals(f.name, "data.txt")
+    assert(f.path.endsWith("secrets/data.txt"))
+    assert(secret("secrets").isDirectory)
+    assert(!secret("secrets/missing.txt").exists)
+    assert(exists("secrets/data.txt"))
+    assert(isDirectory("secrets"))
+
+  test("classified read/write round-trip through map"):
+    writeClassified("secrets/round.txt", classify("original-secret"))
+    val read1 = readClassified("secrets/round.txt")
+    assertEquals(read1.toString, "Classified(***)")
+    val transformed = read1.map(s => s"processed: $s")
+    secret("secrets/round2.txt").writeClassified(transformed)
+    assertEquals(env.contents("secrets/round2.txt"), "processed: original-secret")
+    val check = readClassified("secrets/round2.txt").map(_.startsWith("processed:"))
+    assertEquals(ClassifiedImpl.get(check), true)
+    // writing creates parent directories inside the classified subtree
+    writeClassified("secrets/new/dir/x.txt", classify("x"))
+    assertEquals(env.contents("secrets/new/dir/x.txt"), "x")
+
+  test("readClassified works on any readable file; writeClassified only on classified paths"):
+    assertEquals(ClassifiedImpl.get(readClassified("public.txt")), "public data")
+    val e = intercept[SecurityException](writeClassified("public-copy.txt", classify("x")))
+    assert(e.getMessage.nn.contains("declassify"), e.getMessage)
+    assert(!env.existsOnDisk("public-copy.txt"))
+    intercept[SecurityException](secret("public.txt").writeClassified(classify("x")))
+    assertEquals(env.contents("public.txt"), "public data")
+
+  test("a classified value cannot be laundered through a non-classified path"):
+    val s = readClassified("secrets/data.txt")
+    intercept[SecurityException](writeClassified("leak.txt", s))
+    intercept[SecurityException](writeClassified(env.root.resolve("leak2.txt").toString, s.map(_.toUpperCase)))
+    assert(!env.existsOnDisk("leak.txt") && !env.existsOnDisk("leak2.txt"))
+
+  test("writeClassified of a failed computation reports a sanitized error and writes nothing"):
+    val failed = readClassified("secrets/data.txt").map(s => throw RuntimeException(s"oops $s"))
+    val e = intercept[IllegalStateException](writeClassified("secrets/failed.txt", failed))
+    assert(!e.getMessage.nn.contains("TOP SECRET"), e.getMessage)
+    assert(!e.getMessage.nn.contains("oops"), e.getMessage)
+    assert(!env.existsOnDisk("secrets/failed.txt"))
+
+  test("readClassified of an unreadable path fails inside the Classified"):
+    val outside = TestEnv.outsideDir("nope")
+    val c = readClassified(s"$outside/o.txt")
+    assertEquals(c.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(c).isFailure)
+
+  test("childrenClassified and walkClassified reveal structure only as Classified"):
+    val kids = ClassifiedImpl.get(secret("secrets").childrenClassified).map(p => Path.of(p).getFileName.toString)
+    assert(kids.contains("data.txt") && kids.contains("docs"), kids.toString)
+    val all = ClassifiedImpl.get(secret(".").walkClassified()).map(env.rel)
+    assert(all.contains("secrets/docs/deep.txt"), all.toString)
+    assert(all.contains("public.txt"))
+
+  test("delete and mkdir on classified paths need only write access (content is not revealed)"):
+    writeClassified("secrets/tmp.txt", classify("x"))
+    delete("secrets/tmp.txt")
+    assert(!env.existsOnDisk("secrets/tmp.txt"))
+    mkdir("secrets/made")
+    assert(Files.isDirectory(env.root.resolve("secrets/made")))
+
+  test("classified sub-directory cannot be opened wider through requestFiles"):
+    // Granting more access to `secrets/docs` (a classified subtree) still keeps it classified.
+    env.decisions = List(Decision.AllowSession)
+    val got = requestFiles(env.root.resolve("secrets/docs").toString, atc.lib.Access.Write, "bypass attempt") {
+      intercept[SecurityException](read(env.root.resolve("secrets/docs/deep.txt").toString))
+      intercept[SecurityException](ls(env.root.resolve("secrets/docs").toString))
+      ClassifiedImpl.get(readClassified(env.root.resolve("secrets/docs/deep.txt").toString))
+    }
+    assertEquals(got, "DEEPER SECRET")
+    assert(env.requests.isEmpty, "write on the cwd is already held: no prompt expected")
+
+  // ── Output sinks ────────────────────────────────────────────────
+
+  test("println: the agent sees a mask, the user sees the content"):
+    env.clearOutput()
+    println(classify("real"))
+    println("same")
+    print(classify("p"))
+    println()
+    printf("score=%d name=%s%n", 42, classify("alice"))
+    assertEquals(env.agentOut.toString, "Classified(***)\nsame\nClassified(***)\nscore=42 name=Classified(***)\n")
+    assertEquals(env.userOut.toString, "<real\n>same\n<p>\n<score=42 name=alice\n>")
+
+  test("println of a failed classified value shows the error to the user only"):
+    env.clearOutput()
+    println(classify("v").map(s => throw RuntimeException(s"boom-$s")))
+    assertEquals(env.agentOut.toString, "Classified(***)\n")
+    assert(env.userOut.toString.contains("<classified error: boom-v>"), env.userOut.toString)
+
+  test("printf with no classified arguments is identical for both"):
+    env.clearOutput()
+    printf("%s-%d%n", "a", 1)
+    assertEquals(env.agentOut.toString, "a-1\n")
+    assertEquals(env.userOut.toString, "a-1\n")
+
+  // ── LLM sink ────────────────────────────────────────────────────
+
+  test("chat(Classified) goes to the safe model and stays classified"):
+    val answer = chat(readClassified("secrets/data.txt").map(_.toLowerCase))
+    assertEquals(answer.toString, "Classified(***)")
+    assertEquals(env.safeChats.toList, List("top secret data"))
+    assertEquals(ClassifiedImpl.get(answer), "safe:top secret data")
+    assert(env.chats.isEmpty)
+
+  test("chat(Classified) with a failed value does not call the model"):
+    val before = env.safeChats.size
+    val failed = classify("s").map(_ => throw RuntimeException("x"))
+    val r = chat(failed)
+    assert(ClassifiedImpl.unwrap(r).isFailure)
+    assertEquals(env.safeChats.size, before)
+
+  test("chat(String) goes to the normal model"):
+    assertEquals(chat("hello"), "normal:hello")
+    assertEquals(env.chats.toList, List("hello"))

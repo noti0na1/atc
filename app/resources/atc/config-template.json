@@ -1,0 +1,27 @@
+{
+  "model": "claude",
+  "safeModel": "local",
+  "models": {
+    "claude": { "provider": "anthropic", "model": "claude-opus-5", "webSearch": true, "reasoning": "high" },
+    "sonnet": { "provider": "anthropic", "model": "claude-sonnet-5", "webSearch": true },
+    "gpt":    { "provider": "openai-responses", "model": "gpt-5", "webSearch": true },
+    "chat":   { "provider": "openai", "model": "gpt-4.1" },
+    "deepseek": { 
+      "provider": "openai-responses", "model": "deepseek-v4-flash",  "reasoning": "high",
+      "baseUrl": "https://api.deepseek.com", "webSearch": true,
+      "apiKey": "${DEEPSEEK_API_KEY}"
+    },
+    "local":  { "provider": "openai", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1", "apiKey": "ollama" }
+  },
+  "files": [
+    { "path": ".", "access": "write" },
+    { "path": "./build", "access": "read" },
+    { "path": "secrets", "classified": true },
+    { "path": "~/notes", "access": "read", "locked": true }
+  ],
+  "commands": ["git status", "git diff*", "git log*"],
+  "hosts": ["*.scala-lang.org", "docs.oracle.com"],
+  "safeMode": true,
+  "executionTimeoutMs": 180000,
+  "maxToolCalls": 60
+}

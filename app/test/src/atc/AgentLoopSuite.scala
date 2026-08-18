@@ -1,0 +1,337 @@
+package atc
+
+import atc.agent.*
+import atc.config.Config
+import atc.llm.*
+import atc.sandbox.{ExecutionResult, ReplSession}
+
+import scala.collection.mutable.ListBuffer
+
+/** A programmable model: returns a scripted sequence of completions, records
+  * the history it is asked to complete, and can throw on demand. */
+final class ScriptedModel(val alias: String, steps: Seq[ScriptedModel.Step]) extends ChatModel:
+  val modelId = "scripted"; val providerKey = "scripted"; val webSearch = false
+  val seenHistories: ListBuffer[List[Msg]] = ListBuffer()
+  var i = 0
+  def complete(
+    system: String,
+    history: List[Msg],
+    tools: List[ToolSpec],
+    sink: StreamSink,
+    cancelled: () => Boolean
+  ): Completion =
+    def onText(t: String): Unit = sink.text(t)
+    seenHistories += history
+    val step = if i < steps.length then steps(i) else ScriptedModel.Reply("(no more steps)")
+    i += 1
+    step match
+      case ScriptedModel.Throw(e) => throw e
+      case ScriptedModel.Comp(c) => onText(c.text); c
+      case ScriptedModel.Reply(t) => onText(t); Completion(t, Nil, None, TokenUsage(1, 1), "end_turn")
+  def simple(system: Option[String], prompt: String): String = s"scripted: $prompt"
+
+object ScriptedModel:
+  sealed trait Step
+  case class Comp(c: Completion) extends Step
+  case class Reply(text: String) extends Step
+  case class Throw(e: Throwable) extends Step
+  private var seq = 0
+  private def nextId(): String = { seq += 1; s"call-$seq" }
+  /** A completion that calls `run_scala` with `code`. */
+  def tool(code: String, text: String = "running"): Comp =
+    Comp(Completion(
+      text,
+      List(ToolCall(nextId(), Prompts.ToolName, ujson.write(ujson.Obj("code" -> code)))),
+      None,
+      TokenUsage(1, 1),
+      "tool_use"
+    ))
+  /** A completion with several tool calls at once. */
+  def tools(codes: String*): Comp =
+    Comp(Completion(
+      "multi",
+      codes.toList.map(c => ToolCall(nextId(), Prompts.ToolName, ujson.write(ujson.Obj("code" -> c)))),
+      None,
+      TokenUsage(1, 1),
+      "tool_use"
+    ))
+  def unfinished(text: String): Comp =
+    Comp(Completion(text, Nil, None, TokenUsage(1, 1), "pause_turn", unfinished = true))
+  def refusal(text: String): Comp = Comp(Completion(text, Nil, None, TokenUsage(1, 1), "refusal"))
+
+/** A recording AgentUI. */
+final class RecordingUI extends AgentUI:
+  val deltas, notes, statuses, warnings, toolStarts = ListBuffer[String]()
+  val toolEnds = ListBuffer[Boolean]()
+  var ends = 0
+  def assistantDelta(text: String): Unit = deltas += text
+  def assistantNote(text: String): Unit = notes += text
+  def assistantEnd(): Unit = ends += 1
+  def toolStart(code: String): Unit = toolStarts += code
+  def toolEnd(result: ExecutionResult, millis: Long): Unit = toolEnds += result.success
+  def status(text: String): Unit = statuses += text
+  def warn(text: String): Unit = warnings += text
+  def thinkingDelta(text: String): Unit = ()
+
+/** The agent loop mechanics driven by a scripted model (nudge, resume, tool
+  * budget, multi-tool, cancellation, refusal, usage accounting). */
+class AgentLoopSuite extends munit.FunSuite:
+  override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
+
+  private def setup(
+    model: ChatModel,
+    cfg: Config = Config(),
+    safe: Option[ChatModel] = None
+  ): (TestEnv, ReplSession, RecordingUI, Agent) =
+    val env = TestEnv(prefix = "atc-loop")
+    val s = env.newSession()
+    val ui = RecordingUI()
+    val agent = Agent(cfg, env.root, env.policy, ui, model, safe, None)
+    (env, s, ui, agent)
+
+  private def assistants(a: Agent): List[Msg.Assistant] = a.history.collect { case m: Msg.Assistant => m }
+  private def toolResults(a: Agent): List[Msg.ToolResults] = a.history.collect { case m: Msg.ToolResults => m }
+  private def never(): Boolean = false
+
+  test("a plain reply becomes one assistant message and streams its text"):
+    val (_, s, ui, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("hello there"))))
+    agent.turn(s, "hi", never)
+    assertEquals(agent.history.head, Msg.User("hi"))
+    assertEquals(agent.history.last, Msg.Assistant("hello there", Nil, None))
+    assert(ui.deltas.contains("hello there"))
+    assertEquals(ui.ends, 1)
+
+  test("a tool call runs, its result is appended, then the model answers"):
+    val (env, s, ui, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tool("""println("side effect"); 21 * 2"""),
+        ScriptedModel.Reply("the answer is 42"),
+      )
+    ))
+    agent.turn(s, "compute", never)
+    val trs = toolResults(agent)
+    assertEquals(trs.size, 1)
+    assertEquals(trs.head.results.size, 1)
+    assert(!trs.head.results.head.isError, trs.toString)
+    assert(trs.head.results.head.output.contains("42"), trs.head.results.head.output)
+    assert(env.agentOut.toString.contains("side effect"))
+    assertEquals(ui.toolStarts.size, 1)
+    assertEquals(ui.toolEnds.toList, List(true))
+    assertEquals(agent.history.last, Msg.Assistant("the answer is 42", Nil, None))
+    // the model saw the tool result before its final reply: it was in the history
+    // passed to the second complete() call.
+    val model = agent.model.asInstanceOf[ScriptedModel]
+    assert(model.seenHistories(1).exists(_.isInstanceOf[Msg.ToolResults]))
+
+  test("a failing tool call is reported as an error result"):
+    val (_, s, ui, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tool("""throw new RuntimeException("boom")"""),
+        ScriptedModel.Reply("noted"),
+      )
+    ))
+    agent.turn(s, "go", never)
+    val tr = toolResults(agent).head.results.head
+    assert(tr.isError)
+    assert(tr.output.contains("boom"), tr.output)
+    assertEquals(ui.toolEnds.toList, List(false))
+
+  test("several tool calls in one completion all run, in order"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tools("val a = 1", "val b = a + 1", "println(b)"),
+        ScriptedModel.Reply("done"),
+      )
+    ))
+    agent.turn(s, "go", never)
+    val results = toolResults(agent).head.results
+    assertEquals(results.size, 3)
+    assert(results.forall(!_.isError), results.toString)
+    assert(results.last.output.contains("2"), results.last.output)
+
+  test("empty / missing code argument is rejected without touching the REPL"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.Comp(Completion(
+          "x",
+          List(ToolCall("c1", Prompts.ToolName, "{}")),
+          None,
+          TokenUsage(1, 1),
+          "tool_use"
+        )),
+        ScriptedModel.Reply("ok"),
+      )
+    ))
+    agent.turn(s, "go", never)
+    val tr = toolResults(agent).head.results.head
+    assert(tr.isError)
+    assert(tr.output.contains("Missing 'code'"), tr.output)
+
+  test("an unknown tool name is reported back to the model"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.Comp(Completion(
+          "x",
+          List(ToolCall("c1", "delete_everything", "{}")),
+          None,
+          TokenUsage(1, 1),
+          "tool_use"
+        )),
+        ScriptedModel.Reply("ok"),
+      )
+    ))
+    agent.turn(s, "go", never)
+    val tr = toolResults(agent).head.results.head
+    assert(tr.isError)
+    assert(tr.output.contains("Unknown tool"), tr.output)
+    assert(tr.output.contains(Prompts.ToolName), tr.output)
+
+  test("the per-turn tool budget stops extra calls with an explanatory result"):
+    val (_, s, _, agent) = setup(
+      ScriptedModel(
+        "m",
+        Seq(
+          ScriptedModel.tool("1 + 1"),
+          ScriptedModel.tool("2 + 2"),
+          ScriptedModel.Reply("stopping"),
+        )
+      ),
+      cfg = Config(maxToolCalls = 1)
+    )
+    agent.turn(s, "go", never)
+    val allResults = toolResults(agent).flatMap(_.results)
+    assertEquals(allResults.size, 2)
+    assert(!allResults.head.isError)
+    assert(allResults(1).isError)
+    assert(allResults(1).output.contains("budget"), allResults(1).output)
+    assertEquals(agent.toolCalls, 1) // only the first actually ran
+
+  test("a model cannot loop forever after exhausting the tool budget"):
+    val steps = Seq.fill(10)(ScriptedModel.tool("1 + 1"))
+    val (_, s, ui, agent) = setup(ScriptedModel("m", steps), cfg = Config(maxToolCalls = 0))
+    agent.turn(s, "go", never)
+    assertEquals(toolResults(agent).size, Agent.MaxBudgetRejections)
+    assertEquals(agent.toolCalls, 0)
+    assert(ui.warnings.exists(_.contains("tool budget")))
+
+  test("the model is nudged when it ends on a plan, at most twice"):
+    val (_, s, ui, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.Reply("The build looks off. Let me check the mill file."),
+        ScriptedModel.Reply("Confirmed. Now let me pin the version."),
+        ScriptedModel.Reply("Done. Everything compiles."),
+      )
+    ))
+    agent.turn(s, "fix it", never)
+    // two nudges were injected as user messages
+    val nudges = agent.history.collect { case Msg.User(t) if t == Agent.ContinueNudge => t }
+    assertEquals(nudges.size, 2)
+    assertEquals(agent.history.last, Msg.Assistant("Done. Everything compiles.", Nil, None))
+    assert(ui.warnings.exists(_.contains("plan")))
+
+  test("nudging gives up after MaxNudges even if the model keeps planning"):
+    val steps = Seq.fill(5)(ScriptedModel.Reply("Let me keep going."))
+    val (_, s, _, agent) = setup(ScriptedModel("m", steps))
+    agent.turn(s, "go", never)
+    assertEquals(agent.history.count { case Msg.User(t) => t == Agent.ContinueNudge; case _ => false }, Agent.MaxNudges)
+
+  test("an unfinished completion is resumed without a nudge"):
+    val (_, s, ui, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.unfinished("searching the web…"),
+        ScriptedModel.Reply("Here is what I found."),
+      )
+    ))
+    agent.turn(s, "look it up", never)
+    assert(!agent.history.exists { case Msg.User(t) => t == Agent.ContinueNudge; case _ => false })
+    assertEquals(assistants(agent).map(_.text), List("searching the web…", "Here is what I found."))
+    assert(ui.statuses.exists(_.contains("resuming")))
+
+  test("resuming is bounded by MaxResumes"):
+    val steps = Seq.fill(Agent.MaxResumes + 3)(ScriptedModel.unfinished("still going"))
+    val (_, s, _, agent) = setup(ScriptedModel("m", steps))
+    agent.turn(s, "go", never)
+    // MaxResumes resume-rounds after the first completion → MaxResumes+1 assistant messages, then stop
+    assertEquals(assistants(agent).size, Agent.MaxResumes + 1)
+
+  test("a refusal stop reason warns the user"):
+    val (_, s, ui, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.refusal("I can't help with that."))))
+    agent.turn(s, "do something", never)
+    assert(ui.warnings.exists(_.toLowerCase.contains("refus")))
+    assertEquals(agent.history.last, Msg.Assistant("I can't help with that.", Nil, None))
+
+  test("cancellation before a tool runs yields a cancelled result and interrupted turn"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tool("1 + 1"),
+        ScriptedModel.Reply("unreached"),
+      )
+    ))
+    agent.turn(s, "go", () => true) // cancelled from the start
+    val tr = toolResults(agent).head.results.head
+    assert(tr.isError)
+    assert(tr.output.contains("Cancelled"), tr.output)
+    assertEquals(agent.history.last, Msg.Assistant("[interrupted by user]", Nil, None))
+
+  test("a CancelledException during streaming ends the turn cleanly and tells the user"):
+    val (_, s, ui, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Throw(new CancelledException))))
+    agent.turn(s, "go", never)
+    assertEquals(agent.history.last, Msg.Assistant("[interrupted by user]", Nil, None))
+    assert(ui.warnings.exists(_.contains("interrupted")), ui.warnings.toString)
+
+  test("usage is accumulated across the turn and reset by clear()"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tool("1 + 1"),
+        ScriptedModel.Reply("done"),
+      )
+    ))
+    agent.turn(s, "go", never)
+    assertEquals(agent.usage.input, 2L) // two completions, TokenUsage(1,1) each
+    assertEquals(agent.usage.output, 2L)
+    assert(agent.toolCalls >= 1)
+    agent.clear()
+    assertEquals(agent.history, Nil)
+    assertEquals(agent.usage, TokenUsage())
+    assertEquals(agent.toolCalls, 0)
+
+  test("history threads across turns and state persists in the session"):
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.tool("val remembered = 7"),
+        ScriptedModel.Reply("stored"),
+        ScriptedModel.tool("remembered * 6"),
+        ScriptedModel.Reply("42"),
+      )
+    ))
+    agent.turn(s, "store", never)
+    agent.turn(s, "use it", never)
+    assertEquals(agent.history.count { case _: Msg.User => true; case _ => false }, 2)
+    assert(toolResults(agent).last.results.head.output.contains("42"))
+
+  test("the native replay payload is carried on the assistant message"):
+    val native = NativeTurn("scripted", "opaque-payload")
+    val (_, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.Comp(Completion("with native", Nil, Some(native), TokenUsage(1, 1), "end_turn")),
+      )
+    ))
+    agent.turn(s, "go", never)
+    assertEquals(agent.history.last, Msg.Assistant("with native", Nil, Some(native)))
+
+  test("the system prompt reflects the configured safe model"):
+    val (_, _, _, without) = setup(ScriptedModel("m", Nil))
+    assert(!without.systemPrompt.contains("safe model for classified data: some-safe"))
+    val (_, _, _, withSafe) = setup(ScriptedModel("m", Nil), safe = Some(ScriptedModel("some-safe", Nil)))
+    assert(withSafe.systemPrompt.contains("some-safe"), "system prompt should name the safe model")

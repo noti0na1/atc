@@ -1,0 +1,117 @@
+package atc
+
+import atc.host.*
+import atc.lib.{IOCap, Todo}
+import atc.perms.*
+import atc.sandbox.{ReplSession, SandboxConfig}
+
+import java.nio.file.{Files, Path}
+import scala.collection.mutable.ListBuffer
+
+/** A recording test environment: a fresh temp root, a policy with a scripted
+  * permission prompter, and a [[Host]] whose output, LLM calls, questions and
+  * TODO updates are captured. Optionally opens sandbox REPL sessions on it.
+  *
+  * The `IOCap` for direct host calls is constructed here (its constructor is
+  * `private[atc]`), so suites do not depend on the one-shot
+  * `Interface.takeRootIO()` that sandbox sessions consume.
+  */
+final class TestEnv(
+  mkRules: Path => List[FileRule] = TestEnv.defaultRules,
+  commands: List[String] = List("echo"),
+  hosts: List[String] = Nil,
+  prefix: String = "atc-test",
+):
+  val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
+
+  // ── permission prompter (scripted; unanswered requests are denied) ──
+  var decisions: List[Decision] = Nil
+  val requests: ListBuffer[PermissionRequest] = ListBuffer()
+  /** Called on every prompt before the scripted decision (e.g. to simulate a slow user). */
+  var onRequest: PermissionRequest => Unit = _ => ()
+  val prompter: PermissionPrompter = r =>
+    requests += r
+    onRequest(r)
+    decisions match
+      case d :: rest => decisions = rest; d
+      case Nil => Decision.Deny
+
+  val policy: Policy = Policy(mkRules(root), commands, hosts, prompter)
+
+  // ── recorded host interactions ──
+  val agentOut: StringBuilder = StringBuilder()
+  /** User-visible output; classified segments are wrapped as `<...>`. */
+  val userOut: StringBuilder = StringBuilder()
+  val chats: ListBuffer[String] = ListBuffer()
+  val safeChats: ListBuffer[String] = ListBuffer()
+  val questions: ListBuffer[(String, List[String], Boolean)] = ListBuffer()
+  var answers: List[Option[String]] = Nil
+  var shownTodos: List[Todo] = Nil
+
+  @volatile var session: Option[ReplSession] = None
+
+  val output: HostOutput = new HostOutput:
+    def print(agentText: String, userText: String): Unit =
+      agentOut.append(agentText)
+      session.foreach(_.printStream.print(agentText))
+      userOut.append(if agentText == userText then userText else s"<$userText>")
+
+  val llm: HostLlm = new HostLlm:
+    def chat(m: String): String = { chats += m; s"normal:$m" }
+    def chatClassified(m: String): String = { safeChats += m; s"safe:$m" }
+
+  val ui: HostUi = new HostUi:
+    def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
+      questions += ((question, options, multiple))
+      answers match
+        case a :: rest => answers = rest; a
+        case Nil => None
+    def showTodos(items: List[Todo]): Unit = shownTodos = items
+
+  val host: Host = Host(policy, root, output, llm, ui)
+
+  /** A root capability for calling the host directly from tests. */
+  given io: IOCap = new IOCap()
+
+  // ── helpers ──
+  def file(rel: String, content: String): Path =
+    val p = root.resolve(rel).nn
+    Option(p.getParent).foreach(Files.createDirectories(_))
+    Files.writeString(p, content)
+    p
+  def dir(rel: String): Path = Files.createDirectories(root.resolve(rel)).nn
+  def contents(rel: String): String = Files.readString(root.resolve(rel)).nn
+  def existsOnDisk(rel: String): Boolean = Files.exists(root.resolve(rel))
+  def rel(abs: String): String = root.relativize(Path.of(abs)).toString
+
+  def clearOutput(): Unit =
+    agentOut.clear(); userOut.clear()
+
+  /** Open a sandbox session on this host (installs it as the sandbox API). */
+  def newSession(
+    safeMode: Boolean = true,
+    timeoutMs: Option[Long] = Some(60000L),
+    preambleOverride: Option[String] = None
+  ): ReplSession =
+    val s =
+      ReplSession(SandboxConfig(safeMode = safeMode, executionTimeoutMs = timeoutMs), host, preambleOverride).init()
+    session = Some(s)
+    s
+
+object TestEnv:
+  /** The working directory is writable; nothing else is accessible. */
+  val defaultRules: Path => List[FileRule] = root => List(FileRule(PathPattern(".", root), Some(Access.Write), None))
+
+  /** Writable cwd with a classified `secrets/` directory and the `.env` component pattern. */
+  val withSecrets: Path => List[FileRule] = root =>
+    List(
+      FileRule(PathPattern(".", root), Some(Access.Write), None),
+      FileRule(PathPattern("secrets", root), None, Some(true)),
+      FileRule(PathPattern(".env", root), None, Some(true)),
+    )
+
+  /** A second temp directory outside any root, with one readable file. */
+  def outsideDir(content: String = "outside"): Path =
+    val d = Files.createTempDirectory("atc-outside").nn.toRealPath().nn
+    Files.writeString(d.resolve("o.txt"), content)
+    d
