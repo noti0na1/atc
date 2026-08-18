@@ -1,0 +1,38 @@
+name: Scala CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    - name: Cache Mill and Coursier
+      uses: coursier/cache-action@v6
+    - name: Check formatting
+      run: ./mill __.checkFormat
+    - name: Compile
+      run: ./mill __.compile
+    - name: Run tests
+      run: ./mill app.test
+    - name: Build distribution
+      run: ./mill dist
+    - name: Smoke-test the distribution (key-less echo model, one non-interactive turn)
+      run: |
+        echo '{ "model": "echo", "models": { "echo": { "provider": "echo", "model": "echo" } } }' > /tmp/echo.json
+        out/dist.dest/atc --version
+        out/dist.dest/atc -c /tmp/echo.json -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee /tmp/smoke.log
+        grep -q 'val res1: Int = 42' /tmp/smoke.log

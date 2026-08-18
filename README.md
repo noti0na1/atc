@@ -1,5 +1,7 @@
 # ATC — A Minimal Agent With Tracked Capabilities
 
+[![Scala CI](https://github.com/noti0na1/atc/actions/workflows/scala.yml/badge.svg)](https://github.com/noti0na1/atc/actions/workflows/scala.yml)
+
 ATC is a small terminal coding agent (in the spirit of Claude Code) whose **only tool
 is a Scala 3 REPL** protected by [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
 and Scala's experimental *safe mode*. Every action the model wants to take — read a
@@ -12,19 +14,17 @@ CAIS '26); ATC re-packages them as a self-contained agent instead of an MCP serv
 redesigned file-permission model and interactive permission requests.
 
 ```
-┌───────────── terminal UI (JLine) ─────────────┐
-│  you ⇄ agent loop ⇄ LLM (Anthropic / OpenAI)  │
-│              │ run_scala(code)  — the only native tool
-│   ┌──────────▼───────────┐                              │
-│   │ sandbox REPL         │  api.* = atc.lib.Interface   │
-│   │  capture checking +  │──────────────────────────────┤
-│   │  safe mode           │            ┌─────────────────┴───┐
-│   │  (sees only JDK,     │            │ Host extends        │
-│   │   scala.*, atc.lib)  │            │   Interface         │
-│   └──────────────────────┘            │ policy, pop-ups,    │
-│                                       │ files, exec, http,  │
-│                                       │ ask/todos, LLMs     │
-└───────────────────────────────────────┴─────────────────────┘
+  you ⇄ terminal UI ⇄ agent loop ⇄ LLM (Anthropic / OpenAI / compatible)
+                          │
+                          │  run_scala(code) — the only native tool
+                          ▼
+  ┌────────────────────────────────┐                              ┌─────────────────────────────┐
+  │ sandbox REPL                   │                              │ Host (application side)     │
+  │  capture checking + safe mode  │  api.* = atc.lib.Interface   │  implements Interface:      │
+  │  agent code sees only the JDK, │ ───────────────────────────▶ │  permission policy, pop-ups │
+  │  scala.* and atc.lib           │ ◀─────────────────────────── │  files · exec · http        │
+  │                                │ values · output · exceptions │  ask · todos · chat (LLMs)  │
+  └────────────────────────────────┘                              └─────────────────────────────┘
 ```
 
 ## Modules
