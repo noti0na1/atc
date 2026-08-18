@@ -4,6 +4,16 @@ import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
 
+/** The identity of a permission scope. [[ScopeId.Base]] is the session-wide
+  * base scope; every `request*` block opens a child of the scope its capability
+  * came from. Capabilities carry their scope id, so a leaked capability is
+  * refused once its block has closed. */
+opaque type ScopeId = Long
+object ScopeId:
+  /** The base scope: the configured rules plus the grants the user made "for the session". */
+  val Base: ScopeId = 0L
+  private[perms] def apply(id: Long): ScopeId = id
+
 /** One configured file rule. Missing fields mean "no constraint from this rule".
   * `builtin` marks the default classified patterns (`.ssh`, `.env`, ...) so
   * summaries can fold them into one line. */
@@ -18,7 +28,7 @@ case class FileRule(
     val parts = List(
       access.map(a => s"access=${a.label}"),
       classified.filter(identity).map(_ => "classified"),
-      if locked then Some("locked") else None,
+      Option.when(locked)("locked"),
     ).flatten
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}"
 
@@ -26,35 +36,37 @@ case class FileRule(
 enum Decision:
   case AllowOnce, AllowSession, Deny
 
+/** One pop-up put to the user. Subclasses supply the `label -> value` rows;
+  * [[details]] aligns them (and appends the reason) for the UI. */
 sealed trait PermissionRequest:
-  def reason: String
   def title: String
-  def details: List[String]
+  def reason: String
+  protected def fields: List[(String, String)]
 
-object PermissionRequest:
-  private[perms] def reasonLine(label: String, reason: String): List[String] =
-    if reason.nonEmpty then List(label + reason) else Nil
+  final def details: List[String] =
+    val rows = fields ++ Option.when(reason.nonEmpty)("reason" -> reason)
+    val width = rows.map(_._1.length).maxOption.getOrElse(0) + 1
+    rows.map((label, value) => s"${(label + ":").padTo(width, ' ')} $value")
 
 case class FileRequest(path: Path, access: Access, current: Perm, reason: String) extends PermissionRequest:
   def title = s"File access: ${access.label}"
-  def details =
-    List(s"path:    $path", s"current: ${current.describe}") ++ PermissionRequest.reasonLine("reason:  ", reason)
+  protected def fields = List("path" -> path.toString, "current" -> current.describe)
 
 case class ExecRequest(commands: List[String], reason: String) extends PermissionRequest:
   def title = "Run commands"
-  def details = List(s"patterns: ${commands.mkString(", ")}") ++ PermissionRequest.reasonLine("reason:   ", reason)
+  protected def fields = List("patterns" -> commands.mkString(", "))
 
 case class NetRequest(hosts: List[String], reason: String) extends PermissionRequest:
   def title = "Network access"
-  def details = List(s"hosts:  ${hosts.mkString(", ")}") ++ PermissionRequest.reasonLine("reason: ", reason)
+  protected def fields = List("hosts" -> hosts.mkString(", "))
 
 /** Shows the permission pop-up to the user. */
 trait PermissionPrompter:
   def ask(request: PermissionRequest): Decision
 
 /** A permission scope opened by a `request*` call. Its grants add to those
-  * of its ancestors; scope 0 (the base) holds the session grants. */
-final class Scope(val id: Long, val parent: Option[Scope]):
+  * of its ancestors; the base scope holds the session grants. */
+final class Scope(val id: ScopeId, val parent: Option[Scope]):
   @volatile var fileGrants: List[(Path, Access)] = Nil
   @volatile var commands: List[String] = Nil
   @volatile var hosts: List[String] = Nil
@@ -78,11 +90,15 @@ final class Policy(
   val baseHosts: List[String],
   prompter: PermissionPrompter,
 ):
-  val base: Scope = Scope(0L, None)
-  private val scopes = TrieMap[Long, Scope](0L -> base)
+  val base: Scope = Scope(ScopeId.Base, None)
+  private val scopes = TrieMap[ScopeId, Scope](ScopeId.Base -> base)
   private val nextId = AtomicLong(1L)
+  /** The sandbox mode. The type system already denies what the mode forbids
+    * (the preamble hands out only the mode's capabilities); the checks below
+    * make the host refuse it too, so nothing depends on the REPL alone. */
+  @volatile var mode: Mode = Mode.Full
 
-  private def scope(id: Long): Scope =
+  private def scope(id: ScopeId): Scope =
     scopes.getOrElse(
       id,
       throw SecurityException(s"Permission scope $id is not open (the capability escaped its block?)")
@@ -101,13 +117,15 @@ final class Policy(
       .reduceOption(_.max(_)).getOrElse(Access.None)
 
   /** Effective permission in `scopeId`. `p` must be canonical. */
-  def effective(scopeId: Long, p: Path): Perm =
+  def effective(scopeId: ScopeId, p: Path): Perm =
     val cfg = configPerm(p)
-    if cfg.locked then cfg
-    else cfg.copy(access = cfg.access.max(grantedAccess(scope(scopeId), p)))
+    val perm = if cfg.locked then cfg else cfg.copy(access = cfg.access.max(grantedAccess(scope(scopeId), p)))
+    if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
-  def requestFile(parentId: Long, p: Path, access: Access, reason: String): Long =
+  def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
     val parent = scope(parentId)
+    if access == Access.Write && !mode.allowsWrite then
+      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; writing '$p' cannot be granted")
     val current = effective(parentId, p)
     if !(current.access >= access) then
       if current.locked then
@@ -119,11 +137,13 @@ final class Policy(
 
   private def commandPatterns(s: Scope): List[String] = baseCommands ++ s.chain.flatMap(_.commands)
 
-  def commandAllowed(scopeId: Long, commandLine: String): Boolean =
-    commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
+  def commandAllowed(scopeId: ScopeId, commandLine: String): Boolean =
+    mode.allowsExec && commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
 
-  def requestExec(parentId: Long, commands: List[String], reason: String): Long =
+  def requestExec(parentId: ScopeId, commands: List[String], reason: String): ScopeId =
     val parent = scope(parentId)
+    if !mode.allowsExec then
+      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; commands cannot be run")
     val missing = commands.filterNot(commandPatterns(parent).toSet)
     if missing.nonEmpty then
       decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") { base.commands ++= missing }
@@ -133,11 +153,13 @@ final class Policy(
 
   private def hostPatterns(s: Scope): List[String] = baseHosts ++ s.chain.flatMap(_.hosts)
 
-  def hostAllowed(scopeId: Long, host: String): Boolean =
-    hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
+  def hostAllowed(scopeId: ScopeId, host: String): Boolean =
+    mode.allowsNetwork && hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
 
-  def requestNet(parentId: Long, hosts: List[String], reason: String): Long =
+  def requestNet(parentId: ScopeId, hosts: List[String], reason: String): ScopeId =
     val parent = scope(parentId)
+    if !mode.allowsNetwork then
+      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; the network is not reachable")
     val missing = hosts.filterNot(hostPatterns(parent).toSet)
     if missing.nonEmpty then
       decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") { base.hosts ++= missing }
@@ -159,31 +181,31 @@ final class Policy(
     fileGrants: List[(Path, Access)] = Nil,
     commands: List[String] = Nil,
     hosts: List[String] = Nil
-  ): Long =
-    val s = Scope(nextId.getAndIncrement(), Some(parent))
+  ): ScopeId =
+    val s = Scope(ScopeId(nextId.getAndIncrement()), Some(parent))
     s.fileGrants = fileGrants
     s.commands = commands
     s.hosts = hosts
     scopes.put(s.id, s)
     s.id
 
-  def closeScope(id: Long): Unit = if id != 0L then scopes.remove(id)
+  def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
 
   def openScopeCount: Int = scopes.size - 1
 
-  /** Human-readable summary for the UI. */
+  /** Human-readable summary for the UI and the system prompt. */
   def summary: String =
-    val sb = StringBuilder()
-    sb.append("File rules (strictest matching rule wins; unmatched paths are inaccessible):\n")
     val (builtin, explicit) = rules.partition(_.builtin)
-    explicit.foreach(r => sb.append(s"  ${r.describe}\n"))
-    if builtin.nonEmpty then
-      sb.append(s"  built-in classified patterns: ${builtin.map(_.pattern.toString).mkString(", ")}\n")
+    def listOf(patterns: List[String]) = if patterns.isEmpty then "(none)" else patterns.mkString(", ")
+    def session(patterns: List[String]) = if patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
+    val lines = List.newBuilder[String]
+    lines += s"Mode: ${mode.label} (${mode.description})"
+    lines += "File rules (strictest matching rule wins; unmatched paths are inaccessible):"
+    lines ++= explicit.map(r => s"  ${r.describe}")
+    if builtin.nonEmpty then lines += s"  built-in classified patterns: ${builtin.map(_.pattern).mkString(", ")}"
     if base.fileGrants.nonEmpty then
-      sb.append("Session file grants:\n")
-      base.fileGrants.reverse.foreach((p, a) => sb.append(s"  $p: ${a.label}\n"))
-    sb.append("Commands: ").append(if baseCommands.isEmpty then "(none)" else baseCommands.mkString(", "))
-    if base.commands.nonEmpty then sb.append(s"  + session: ${base.commands.mkString(", ")}")
-    sb.append("\nHosts:    ").append(if baseHosts.isEmpty then "(none)" else baseHosts.mkString(", "))
-    if base.hosts.nonEmpty then sb.append(s"  + session: ${base.hosts.mkString(", ")}")
-    sb.toString
+      lines += "Session file grants:"
+      lines ++= base.fileGrants.reverse.map((p, a) => s"  $p: ${a.label}")
+    lines += s"Commands: ${listOf(baseCommands)}${session(base.commands)}"
+    lines += s"Hosts:    ${listOf(baseHosts)}${session(base.hosts)}"
+    lines.result().mkString("\n")

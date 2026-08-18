@@ -1,8 +1,9 @@
 package atc.host
 
 import atc.lib.*
+import atc.perms.ScopeId
 
-import java.nio.charset.StandardCharsets
+import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import scala.util.{Failure, Success, Try, Using}
 
@@ -10,43 +11,53 @@ import scala.util.{Failure, Success, Try, Using}
   * policy resolves the effective permissions of that scope (its own grants
   * plus those of its ancestors, on top of the configured base). Constructors
   * of the abstract capability classes are `private[atc]`, so agent code (in
-  * the empty package) cannot forge these. */
+  * the empty package) cannot forge these.
+  *
+  * The read-only/full distinction is purely a matter of types on the agent
+  * side (`FileEntry`'s `update` methods, `Cap`'s capture sets): the same
+  * objects serve both views, and the host enforces the policy, including the
+  * sandbox mode, on every call. */
 sealed trait Scoped:
-  def scope: Long
+  def scope: ScopeId
 
-final class FileSystemImpl(val scope: Long, val host: Host) extends FileSystem, Scoped:
+final class FileSystemImpl(val scope: ScopeId, val host: Host) extends FileSystem, Scoped:
   def access(path: String): FileEntry = FileEntryImpl(this, host.canonical(path))
 
-final class ExecImpl(val scope: Long) extends Exec, Scoped
-final class NetworkImpl(val scope: Long) extends Network, Scoped
+final class ExecImpl(val scope: ScopeId) extends Exec, Scoped
+final class NetworkImpl(val scope: ScopeId) extends Network, Scoped
 
-final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry(fs):
+final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   private def host: Host = fs.host
-  private def scope: Long = fs.scope
+  private def scope: ScopeId = fs.scope
+
+  /** Require read access for `what` *and* that the content is not classified;
+    * `alt` names the `Classified`-returning member to use instead. */
+  private def requireReadable(what: String, alt: String): Unit =
+    host.requireNotClassified(host.requireRead(scope, p, what), p, what, alt)
+
+  /** Run `op` (a read of classified content) as a `Classified` result: the
+    * permission check and any failure stay inside the classified value. */
+  private def asClassified[T](what: String)(op: => T): Classified[T] =
+    ClassifiedImpl.fromTry(Try { host.requireRead(scope, p, what); op })
+
   def path: String = p.toString
   def name: String = Option(p.getFileName).map(_.toString).getOrElse(p.toString)
   def exists: Boolean = { host.requireRead(scope, p, "exists"); Files.exists(p) }
   def isDirectory: Boolean = { host.requireRead(scope, p, "isDirectory"); Files.isDirectory(p) }
   def isClassified: Boolean = host.requireRead(scope, p, "isClassified").classified
-  def size: Long =
-    val pm = host.requireRead(scope, p, "size")
-    host.requireNotClassified(pm, p, "size", "readClassified()")
-    Files.size(p)
-  def read(): String = String(readBytes(), StandardCharsets.UTF_8)
-  def readBytes(): Array[Byte] =
-    val pm = host.requireRead(scope, p, "read")
-    host.requireNotClassified(pm, p, "read", "readClassified()")
-    Files.readAllBytes(p).nn
+  def size: Long = { requireReadable("size", "readClassified()"); Files.size(p) }
+  def read(): String = String(readBytes(), UTF_8)
+  def readBytes(): Array[Byte] = { requireReadable("read", "readClassified()"); Files.readAllBytes(p).nn }
   def readLines(): List[String] = read().linesIterator.toList
+
   /** Stream the file line by line (never loaded whole); `op` receives each
     * line with its 1-based number. Decoding is lenient like `read()` (invalid
     * UTF-8 becomes U+FFFD, so binary or Latin-1 files do not abort a search);
     * the file is closed when the iteration ends. */
   def forEachLine(op: (String, Int) => Unit): Unit =
-    val pm = host.requireRead(scope, p, "forEachLine")
-    host.requireNotClassified(pm, p, "forEachLine", "readClassified()")
+    requireReadable("forEachLine", "readClassified()")
     // Not `Files.lines`/`newBufferedReader`: their decoder throws on malformed input.
-    val reader = java.io.BufferedReader(java.io.InputStreamReader(Files.newInputStream(p).nn, StandardCharsets.UTF_8))
+    val reader = java.io.BufferedReader(java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8))
     Using.resource(reader) { r =>
       var i = 0
       var line = r.readLine()
@@ -55,31 +66,29 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry(fs):
         op(line, i)
         line = r.readLine()
     }
+
   def write(content: String): Unit = host.writeFile(scope, p, content, append = false)
+  def writeBytes(content: Array[Byte]): Unit = host.writeFileBytes(scope, p, content)
   def append(content: String): Unit = host.writeFile(scope, p, content, append = true)
   def delete(): Unit = { host.requireWrite(scope, p, "delete"); Files.delete(p) }
   def mkdir(): Unit = { host.requireWrite(scope, p, "mkdir"); Files.createDirectories(p); () }
+
   def children: List[FileEntry] =
-    val pm = host.requireRead(scope, p, "children")
-    host.requireNotClassified(pm, p, "children", "childrenClassified")
+    requireReadable("children", "childrenClassified")
     host.visibleChildren(scope, p).map(FileEntryImpl(fs, _))
+
   def walk(): List[FileEntry] =
-    val pm = host.requireRead(scope, p, "walk")
-    host.requireNotClassified(pm, p, "walk", "walkClassified")
+    requireReadable("walk", "walkClassified")
     host.walkPaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
+
   def readClassified(): Classified[String] =
-    ClassifiedImpl.fromTry(Try {
-      host.requireRead(scope, p, "readClassified"); Files.readString(p, StandardCharsets.UTF_8).nn
-    })
+    asClassified("readClassified")(Files.readString(p, UTF_8).nn)
+  def childrenClassified: Classified[List[String]] =
+    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(_.toString))
+  def walkClassified(): Classified[List[String]] =
+    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(_.toString))
+
   def writeClassified(content: Classified[String]): Unit =
     ClassifiedImpl.unwrap(content) match
       case Success(v) => host.writeClassifiedFile(scope, p, v)
       case Failure(_) => throw ClassifiedImpl.failed() // never rethrow: the message may hold the secret
-  def childrenClassified: Classified[List[String]] =
-    ClassifiedImpl.fromTry(Try {
-      host.requireRead(scope, p, "childrenClassified"); host.visibleChildren(scope, p).map(_.toString)
-    })
-  def walkClassified(): Classified[List[String]] =
-    ClassifiedImpl.fromTry(Try {
-      host.requireRead(scope, p, "walkClassified"); host.walkPaths(scope, p, intoClassified = true).map(_.toString)
-    })

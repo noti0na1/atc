@@ -1,16 +1,14 @@
 package atc.llm
 
 import atc.Debug
-import atc.config.{Config, ModelConfig}
+import atc.config.ModelConfig
 
 import com.openai.client.OpenAIClient
-import com.openai.client.okhttp.OpenAIOkHttpClient
 import com.openai.core.JsonValue
 import com.openai.helpers.ResponseAccumulator
 import com.openai.models.{Reasoning, ReasoningEffort}
 import com.openai.models.responses.*
 
-import java.time.Duration
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 import scala.util.Using
@@ -22,13 +20,7 @@ final class OpenAIResponsesModel(val alias: String, cfg: ModelConfig) extends Ch
   val providerKey: String = "openai-responses"
   val webSearch: Boolean = cfg.webSearch
 
-  private lazy val client: OpenAIClient =
-    val b = OpenAIOkHttpClient.builder().timeout(Duration.ofMinutes(15))
-    Config.resolveApiKey(cfg) match
-      case Some(key) => b.apiKey(key)
-      case None => b.fromEnv()
-    cfg.baseUrl.foreach(b.baseUrl)
-    b.build()
+  private lazy val client: OpenAIClient = Providers.openAiClient(cfg)
 
   private def functionTool(t: ToolSpec): Tool =
     val schema = ujson.read(t.parametersJson)

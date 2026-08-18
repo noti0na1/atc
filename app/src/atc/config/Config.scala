@@ -57,6 +57,9 @@ case class Config(
   defaultClassified: Boolean = true,
   /** Compile agent code with `import language.experimental.safe`. */
   safeMode: Boolean = true,
+  /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
+    * files, run commands) or `full` (also network). `/mode` switches at run time. */
+  mode: Option[String] = None,
   executionTimeoutMs: Option[Long] = Some(180000L),
   /** Max tool calls per user turn before the agent is stopped. */
   maxToolCalls: Int = 60,
@@ -128,6 +131,10 @@ object Config:
     if config.maxToolCalls < 0 then
       throw IllegalArgumentException(s"Invalid config: maxToolCalls must be non-negative (was ${config.maxToolCalls})")
     config.executionTimeoutMs.foreach(positive("executionTimeoutMs", _))
+    config.mode.foreach { m =>
+      try atc.perms.Mode.parse(m)
+      catch case e: IllegalArgumentException => throw IllegalArgumentException(s"Invalid config: ${e.getMessage}")
+    }
     config.models.foreach { (alias, model) =>
       if alias.trim.isEmpty then throw IllegalArgumentException("Invalid config: model aliases must not be blank")
       if model.provider.trim.isEmpty then
@@ -142,33 +149,32 @@ object Config:
     }
     config
 
-  private val listKeys = Set("files", "commands", "hosts")
+  /** List settings extend rather than replace. */
+  private val ListKeys = Set("files", "commands", "hosts")
 
+  /** `over` on top of `base`: list settings are concatenated, `models` is
+    * merged by alias (a redefined alias replaces the whole entry), everything
+    * else is overwritten. */
   def mergeJson(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
     val out = ujson.Obj()
     for (k, v) <- base.value do out(k) = v
     for (k, v) <- over.value do
-      (out.value.get(k), v) match
-        case (Some(a: ujson.Arr), b: ujson.Arr) if listKeys.contains(k) => out(k) = ujson.Arr(a.value ++ b.value)
-        case (Some(a: ujson.Obj), b: ujson.Obj) if k == "models" =>
-          val m = ujson.Obj()
-          for (mk, mv) <- a.value do m(mk) = mv
-          for (mk, mv) <- b.value do m(mk) = mv
-          out(k) = m
-        case _ => out(k) = v
+      out(k) = (out.value.get(k), v) match
+        case (Some(a: ujson.Arr), b: ujson.Arr) if ListKeys.contains(k) => ujson.Arr(a.value ++ b.value)
+        case (Some(a: ujson.Obj), b: ujson.Obj) if k == "models" => mergeJson(a, b)
+        case _ => v
     out
+
+  private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
 
   /** Resolve `${VAR}` references and `apiKeyEnv`. */
   def resolveApiKey(m: ModelConfig): Option[String] =
-    val envRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
     m.apiKey.flatMap {
-      case envRef(name) => Option(System.getenv(name)).filter(_.nonEmpty)
+      case EnvRef(name) => Option(System.getenv(name)).filter(_.nonEmpty)
       case literal => Some(literal)
     }.orElse(m.apiKeyEnv.flatMap(n => Option(System.getenv(n)).filter(_.nonEmpty)))
 
   /** The starter config written by `--init` (`app/resources/atc/config-template.json`). */
-  def template: String =
-    val in = getClass.getResourceAsStream("/atc/config-template.json")
-    if in == null then throw IllegalStateException("config template resource missing (atc/config-template.json)")
-    try String(in.readAllBytes(), "UTF-8")
-    finally in.close()
+  def template: String = atc.Resources.text("/atc/config-template.json").getOrElse(
+    throw IllegalStateException("config template resource missing (atc/config-template.json)")
+  )

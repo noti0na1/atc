@@ -1,15 +1,13 @@
 package atc.llm
 
-import atc.config.{Config, ModelConfig}
+import atc.config.ModelConfig
 
 import com.openai.client.OpenAIClient
-import com.openai.client.okhttp.OpenAIOkHttpClient
 import com.openai.core.JsonValue
 import com.openai.helpers.ChatCompletionAccumulator
 import com.openai.models.{FunctionDefinition, FunctionParameters, ReasoningEffort}
 import com.openai.models.chat.completions.*
 
-import java.time.Duration
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 import scala.util.Using
@@ -21,14 +19,7 @@ final class OpenAIChatModel(val alias: String, cfg: ModelConfig) extends ChatMod
   val providerKey: String = "openai"
   val webSearch: Boolean = cfg.webSearch
 
-  private lazy val client: OpenAIClient =
-    val b = OpenAIOkHttpClient.builder().timeout(Duration.ofMinutes(15))
-    Config.resolveApiKey(cfg) match
-      case Some(key) => b.apiKey(key)
-      case None if cfg.baseUrl.isDefined => b.apiKey("none") // local servers usually ignore the key
-      case None => b.fromEnv()
-    cfg.baseUrl.foreach(b.baseUrl)
-    b.build()
+  private lazy val client: OpenAIClient = Providers.openAiClient(cfg)
 
   private def functionTool(t: ToolSpec): ChatCompletionFunctionTool =
     val schema = ujson.read(t.parametersJson)

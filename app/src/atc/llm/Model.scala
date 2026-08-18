@@ -1,6 +1,6 @@
 package atc.llm
 
-import atc.config.{Config, ModelConfig}
+import atc.config.ModelConfig
 
 /** A tool the model may call. `parametersJson` is a JSON-schema object. */
 case class ToolSpec(name: String, description: String, parametersJson: String)

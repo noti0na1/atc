@@ -85,10 +85,10 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertRejected("atc.ui.Tui", "atc-host")
   test("allow the library package"):
     assertAllowed("val c: atc.lib.Classified[String] = classify(\"x\")")
-  test("reject Interface.current / takeRootIO / install"):
-    assertRejected("Interface.current", "atc-runtime")
-    assertRejected("atc.lib.Interface.takeRootIO()", "atc-runtime")
-    assertRejected("Interface.install(null)", "atc-runtime")
+  test("reject Runtime.current / rootIO / install"):
+    assertRejected("Runtime.current", "atc-runtime")
+    assertRejected("atc.lib.Runtime.rootIO", "atc-runtime")
+    assertRejected("Runtime.install(null)", "atc-runtime")
   test("allow the Interface type name itself"):
     assertAllowed("val i: Interface = ???")
 

@@ -1,6 +1,6 @@
 package atc.sandbox
 
-import atc.lib.Interface
+import atc.lib.{Interface, Runtime}
 
 import java.io.File
 import java.nio.file.{Files, Path, Paths}
@@ -69,5 +69,5 @@ object Sandbox:
 
   def newLoader(): ClassLoader = SandboxLoader(classOf[Interface].getClassLoader.nn)
 
-  /** Make `host` the sandbox's API implementation (re-arms the root capability). */
-  def installHost(host: Interface): Unit = Interface.install(host)
+  /** Make `host` the sandbox's API implementation. */
+  def installHost(host: Interface): Unit = Runtime.install(host)

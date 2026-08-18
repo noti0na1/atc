@@ -59,14 +59,30 @@ final class Agent(
 
   def systemPrompt: String = Prompts.system(cwd, policy, safeModel.map(_.alias), extraInstructions)
 
+  /** A note prepended to the next user message, e.g. that the sandbox was
+    * restarted. It is carried this way rather than appended to the history on
+    * its own so the transcript never holds two user messages in a row. */
+  private var pendingNote: Option[String] = None
+
+  /** Tell the model that its REPL was replaced, so it does not conclude that
+    * the documented "definitions persist between calls" guarantee is false when
+    * its earlier `val`s and `def`s have vanished. */
+  def noteSandboxRestarted(reason: String): Unit =
+    pendingNote = Some(
+      s"[sandbox notice] The Scala REPL was restarted ($reason). Every `val`, `def` and `import` " +
+        "you defined earlier is gone, so re-create anything you still need. The conversation itself is unchanged."
+    )
+
   def clear(): Unit =
     history = Nil
     usage = TokenUsage()
     toolCalls = 0
+    pendingNote = None
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
   def turn(session: ReplSession, input: String, cancelled: () => Boolean): Unit =
-    history :+= Msg.User(input)
+    history :+= Msg.User(pendingNote.fold(input)(n => s"$n\n\n$input"))
+    pendingNote = None
     Turn(session, cancelled).run()
 
   private enum Outcome:
@@ -203,6 +219,17 @@ object Agent:
     Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),
       "do not define your own `given FileSystem`; use requestFiles(...) { ... } blocks."
+    ),
+    Hint(
+      out => out.contains("cannot subsume a read-only capture set") || out.contains("Cannot call update method"),
+      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write, run commands or use the network. Say so and let the user switch modes (/mode) instead of working around it."
+    ),
+    Hint(
+      out =>
+        out.contains("No given instance of type atc.lib.Network") || out.contains(
+          "No given instance of type atc.lib.Exec"
+        ),
+      "that capability does not exist in the current sandbox mode (local: no network; read-only: no commands, no network); tell the user which mode the task needs (/mode local, /mode full)."
     ),
   )
 

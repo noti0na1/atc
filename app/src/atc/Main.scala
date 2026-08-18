@@ -1,23 +1,20 @@
 package atc
 
 import atc.config.Config
+import atc.perms.Mode
 
 import java.nio.file.{Files, Path, Paths}
 
 /** Command line entry point: parses the flags and starts [[App]]. */
 object Main:
   /** Written by the build (`Versions.atc` in `build.mill`) into `atc/version.txt`. */
-  lazy val Version: String =
-    val in = getClass.getResourceAsStream("/atc/version.txt")
-    if in == null then "dev"
-    else
-      try String(in.readAllBytes(), "UTF-8").trim
-      finally in.close()
+  lazy val Version: String = Resources.text("/atc/version.txt").map(_.trim).getOrElse("dev")
 
   case class Args(
     config: Option[Path] = None,
     cwd: Path = Paths.get("").toAbsolutePath,
     model: Option[String] = None,
+    mode: Option[Mode] = None,
     prompt: Option[String] = None,
     approveAll: Boolean = false,
     init: Boolean = false,
@@ -31,6 +28,7 @@ object Main:
     case ("-C" | "--cwd") :: p :: rest => parseArgs(rest, acc.copy(cwd = Paths.get(p).toAbsolutePath.normalize))
     case ("-m" | "--model") :: m :: rest => parseArgs(rest, acc.copy(model = Some(m)))
     case ("-p" | "--prompt") :: p :: rest => parseArgs(rest, acc.copy(prompt = Some(p)))
+    case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
     case "--approve-all" :: rest => parseArgs(rest, acc.copy(approveAll = true))
     case "--init" :: rest => parseArgs(rest, acc.copy(init = true))
     case ("-h" | "--help") :: rest => parseArgs(rest, acc.copy(help = true))
@@ -45,6 +43,7 @@ object Main:
        |  -C, --cwd <dir>       working directory (default: current)
        |  -m, --model <alias>   model alias to use (from the config's "models")
        |  -p, --prompt <text>   run one turn non-interactively and exit
+       |      --mode <mode>     sandbox mode: readonly | local | full (default: the config's "mode", else full)
        |      --approve-all     auto-approve permission requests (use with -p in trusted setups only)
        |      --init            write a starter ./.atc/config.json and exit
        |  -h, --help            show this help

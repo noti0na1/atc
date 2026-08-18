@@ -9,7 +9,6 @@ import com.anthropic.core.JsonValue
 import com.anthropic.helpers.MessageAccumulator
 import com.anthropic.models.messages.*
 
-import java.time.Duration
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 import scala.util.Using
@@ -22,7 +21,7 @@ final class AnthropicModel(val alias: String, cfg: ModelConfig) extends ChatMode
   val webSearch: Boolean = cfg.webSearch
 
   private lazy val client: AnthropicClient =
-    val b = AnthropicOkHttpClient.builder().timeout(Duration.ofMinutes(15))
+    val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
     Config.resolveApiKey(cfg) match
       case Some(key) => b.apiKey(key)
       case None => b.fromEnv()

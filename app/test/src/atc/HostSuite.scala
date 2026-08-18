@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Classified, Exec, FileSystem, IOCap, Network}
+import atc.lib.{Classified, Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
 import java.nio.file.{Files, Path}
 
@@ -51,10 +51,11 @@ class HostSuite extends munit.FunSuite:
     def showTodos(items: List[atc.lib.Todo]): Unit = ()
   val host = Host(policy, root, output, llm, hostUi)
 
-  given io: IOCap = atc.lib.Interface.takeRootIO()
-  given fs: FileSystem = host.defaultFiles
-  given ex: Exec = host.defaultExec
-  given net: Network = host.defaultNetwork
+  given io: IOCap = atc.lib.Runtime.rootIO
+  given user: UserIO = atc.lib.Runtime.rootUser
+  given fs: FileSystem = host.fileSystem
+  given ex: Exec = host.processes
+  given net: Network = host.network
   import host.*
 
   private def rel(p: String) = root.relativize(Path.of(p)).toString
@@ -67,6 +68,29 @@ class HostSuite extends munit.FunSuite:
     assert(Files.readString(root.resolve("src/B.scala")).nn.endsWith("// more"))
     assert(exists("README.md"))
     assertEquals(access("/a/b/c.txt").name, "c.txt")
+
+  test("replace makes a targeted edit and reports how many occurrences it changed"):
+    Files.writeString(root.resolve("edit.txt"), "alpha\nbeta\nalpha\n")
+    assertEquals(replace("edit.txt", "alpha", "ALPHA"), 2)
+    assertEquals(Files.readString(root.resolve("edit.txt")), "ALPHA\nbeta\nALPHA\n")
+
+  test("replace refuses a no-op instead of rewriting the file unchanged"):
+    // `write(p, read(p).replace(...))` would succeed silently and look like an edit.
+    Files.writeString(root.resolve("edit2.txt"), "content")
+    val e = intercept[IllegalArgumentException](replace("edit2.txt", "absent", "x"))
+    assert(e.getMessage.nn.contains("does not occur"), e.getMessage)
+    assertEquals(Files.readString(root.resolve("edit2.txt")), "content")
+    intercept[IllegalArgumentException](replace("edit2.txt", "", "x"))
+
+  test("readBytes/writeBytes round-trip a binary file byte for byte"):
+    val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
+    Files.write(root.resolve("bin.dat"), bytes)
+    assert(java.util.Arrays.equals(readBytes("bin.dat"), bytes))
+    writeBytes("copy.dat", readBytes("bin.dat"))
+    assert(java.util.Arrays.equals(Files.readAllBytes(root.resolve("copy.dat")), bytes))
+
+  test("writeBytes is refused on a classified path, like write"):
+    intercept[SecurityException](writeBytes("secrets/x.dat", Array[Byte](1, 2)))
 
   test("forEachLine streams lines with 1-based numbers"):
     write("lines.txt", "alpha\nbeta\ngamma")

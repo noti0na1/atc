@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{IOCap, Todo}
+import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
 import atc.sandbox.{ReplSession, SandboxConfig}
 
@@ -13,8 +13,7 @@ import scala.collection.mutable.ListBuffer
   * TODO updates are captured. Optionally opens sandbox REPL sessions on it.
   *
   * The `IOCap` for direct host calls is constructed here (its constructor is
-  * `private[atc]`), so suites do not depend on the one-shot
-  * `Interface.takeRootIO()` that sandbox sessions consume.
+  * `private[atc]`); it is only a label, so any instance will do.
   */
 final class TestEnv(
   mkRules: Path => List[FileRule] = TestEnv.defaultRules,
@@ -70,8 +69,9 @@ final class TestEnv(
 
   val host: Host = Host(policy, root, output, llm, ui)
 
-  /** A root capability for calling the host directly from tests. */
+  /** Root capabilities for calling the host directly from tests. */
   given io: IOCap = new IOCap()
+  given user: UserIO = new UserIO()
 
   // ── helpers ──
   def file(rel: String, content: String): Path =
@@ -87,14 +87,22 @@ final class TestEnv(
   def clearOutput(): Unit =
     agentOut.clear(); userOut.clear()
 
+  /** Re-install this env's host as the sandbox implementation. The installed
+    * host is process-global (one sandbox per JVM), so a suite that keeps more
+    * than one session alive must activate the right env before evaluating.
+    * Otherwise a session picks up another env's host when its `api` object is
+    * first forced, and its effects land in the wrong temp root. */
+  def activate(): Unit = atc.sandbox.Sandbox.installHost(host)
+
   /** Open a sandbox session on this host (installs it as the sandbox API). */
   def newSession(
     safeMode: Boolean = true,
     timeoutMs: Option[Long] = Some(60000L),
-    preambleOverride: Option[String] = None
+    preambleOverride: Option[String] = None,
+    mode: Mode = Mode.Full
   ): ReplSession =
-    val s =
-      ReplSession(SandboxConfig(safeMode = safeMode, executionTimeoutMs = timeoutMs), host, preambleOverride).init()
+    policy.mode = mode
+    val s = ReplSession(SandboxConfig(safeMode, mode, timeoutMs), host, preambleOverride).init()
     session = Some(s)
     s
 

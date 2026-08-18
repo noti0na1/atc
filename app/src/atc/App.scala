@@ -25,18 +25,18 @@ final class App(args: Main.Args):
 
   val modelConfigs: Map[String, ModelConfig] = if config.models.isEmpty then Config.DefaultModels else config.models
   private val modelCache = mutable.Map[String, ChatModel]()
+
+  /** The client for a configured alias, created once per session. */
   def modelFor(alias: String): ChatModel =
-    modelCache.getOrElseUpdate(
-      alias, {
-        val mc = modelConfigs.getOrElse(
-          alias,
-          throw IllegalArgumentException(
-            s"Unknown model alias '$alias'. Configured: ${modelConfigs.keys.toList.sorted.mkString(", ")}"
-          )
-        )
-        ChatModel.create(alias, mc)
-      }
+    modelCache.getOrElseUpdate(alias, ChatModel.create(alias, modelConfig(alias)))
+
+  private def modelConfig(alias: String): ModelConfig = modelConfigs.getOrElse(
+    alias,
+    throw IllegalArgumentException(
+      s"Unknown model alias '$alias'. Configured: ${modelConfigs.keys.toList.sorted.mkString(", ")}"
     )
+  )
+
   val initialModel: ChatModel =
     modelFor(args.model.orElse(config.model).getOrElse(modelConfigs.keys.toList.sorted.head))
   val initialSafe: Option[ChatModel] = config.safeModel.map(modelFor)
@@ -58,6 +58,7 @@ final class App(args: Main.Args):
     if args.approveAll then (_ => Decision.AllowSession)
     else request => whileUserDecides(tui.askPermission(request))
   val policy = Policy(App.fileRules(config, cwd), config.commands, config.hosts, prompter)
+  policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
 
   // ── host (the sandbox API implementation) and its ports ───────────
 
@@ -85,9 +86,24 @@ final class App(args: Main.Args):
   // ── running ───────────────────────────────────────────────────────
 
   private def newSession(): ReplSession =
-    tui.status("starting sandbox")
-    try ReplSession(SandboxConfig(config.safeMode, config.executionTimeoutMs), host).init()
+    tui.status(s"starting sandbox (${policy.mode.label} mode)")
+    try ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
     finally tui.endTurn()
+
+  /** Replace the sandbox session (after `/reset` or a mode switch); the conversation is kept.
+    * `reason` is passed to the agent so it knows its REPL definitions are gone. */
+  private def restartSession(reason: String): Boolean =
+    session.foreach(_.close())
+    session = None
+    try
+      session = Some(newSession())
+      agent.noteSandboxRestarted(reason)
+      true
+    catch
+      case e: Exception =>
+        tui.error(s"could not restart the sandbox: ${e.getMessage}")
+        Debug.trace(e)
+        false
 
   def run(): Int =
     try
@@ -106,23 +122,23 @@ final class App(args: Main.Args):
 
   private def banner(): Unit =
     def describe(m: ChatModel): String = s"${m.alias} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
+    val noSafeModel = "(none — set \"safeModel\" in the config to chat about classified data)"
+    val noConfig = "(none; built-in defaults — try `atc --init`)"
     tui.banner(
       s"atc ${Main.Version}",
       List(
         "model" -> describe(agent.model),
-        "safe model" -> agent.safeModel.map(
-          describe
-        ).getOrElse("(none — set \"safeModel\" in the config to chat about classified data)"),
+        "safe model" -> agent.safeModel.map(describe).getOrElse(noSafeModel),
         "cwd" -> App.pretty(cwd),
-        "config" -> (if configFiles.nonEmpty then configFiles.map(App.pretty).mkString(", ")
-                     else "(none; built-in defaults — try `atc --init`)"),
+        "config" -> (if configFiles.isEmpty then noConfig else configFiles.map(App.pretty).mkString(", ")),
+        "mode" -> policy.mode.describe,
         "sandbox" -> List(
           s"safe mode ${if config.safeMode then "on" else "off"}",
           config.executionTimeoutMs.map(ms => s"timeout ${ms / 1000} s").getOrElse("no timeout"),
           s"max ${config.maxToolCalls} tool calls/turn"
         ).mkString(" · "),
       ),
-      "Type a request · /help commands · Ctrl-C interrupt · Ctrl-O expand/collapse · Ctrl-D quit",
+      "Type a request · /help commands · Shift-Tab or /mode cycle mode · Ctrl-C interrupt · Ctrl-O expand/collapse · Ctrl-D quit",
     )
 
   private def runTurn(input: String): Unit =
@@ -144,13 +160,18 @@ final class App(args: Main.Args):
   private def interactive(): Unit =
     var running = true
     while running do
-      tui.readLine("> ") match
+      tui.readLine(prompt) match
         case None =>
           Debug.log("input closed, exiting")
           running = false
         case Some(line) if line.trim.isEmpty => ()
         case Some(line) if line.trim.startsWith("/") => running = command(line.trim)
         case Some(line) => runTurn(line)
+
+  /** The input prompt names the mode unless it is the full one. */
+  private def prompt: String = policy.mode match
+    case Mode.Full => "> "
+    case m => s"${m.label} > "
 
   // ── slash commands ────────────────────────────────────────────────
 
@@ -159,6 +180,7 @@ final class App(args: Main.Args):
       |  /help              this help
       |  /model [alias]     show or switch the agent model
       |  /models            list configured models
+      |  /mode [name]       cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL
       |  /perms             show the effective permission policy
       |  /config            show config files and settings
       |  /interface         show the sandbox API reference
@@ -173,12 +195,19 @@ final class App(args: Main.Args):
     val parts = line.split("\\s+", 2)
     val cmd = parts(0).toLowerCase
     val arg = if parts.length > 1 then parts(1).trim else ""
+    if cmd == "/quit" || cmd == "/exit" || cmd == "/q" then false
+    else
+      dispatch(cmd, arg)
+      true
+
+  /** Run one (non-quitting) slash command. */
+  private def dispatch(cmd: String, arg: String): Unit =
     cmd match
-      case "/quit" | "/exit" | "/q" => return false
       case "/help" | "/?" => tui.println(helpText)
       case "/models" => showModels()
       case "/model" => switchModel(arg)
       case "/perms" | "/permissions" => tui.println(policy.summary)
+      case "/mode" => switchMode(arg)
       case "/config" =>
         tui.println(s"config files: ${if configFiles.isEmpty then "(none)" else configFiles.mkString(", ")}")
         tui.println(
@@ -187,15 +216,7 @@ final class App(args: Main.Args):
         tui.println(s"open permission scopes: ${policy.openScopeCount}")
       case "/interface" | "/api" => tui.println(Prompts.interfaceSource)
       case "/reset" =>
-        session.foreach(_.close())
-        session = None
-        try
-          session = Some(newSession())
-          tui.success("sandbox restarted")
-        catch
-          case e: Exception =>
-            tui.error(s"could not restart the sandbox: ${e.getMessage}")
-            Debug.trace(e)
+        if restartSession("you asked for /reset") then tui.success("sandbox restarted")
       case "/clear" =>
         agent.clear()
         tui.success("conversation cleared")
@@ -206,17 +227,35 @@ final class App(args: Main.Args):
           s"tokens: input=${u.input} (cached ${u.cacheRead}) output=${u.output}; tool calls: ${agent.toolCalls}"
         )
       case other => tui.error(s"unknown command $other (try /help)")
-    true
 
   private def showModels(): Unit =
     modelConfigs.toList.sortBy(_._1).foreach { (alias, mc) =>
       val marks = List(
-        if agent.model.alias == alias then Some("agent") else None,
-        if agent.safeModel.exists(_.alias == alias) then Some("safe") else None
+        Option.when(agent.model.alias == alias)("agent"),
+        Option.when(agent.safeModel.exists(_.alias == alias))("safe"),
       ).flatten
-      tui.println(f"  $alias%-12s ${mc.provider}%-18s ${mc.model}%-28s${if mc.webSearch then " web-search" else ""}${
-          if marks.nonEmpty then s"  [${marks.mkString(", ")}]" else ""
-        }")
+      val search = if mc.webSearch then " web-search" else ""
+      val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
+      tui.println(f"  $alias%-12s ${mc.provider}%-18s ${mc.model}%-28s$search$role")
+    }
+
+  /** `/mode`: cycle (no argument) or set the sandbox mode; a new REPL is
+    * started with only that mode's capabilities (definitions are gone, the
+    * conversation stays). */
+  private def switchMode(arg: String): Unit =
+    val target =
+      if arg.isEmpty then Some(policy.mode.next)
+      else
+        try Some(Mode.parse(arg))
+        catch case e: IllegalArgumentException => { tui.error(e.getMessage); None }
+    target.foreach { m =>
+      if m == policy.mode then tui.info(s"mode: ${m.describe}")
+      else
+        val previous = policy.mode
+        policy.mode = m
+        if restartSession(s"the sandbox mode changed to ${m.label}") then
+          tui.success(s"mode -> ${m.describe} (fresh REPL)")
+        else policy.mode = previous
     }
 
   private def switchModel(arg: String): Unit =
@@ -240,8 +279,8 @@ object App:
     val rules = explicit.map { r =>
       FileRule(PathPattern(r.path, cwd), r.access.map(Access.parse), r.classified, r.locked)
     }
-    val defaults =
+    val classified =
       if cfg.defaultClassified then
         Config.DefaultClassifiedPatterns.map(p => FileRule(PathPattern(p, cwd), None, Some(true), builtin = true))
       else Nil
-    rules ++ defaults
+    rules ++ classified

@@ -20,21 +20,10 @@ final class PathPattern private (val raw: String, private val kind: PathPattern.
   import PathPattern.*
 
   def matches(p: Path): Boolean = kind match
-    case Kind.Component(m) =>
-      var i = 0
-      var found = false
-      val n = p.getNameCount
-      while i < n && !found do
-        if m.matches(p.getName(i)) then found = true
-        i += 1
-      found
+    case Kind.Component(m) => (0 until p.getNameCount).exists(i => m.matches(p.getName(i)))
+    // matched against the path relative to the anchor root
     case Kind.Anchored(root, matchers) =>
-      // match against the path relative to the anchor root
-      if !p.startsWith(root) then false
-      else if p == root then matchers.exists(_.matches(Paths.get("")))
-      else
-        val rel = root.relativize(p)
-        matchers.exists(_.matches(rel))
+      p.startsWith(root) && matchers.exists(_.matches(if p == root then EmptyPath else root.relativize(p)))
     case Kind.Exact(path) => p == path || p.startsWith(path)
 
   override def toString: String = raw
@@ -47,6 +36,7 @@ object PathPattern:
     case Exact(path: Path)
 
   private val globChars = "*?[{"
+  private val EmptyPath = Paths.get("")
 
   def apply(pattern: String, base: Path): PathPattern =
     val expanded = expandHome(pattern.trim).stripSuffix("/")
@@ -62,17 +52,14 @@ object PathPattern:
       if rest.isEmpty then new PathPattern(pattern, Kind.Exact(canonical(root)))
       else new PathPattern(pattern, Kind.Anchored(canonical(root), globOrDescendantMatchers(rest)))
 
-  private def expandHome(p: String): String =
+  /** `~` / `~/x` resolved against the home directory (also used by `Host` for agent-supplied paths). */
+  def expandHome(p: String): String =
     if p == "~" || p.startsWith("~/") then System.getProperty("user.home") + p.drop(1) else p
 
   /** Split an absolute path into its longest glob-free prefix and the rest. */
   private def splitGlob(abs: Path): (Path, String) =
     val n = abs.getNameCount
-    var firstGlob = n
-    var i = 0
-    while i < n && firstGlob == n do
-      if globChars.exists(abs.getName(i).toString.contains(_)) then firstGlob = i
-      i += 1
+    val firstGlob = (0 until n).find(i => globChars.exists(abs.getName(i).toString.contains(_))).getOrElse(n)
     val root = if firstGlob == 0 then abs.getRoot else abs.getRoot.resolve(abs.subpath(0, firstGlob))
     val rest = if firstGlob == n then "" else abs.subpath(firstGlob, n).toString
     (root, rest)

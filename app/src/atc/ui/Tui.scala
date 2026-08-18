@@ -7,7 +7,8 @@ import atc.perms.*
 import atc.sandbox.ExecutionResult
 
 import org.jline.prompt.{CheckboxResult, ListResult, PromptBuilder, PromptResult, PrompterConfig, PrompterFactory}
-import org.jline.reader.{EndOfFileException, LineReader, LineReaderBuilder, UserInterruptException}
+import org.jline.keymap.KeyMap
+import org.jline.reader.{EndOfFileException, LineReader, LineReaderBuilder, Reference, UserInterruptException, Widget}
 import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
 import org.jline.utils.{AttributedString, InfoCmp, NonBlockingReader}
@@ -29,7 +30,7 @@ import scala.jdk.CollectionConverters.*
   * ● run_scala                           tool block, magenta
   *   │ code                              magenta gutter, syntax-coloured
   *   ├ output                            live program output, dim gutter
-  *   │ hello                             (folded after 15 lines: "⋯ N more lines" + the last 5, live)
+  *   │ hello                             (folded after 15 rows: "⋯ N more lines" + the last 5, live)
   *   ├ result  /  ├ error                what the REPL added: echoes, diagnostics
   *   │ val x: Int = 1
   *   └ ok 34 ms  /  └ failed 34 ms
@@ -66,6 +67,23 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   /** Not a real terminal (piped / `-p` in a script): no spinner, no cursor tricks, no menus, nothing folded. */
   private val plain: Boolean = terminal.getType == Terminal.TYPE_DUMB || terminal.getType == Terminal.TYPE_DUMB_COLOR
+
+  /** The line `readLine` returns when the user presses Shift-Tab on an empty
+    * prompt: the app treats it as the `/mode` command (cycle the sandbox mode). */
+  val CycleModeLine: String = "/mode"
+  if !plain then
+    val cycle: Widget = () =>
+      if reader.getBuffer.length == 0 then
+        reader.getBuffer.write(CycleModeLine)
+        reader.callWidget(LineReader.ACCEPT_LINE)
+      true
+    reader.getWidgets.put("atc-cycle-mode", cycle)
+    // Shift-Tab: `kcbt` from the terminfo when present, plus the usual CSI Z sequence.
+    val keyMap = reader.getKeyMaps.get(LineReader.MAIN)
+    if keyMap != null then
+      val seqs =
+        (Option(KeyMap.key(terminal, InfoCmp.Capability.back_tab)).toList :+ "\u001b[Z").distinct.filter(_.nonEmpty)
+      keyMap.bind(Reference("atc-cycle-mode"), seqs*)
   private val g: Tui.Glyphs =
     if terminal.encoding().name.toUpperCase.contains("UTF") && System.getenv("ATC_ASCII") == null then
       Tui.Glyphs.unicode
@@ -93,7 +111,7 @@ final class Tui(historyFile: Path) extends AgentUI:
   private val Reset = "\u001b[0m"
   private val ClearLine = "\r\u001b[2K"
   private val Indent = "  "
-  private def width: Int = { val w = terminal.getWidth; if w <= 0 then 80 else w }
+  private def width: Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
 
   // ── state ─────────────────────────────────────────────────────────
 
@@ -108,6 +126,9 @@ final class Tui(historyFile: Path) extends AgentUI:
   /** A tool block is open; `outputStarted` once the first program output line appeared. */
   private var toolOpen = false
   private var outputStarted = false
+  /** Agent-visible text printed during the current tool call, as it appears in
+    * the REPL's captured output; `toolEnd` subtracts it from the result panel. */
+  private val printed = StringBuilder()
   /** TODO list changed during the current tool call; drawn once when it ends. */
   @volatile private var pendingTodos: Option[List[Todo]] = None
   /** Ctrl-O: show thinking in full and never fold output. Sticks for the session. */
@@ -128,14 +149,14 @@ final class Tui(historyFile: Path) extends AgentUI:
     synchronized:
       stopSpinner()
       busy = false
-      endThinking()
+      thinking.end()
       closeProse()
-      endOutput()
+      liveOutput.end()
       toolOpen = false
       flushTodos()
       stats.foreach { s =>
         ensureNewline()
-        val calls = s"${s.toolCalls} tool call${if s.toolCalls == 1 then "" else "s"}"
+        val calls = Tui.plural(s.toolCalls, "tool call")
         write(styled(
           s"${g.bullet} worked for ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens",
           Dim
@@ -159,7 +180,7 @@ final class Tui(historyFile: Path) extends AgentUI:
   /** Make sure the previous content is followed by an empty line. */
   private def blankLine(): Unit = { ensureNewline(); if !afterBlankLine then write("\n") }
   /** Start a new block: blank line before it, and no prose/thinking block is open any more. */
-  private def beginBlock(): Unit = { stopSpinner(); endThinking(); closeProse(); blankLine() }
+  private def beginBlock(): Unit = { stopSpinner(); thinking.end(); closeProse(); blankLine() }
 
   /** Write text that may arrive in chunks and span lines, putting `gutter` at
     * every line start. Empty lines get the gutter too unless it is blank
@@ -176,6 +197,8 @@ final class Tui(historyFile: Path) extends AgentUI:
       i += 1
 
   private def gutter(code: Int): String = Indent + styled(g.bar, code) + " "
+  /** Visible width of `gutter`: the indent plus the bar and its space. */
+  private val GutterWidth = Indent.length + 2
 
   /** Cut a plain line so it fits on one terminal row (region lines must not wrap). */
   private def fit(line: String, used: Int): String =
@@ -215,64 +238,69 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   // ── thinking (streamed reasoning) ─────────────────────────────────
 
-  private val thinkBuf = StringBuilder()
-  private var thinkRegion: Option[LiveRegion] = None
-  /** Thinking is being streamed in full (plain or expanded mode). */
-  private var thinkOpen = false
-  private var thinkStart = 0L
+  def thinkingDelta(text: String): Unit = synchronized(thinking.delta(text))
 
-  def thinkingDelta(text: String): Unit = synchronized:
-    if text.isEmpty then return
-    stopSpinner()
-    if thinkStart == 0L then thinkStart = System.nanoTime()
-    thinkBuf.append(text)
-    if plain || expanded then
-      if thinkOpen then writeGuttered(text, Indent) else renderThinking()
-    else renderThinking()
+  /** The model's reasoning as it streams. Compact view: a live window over the
+    * last lines that collapses to a one-line summary when the reasoning ends.
+    * Plain or expanded view: written out in full, the block staying open so
+    * later deltas simply append. */
+  private object thinking:
+    private val buf = StringBuilder()
+    private var region: Option[LiveRegion] = None
+    /** Written out in full (plain/expanded), so the block is still open. */
+    private var streaming = false
+    private var started = 0L
 
-  /** (Re)draw the reasoning gathered so far in the current mode: in full
-    * (plain/expanded — the block stays open and later deltas append) or as
-    * a live window over its last lines. */
-  private def renderThinking(): Unit =
-    if plain || expanded then
-      thinkRegion.foreach(_.clear()); thinkRegion = None
-      beginBlock()
-      write(styled(g.bullet, Dim) + " " + styled("thinking", Dim) + "\n")
-      if colors > 0 then out.print(s"\u001b[${Dim}m")
-      thinkOpen = true
-      writeGuttered(thinkBuf.toString.dropWhile(_ == '\n'), Indent)
-    else
-      val region = thinkRegion.getOrElse {
+    def active: Boolean = streaming || region.isDefined
+
+    def delta(text: String): Unit = if text.nonEmpty then
+      stopSpinner()
+      if started == 0L then started = System.nanoTime()
+      buf.append(text)
+      if streaming then writeGuttered(text, Indent) else render()
+
+    /** (Re)draw everything gathered so far in the current view. */
+    def render(): Unit =
+      if plain || expanded then
+        clearRegion()
         beginBlock()
-        val r = LiveRegion(); thinkRegion = Some(r); r
-      }
-      region.redraw(thinkWindow())
+        write(styled(g.bullet, Dim) + " " + styled("thinking", Dim) + "\n")
+        if colors > 0 then out.print(s"\u001b[${Dim}m")
+        streaming = true
+        writeGuttered(buf.toString.dropWhile(_ == '\n'), Indent)
+      else
+        val live = region.getOrElse { beginBlock(); val r = LiveRegion(); region = Some(r); r }
+        live.redraw(window())
 
-  /** The live window: header + the last few lines of the reasoning so far. */
-  private def thinkWindow(): List[String] =
-    val header = styled(s"${g.bullet} thinking${g.ellipsis} (Ctrl-O to expand)", Dim)
-    val lines = thinkBuf.toString.linesIterator.toList
-    header :: lines.takeRight(Tui.ThinkingWindow).map(l => Indent + styled(fit(l, Indent.length), Dim))
+    /** Take the rendering off the screen but keep the reasoning (Ctrl-O). */
+    def detach(): Unit =
+      clearRegion()
+      if streaming then
+        if colors > 0 then out.print(Reset)
+        ensureNewline()
+        streaming = false
 
-  /** Thinking ended (answer text or tool call follows): a window collapses to
-    * a summary line; reasoning shown in full just ends. */
-  private def endThinking(): Unit = if thinkOpen || thinkRegion.isDefined then
-    if thinkOpen then
-      if colors > 0 then out.print(Reset)
-      ensureNewline()
-      thinkOpen = false
-    thinkRegion.foreach { r =>
-      r.clear()
-      val secs = (System.nanoTime() - thinkStart) / 1e9
-      val n = thinkBuf.toString.linesIterator.count(_.trim.nonEmpty)
-      write(styled(
-        s"${g.bullet} thought for ${Tui.duration(secs)} ${g.dot} $n line${if n == 1 then "" else "s"}",
-        Dim
-      ) + "\n")
-    }
-    thinkRegion = None
-    thinkBuf.clear()
-    thinkStart = 0L
+    /** Thinking ended (answer text or a tool call follows): a window collapses
+      * to a summary line, reasoning shown in full just ends. */
+    def end(): Unit = if active then
+      val collapses = region.isDefined
+      detach()
+      if collapses then write(summary())
+      buf.clear()
+      started = 0L
+
+    private def clearRegion(): Unit = { region.foreach(_.clear()); region = None }
+
+    private def summary(): String =
+      val secs = (System.nanoTime() - started) / 1e9
+      val lines = buf.toString.linesIterator.count(_.trim.nonEmpty)
+      styled(s"${g.bullet} thought for ${Tui.duration(secs)} ${g.dot} ${Tui.plural(lines, "line")}", Dim) + "\n"
+
+    /** Header + the last few lines of the reasoning so far. */
+    private def window(): List[String] =
+      styled(s"${g.bullet} thinking${g.ellipsis} (Ctrl-O to expand)", Dim) ::
+        buf.toString.linesIterator.toList.takeRight(Tui.ThinkingWindow)
+          .map(l => Indent + styled(fit(l, Indent.length), Dim))
 
   // ── assistant prose (streamed) ────────────────────────────────────
 
@@ -307,10 +335,10 @@ final class Tui(historyFile: Path) extends AgentUI:
     * next text; empty = paragraph break within the same prose block. */
   def assistantNote(text: String): Unit = synchronized:
     stopSpinner()
-    endThinking()
+    thinking.end()
     ensureNewline()
     if text.nonEmpty then status(text)
-  def assistantEnd(): Unit = synchronized { stopSpinner(); endThinking(); closeProse(); ensureNewline() }
+  def assistantEnd(): Unit = synchronized { stopSpinner(); thinking.end(); closeProse(); ensureNewline() }
 
   // ── tool blocks ───────────────────────────────────────────────────
 
@@ -322,22 +350,8 @@ final class Tui(historyFile: Path) extends AgentUI:
     toolOpen = true
     outputStarted = false
     printed.clear()
-    outDirectLines = 0
-    folding = false
-    foldBuf.clear()
+    liveOutput.start()
     if !plain then spin(Indent, "running") // until the first output line / the result
-
-  /** Agent-visible text printed during the current tool call, as it appears
-    * in the REPL's captured output; `toolEnd` subtracts it from the result panel. */
-  private val printed = StringBuilder()
-
-  // Folding of long live output: the first `FoldAfter` lines are written as
-  // they come; from then on the text goes to a live tail window ("⋯ N more
-  // lines" + the last `FoldTail` lines) unless the view is expanded.
-  private var outDirectLines = 0
-  private var folding = false
-  private val foldBuf = StringBuilder()
-  private var foldRegion: Option[LiveRegion] = None
 
   /** Live output of the agent's `println` (see `HostOutput.print`). Classified
     * content — where the two texts differ — is marked so the user knows the
@@ -349,45 +363,80 @@ final class Tui(historyFile: Path) extends AgentUI:
       ensureNewline()
       write(section("output", Dim))
       outputStarted = true
-    val body =
-      if agentText == userText then userText
-      else styled("[classified] ", Yellow, Bold) + styled(userText, Yellow)
-    if plain || expanded || !toolOpen then writeGuttered(body, gutter(Dim))
-    else if folding then foldAppend(body)
-    else
-      // write whole lines until the fold threshold, then start folding
-      var rest = body
-      while rest.nonEmpty && !folding do
-        val nl = rest.indexOf('\n')
-        if nl < 0 then { writeGuttered(rest, gutter(Dim)); rest = "" }
-        else
-          writeGuttered(rest.take(nl + 1), gutter(Dim))
-          rest = rest.drop(nl + 1)
-          outDirectLines += 1
-          if outDirectLines >= Tui.FoldAfter then folding = true
-      if rest.nonEmpty then foldAppend(rest)
+    if agentText == userText then liveOutput.emit(userText)
+    else liveOutput.emit(styled("[classified] ", Yellow, Bold) + styled(userText, Yellow))
 
-  private def foldAppend(text: String): Unit =
-    foldBuf.append(text)
-    val region = foldRegion.getOrElse { val r = LiveRegion(); foldRegion = Some(r); r }
-    region.redraw(foldWindow())
+  /** Program output inside a tool block. It goes straight to the screen while
+    * the section fits in `Tui.FoldAfterRows` terminal *rows*; everything after
+    * that into a live tail window ("⋯ N more lines" + the last `Tui.FoldTail`
+    * lines), unless the view is expanded or there is no terminal to redraw.
+    *
+    * The budget counts rows rather than lines because a long line wraps: a few
+    * 400-character lines, or output printed without newlines at all, would
+    * otherwise fill the screen without ever reaching a line count. */
+  private object liveOutput:
+    /** Rows the direct section has used, and how far into its last row it got. */
+    private var usedRows = 0
+    private var column = 0
+    private var folding = false
+    private val held = StringBuilder()
+    private var region: Option[LiveRegion] = None
 
-  private def foldWindow(): List[String] =
-    val lines = foldBuf.toString.split("\n", -1).toList match
-      case init :+ "" => init // an unfinished last line is shown; a trailing newline is not a line
-      case ls => ls
-    val hidden = lines.length - Tui.FoldTail
-    val head = if hidden > 0 then
-      List(gutter(Dim) + styled(s"${g.ellipsis} $hidden more lines (Ctrl-O to expand)", Dim))
-    else Nil
-    head ++ lines.takeRight(Tui.FoldTail).map(l => gutter(Dim) + fit(l, Indent.length + 2))
+    /** A new tool block begins: nothing written, nothing folded yet. */
+    def start(): Unit = { usedRows = 0; column = 0; folding = false; held.clear() }
 
-  /** The output section is over: whatever the tail window shows stays on screen. */
-  private def endOutput(): Unit =
-    foldRegion.foreach(_.freeze())
-    foldRegion = None
-    folding = false
-    foldBuf.clear()
+    def emit(body: String): Unit =
+      if plain || expanded || !toolOpen then writeGuttered(body, gutter(Dim))
+      else if folding then fold(body)
+      else
+        // One logical line at a time, while the rows it needs still fit; the
+        // first one that does not fit starts the folded tail window.
+        var rest = body
+        while rest.nonEmpty && !folding do
+          val nl = rest.indexOf('\n')
+          val (segment, remainder) = if nl < 0 then (rest, "") else rest.splitAt(nl + 1)
+          val placed = Tui.place(column, segment, width, GutterWidth)
+          if usedRows + placed.rows > Tui.FoldAfterRows then folding = true
+          else
+            writeGuttered(segment, gutter(Dim))
+            usedRows += placed.rows
+            column = placed.column
+            rest = remainder
+        if rest.nonEmpty then fold(rest)
+
+    /** The output section is over: whatever the tail window shows stays on screen. */
+    def end(): Unit =
+      region.foreach(_.freeze())
+      region = None
+      folding = false
+      held.clear()
+
+    /** Ctrl-O: take the window down and hand back the text it was hiding. */
+    def detach(): String =
+      val hidden = held.toString
+      region.foreach(_.clear())
+      region = None
+      held.clear()
+      hidden
+
+    def foldFromHere(): Unit = folding = true
+    def showEverything(): Unit = folding = false
+
+    private def fold(text: String): Unit =
+      held.append(text)
+      val live = region.getOrElse { val r = LiveRegion(); region = Some(r); r }
+      live.redraw(window())
+
+    private def window(): List[String] =
+      val lines = held.toString.split("\n", -1).toList match
+        case init :+ "" => init // an unfinished last line is shown; a trailing newline is not a line
+        case ls => ls
+      val hidden = lines.length - Tui.FoldTail
+      val header =
+        if hidden > 0 then
+          List(gutter(Dim) + styled(s"${g.ellipsis} ${Tui.plural(hidden, "more line")} (Ctrl-O to expand)", Dim))
+        else Nil
+      header ++ lines.takeRight(Tui.FoldTail).map(l => gutter(Dim) + fit(l, GutterWidth))
 
   private def section(label: String, code: Int): String =
     Indent + styled(s"${g.tee} $label", code) + "\n"
@@ -398,18 +447,21 @@ final class Tui(historyFile: Path) extends AgentUI:
     * both the first diagnostics and the tail stay visible. */
   def toolEnd(r: ExecutionResult, millis: Long): Unit = synchronized:
     stopSpinner()
-    endOutput()
+    liveOutput.end()
     ensureNewline()
     val body =
       List(Option(ExecutionResult.trimStackFrames(r.output)).filter(_.nonEmpty), r.error).flatten.mkString("\n")
     val lines = Tui.withoutPrinted(body, printed.toString).linesIterator.toList
     if lines.nonEmpty then
-      val shown =
+      val kept =
         if lines.length <= Tui.MaxPanelLines || plain || expanded then lines
         else
           lines.take(Tui.MaxPanelLines * 2 / 3) ++
             List(s"${g.ellipsis} ${lines.length - Tui.MaxPanelLines} lines omitted (Ctrl-O to expand next time)") ++
             lines.takeRight(Tui.MaxPanelLines / 3)
+      // One row per line, so the panel's line budget really is a row budget:
+      // diagnostics and echoed values are often far wider than the terminal.
+      val shown = if plain || expanded then kept else kept.map(fit(_, GutterWidth))
       if r.success then
         write(section("result", Dim))
         shown.foreach(l => write(gutter(Dim) + styled(l, Dim) + "\n"))
@@ -426,19 +478,16 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   private def toggleExpanded(): Unit = synchronized:
     expanded = !expanded
-    // Take down what is live, say what happened, then re-render it in the new mode.
-    val thinking = thinkRegion.isDefined || thinkOpen
-    thinkRegion.foreach(_.clear()); thinkRegion = None
-    if thinkOpen then { if colors > 0 then out.print(Reset); ensureNewline(); thinkOpen = false }
-    val foldText = foldBuf.toString
-    foldRegion.foreach(_.clear()); foldRegion = None
-    foldBuf.clear()
+    // Take down what is live, say what happened, then re-render it in the new view.
+    val wasThinking = thinking.active
+    thinking.detach()
+    val heldBack = liveOutput.detach()
     info(if expanded then "expanded view (Ctrl-O to collapse)" else "compact view (Ctrl-O to expand)")
-    if thinking then renderThinking() // the whole reasoning so far (expanded) or a window over it (compact)
+    if wasThinking then thinking.render() // the whole reasoning (expanded) or a window over it (compact)
     if expanded then
-      if foldText.nonEmpty then writeGuttered(foldText, gutter(Dim)) // what was held back
-      folding = false
-    else if toolOpen && outputStarted then folding = true // fold from here on
+      if heldBack.nonEmpty then writeGuttered(heldBack, gutter(Dim)) // what was held back
+      liveOutput.showEverything()
+    else if toolOpen && outputStarted then liveOutput.foldFromHere()
 
   // ── spinner ───────────────────────────────────────────────────────
 
@@ -469,7 +518,7 @@ final class Tui(historyFile: Path) extends AgentUI:
   /** Show progress ("model is thinking"); ends the current prose block. */
   def status(text: String): Unit = synchronized:
     stopSpinner()
-    endThinking()
+    thinking.end()
     closeProse()
     ensureNewline()
     if plain then write(styled(s"~ $text...", Dim) + "\n") else spin("", text)
@@ -701,13 +750,31 @@ final class Tui(historyFile: Path) extends AgentUI:
 object Tui:
   /** Lines of a tool-result section before it is cut in the middle. */
   val MaxPanelLines = 40
-  /** Live output lines shown before the rest is folded, and the size of the live tail. */
-  val FoldAfter = 15
+  /** Terminal rows of live output shown before the rest is folded, and the
+    * number of lines in the live tail that replaces it. */
+  val FoldAfterRows = 15
   val FoldTail = 5
   /** Lines of reasoning shown live in the thinking window. */
   val ThinkingWindow = 5
   /** What a turn cost, for the summary line `endTurn` prints. */
   final case class TurnStats(seconds: Double, toolCalls: Int, tokens: Long)
+
+  /** Where a chunk of text lands on screen: the number of terminal rows it
+    * adds to a section whose last row already holds `column` characters, and
+    * the column it ends at (0 when it ended the line). A fresh row starts with
+    * a gutter, hence `indent`; a line always takes at least one row. */
+  def place(column: Int, text: String, width: Int, indent: Int): (rows: Int, column: Int) =
+    val body = text.stripSuffix("\n")
+    val start = if column == 0 then indent else column
+    val end = start + body.length
+    val rows = math.max(1, (end + width - 1) / width)
+    (
+      rows = if column == 0 then rows else rows - 1, // the row we started on was already counted
+      column = if text.endsWith("\n") then 0 else { val c = end % width; if c == 0 then width else c },
+    )
+
+  /** `1 line`, `2 lines`. */
+  def plural(n: Long, noun: String): String = s"$n $noun${if n == 1 then "" else "s"}"
 
   def duration(secs: Double): String =
     if secs < 10 then f"$secs%.1f s"
@@ -725,11 +792,17 @@ object Tui:
   val DenyLabel = "No"
   val OtherLabel = "Other (type an answer)"
 
-  /** The characters that draw the layout; ASCII when the terminal is not UTF-8 (or `ATC_ASCII` is set). */
+  /** The characters that draw the layout; ASCII when the terminal is not UTF-8
+    * (or `ATC_ASCII` is set). Always constructed with named arguments — a bare
+    * list of eighteen one-character strings says nothing. */
   final case class Glyphs(
+    /** Opens a block: prose, tool call, thinking. */
     bullet: String,
+    /** The gutter of a block's body. */
     bar: String,
+    /** Opens a section inside a block ("output", "result"). */
     tee: String,
+    /** Closes a tool block (the verdict line). */
     end: String,
     arrow: String,
     warn: String,
@@ -738,54 +811,59 @@ object Tui:
     done: String,
     inProgress: String,
     pending: String,
+    /** Markdown list bullet (prose, not blocks). */
     bullet2: String,
+    /** Markdown block quote bar. */
     quote: String,
+    /** Horizontal rule, also table rules. */
     rule: String,
     ellipsis: String,
+    /** Separator in summary lines ("worked for 3 s · 2 tool calls"). */
     dot: String,
+    /** Table header/rule crossing. */
     junction: String,
     spinner: IndexedSeq[String]
   )
   object Glyphs:
     val unicode: Glyphs = Glyphs(
-      "●",
-      "│",
-      "├",
-      "└",
-      "→",
-      "⚠",
-      "✗",
-      "▸",
-      "✓",
-      "▶",
-      "○",
-      "•",
-      "▎",
-      "─",
-      "…",
-      "·",
-      "┼",
-      IndexedSeq("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+      bullet = "●",
+      bar = "│",
+      tee = "├",
+      end = "└",
+      arrow = "→",
+      warn = "⚠",
+      cross = "✗",
+      todo = "▸",
+      done = "✓",
+      inProgress = "▶",
+      pending = "○",
+      bullet2 = "•",
+      quote = "▎",
+      rule = "─",
+      ellipsis = "…",
+      dot = "·",
+      junction = "┼",
+      spinner = IndexedSeq("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
     )
     val ascii: Glyphs = Glyphs(
-      "*",
-      "|",
-      "+",
-      "`",
-      "->",
-      "!",
-      "x",
-      ">",
-      "[x]",
-      "[>]",
-      "[ ]",
-      "-",
-      ">",
-      "-",
-      "...",
-      "-",
-      "+",
-      IndexedSeq("|", "/", "-", "\\")
+      bullet = "*",
+      bar = "|",
+      tee = "+",
+      end = "`",
+      arrow = "->",
+      warn = "!",
+      cross = "x",
+      todo = ">",
+      done = "[x]",
+      inProgress = "[>]",
+      pending = "[ ]",
+      bullet2 = "-",
+      quote = ">",
+      rule = "-",
+      ellipsis = "...",
+      dot = "-",
+      junction = "+",
+      spinner = IndexedSeq("|", "/", "-", "\\"),
     )
 
   /** Menu ids are the labels; duplicates get a numeric suffix so they stay unique. */

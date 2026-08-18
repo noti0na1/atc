@@ -283,7 +283,7 @@ class ReplSessionSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("preamble"), e.getMessage)
   test("agent code cannot re-take the root capability"):
     // The validator blocks the name outright...
-    assertFails(run("atc.lib.Interface.takeRootIO()"), "atc-runtime")
+    assertFails(run("atc.lib.Runtime.rootIO"), "atc-runtime")
     // ...and the given `io` the preamble bound is the only IOCap in scope; there is no
     // other way to obtain one, so an effect always needs the single existing capability.
     assert(assertOk(run("""println("io works")""")).output.contains("io works"))

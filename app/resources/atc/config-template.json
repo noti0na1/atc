@@ -15,6 +15,7 @@
   },
   "files": [
     { "path": ".", "access": "write" },
+    { "path": ".atc", "access": "none", "locked": true },
     { "path": "./build", "access": "read" },
     { "path": "secrets", "classified": true },
     { "path": "~/notes", "access": "read", "locked": true }
@@ -22,6 +23,7 @@
   "commands": ["git status", "git diff*", "git log*"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
   "safeMode": true,
+  "mode": "full",
   "executionTimeoutMs": 180000,
   "maxToolCalls": 60
 }

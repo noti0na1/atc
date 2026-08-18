@@ -31,7 +31,7 @@ redesigned file-permission model and interactive permission requests.
 
 | Module | What it is |
 |--------|------------|
-| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking, every agent-visible definition `@assumeSafe`. No implementation — the only extra members are on the `Interface` companion: `current` (the installed implementation, read by the preamble) and `takeRootIO()` (the root `IOCap`, once). |
+| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking, every agent-visible definition `@assumeSafe`. The mode-tracked capabilities (`IOCap`/`FileSystem`/`FileEntry`) use the nightly's [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html): a bare type is read-only, `^` is full, and writes are `update` methods. There is no implementation here; the sandbox injection point (`atc.lib.Runtime`, with `current` and the root capability labels) sits in its own file, outside the API the model reads. |
 | `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions to the user, TODO list, LLM calls); the REPL preamble binds that implementation as `api` and imports it, so a call in agent code is a plain method call on the host — no marshalling layer to keep in sync. Also: sandbox/REPL management, LLM providers, terminal UI. |
 
 Everything is built with [Mill](https://mill-build.org) (`./mill`, pinned to 1.1.8) on the
@@ -44,6 +44,7 @@ lib/src/atc/lib/Interface.scala      the agent-facing API (capabilities, data ty
 app/src/atc/
   Main.scala                         command line → App
   App.scala                          wiring (config, models, policy, host, sandbox, agent, TUI), slash commands
+  Resources.scala, Debug.scala       bundled text resources (version, API source, template); ATC_DEBUG tracing
   agent/   Agent.scala, Prompts.scala          the loop (model ⇄ run_scala), system prompt & tool spec
   config/  Config.scala                        JSON config model, merging, validation, --init template
   host/    Host.scala                          Interface implementation: policy checks + real effects
@@ -51,8 +52,10 @@ app/src/atc/
            HostPorts.scala                     what the host needs from the app (output, user, LLM)
            Processes.scala, ClassifiedImpl.scala
   llm/     Model.scala                         provider-neutral messages, ChatModel, factory
-           AnthropicModel / OpenAIResponsesModel / OpenAIChatModel / EchoModel, Json.scala
-  perms/   Policy.scala, PathPattern.scala, Access.scala, GlobMatcher.scala
+           AnthropicModel / OpenAIResponsesModel / OpenAIChatModel / EchoModel
+           Providers.scala, Json.scala         shared client construction; ujson ↔ SDK values
+  perms/   Policy.scala                        rules, scopes (ScopeId), grants, prompts, summary
+           PathPattern.scala, Access.scala (Access/Perm/Mode), GlobMatcher.scala
   sandbox/ ReplSession.scala                   the in-process REPL: compile, run, timeout, interrupt
            Sandbox.scala                       class-loader isolation
            Execution.scala                     ExecutionResult / ExecutionClock / SandboxConfig
@@ -61,7 +64,10 @@ app/src/atc/
   ui/      Tui.scala                           JLine terminal: streaming, panels, pop-ups, input
            Markdown.scala                      streaming Markdown → ANSI for the assistant's prose
            Highlight.scala                     Scala colouring via the compiler's SyntaxHighlighting
-app/test/src/atc/                    munit suites (see TestEnv.scala for the shared fixture)
+app/test/src/atc/                    munit suites (TestEnv.scala + ReplAssertions.scala are the shared fixtures)
+  CapabilitySuite   the capability type system: read-only vs full, UserIO, escapes, Classified.map
+  ModeSuite         the read-only / local / full matrix, and how a mode reaches the sandbox
+  SandboxSuite      the sandbox: session, isolation, validator and fatal-throwable safety nets
 ```
 
 ## Quick start
@@ -113,6 +119,7 @@ starting point.
   "commands": ["git status", "git diff*", "git log*", "ls", "./mill *"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
   "safeMode": true,
+  "mode": "full",
   "executionTimeoutMs": 180000,
   "maxToolCalls": 60,
   "instructions": "Use 2-space indentation."
@@ -179,16 +186,51 @@ runs in (the working directory by default), which must not be classified — che
 through the `FileSystem` capability, so a `requestFiles` block covers it. `hosts` are
 glob patterns on host names; only `http`/`https` URLs are accepted.
 
+## Modes: read-only, local, full
+
+A **mode** decides what the sandbox can do at all, independent of the per-path permission
+policy. Every mode gives the agent `given io` and `given fs`, but with different power:
+
+| Mode | `given`s (besides the always-full `user: UserIO^`) | Can |
+|------|----------------------------------------------------|-----|
+| **read-only** | `io: IOCap` (read-only), `fs: FileSystem^{io.rd}` | read files only |
+| **local** | `io: IOCap` (read-only), `fs: FileSystem^`, `ex: Exec^` | read/write files, run commands |
+| **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex`, `net` | files, commands, network |
+
+Talking to the user is a **separate capability**, `user: UserIO^`, which is always
+present and always full, so `println`, `ask`, the TODO list and `chat` work in every
+mode (you can always report results), while `io` alone decides what you may do to the
+file system, processes and network.
+
+The distinction is enforced *by the types* (following the nightly's
+[mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html)):
+a bare capability type (`FileSystem`, `IOCap`) is the **read-only** view, `^` / `^{io}` the
+**full** view. The write operations (`write`, `append`, `delete`, `mkdir`, `writeClassified`)
+are `update` methods, callable only through a full capability, so in read-only mode `write`
+simply does not compile ("*cannot subsume a read-only capture set*" / "*Cannot call update
+method*"), and `Exec`/`Network` are derived only from a full `IOCap^`, which read-only and
+local modes do not hand out. The permission `Policy` *also* enforces the mode at run time
+(writes downgraded to read, `exec`/network refused), so nothing depends on the type check
+alone.
+
+Switch modes with **`/mode`** (cycles read-only → local → full), **Shift-Tab** (same, on an
+empty prompt), `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts
+a fresh REPL (agent-defined `val`s/`def`s are gone) but keeps the conversation. The default
+is full.
+
 ## How the agent asks for more
 
-The REPL preamble defines
+The REPL preamble defines the capabilities of the current mode, e.g. in full mode:
 
 ```scala
-given io:  IOCap               // the root capability
+given io:  IOCap^              // the root capability
 given fs:  FileSystem^{io}     // configured file permissions (+ session grants)
 given ex:  Exec^{io}           // configured commands
 given net: Network^{io}        // configured hosts
 ```
+
+A helper that writes must ask for a full file system (`(using fs: FileSystem^)`); a bare
+`FileSystem` can only read, and `readOnlyFileSystem` gives an explicitly read-only one.
 
 Anything the configuration already permits just works (`read`, `write`, `ls`, `walk`,
 `grepRecursive`, `exec("git", List("status"))`, …). If an operation is denied, the
@@ -198,9 +240,16 @@ exception says which `request*` block to use:
 requestFiles("/tmp/data", Access.Write, reason = "cache build outputs") {
   write("/tmp/data/out.txt", "done")      // uses the new FileSystem^ given for this block
 }
+requestFiles("~/notes", reason = "look up the design notes") {   // read-only fs in read-only mode
+  read("~/notes/design.md")
+}
 requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
+
+`requestFiles` works in every mode: the file system it hands the block is exactly as
+capable as the one you already have: full (so you can write) in local/full mode,
+read-only in read-only mode.
 
 The host shows a pop-up — *Yes, this time* / *Yes, for the rest of this session* / *No* —
 and the block runs with the extra permission. `locked` rules cannot be widened at all.
@@ -208,8 +257,10 @@ Capture checking guarantees the granted capability (and any `FileEntry` derived 
 cannot leave the block; the host additionally closes the permission scope when the block
 exits, so a scope id can never be reused.
 
-Classified data can be computed on but not looked at: `readClassified(p).map(f)` only
-accepts pure `f` (no `io`, `fs`, … captured); the only sinks are `println` (the human sees
+Classified data can be computed on but not looked at: `readClassified(p).map(f)` accepts
+an `f` that captures only **read-only** capabilities (`->{any.rd}`), so it can compute and
+read but never write, run a command, use the network, print, `chat` or `ask`, because each
+of those needs a *full* capability. The only sinks are `println` (the human sees
 the content in the terminal marked `[classified]`, the model gets `Classified(***)`),
 `writeClassified`, `chat(Classified)` (safe model), and `httpPostClassified` /
 `secretHeaders` to an allow-listed host.
@@ -219,10 +270,10 @@ the content in the terminal marked `[classified]`, the model gets `Classified(**
 * Agent code is compiled by an in-process Scala 3 REPL with capture checking and explicit
   nulls, then `import language.experimental.safe`. Definitions the model may touch are all
   `@assumeSafe` in `atc.lib`; constructors of the capability classes are `private[atc]`
-  (agent code lives in the empty package), and the root capability is only obtainable
-  through `Interface.takeRootIO()` (guarded so it succeeds once per sandbox — a pure
-  function can never obtain an `IOCap`). Regex validation (`CodeValidator`) rejects
-  `java.io`, reflection, `caps.unsafe`, `Interface.current`/`takeRootIO`/`install`,
+  (agent code lives in the empty package), and the root capability `Interface.rootIO` is
+  `@rejectSafe`, so agent code (compiled under safe mode) cannot name it, and a pure
+  function can never obtain an `IOCap`. Regex validation (`CodeValidator`) rejects
+  `java.io`, reflection, `caps.unsafe`, `Interface.current`/`rootIO`/`install`,
   `atc.host`, … before compilation as defence in depth.
 * The REPL loader's parent is a filtering `SandboxLoader` that delegates `scala.*` and
   `atc.lib.*` to the application class loader (so both sides share exactly the same
@@ -232,8 +283,10 @@ the content in the terminal marked `[classified]`, the model gets `Classified(**
   the host resolves permissions for that scope on each call.
 * Only one native LLM tool exists, `run_scala`. Asking the user (`ask`), the TODO list
   (`setTodos`/`markTodo`/`todos`), printing, LLM sub-calls — everything is a Scala function
-  in `Interface`, and each one that has an effect requires `IOCap`, so none of them can be
-  reached from a pure `Classified.map`.
+  in `Interface`, and each one that has an effect requires `IOCap` (or a derived capability),
+  so none of them can be reached from a pure `Classified.map` (whose function is typed
+  `T ->{any.rd} B`: it may capture read-only capabilities but no full one, and every
+  outward channel needs a full capability).
 * Runtime errors in agent code do not fail the REPL, so the executor detects uncaught
   exceptions in the output and reports them to the model as errors; the tool result trims
   host stack frames and appends hints for common capture-checking stumbles.
@@ -243,10 +296,11 @@ the content in the terminal marked `[classified]`, the model gets `Classified(**
 
 ## Terminal commands
 
-`/help`, `/model [alias]`, `/models`, `/perms`, `/todos`, `/config`,
-`/interface`, `/reset` (restart the REPL — a fresh session, all agent-defined vals/defs are
-gone), `/clear` (forget the conversation), `/cost`, `/quit`. Ctrl-C interrupts the current
-turn (also the running snippet), Ctrl-D exits.
+`/help`, `/model [alias]`, `/models`, `/mode [name]` (cycle or set the sandbox mode, starting
+a fresh REPL with the conversation kept), `/perms`, `/todos`, `/config`, `/interface`,
+`/reset` (restart the REPL: a fresh session, all agent-defined vals/defs are gone), `/clear` (forget the
+conversation), `/cost`, `/quit`. Ctrl-C interrupts the current turn (also the running
+snippet), Shift-Tab cycles the mode on an empty prompt, Ctrl-D exits.
 
 There is one REPL session per conversation: definitions the agent makes in one snippet are
 available in the next, across turns, until you `/reset`.
@@ -298,19 +352,5 @@ cat > .atc/config.json <<'EOF'
 EOF
 atc -p 'run: println(read("README.md").take(80))'
 ```
-
-## Status and known limits
-
-* Prototype quality; the sandbox is in-process, so a CPU-bound loop that ignores
-  interrupts survives the timeout (as in TACIT). `exec` runs real processes with the
-  user's privileges — the command allow-list is the boundary.
-* Component patterns match anywhere in a path (so `private` would match
-  `/private/var/...` on macOS); use `./private` for a project directory.
-* Safe mode is experimental; the system prompt documents its current quirks (top-level
-  `val`s of capturing types need explicit types, `Option.foreach` needs a pure function,
-  no mutable collections at top level). Agent code, like the whole code base, is compiled
-  with `-Yexplicit-nulls`, so Java results are `T | Null` and need `.nn` or a null check.
-* One sandbox per JVM: the `Interface` companion holds the installed implementation, so two
-  live REPL sessions in one process would share it (the app only ever has one).
 
 License: Apache-2.0.

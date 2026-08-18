@@ -45,8 +45,8 @@ object CodeValidator:
     ),
     Forbidden(
       "atc-runtime",
-      raw"\bInterface\.(current|takeRootIO|install)\b".r,
-      "Interface.current/takeRootIO/install are internal to the sandbox"
+      raw"\bRuntime\.(current|rootIO|rootUser|install)\b".r,
+      "Runtime.current/rootIO/rootUser/install are internal to the sandbox"
     ),
     // Reflection
     Forbidden("reflect-method", raw"getDeclaredMethod".r, "Reflective access is forbidden"),
@@ -257,9 +257,11 @@ object CodeValidator:
   def validate(code: String): List[Violation] =
     val stripped = stripLiteralsAndComments(code)
     val originalLines = code.linesIterator.toArray
-    val strippedLines = stripped.linesIterator.toArray
     val stringStrippedLines = stripStringLiteralsOnly(code).linesIterator.toArray
-    val logical = logicalLines(strippedLines)
+    val logical = logicalLines(stripped.linesIterator.toArray)
+    /** The violation of `pattern` on line `idx`, quoting the original source. */
+    def violation(pattern: Forbidden, idx: Int, fallback: String): Violation =
+      Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse(fallback).trim)
     val perLine =
       for
         pattern <- forbidden
@@ -269,13 +271,13 @@ object CodeValidator:
           else logical
         (line, idx) <- lines
         if pattern.regex.findFirstIn(line).isDefined
-      yield Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse(line).trim)
+      yield violation(pattern, idx, line)
     val crossLine =
       for
         pattern <- crossLineForbidden
         m <- pattern.regex.findAllMatchIn(stripped).toList
         idx = stripped.substring(0, m.start).count(_ == '\n')
-      yield Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+      yield violation(pattern, idx, "")
     perLine ++ crossLine
 
   def formatErrors(violations: List[Violation]): String =

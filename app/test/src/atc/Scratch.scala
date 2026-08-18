@@ -6,7 +6,8 @@ import atc.sandbox.*
 import java.nio.file.{Files, Path}
 
 /** Dev helper: run each `// ---`-separated snippet of a file in a fresh
-  * sandbox session (permissive policy, everything approved) and print results. */
+  * sandbox session (permissive policy, everything approved) and print results.
+  * `args`: file [safe|nosafe] [mode=readonly|local|full | preamble-file]. */
 object Scratch:
   def main(args: Array[String]): Unit =
     val root = Files.createTempDirectory("atc-scratch").nn.toRealPath().nn
@@ -31,9 +32,13 @@ object Scratch:
       def showTodos(items: List[atc.lib.Todo]): Unit = println(s"[todos] $items")
     val host = Host(policy, root, output, llm, hostUi)
     val safe = args.length < 2 || args(1) != "nosafe"
-    val preambleOverride = if args.length >= 3 then Some(Files.readString(Path.of(args(2))).nn) else None
+    val third = if args.length >= 3 then Some(args(2)) else None
+    val mode = third.filter(_.startsWith("mode=")).map(m => Mode.parse(m.drop(5))).getOrElse(Mode.Full)
+    policy.mode = mode
+    val preambleOverride = third.filterNot(_.startsWith("mode=")).map(f => Files.readString(Path.of(f)).nn)
     val s0 =
-      ReplSession(SandboxConfig(safeMode = safe, executionTimeoutMs = Some(60000)), host, preambleOverride).init()
+      ReplSession(SandboxConfig(safeMode = safe, mode = mode, executionTimeoutMs = Some(60000)), host, preambleOverride)
+        .init()
     session = Some(s0)
     val snippets = Files.readString(Path.of(args(0))).nn.split("(?m)^// ---.*$").nn.map(_.nn.trim).filter(_.nonEmpty)
     for s <- snippets do

@@ -69,23 +69,23 @@ class PolicySuite extends munit.FunSuite:
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.Deny, Decision.AllowSession))
     val p = Policy(rules((".", Some(Access.Read), None, false)), Nil, Nil, prompter)
     val f = root.resolve("src/main/A.scala")
-    assertEquals(p.effective(0L, f).access, Access.Read)
+    assertEquals(p.effective(ScopeId.Base, f).access, Access.Read)
     // read is already held: no prompt, scope opened
-    val s0 = p.requestFile(0L, root.resolve("src"), Access.Read, "")
+    val s0 = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Read, "")
     assert(prompter.asked.isEmpty)
     p.closeScope(s0)
     // once
-    val s1 = p.requestFile(0L, root.resolve("src"), Access.Write, "edit")
+    val s1 = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "edit")
     assertEquals(p.effective(s1, f).access, Access.Write)
-    assertEquals(p.effective(0L, f).access, Access.Read) // base unchanged
+    assertEquals(p.effective(ScopeId.Base, f).access, Access.Read) // base unchanged
     p.closeScope(s1)
     intercept[SecurityException](p.effective(s1, f)) // closed scope is unusable
     // deny
-    intercept[SecurityException](p.requestFile(0L, root.resolve("src"), Access.Write, "again"))
+    intercept[SecurityException](p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "again"))
     // session
-    val s3 = p.requestFile(0L, root.resolve("src"), Access.Write, "third")
+    val s3 = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "third")
     p.closeScope(s3)
-    assertEquals(p.effective(0L, f).access, Access.Write)
+    assertEquals(p.effective(ScopeId.Base, f).access, Access.Write)
     assertEquals(prompter.asked.size, 3)
 
   test("locked rules cannot be widened, classified stays classified"):
@@ -100,9 +100,9 @@ class PolicySuite extends munit.FunSuite:
       Nil,
       prompter
     )
-    intercept[SecurityException](p.requestFile(0L, root.resolve("build"), Access.Write, ""))
+    intercept[SecurityException](p.requestFile(ScopeId.Base, root.resolve("build"), Access.Write, ""))
     assert(prompter.asked.isEmpty)
-    val s = p.requestFile(0L, root.resolve("secrets"), Access.Write, "")
+    val s = p.requestFile(ScopeId.Base, root.resolve("secrets"), Access.Write, "")
     val pm = p.effective(s, root.resolve("secrets/key.txt"))
     assertEquals(pm, Perm(Access.Write, true))
 
@@ -110,20 +110,20 @@ class PolicySuite extends munit.FunSuite:
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.AllowOnce, Decision.AllowOnce))
     val p =
       Policy(rules((".", Some(Access.Read), None, false)), List("git status", "ls"), List("*.scala-lang.org"), prompter)
-    assert(p.commandAllowed(0L, "git status --short"))
-    assert(p.commandAllowed(0L, "ls -la"))
-    assert(!p.commandAllowed(0L, "git push"))
-    assert(!p.commandAllowed(0L, "lsof"))
-    assert(p.hostAllowed(0L, "docs.scala-lang.org"))
-    assert(!p.hostAllowed(0L, "example.com"))
-    val s1 = p.requestFile(0L, root.resolve("src"), Access.Write, "")
+    assert(p.commandAllowed(ScopeId.Base, "git status --short"))
+    assert(p.commandAllowed(ScopeId.Base, "ls -la"))
+    assert(!p.commandAllowed(ScopeId.Base, "git push"))
+    assert(!p.commandAllowed(ScopeId.Base, "lsof"))
+    assert(p.hostAllowed(ScopeId.Base, "docs.scala-lang.org"))
+    assert(!p.hostAllowed(ScopeId.Base, "example.com"))
+    val s1 = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "")
     val s2 = p.requestFile(s1, root.resolve("build"), Access.Read, "")
     assertEquals(p.effective(s2, root.resolve("src/main/A.scala")).access, Access.Write) // inherited from s1
-    val e = p.requestExec(0L, List("npm *"), "")
+    val e = p.requestExec(ScopeId.Base, List("npm *"), "")
     assert(p.commandAllowed(e, "npm install"))
-    assert(!p.commandAllowed(0L, "npm install"))
+    assert(!p.commandAllowed(ScopeId.Base, "npm install"))
     // already-permitted patterns do not prompt
-    val e2 = p.requestExec(0L, List("ls"), "")
+    val e2 = p.requestExec(ScopeId.Base, List("ls"), "")
     assertEquals(prompter.asked.size, 2)
     p.closeScope(e2)
 

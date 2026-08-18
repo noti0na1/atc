@@ -93,6 +93,29 @@ class AgentLoopSuite extends munit.FunSuite:
   private def toolResults(a: Agent): List[Msg.ToolResults] = a.history.collect { case m: Msg.ToolResults => m }
   private def never(): Boolean = false
 
+  test("a sandbox restart is announced to the model on the next turn, once"):
+    // A mode switch or /reset replaces the REPL, so the agent's `val`s and `def`s
+    // are gone. Without a notice the model concludes that the documented
+    // "definitions persist" guarantee is broken and wastes a round on it.
+    val (_, s, _, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("a"), ScriptedModel.Reply("b"))))
+    agent.noteSandboxRestarted("the sandbox mode changed to read-only")
+    agent.turn(s, "what is left?", never)
+    val first = agent.history.head.asInstanceOf[Msg.User].text
+    assert(first.contains("[sandbox notice]"), first)
+    assert(first.contains("read-only"), first)
+    assert(first.endsWith("what is left?"), first)
+    // The notice is not repeated on later turns.
+    agent.turn(s, "and now?", never)
+    val second = agent.history.collect { case u: Msg.User => u }.last.text
+    assertEquals(second, "and now?")
+
+  test("clear() drops a pending restart notice"):
+    val (_, s, _, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("a"))))
+    agent.noteSandboxRestarted("whatever")
+    agent.clear()
+    agent.turn(s, "fresh", never)
+    assertEquals(agent.history.head, Msg.User("fresh"))
+
   test("a plain reply becomes one assistant message and streams its text"):
     val (_, s, ui, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("hello there"))))
     agent.turn(s, "hi", never)

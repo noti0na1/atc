@@ -5,13 +5,9 @@ import java.util.regex.Pattern
 /** Simple glob matching for command lines and host names: `*` matches any
   * sequence of characters, everything else is literal. Adapted from TACIT. */
 object GlobMatcher:
-  def compile(pattern: String): Pattern =
-    val sb = StringBuilder()
-    pattern.foreach:
-      case '*' => sb.append(".*")
-      case c if "\\^$.|?+(){}[]".contains(c) => sb.append('\\').append(c)
-      case c => sb.append(c)
-    Pattern.compile(sb.toString)
+  /** `*` becomes `.*`; every other segment is quoted, so it stays literal. */
+  private def compile(pattern: String): Pattern =
+    Pattern.compile(pattern.split("\\*", -1).map(Pattern.quote).mkString(".*"))
 
   def matches(value: String, pattern: String): Boolean =
     compile(pattern).matcher(value).matches()

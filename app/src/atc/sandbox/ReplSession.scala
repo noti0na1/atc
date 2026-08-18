@@ -1,6 +1,7 @@
 package atc.sandbox
 
 import atc.lib.Interface
+import atc.perms.Mode
 
 import dotty.tools.repl.*
 import dotty.tools.dotc.reporting.Diagnostic
@@ -62,20 +63,63 @@ object ReplSession:
     "-Wconf:msg=exposes a flexible type:s",
   )
 
-  /** Definitions in scope before any agent code runs. */
-  val preamble: String =
-    """|import language.experimental.captureChecking
-       |import atc.lib.*
-       |import caps.*
-       |@assumeSafe object api:
-       |  private val host: Interface = Interface.current
-       |  export host.*
-       |import api.*
-       |@assumeSafe given io: IOCap = Interface.takeRootIO()
-       |@assumeSafe given fs: (FileSystem^{io}) = defaultFiles
-       |@assumeSafe given ex: (Exec^{io}) = defaultExec
-       |@assumeSafe given net: (Network^{io}) = defaultNetwork
-       |""".stripMargin
+  /** Definitions in scope before any agent code runs, for `mode`.
+    *
+    * `object api` holds the host and the root capability privately and
+    * publishes, as givens, only the capabilities of the mode:
+    *
+    *  - full: `io: IOCap^` (the root itself) and `fs`/`ex`/`net` derived from it;
+    *  - local: `io: IOCap` (a read-only view of the root), a full `fs: FileSystem^`
+    *    and `ex: Exec^` derived from the hidden root, with no network and no
+    *    full `io` (so no way to derive one);
+    *  - read-only: `io: IOCap` and the read-only `fs` derived from it.
+    *
+    * `atc.lib.Runtime.current`/`.rootIO` are `@rejectSafe`: the preamble is
+    * compiled before the safe-mode import, agent code after it, so agent code
+    * cannot name them (nor `api.host`/`api.root`, which are private).
+    *
+    * The chunks are loaded as separate REPL rounds (`init`): the base
+    * (`object api` + imports) first, then **each given on its own round**. That
+    * isolation matters for capture checking: each given becomes a field of its
+    * own line-wrapper object, so a pure `Classified.map` that reads a file
+    * captures only the `fs` wrapper, not the always-full `user`/`io` givens,
+    * which live in other wrappers. If all givens shared one wrapper, capturing
+    * `fs` would pull in that full `user`/`io` and the read would be rejected. */
+  def preambleChunks(mode: Mode): List[String] =
+    val base =
+      """|import language.experimental.captureChecking
+         |import atc.lib.*
+         |import caps.*
+         |@assumeSafe object api:
+         |  private val host: Interface = atc.lib.Runtime.current
+         |  export host.*
+         |import api.*""".stripMargin
+    val givens = mode match
+      case Mode.Full =>
+        List(
+          "@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO",
+          "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
+          "@assumeSafe given fs: (FileSystem^{io}) = fileSystem",
+          "@assumeSafe given ex: (Exec^{io}) = processes",
+          "@assumeSafe given net: (Network^{io}) = network",
+        )
+      case Mode.Local =>
+        List(
+          "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
+          "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
+          "@assumeSafe given fs: (FileSystem^) = fileSystem(using atc.lib.Runtime.rootIO)",
+          "@assumeSafe given ex: (Exec^) = processes(using atc.lib.Runtime.rootIO)",
+        )
+      case Mode.ReadOnly =>
+        List(
+          "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
+          "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
+          "@assumeSafe given fs: (FileSystem^{io.rd}) = readOnlyFileSystem",
+        )
+    base :: givens
+
+  /** The full preamble as one string (for display, e.g. `:imports`). */
+  def preamble(mode: Mode): String = preambleChunks(mode).mkString("\n")
 
   val safeModeImport: String = "import language.experimental.safe"
 
@@ -126,19 +170,21 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
   /** Set while a stop (interrupt or timeout) is in flight for the current run. */
   @volatile private var stopRequested: Boolean = false
 
-  /** Load the preamble; errors here are programmer bugs and are thrown. */
+  /** Load the preamble; errors here are programmer bugs and are thrown. Each
+    * chunk is a separate REPL round so that every given lands in its own
+    * line-wrapper (see `preambleChunks`); a `preambleOverride` runs as one round. */
   def init(): this.type =
     Sandbox.installHost(host)
-    val (out, thrown) = withOutputCapture() { state = driver.run(preambleOverride.getOrElse(preamble))(using state) }
-    thrown.foreach(throw _)
-    if out.toLowerCase.contains("error") then
-      throw IllegalStateException(s"Sandbox preamble failed to compile:\n$out")
-    if config.safeMode then
-      val (out2, thrown2) = withOutputCapture() { state = driver.run(safeModeImport)(using state) }
-      thrown2.foreach(throw _)
-      if out2.toLowerCase.contains("error") then
-        throw IllegalStateException(s"Safe mode import failed:\n$out2")
+    val chunks = preambleOverride.map(List(_)).getOrElse(preambleChunks(config.mode))
+    chunks.foreach(setUp("Sandbox preamble", _))
+    if config.safeMode then setUp("Safe mode import", safeModeImport)
     this
+
+  /** Evaluate one set-up round, failing loudly: nothing the agent writes has run yet. */
+  private def setUp(what: String, code: String): Unit =
+    val (out, thrown) = withOutputCapture() { state = driver.run(code)(using state) }
+    thrown.foreach(throw _)
+    if out.toLowerCase.contains("error") then throw IllegalStateException(s"$what failed to compile:\n$out")
 
   def close(): Unit = ()
 
