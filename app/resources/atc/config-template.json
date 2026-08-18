@@ -1,17 +1,35 @@
 {
   "model": "claude",
-  "safeModel": "local",
-  "models": {
-    "claude": { "provider": "anthropic", "model": "claude-opus-5", "webSearch": true, "reasoning": "high" },
-    "sonnet": { "provider": "anthropic", "model": "claude-sonnet-5", "webSearch": true },
-    "gpt":    { "provider": "openai-responses", "model": "gpt-5", "webSearch": true },
-    "chat":   { "provider": "openai", "model": "gpt-4.1" },
-    "deepseek": { 
-      "provider": "openai-responses", "model": "deepseek-v4-flash",  "reasoning": "high",
-      "baseUrl": "https://api.deepseek.com", "webSearch": true,
-      "apiKey": "${DEEPSEEK_API_KEY}"
+  "classifiedModel": "local",
+  "providers": {
+    "anthropic": {
+      "api": "anthropic",
+      "models": {
+        "claude":  { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
+        "sonnet":  { "name": "claude-sonnet-5", "webSearch": true }
+      }
     },
-    "local":  { "provider": "openai", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1", "apiKey": "ollama" }
+    "openai": {
+      "api": "openai-responses",
+      "models": {
+        "gpt":  { "name": "gpt-5", "webSearch": true },
+        "chat": { "name": "gpt-4.1" }
+      }
+    },
+    "deepseek": {
+      "api": "openai-responses",
+      "url": "https://api.deepseek.com",
+      "key": "${DEEPSEEK_API_KEY}",
+      "models": {
+        "deepseek": { "name": "deepseek-v4-flash", "reasoning": "high", "webSearch": true }
+      }
+    },
+    "ollama": {
+      "api": "openai",
+      "url": "http://localhost:11434/v1",
+      "key": "ollama",
+      "models": { "local": { "name": "llama3.1" } }
+    }
   },
   "files": [
     { "path": ".", "access": "write" },

@@ -42,7 +42,7 @@ final class TestEnv(
   /** User-visible output; classified segments are wrapped as `<...>`. */
   val userOut: StringBuilder = StringBuilder()
   val chats: ListBuffer[String] = ListBuffer()
-  val safeChats: ListBuffer[String] = ListBuffer()
+  val classifiedChats: ListBuffer[String] = ListBuffer()
   val questions: ListBuffer[(String, List[String], Boolean)] = ListBuffer()
   var answers: List[Option[String]] = Nil
   var shownTodos: List[Todo] = Nil
@@ -57,7 +57,7 @@ final class TestEnv(
 
   val llm: HostLlm = new HostLlm:
     def chat(m: String): String = { chats += m; s"normal:$m" }
-    def chatClassified(m: String): String = { safeChats += m; s"safe:$m" }
+    def chatClassified(m: String): String = { classifiedChats += m; s"safe:$m" }
 
   val ui: HostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =

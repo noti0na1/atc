@@ -32,7 +32,7 @@ jobs:
       run: ./mill dist
     - name: Smoke-test the distribution (key-less echo model, one non-interactive turn)
       run: |
-        echo '{ "model": "echo", "models": { "echo": { "provider": "echo", "model": "echo" } } }' > /tmp/echo.json
+        echo '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' > /tmp/echo.json
         out/dist.dest/atc --version
         out/dist.dest/atc -c /tmp/echo.json -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee /tmp/smoke.log
         grep -q 'val res1: Int = 42' /tmp/smoke.log

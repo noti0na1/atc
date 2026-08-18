@@ -1,6 +1,6 @@
 package atc.llm
 
-import atc.config.{Config, ModelConfig}
+import atc.config.ModelSpec
 
 import com.openai.client.OpenAIClient
 import com.openai.client.okhttp.OpenAIOkHttpClient
@@ -14,13 +14,13 @@ private[llm] object Providers:
 
   /** A client for the two OpenAI-shaped providers: the configured key if there
     * is one, else the SDK's own environment resolution — except against a
-    * custom `baseUrl` (Ollama, vLLM, LM Studio, ...), where a placeholder
-    * stands in for the key such servers ignore. */
-  def openAiClient(cfg: ModelConfig): OpenAIClient =
+    * custom `url` (Ollama, vLLM, LM Studio, ...), where a placeholder stands
+    * in for the key such servers ignore. */
+  def openAiClient(spec: ModelSpec): OpenAIClient =
     val b = OpenAIOkHttpClient.builder().timeout(RequestTimeout)
-    Config.resolveApiKey(cfg) match
+    spec.apiKey match
       case Some(key) => b.apiKey(key)
-      case None if cfg.baseUrl.isDefined => b.apiKey("none")
+      case None if spec.baseUrl.isDefined => b.apiKey("none")
       case None => b.fromEnv()
-    cfg.baseUrl.foreach(b.baseUrl)
+    spec.baseUrl.foreach(b.baseUrl)
     b.build()

@@ -45,7 +45,8 @@ final class Agent(
   policy: Policy,
   ui: AgentUI,
   var model: ChatModel,
-  val safeModel: Option[ChatModel],
+  /** The model that may see classified data; switchable with `/safemodel`. */
+  var classifiedModel: Option[ChatModel],
   extraInstructions: Option[String],
 ):
   var history: List[Msg] = Nil
@@ -58,7 +59,7 @@ final class Agent(
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
   def systemPrompt: String =
-    Prompts.system(cwd, policy, safeModel.map(_.alias), config.respectGitignore, extraInstructions)
+    Prompts.system(cwd, policy, classifiedModel.map(_.ref), config.respectGitignore, extraInstructions)
 
   /** A note prepended to the next user message, e.g. that the sandbox was
     * restarted. It is carried this way rather than appended to the history on

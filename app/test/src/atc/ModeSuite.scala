@@ -65,7 +65,7 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     onlyIn(allModes.toSet, """ask("q?", List("a", "b")).isDefined""")
     onlyIn(allModes.toSet, """chat("hello").length""")
 
-  test("classified reads and the safe model work in every mode"):
+  test("classified reads and the classified model work in every mode"):
     onlyIn(allModes.toSet, """classify("x").map(_.length)""")
     onlyIn(allModes.toSet, """chat(classify("x")).toString.length""")
 

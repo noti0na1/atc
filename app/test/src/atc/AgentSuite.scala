@@ -100,7 +100,7 @@ class AgentSuite extends munit.FunSuite:
     assert(!lastResult.success)
     assert(lastToolText.toLowerCase.contains("leak"), lastToolText)
 
-  test("classified: model sees mask, user sees content, safe model used"):
+  test("classified: model sees mask, user sees content, classified model used"):
     agent.turn(
       session,
       """run: val c = readClassified("secrets/token.txt"); println(c); println(chat(c.map(_ + "?")))""",

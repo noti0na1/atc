@@ -81,13 +81,13 @@ working directory, `--approve-all` auto-approve permission requests (scripted us
 
 ### Trying it without an API key
 
-`"provider": "echo"` is a built-in model that echoes your text and turns a message of the
+`"api": "echo"` is a built-in provider whose model echoes your text and turns a message of the
 form `run: <code>` into a `run_scala` call. It needs no key, and is the quickest way to see
 the sandbox, the modes and the permission pop-ups for yourself:
 
 ```bash
 mkdir -p .atc && cat > .atc/config.json <<'EOF'
-{ "model": "echo", "safeModel": "echo", "models": { "echo": { "provider": "echo", "model": "echo" } } }
+{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }
 EOF
 out/dist.dest/atc -p 'run: println(read("README.md").take(80))'
 out/dist.dest/atc --mode readonly -p 'run: write("notes.md", "hello")'   # a compile error
@@ -211,7 +211,7 @@ itself read-only) but never see it; `toString` is `Classified(***)`.
 
 The ways out are deliberate and few: `println` (the human sees the value in the terminal,
 marked `[classified]`; the model sees `Classified(***)`), `writeClassified` into a
-classified path, `chat(Classified)` with the configured safe model, and `httpPostClassified`
+classified path, `chat(Classified)` with the configured classified model, and `httpPostClassified`
 / `secretHeaders` to an allow-listed host.
 
 ### What the types do not know
@@ -308,12 +308,25 @@ starting point.
 ```json
 {
   "model": "claude",
-  "safeModel": "local",
-  "models": {
-    "claude": { "provider": "anthropic",        "model": "claude-opus-5", "webSearch": true, "reasoning": "high" },
-    "gpt":    { "provider": "openai-responses", "model": "gpt-5",         "webSearch": true },
-    "chat":   { "provider": "openai",           "model": "gpt-4.1" },
-    "local":  { "provider": "openai", "model": "llama3.1", "baseUrl": "http://localhost:11434/v1", "apiKey": "ollama" }
+  "classifiedModel": "local",
+  "providers": {
+    "anthropic": {
+      "api": "anthropic",
+      "models": {
+        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
+        "sonnet": { "name": "claude-sonnet-5", "webSearch": true }
+      }
+    },
+    "openai": {
+      "api": "openai-responses",
+      "models": { "gpt": { "name": "gpt-5", "webSearch": true } }
+    },
+    "ollama": {
+      "api": "openai",
+      "url": "http://localhost:11434/v1",
+      "key": "ollama",
+      "models": { "local": { "name": "llama3.1" } }
+    }
   },
   "files": [
     { "path": ".",        "access": "write" },
@@ -334,9 +347,23 @@ starting point.
 }
 ```
 
-### Models
+### Providers and models
 
-`provider` is one of
+A **provider** is one endpoint: an `api` (the wire protocol), an optional `url` and key, and
+the `models` reachable through it. A **model** is an alias under that provider, whose `name`
+is the id the provider knows it by (`name` defaults to the alias, so `"models": { "gpt-5":
+{} }` is enough) plus the settings that apply to that model alone — `webSearch`, `reasoning`,
+`thinking`, `reasoningSummary`, `maxTokens`, `temperature`, `webSearchVersion`.
+
+A model is named by its **alias** (`"model": "claude"`, `/model sonnet`), or by
+**`provider/alias`** when two providers use the same alias — then the bare alias is refused
+with both candidates named. `/models` lists every model with the name that identifies it.
+
+One vendor reachable through two protocols is two providers (an `openai` entry with
+`"api": "openai-responses"` and an `openai-chat` entry with `"api": "openai"`), since the
+protocol belongs to the endpoint.
+
+`api` is one of
 
 * `anthropic` — Messages API (official Java SDK). `webSearch: true` adds the server-side
   `web_search` tool (`web_search_20260209`; set `"webSearchVersion": "20250305"` for older
@@ -348,17 +375,24 @@ starting point.
   asks OpenAI to stream reasoning summaries (shown as thinking; DeepSeek streams its
   reasoning without it).
 * `openai` — Chat Completions; also the adapter for any OpenAI-compatible server (Ollama,
-  vLLM, LM Studio, OpenRouter …) via `baseUrl`. `webSearch: true` sets `web_search_options`
+  vLLM, LM Studio, OpenRouter …) via `url`. `webSearch: true` sets `web_search_options`
   (only search-enabled models accept it).
+* `echo` — the key-less local model used for smoke tests.
 
-API keys: `apiKey` (a literal or `"${SOME_ENV_VAR}"`), `apiKeyEnv`, or the SDK's own
-resolution (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …).
+API keys are per provider: `key` (a literal or `"${SOME_ENV_VAR}"`), `keyEnv`, or the SDK's
+own resolution (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …).
 
-Two roles. **`model`** is the agent; it never sees classified data. **`safeModel`** is the
-model that handles `Classified` values through `chat(Classified[String])` — point it at
-something you trust with your secrets, typically a local model. The agent model can be
-switched mid-conversation with `/model <alias>` (the history is provider-neutral); the safe
-model is fixed by the config.
+Two roles. **`model`** is the agent; it never sees classified data. **`classifiedModel`** is
+the model that handles `Classified` values through `chat(Classified[String])` — point it at
+something you trust with your secrets, typically a local model; leave it unset and classified
+data never reaches any model. Both are switched for the session with **`/model [ref]`** and
+**`/classifiedmodel [ref]`**: with a reference they switch directly, without one they open a
+pick-list of every configured model (`/classifiedmodel off` unsets the role). The
+conversation survives a switch, since the history is provider-neutral.
+
+Layers merge per provider: a project config can add a model to a provider the global config
+defined without repeating its `url` and `key`, and a redefined alias replaces that model
+entry outright.
 
 ### File permissions
 
@@ -413,7 +447,7 @@ never drop from it. They are listed in `/perms` and in the agent's system prompt
 
 ## The terminal
 
-`/help`, `/model [alias]`, `/models`, `/mode [name]`, `/perms`, `/todos`, `/config`,
+`/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`, `/perms`, `/todos`, `/config`,
 `/interface` (print the API the model sees), `/reset` (fresh REPL, conversation kept),
 `/clear` (forget the conversation, REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
 current turn including the running snippet, Shift-Tab cycles the mode on an empty prompt,

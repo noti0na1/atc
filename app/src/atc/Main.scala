@@ -41,7 +41,7 @@ object Main:
        |Usage: atc [options]
        |  -c, --config <file>   extra config file (merged over ~/.config/atc/config.json and ./.atc/config.json)
        |  -C, --cwd <dir>       working directory (default: current)
-       |  -m, --model <alias>   model alias to use (from the config's "models")
+       |  -m, --model <ref>     model to use: an alias from the config, or provider/alias
        |  -p, --prompt <text>   run one turn non-interactively and exit
        |      --mode <mode>     sandbox mode: readonly | local | full (default: the config's "mode", else full)
        |      --approve-all     auto-approve permission requests (use with -p in trusted setups only)
@@ -78,5 +78,5 @@ object Main:
     else
       Files.createDirectories(target.getParent)
       Files.writeString(target, Config.template)
-      println(s"Wrote $target — edit the models and permissions, then run atc again.")
+      println(s"Wrote $target — edit the providers and permissions, then run atc again.")
       0

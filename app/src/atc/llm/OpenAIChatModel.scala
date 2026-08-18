@@ -1,6 +1,6 @@
 package atc.llm
 
-import atc.config.ModelConfig
+import atc.config.ModelSpec
 
 import com.openai.client.OpenAIClient
 import com.openai.core.JsonValue
@@ -14,12 +14,15 @@ import scala.util.Using
 
 /** OpenAI Chat Completions API — also the adapter for any OpenAI-compatible
   * server (Ollama, vLLM, LM Studio, OpenRouter, ...) via `baseUrl`. */
-final class OpenAIChatModel(val alias: String, cfg: ModelConfig) extends ChatModel:
-  val modelId: String = cfg.model
+final class OpenAIChatModel(val spec: ModelSpec) extends ChatModel:
+  val alias: String = spec.alias
+  override val ref: String = spec.ref
+  val modelId: String = spec.modelId
   val providerKey: String = "openai"
+  private val cfg = spec.settings
   val webSearch: Boolean = cfg.webSearch
 
-  private lazy val client: OpenAIClient = Providers.openAiClient(cfg)
+  private lazy val client: OpenAIClient = Providers.openAiClient(spec)
 
   private def functionTool(t: ToolSpec): ChatCompletionFunctionTool =
     val schema = ujson.read(t.parametersJson)

@@ -38,10 +38,10 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("val persisted = 41"))
     assert(assertOk(run("persisted + 1")).output.contains("42"))
 
-  test("a classified file round-trips to the safe model without reaching the agent"):
+  test("a classified file round-trips to the classified model without reaching the agent"):
     env.clearOutput()
     val r = assertOk(run("""val c = chat(readClassified("secrets/s.txt")); println(c); c"""))
-    assert(env.safeChats.contains("secret"), env.safeChats.toString)
+    assert(env.classifiedChats.contains("secret"), env.classifiedChats.toString)
     assert(env.agentOut.toString.contains("Classified(***)"), env.agentOut.toString)
     assert(env.userOut.toString.contains("safe:secret"), env.userOut.toString)
     assert(!r.output.contains("secret"), r.output)

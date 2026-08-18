@@ -35,7 +35,7 @@ import caps.*
  *
  *  The only ways out are: `println` (the user sees the value, you still see
  *  `Classified(***)`), `writeClassified` (into a classified file), `chat` with
- *  the safe model, and `httpPostClassified` / `secretHeaders` to an allowed host.
+ *  the classified model, and `httpPostClassified` / `secretHeaders` to an allowed host.
  *
  *  {{{
  *  val secret = readClassified(".env")          // Classified[String]
@@ -416,5 +416,5 @@ trait Interface:
   /** Ask the normal model a one-shot question (e.g. to summarize a long text). */
   def chat(message: String)(using UserIO^): String
 
-  /** Ask the *safe* model about classified content; the answer stays classified. */
+  /** Ask the *classified* model about classified content; the answer stays classified. */
   def chat(message: Classified[String]): Classified[String]

@@ -1,9 +1,14 @@
 package atc.llm
 
-/** A local, key-less model for smoke tests and demos (`"provider": "echo"`).
-  * It replies with the user's text; a message of the form `run: <scala>`
-  * makes it call `run_scala` with that code and then report the result. */
-final class EchoModel(val alias: String) extends ChatModel:
+/** A local, key-less model for smoke tests and demos (`"api": "echo"`). It
+  * replies with the user's text; a message of the form `run: <scala>` makes it
+  * call `run_scala` with that code and then report the result. */
+object EchoModel:
+  def apply(alias: String, ref: String): EchoModel = new EchoModel(alias, ref)
+  /** An echo model that is its own reference (tests and smoke runs). */
+  def apply(alias: String): EchoModel = new EchoModel(alias, alias)
+
+final class EchoModel(val alias: String, override val ref: String) extends ChatModel:
   val modelId = "echo"
   val providerKey = "echo"
   val webSearch = false

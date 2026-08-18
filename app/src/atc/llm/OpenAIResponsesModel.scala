@@ -1,7 +1,7 @@
 package atc.llm
 
 import atc.Debug
-import atc.config.ModelConfig
+import atc.config.ModelSpec
 
 import com.openai.client.OpenAIClient
 import com.openai.core.JsonValue
@@ -15,12 +15,15 @@ import scala.util.Using
 
 /** OpenAI Responses API (official Java SDK), streaming, with the built-in
   * `web_search` tool when enabled. */
-final class OpenAIResponsesModel(val alias: String, cfg: ModelConfig) extends ChatModel:
-  val modelId: String = cfg.model
+final class OpenAIResponsesModel(val spec: ModelSpec) extends ChatModel:
+  val alias: String = spec.alias
+  override val ref: String = spec.ref
+  val modelId: String = spec.modelId
   val providerKey: String = "openai-responses"
+  private val cfg = spec.settings
   val webSearch: Boolean = cfg.webSearch
 
-  private lazy val client: OpenAIClient = Providers.openAiClient(cfg)
+  private lazy val client: OpenAIClient = Providers.openAiClient(spec)
 
   private def functionTool(t: ToolSpec): Tool =
     val schema = ujson.read(t.parametersJson)

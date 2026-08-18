@@ -4,17 +4,13 @@ import upickle.default.*
 
 import java.nio.file.{Files, Path, Paths}
 
-/** One LLM endpoint. `provider` is one of `anthropic`, `openai` (Chat
-  * Completions; also for any OpenAI-compatible server such as Ollama, vLLM,
-  * LM Studio via `baseUrl`), or `openai-responses` (the Responses API). */
+/** One model of a provider: the id the provider knows it by, plus the
+  * settings that apply to this model only. Everything about *where* to send
+  * the request (API shape, URL, key) belongs to its [[ProviderConfig]]. */
 case class ModelConfig(
-  provider: String,
-  model: String,
-  /** Literal key, or `${ENV_VAR}`. When absent, `apiKeyEnv` / the provider's
-    * default environment variable / SDK credential resolution is used. */
-  apiKey: Option[String] = None,
-  apiKeyEnv: Option[String] = None,
-  baseUrl: Option[String] = None,
+  /** The provider's model id. Defaults to the alias the model is listed under,
+    * so `"models": { "gpt-5": {} }` needs no `name`. */
+  name: Option[String] = None,
   /** Enable the provider's built-in web search tool (Anthropic
     * `web_search`, OpenAI Responses `web_search`, Chat Completions
     * `web_search_options`). */
@@ -33,6 +29,23 @@ case class ModelConfig(
   webSearchVersion: Option[String] = None,
 ) derives ReadWriter
 
+/** One LLM endpoint and the models reachable through it. `api` is the wire
+  * protocol: `anthropic`, `openai` (Chat Completions; also any
+  * OpenAI-compatible server such as Ollama, vLLM, LM Studio via `url`),
+  * `openai-responses` (the Responses API), or `echo` (the key-less test
+  * model). */
+case class ProviderConfig(
+  api: String,
+  /** Base URL override for this endpoint. */
+  url: Option[String] = None,
+  /** Literal key, or `${ENV_VAR}`. When absent, `keyEnv` / the SDK's own
+    * credential resolution (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) is used. */
+  key: Option[String] = None,
+  keyEnv: Option[String] = None,
+  /** The provider's models, by alias. */
+  models: Map[String, ModelConfig] = Map.empty,
+) derives ReadWriter
+
 /** One file-permission rule. See `atc.perms.Policy` for the semantics. */
 case class FileRuleConfig(
   path: String,
@@ -42,11 +55,14 @@ case class FileRuleConfig(
 ) derives ReadWriter
 
 case class Config(
-  /** Alias (key of `models`) of the agent's model. */
+  /** The agent's model: a model alias, or `provider/alias` when two providers
+    * use the same alias. Unset picks the first configured model. */
   model: Option[String] = None,
-  /** Alias of the model that handles classified data (`chat(Classified)`). */
-  safeModel: Option[String] = None,
-  models: Map[String, ModelConfig] = Map.empty,
+  /** The model that handles classified data (`chat(Classified)`), named the
+    * same way. Unset means classified data is never sent to a model. */
+  classifiedModel: Option[String] = None,
+  /** LLM endpoints by name, each with its own models. */
+  providers: Map[String, ProviderConfig] = Map.empty,
   files: List[FileRuleConfig] = Nil,
   /** Command-line patterns the agent may run without asking (`*` wildcard;
     * a pattern without `*` also matches by word prefix). */
@@ -98,10 +114,16 @@ object Config:
     "id_ed25519",
   )
 
-  /** Built-in model definitions used when the config defines none. */
-  val DefaultModels: Map[String, ModelConfig] = Map(
-    "claude" -> ModelConfig(provider = "anthropic", model = "claude-opus-5", webSearch = true),
-    "gpt" -> ModelConfig(provider = "openai-responses", model = "gpt-5", webSearch = true),
+  /** Built-in providers used when the config defines none. */
+  val DefaultProviders: Map[String, ProviderConfig] = Map(
+    "anthropic" -> ProviderConfig(
+      api = "anthropic",
+      models = Map("claude" -> ModelConfig(name = Some("claude-opus-5"), webSearch = true))
+    ),
+    "openai" -> ProviderConfig(
+      api = "openai-responses",
+      models = Map("gpt" -> ModelConfig(name = Some("gpt-5"), webSearch = true))
+    ),
   )
 
   def globalPath: Path =
@@ -111,7 +133,7 @@ object Config:
   def projectPath(cwd: Path): Path = cwd.resolve(".atc").resolve("config.json")
 
   /** Load and merge: global ← project ← explicit. Later layers override
-    * scalars, extend lists (`files`, `commands`, `hosts`) and merge `models`. */
+    * scalars, extend the list settings and merge `providers` (see [[mergeJson]]). */
   def load(cwd: Path, explicit: Option[Path]): (Config, List[Path]) =
     // The explicit path may name the project/global file again. Since list
     // settings are additive, loading a layer twice would duplicate its rules.
@@ -145,45 +167,84 @@ object Config:
       try atc.perms.Mode.parse(m)
       catch case e: IllegalArgumentException => throw IllegalArgumentException(s"Invalid config: ${e.getMessage}")
     }
-    config.models.foreach { (alias, model) =>
-      if alias.trim.isEmpty then throw IllegalArgumentException("Invalid config: model aliases must not be blank")
-      if model.provider.trim.isEmpty then
-        throw IllegalArgumentException(s"Invalid config: provider for model '$alias' must not be blank")
-      if model.model.trim.isEmpty then
-        throw IllegalArgumentException(s"Invalid config: model id for '$alias' must not be blank")
-      model.maxTokens.foreach(positive(s"models.$alias.maxTokens", _))
-      model.temperature.foreach { value =>
-        if !value.isFinite then
-          throw IllegalArgumentException(s"Invalid config: models.$alias.temperature must be finite")
+    config.providers.foreach { (name, provider) =>
+      if name.trim.isEmpty then throw IllegalArgumentException("Invalid config: provider names must not be blank")
+      if provider.api.trim.isEmpty then
+        throw IllegalArgumentException(s"Invalid config: api for provider '$name' must not be blank")
+      if provider.models.isEmpty then
+        throw IllegalArgumentException(s"Invalid config: provider '$name' defines no models")
+      provider.models.foreach { (alias, model) =>
+        val where = s"providers.$name.models.$alias"
+        if alias.trim.isEmpty then
+          throw IllegalArgumentException(s"Invalid config: model aliases of provider '$name' must not be blank")
+        // `/` separates provider from alias in a model reference.
+        if alias.contains('/') then
+          throw IllegalArgumentException(s"Invalid config: model alias '$alias' must not contain '/'")
+        if model.name.exists(_.trim.isEmpty) then
+          throw IllegalArgumentException(s"Invalid config: $where.name must not be blank")
+        model.maxTokens.foreach(positive(s"$where.maxTokens", _))
+        model.temperature.foreach { value =>
+          if !value.isFinite then throw IllegalArgumentException(s"Invalid config: $where.temperature must be finite")
+        }
       }
     }
+    // Fail here rather than at the first request: a typo in `model` is a
+    // config error, and the catalog message lists what is configured.
+    val catalog = ModelCatalog.from(config)
+    config.model.foreach(catalog.find)
+    config.classifiedModel.foreach(catalog.find)
     config
 
   /** List settings extend rather than replace (a later layer can add a deny
     * pattern, and cannot drop one an earlier layer set). */
   private val ListKeys = Set("files", "commands", "hosts", "denyCommands", "denyHosts")
 
-  /** `over` on top of `base`: list settings are concatenated, `models` is
-    * merged by alias (a redefined alias replaces the whole entry), everything
-    * else is overwritten. */
+  /** `over` on top of `base`: list settings are concatenated, `providers` are
+    * merged by name (and within one, its `models` by alias, a redefined alias
+    * replacing the whole model entry), everything else is overwritten. So a
+    * project config can add a model to a provider the global config defined
+    * without repeating its url and key. */
   def mergeJson(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
+    overlay(base, over) { (k, a, b) =>
+      (a, b) match
+        case (x: ujson.Arr, y: ujson.Arr) if ListKeys.contains(k) => ujson.Arr(x.value ++ y.value)
+        case (x: ujson.Obj, y: ujson.Obj) if k == "providers" => mergeProviders(x, y)
+        case _ => b
+    }
+
+  private def mergeProviders(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
+    overlay(base, over) { (_, a, b) =>
+      (a, b) match
+        case (x: ujson.Obj, y: ujson.Obj) => mergeProvider(x, y)
+        case _ => b
+    }
+
+  private def mergeProvider(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
+    overlay(base, over) { (k, a, b) =>
+      (a, b) match
+        case (x: ujson.Obj, y: ujson.Obj) if k == "models" => overlay(x, y)((_, _, m) => m)
+        case _ => b
+    }
+
+  /** `over` laid over `base` key by key; `join` decides what happens where
+    * both define the same key. */
+  private def overlay(base: ujson.Obj, over: ujson.Obj)(
+    join: (String, ujson.Value, ujson.Value) => ujson.Value
+  ): ujson.Obj =
     val out = ujson.Obj()
     for (k, v) <- base.value do out(k) = v
-    for (k, v) <- over.value do
-      out(k) = (out.value.get(k), v) match
-        case (Some(a: ujson.Arr), b: ujson.Arr) if ListKeys.contains(k) => ujson.Arr(a.value ++ b.value)
-        case (Some(a: ujson.Obj), b: ujson.Obj) if k == "models" => mergeJson(a, b)
-        case _ => v
+    for (k, v) <- over.value do out(k) = out.value.get(k).fold(v)(old => join(k, old, v))
     out
 
   private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
 
-  /** Resolve `${VAR}` references and `apiKeyEnv`. */
-  def resolveApiKey(m: ModelConfig): Option[String] =
-    m.apiKey.flatMap {
+  /** The provider's key: `key` (a literal or `${VAR}`), else `keyEnv`, else
+    * none — leaving the SDK to resolve its own default environment variable. */
+  def resolveApiKey(p: ProviderConfig): Option[String] =
+    p.key.flatMap {
       case EnvRef(name) => Option(System.getenv(name)).filter(_.nonEmpty)
       case literal => Some(literal)
-    }.orElse(m.apiKeyEnv.flatMap(n => Option(System.getenv(n)).filter(_.nonEmpty)))
+    }.orElse(p.keyEnv.flatMap(n => Option(System.getenv(n)).filter(_.nonEmpty)))
 
   /** The starter config written by `--init` (`app/resources/atc/config-template.json`). */
   def template: String = atc.Resources.text("/atc/config-template.json").getOrElse(

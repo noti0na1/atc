@@ -626,6 +626,20 @@ final class Tui(historyFile: Path) extends AgentUI:
       case _ => None
     }
 
+  /** Whether pop-up menus can be drawn (a real terminal). */
+  def menusAvailable: Boolean = !plain
+
+  /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
+    * `None` when there is no terminal for menus, no options, or the user
+    * cancelled with Ctrl-C/Ctrl-D. */
+  def choose(title: String, options: List[String]): Option[String] =
+    if plain || options.isEmpty then None
+    else
+      synchronized { flushTodos(); beginBlock() }
+      val chosen = menu(title, options)
+      blankLine()
+      chosen
+
   def askPermission(req: PermissionRequest): Decision =
     synchronized { flushTodos(); beginBlock() }
     write(Indent + styled(s"${g.warn} Permission request: ${req.title}", Yellow, Bold) + "\n")

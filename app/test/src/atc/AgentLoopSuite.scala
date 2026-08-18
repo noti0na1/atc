@@ -81,12 +81,12 @@ class AgentLoopSuite extends munit.FunSuite:
   private def setup(
     model: ChatModel,
     cfg: Config = Config(),
-    safe: Option[ChatModel] = None
+    classified: Option[ChatModel] = None
   ): (TestEnv, ReplSession, RecordingUI, Agent) =
     val env = TestEnv(prefix = "atc-loop")
     val s = env.newSession()
     val ui = RecordingUI()
-    val agent = Agent(cfg, env.root, env.policy, ui, model, safe, None)
+    val agent = Agent(cfg, env.root, env.policy, ui, model, classified, None)
     (env, s, ui, agent)
 
   private def assistants(a: Agent): List[Msg.Assistant] = a.history.collect { case m: Msg.Assistant => m }
@@ -353,8 +353,10 @@ class AgentLoopSuite extends munit.FunSuite:
     agent.turn(s, "go", never)
     assertEquals(agent.history.last, Msg.Assistant("with native", Nil, Some(native)))
 
-  test("the system prompt reflects the configured safe model"):
+  test("the system prompt reflects the configured classified model"):
     val (_, _, _, without) = setup(ScriptedModel("m", Nil))
-    assert(!without.systemPrompt.contains("safe model for classified data: some-safe"))
-    val (_, _, _, withSafe) = setup(ScriptedModel("m", Nil), safe = Some(ScriptedModel("some-safe", Nil)))
-    assert(withSafe.systemPrompt.contains("some-safe"), "system prompt should name the safe model")
+    assert(without.systemPrompt.contains("classified model"), "the line is there either way")
+    assert(without.systemPrompt.contains("(none configured)"), without.systemPrompt)
+    val (_, _, _, withClassified) =
+      setup(ScriptedModel("m", Nil), classified = Some(ScriptedModel("private-llm", Nil)))
+    assert(withClassified.systemPrompt.contains("private-llm"), "the prompt should name the classified model")

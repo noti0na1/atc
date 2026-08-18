@@ -273,19 +273,19 @@ class ClassifiedSuite extends munit.FunSuite:
 
   // ── LLM sink ────────────────────────────────────────────────────
 
-  test("chat(Classified) goes to the safe model and stays classified"):
+  test("chat(Classified) goes to the classified model and stays classified"):
     val answer = chat(readClassified("secrets/data.txt").map(_.toLowerCase))
     assertEquals(answer.toString, "Classified(***)")
-    assertEquals(env.safeChats.toList, List("top secret data"))
+    assertEquals(env.classifiedChats.toList, List("top secret data"))
     assertEquals(ClassifiedImpl.get(answer), "safe:top secret data")
     assert(env.chats.isEmpty)
 
   test("chat(Classified) with a failed value does not call the model"):
-    val before = env.safeChats.size
+    val before = env.classifiedChats.size
     val failed = classify("s").map(_ => throw RuntimeException("x"))
     val r = chat(failed)
     assert(ClassifiedImpl.unwrap(r).isFailure)
-    assertEquals(env.safeChats.size, before)
+    assertEquals(env.classifiedChats.size, before)
 
   test("chat(String) goes to the normal model"):
     assertEquals(chat("hello"), "normal:hello")

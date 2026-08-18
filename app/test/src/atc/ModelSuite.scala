@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.Agent
-import atc.config.ModelConfig
+import atc.config.{Config, ModelCatalog, ModelConfig, ModelSpec, ProviderConfig}
 import atc.llm.*
 import atc.sandbox.ExecutionResult
 
@@ -45,15 +45,52 @@ class ModelSuite extends munit.FunSuite:
 
   // ── ChatModel.create dispatch ───────────────────────────────────
 
-  test("create resolves the echo provider"):
-    val m = ChatModel.create("e", ModelConfig(provider = "echo", model = "ignored"))
-    assert(m.isInstanceOf[EchoModel])
-    assertEquals(m.alias, "e")
+  private def spec(api: String, provider: String = "p", alias: String = "e") =
+    ModelSpec(provider, alias, api, "ignored", None, None, ModelConfig())
 
-  test("create rejects an unknown provider with a helpful message"):
-    val e = intercept[IllegalArgumentException](ChatModel.create("x", ModelConfig(provider = "myllm", model = "m")))
+  test("create dispatches on the provider's api and keeps the model's reference"):
+    val m = ChatModel.create(spec("echo"))
+    assert(m.isInstanceOf[EchoModel], m.getClass.getName)
+    assertEquals(m.alias, "e")
+    assertEquals(m.ref, "p/e")
+
+  test("create rejects an unknown api with a helpful message"):
+    val e = intercept[IllegalArgumentException](ChatModel.create(spec("myllm")))
     assert(e.getMessage.nn.contains("myllm"), e.getMessage)
     assert(e.getMessage.nn.contains("anthropic"), e.getMessage)
+
+  // ── ModelCatalog ────────────────────────────────────────────────
+
+  private def catalog(providers: (String, String, List[String])*): ModelCatalog =
+    ModelCatalog.from(Config(providers = providers.map { (name, api, aliases) =>
+      name -> ProviderConfig(api, models = aliases.map(_ -> ModelConfig()).toMap)
+    }.toMap))
+
+  test("a model is found by its alias, or by provider/alias"):
+    val c = catalog(("anthropic", "anthropic", List("claude", "sonnet")), ("ollama", "openai", List("llama")))
+    assertEquals(c.find("claude").ref, "anthropic/claude")
+    assertEquals(c.find("anthropic/claude").ref, "anthropic/claude")
+    assertEquals(c.find("Claude").ref, "anthropic/claude") // case-insensitive
+    assertEquals(c.find("llama").provider, "ollama")
+    // stable order (provider, then alias) and short labels while they are unique
+    assertEquals(c.labels, List("claude", "sonnet", "llama"))
+    assertEquals(c.default.ref, "anthropic/claude")
+    // `name` defaults to the alias
+    assertEquals(c.find("llama").modelId, "llama")
+
+  test("a bare alias two providers share is ambiguous; the qualified name is not"):
+    val c = catalog(("ollama", "openai", List("llama")), ("vllm", "openai", List("llama")))
+    val e = intercept[IllegalArgumentException](c.find("llama"))
+    assert(e.getMessage.nn.contains("Ambiguous"), e.getMessage)
+    assert(e.getMessage.nn.contains("ollama/llama") && e.getMessage.nn.contains("vllm/llama"), e.getMessage)
+    assertEquals(c.find("vllm/llama").provider, "vllm")
+    // an ambiguous alias is labelled with its provider everywhere
+    assertEquals(c.labels, List("ollama/llama", "vllm/llama"))
+
+  test("an unknown model names the configured ones"):
+    val e = intercept[IllegalArgumentException](catalog(("p", "openai", List("a", "b"))).find("nope"))
+    assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
+    assert(e.getMessage.nn.contains("a, b"), e.getMessage)
 
   // ── Agent.looksUnfinished ───────────────────────────────────────
 

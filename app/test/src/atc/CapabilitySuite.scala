@@ -218,4 +218,4 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // it takes no capability, so it also passes the `map` capture contract.
     assertOk(run("""classify("x").map(c => 1)"""))
     assertOk(run("""val answer: Classified[String] = chat(classify("topsecret")); answer.toString"""))
-    assert(env.safeChats.contains("topsecret"), env.safeChats.toString)
+    assert(env.classifiedChats.contains("topsecret"), env.classifiedChats.toString)

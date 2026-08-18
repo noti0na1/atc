@@ -1,7 +1,7 @@
 package atc.llm
 
 import atc.Debug
-import atc.config.{Config, ModelConfig}
+import atc.config.ModelSpec
 
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
@@ -15,17 +15,20 @@ import scala.util.Using
 
 /** Anthropic Messages API (official Java SDK), streaming, with the
   * server-side web-search tool when enabled. */
-final class AnthropicModel(val alias: String, cfg: ModelConfig) extends ChatModel:
-  val modelId: String = cfg.model
+final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
+  val alias: String = spec.alias
+  override val ref: String = spec.ref
+  val modelId: String = spec.modelId
   val providerKey: String = "anthropic"
+  private val cfg = spec.settings
   val webSearch: Boolean = cfg.webSearch
 
   private lazy val client: AnthropicClient =
     val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
-    Config.resolveApiKey(cfg) match
+    spec.apiKey match
       case Some(key) => b.apiKey(key)
       case None => b.fromEnv()
-    cfg.baseUrl.foreach(b.baseUrl)
+    spec.baseUrl.foreach(b.baseUrl)
     b.build()
 
   private def toolUnion(t: ToolSpec): Tool =

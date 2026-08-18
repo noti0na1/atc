@@ -44,7 +44,7 @@ object Prompts:
   def system(
     cwd: Path,
     policy: Policy,
-    safeModelName: Option[String],
+    classifiedModelName: Option[String],
     respectGitignore: Boolean,
     extra: Option[String],
   ): String =
@@ -65,7 +65,9 @@ object Prompts:
        |- working directory: $cwd
        |- OS: $os
        |- REPL: Scala 3 with `-language:experimental.captureChecking` and `import language.experimental.safe`
-       |- safe model for classified data: ${safeModelName.getOrElse("(none configured)")}$gitignoreNote
+       |- classified model (the only one that may see `Classified` data): ${classifiedModelName.getOrElse(
+        "(none configured)"
+      )}$gitignoreNote
        |
        |How to work
        |1. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
@@ -136,7 +138,7 @@ object Prompts:
        |- Classified data: `readClassified` gives `Classified[String]`; you can only `map` it with
        |  pure functions (no `io`/`fs`/... captured, not even read-only), `println` it (the user sees
        |  the content, you see `Classified(***)`), `writeClassified` it, or `chat(classified)` with the
-       |  safe model. You cannot read it yourself.
+       |  classified model. You cannot read it yourself.
        |
        |Current permissions
        |${policy.summary.linesIterator.map("  " + _).mkString("\n")}

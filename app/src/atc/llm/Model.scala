@@ -1,6 +1,6 @@
 package atc.llm
 
-import atc.config.ModelConfig
+import atc.config.ModelSpec
 
 /** A tool the model may call. `parametersJson` is a JSON-schema object. */
 case class ToolSpec(name: String, description: String, parametersJson: String)
@@ -70,7 +70,10 @@ object StreamSink:
 trait ChatModel:
   /** Alias from the config. */
   def alias: String
+  /** The name that identifies this model unambiguously (`provider/alias`). */
+  def ref: String = alias
   def modelId: String
+  /** The wire protocol, matched against [[NativeTurn]] when replaying a turn. */
   def providerKey: String
   def webSearch: Boolean
 
@@ -88,12 +91,13 @@ trait ChatModel:
   def simple(system: Option[String], prompt: String): String
 
 object ChatModel:
-  def create(alias: String, cfg: ModelConfig): ChatModel =
-    cfg.provider.trim.toLowerCase match
-      case "anthropic" | "claude" => AnthropicModel(alias, cfg)
-      case "openai-responses" | "responses" => OpenAIResponsesModel(alias, cfg)
-      case "openai" | "openai-chat" | "chat" => OpenAIChatModel(alias, cfg)
-      case "echo" => EchoModel(alias)
+  /** The client for one configured model, chosen by its provider's `api`. */
+  def create(spec: ModelSpec): ChatModel =
+    spec.api.trim.toLowerCase match
+      case "anthropic" | "claude" => AnthropicModel(spec)
+      case "openai-responses" | "responses" => OpenAIResponsesModel(spec)
+      case "openai" | "openai-chat" | "chat" => OpenAIChatModel(spec)
+      case "echo" => EchoModel(spec.alias, spec.ref)
       case other => throw IllegalArgumentException(
-          s"Unknown provider '$other' for model '$alias' (expected anthropic | openai | openai-responses)"
+          s"Unknown api '$other' for provider '${spec.provider}' (expected anthropic | openai | openai-responses | echo)"
         )

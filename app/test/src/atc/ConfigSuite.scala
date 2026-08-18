@@ -50,9 +50,13 @@ class ConfigSuite extends munit.FunSuite:
     for expected <- List(".ssh", ".env", ".env.*", "*.pem", "id_rsa", ".aws") do
       assert(p.contains(expected), s"missing $expected")
 
-  test("built-in default models are Anthropic + OpenAI"):
-    assertEquals(Config.DefaultModels("claude").provider, "anthropic")
-    assertEquals(Config.DefaultModels("gpt").provider, "openai-responses")
+  test("built-in default providers are Anthropic + OpenAI"):
+    assertEquals(Config.DefaultProviders("anthropic").api, "anthropic")
+    assertEquals(Config.DefaultProviders("openai").api, "openai-responses")
+    val catalog = ModelCatalog.from(Config())
+    assertEquals(catalog.labels, List("claude", "gpt"))
+    assertEquals(catalog.find("claude").modelId, "claude-opus-5")
+    assertEquals(catalog.default.ref, "anthropic/claude")
 
   // ── parsing a single file ───────────────────────────────────────
 
@@ -63,8 +67,13 @@ class ConfigSuite extends munit.FunSuite:
       "config.json",
       """
       {
-        "model": "claude", "safeModel": "local",
-        "models": { "claude": { "provider": "anthropic", "model": "claude-opus-5", "webSearch": true } },
+        "model": "claude", "classifiedModel": "local",
+        "providers": {
+          "anthropic": { "api": "anthropic",
+            "models": { "claude": { "name": "claude-opus-5", "webSearch": true } } },
+          "ollama": { "api": "openai", "url": "http://localhost:11434/v1", "key": "ollama",
+            "models": { "local": {} } }
+        },
         "files": [ { "path": ".", "access": "write" }, { "path": "secrets", "classified": true } ],
         "commands": ["git status"], "hosts": ["*.scala-lang.org"],
         "safeMode": false, "maxToolCalls": 10
@@ -74,8 +83,14 @@ class ConfigSuite extends munit.FunSuite:
     val (c, present) = Config.load(dir, Some(cfg))
     assertEquals(present, List(cfg))
     assertEquals(c.model, Some("claude"))
-    assertEquals(c.safeModel, Some("local"))
-    assertEquals(c.models("claude").model, "claude-opus-5")
+    assertEquals(c.classifiedModel, Some("local"))
+    assertEquals(c.providers("anthropic").models("claude").name, Some("claude-opus-5"))
+    // `name` defaults to the alias, and provider settings reach the resolved model
+    val local = ModelCatalog.from(c).find("local")
+    assertEquals(local.modelId, "local")
+    assertEquals(local.api, "openai")
+    assertEquals(local.baseUrl, Some("http://localhost:11434/v1"))
+    assertEquals(local.apiKey, Some("ollama"))
     assertEquals(c.files.map(_.path), List(".", "secrets"))
     assertEquals(c.files(1).classified, Some(true))
     assertEquals(c.commands, List("git status"))
@@ -123,7 +138,7 @@ class ConfigSuite extends munit.FunSuite:
       "a.json",
       """
       { "model": "a", "safeMode": true, "files": [ {"path": "."} ], "commands": ["ls"],
-        "models": { "a": { "provider": "anthropic", "model": "m1" } } }
+        "providers": { "anthropic": { "api": "anthropic", "models": { "a": { "name": "m1" } } } } }
     """
     )
     val over = writeCfg(
@@ -131,7 +146,8 @@ class ConfigSuite extends munit.FunSuite:
       "b.json",
       """
       { "model": "b", "safeMode": false, "files": [ {"path": "secrets", "classified": true} ],
-        "commands": ["git status"], "models": { "b": { "provider": "openai", "model": "m2" } } }
+        "commands": ["git status"],
+        "providers": { "openai": { "api": "openai-responses", "models": { "b": { "name": "m2" } } } } }
     """
     )
     // load merges global(a) ← project ← explicit(b); we drive it directly via mergeJson too.
@@ -141,8 +157,8 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(c.safeMode, false) // scalar overridden
     assertEquals(c.files.map(_.path), List(".", "secrets")) // list extended
     assertEquals(c.commands, List("ls", "git status")) // list extended
-    assertEquals(c.models.keySet, Set("a", "b")) // models merged
-    assertEquals(c.models("a").model, "m1")
+    assertEquals(c.providers.keySet, Set("anthropic", "openai")) // providers merged
+    assertEquals(ModelCatalog.from(c).labels, List("a", "b"))
 
   test("deny lists extend across layers, so a later layer cannot drop a deny pattern"):
     val a = ujson.read("""{ "commands": ["ls"], "denyCommands": ["rm *"], "denyHosts": ["*.internal"] }""").obj
@@ -152,23 +168,41 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(c.denyCommands, List("rm *", "curl *"))
     assertEquals(c.denyHosts, List("*.internal"))
 
-  test("merging the same model key keeps the later definition"):
-    val a = ujson.read("""{ "models": { "m": { "provider": "anthropic", "model": "old" } } }""").obj
-    val b = ujson.read("""{ "models": { "m": { "provider": "openai", "model": "new" } } }""").obj
+  test("a provider is merged field by field: models are added, a redefined alias replaced"):
+    val a = ujson.read("""{ "providers": {
+        "openai": { "api": "openai", "url": "http://old", "key": "k",
+          "models": { "old": { "name": "v1", "webSearch": true } } },
+        "anthropic": { "api": "anthropic", "models": { "claude": {} } } } }""").obj
+    val b = ujson.read("""{ "providers": {
+        "openai": { "api": "openai", "url": "http://new",
+          "models": { "old": { "name": "v2" }, "fresh": { "name": "v3" } } } } }""").obj
     val c = upickle.default.read[Config](Config.mergeJson(a, b))
-    assertEquals(c.models("m").provider, "openai")
-    assertEquals(c.models("m").model, "new")
+    val p = c.providers("openai")
+    assertEquals(p.url, Some("http://new")) // provider scalar overridden
+    assertEquals(p.key, Some("k")) // untouched field kept from the earlier layer
+    assertEquals(p.models.keySet, Set("old", "fresh")) // model added, not replaced wholesale
+    assertEquals(p.models("old").name, Some("v2")) // redefined alias replaced entirely
+    assertEquals(p.models("old").webSearch, false) // ... including its dropped settings
+    assertEquals(c.providers("anthropic").models.keySet, Set("claude")) // other providers untouched
 
   // ── API-key resolution ──────────────────────────────────────────
 
-  test("resolveApiKey handles literals, ${ENV} refs and apiKeyEnv"):
+  test("resolveApiKey handles literals, ${ENV} refs and keyEnv"):
     val varName = "ATC_TEST_KEY_" + ProcessHandle.current().pid()
-    assertEquals(Config.resolveApiKey(ModelConfig("openai", "m", apiKey = Some("literal-key"))), Some("literal-key"))
+    def provider(key: Option[String] = None, keyEnv: Option[String] = None) =
+      ProviderConfig("openai", key = key, keyEnv = keyEnv)
+    assertEquals(Config.resolveApiKey(provider(key = Some("literal-key"))), Some("literal-key"))
     // an unset ${VAR} resolves to None
-    assertEquals(Config.resolveApiKey(ModelConfig("openai", "m", apiKey = Some(s"$${$varName}"))), None)
-    assertEquals(Config.resolveApiKey(ModelConfig("openai", "m", apiKey = None)), None)
-    // apiKeyEnv falls back to the environment (unset here → None)
-    assertEquals(Config.resolveApiKey(ModelConfig("openai", "m", apiKeyEnv = Some(varName))), None)
+    assertEquals(Config.resolveApiKey(provider(key = Some(s"$${$varName}"))), None)
+    assertEquals(Config.resolveApiKey(provider()), None)
+    // keyEnv falls back to the environment (unset here → None)
+    assertEquals(Config.resolveApiKey(provider(keyEnv = Some(varName))), None)
+    // a resolved key never reaches a message or a log through toString
+    val spec = ModelCatalog.from(Config(providers =
+      Map("p" -> ProviderConfig("openai", key = Some("sk-secret"), models = Map("m" -> ModelConfig())))
+    )).find("m")
+    assertEquals(spec.apiKey, Some("sk-secret"))
+    assert(!spec.toString.contains("sk-secret"), spec.toString)
 
   // ── App.fileRules ──────────────────────────────────────────────
 
@@ -215,5 +249,10 @@ class ConfigSuite extends munit.FunSuite:
   test("the --init template is valid JSON that parses into a Config"):
     val json = Config.template
     val c = upickle.default.read[Config](ujson.read(json))
-    assert(c.models.nonEmpty, "template should define models")
+    assert(c.providers.nonEmpty, "template should define providers")
+    val catalog = ModelCatalog.from(c)
+    assert(catalog.models.size >= 4, catalog.labels.toString)
+    // the roles the template names must resolve
+    c.model.foreach(catalog.find)
+    c.classifiedModel.foreach(catalog.find)
     assert(c.files.nonEmpty, "template should define file rules")

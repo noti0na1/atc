@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.{Agent, Prompts}
-import atc.config.{Config, FileRuleConfig, ModelConfig}
+import atc.config.{Config, FileRuleConfig, ModelCatalog, ModelSpec}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
@@ -23,23 +23,19 @@ final class App(args: Main.Args):
 
   // ── models ────────────────────────────────────────────────────────
 
-  val modelConfigs: Map[String, ModelConfig] = if config.models.isEmpty then Config.DefaultModels else config.models
+  /** Every model of every configured provider, resolved. */
+  val catalog: ModelCatalog = ModelCatalog.from(config)
   private val modelCache = mutable.Map[String, ChatModel]()
 
-  /** The client for a configured alias, created once per session. */
-  def modelFor(alias: String): ChatModel =
-    modelCache.getOrElseUpdate(alias, ChatModel.create(alias, modelConfig(alias)))
+  /** The client for one configured model, created once per session. */
+  def modelFor(spec: ModelSpec): ChatModel = modelCache.getOrElseUpdate(spec.ref, ChatModel.create(spec))
 
-  private def modelConfig(alias: String): ModelConfig = modelConfigs.getOrElse(
-    alias,
-    throw IllegalArgumentException(
-      s"Unknown model alias '$alias'. Configured: ${modelConfigs.keys.toList.sorted.mkString(", ")}"
-    )
-  )
+  /** The client for a model reference (`alias` or `provider/alias`). */
+  def modelFor(reference: String): ChatModel = modelFor(catalog.find(reference))
 
   val initialModel: ChatModel =
-    modelFor(args.model.orElse(config.model).getOrElse(modelConfigs.keys.toList.sorted.head))
-  val initialSafe: Option[ChatModel] = config.safeModel.map(modelFor)
+    modelFor(args.model.orElse(config.model).map(catalog.find).getOrElse(catalog.default))
+  val initialClassified: Option[ChatModel] = config.classifiedModel.map(modelFor)
 
   // ── sandbox session ───────────────────────────────────────────────
 
@@ -70,8 +66,8 @@ final class App(args: Main.Args):
   val llm = new HostLlm:
     def chat(message: String): String = agent.model.simple(None, message)
     def chatClassified(message: String): String =
-      agent.safeModel.getOrElse(throw RuntimeException(
-        "No safe model configured: set \"safeModel\" in the config to a model that may see classified data."
+      agent.classifiedModel.getOrElse(throw RuntimeException(
+        "No classified model configured: set \"classifiedModel\" in the config to a model that may see classified data."
       ))
         .simple(Some("You are a trusted assistant handling confidential data. Answer directly and concisely."), message)
   val hostUi = new HostUi:
@@ -84,7 +80,7 @@ final class App(args: Main.Args):
 
   // ── agent ─────────────────────────────────────────────────────────
 
-  val agent = Agent(config, cwd, policy, tui, initialModel, initialSafe, config.instructions)
+  val agent = Agent(config, cwd, policy, tui, initialModel, initialClassified, config.instructions)
 
   // ── running ───────────────────────────────────────────────────────
 
@@ -124,14 +120,14 @@ final class App(args: Main.Args):
       tui.close()
 
   private def banner(): Unit =
-    def describe(m: ChatModel): String = s"${m.alias} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
-    val noSafeModel = "(none — set \"safeModel\" in the config to chat about classified data)"
+    def describe(m: ChatModel): String = s"${m.ref} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
+    val noClassifiedModel = "(none — set \"classifiedModel\" in the config to chat about classified data)"
     val noConfig = "(none; built-in defaults — try `atc --init`)"
     tui.banner(
       s"atc ${Main.Version}",
       List(
         "model" -> describe(agent.model),
-        "safe model" -> agent.safeModel.map(describe).getOrElse(noSafeModel),
+        "classified model" -> agent.classifiedModel.map(describe).getOrElse(noClassifiedModel),
         "cwd" -> App.pretty(cwd),
         "config" -> (if configFiles.isEmpty then noConfig else configFiles.map(App.pretty).mkString(", ")),
         "mode" -> policy.mode.describe,
@@ -180,18 +176,19 @@ final class App(args: Main.Args):
 
   private val helpText =
     """Commands:
-      |  /help              this help
-      |  /model [alias]     show or switch the agent model
-      |  /models            list configured models
-      |  /mode [name]       cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL
-      |  /perms             show the effective permission policy
-      |  /config            show config files and settings
-      |  /interface         show the sandbox API reference
-      |  /reset             restart the sandbox REPL (keeps the conversation)
-      |  /clear             forget the conversation (keeps the REPL)
-      |  /todos             show the agent's TODO list
-      |  /cost              show token usage
-      |  /quit              exit""".stripMargin
+      |  /help                   this help
+      |  /model [ref]            switch the agent model (no argument: pick from a list)
+      |  /classifiedmodel [ref]  switch the model that may see classified data ("off" to unset)
+      |  /models                 list configured models
+      |  /mode [name]            cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL
+      |  /perms                  show the effective permission policy
+      |  /config                 show config files and settings
+      |  /interface              show the sandbox API reference
+      |  /reset                  restart the sandbox REPL (keeps the conversation)
+      |  /clear                  forget the conversation (keeps the REPL)
+      |  /todos                  show the agent's TODO list
+      |  /cost                   show token usage
+      |  /quit                   exit""".stripMargin
 
   /** Handle a slash command; returns false to quit. */
   private def command(line: String): Boolean =
@@ -209,6 +206,7 @@ final class App(args: Main.Args):
       case "/help" | "/?" => tui.println(helpText)
       case "/models" => showModels()
       case "/model" => switchModel(arg)
+      case "/classifiedmodel" | "/classified" => switchClassifiedModel(arg)
       case "/perms" | "/permissions" => tui.println(policy.summary)
       case "/mode" => switchMode(arg)
       case "/config" =>
@@ -231,16 +229,56 @@ final class App(args: Main.Args):
         )
       case other => tui.error(s"unknown command $other (try /help)")
 
-  private def showModels(): Unit =
-    modelConfigs.toList.sortBy(_._1).foreach { (alias, mc) =>
-      val marks = List(
-        Option.when(agent.model.alias == alias)("agent"),
-        Option.when(agent.safeModel.exists(_.alias == alias))("safe"),
-      ).flatten
-      val search = if mc.webSearch then " web-search" else ""
-      val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-      tui.println(f"  $alias%-12s ${mc.provider}%-18s ${mc.model}%-28s$search$role")
+  /** One line per configured model, marked with the role it currently plays. */
+  private def modelRow(spec: ModelSpec): String =
+    val marks = List(
+      Option.when(agent.model.ref == spec.ref)("agent"),
+      Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
+    ).flatten
+    val search = if spec.settings.webSearch then " web-search" else ""
+    val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
+    f"${catalog.label(spec)}%-14s ${spec.provider}%-12s ${spec.api}%-17s ${spec.modelId}%-26s$search$role"
+
+  private def showModels(): Unit = catalog.models.foreach(m => tui.println("  " + modelRow(m)))
+
+  /** Pick a model from the list. Without a menu (plain mode) the list is
+    * printed instead, so the user can name one with `/model <ref>`. */
+  private def pickModel(title: String): Option[ModelSpec] =
+    val rows = catalog.models.map(modelRow)
+    tui.choose(title, rows) match
+      case Some(row) => catalog.models.zip(rows).collectFirst { case (m, r) if r == row => m }
+      case None =>
+        if !tui.menusAvailable then showModels()
+        None
+
+  /** `/model`: pick from the list, or switch to the named one. */
+  private def switchModel(arg: String): Unit =
+    setModel(arg, "model", agent.model) { m =>
+      agent.model = m
+      tui.success(s"model -> ${m.ref} (${m.modelId})")
     }
+
+  /** `/classifiedmodel`: the model that may see classified data. `off` unsets it. */
+  private def switchClassifiedModel(arg: String): Unit =
+    if arg.trim.toLowerCase == "off" || arg.trim.toLowerCase == "none" then
+      agent.classifiedModel = None
+      tui.success("classified model -> (none): classified data is no longer sent to any model")
+    else
+      setModel(arg, "classified model", agent.classifiedModel.getOrElse(agent.model)) { m =>
+        agent.classifiedModel = Some(m)
+        tui.success(s"classified model -> ${m.ref} (${m.modelId})")
+      }
+
+  /** Shared by the two switches: an argument names a model, no argument opens
+    * the picker; the current one is reported when nothing is chosen. */
+  private def setModel(arg: String, what: String, current: ChatModel)(use: ChatModel => Unit): Unit =
+    if arg.nonEmpty then
+      try use(modelFor(arg))
+      catch case e: IllegalArgumentException => tui.error(e.getMessage)
+    else
+      pickModel(s"Choose the $what") match
+        case Some(spec) => use(modelFor(spec))
+        case None => tui.info(s"$what: ${current.ref} (${current.providerKey} ${current.modelId})")
 
   /** `/mode`: cycle (no argument) or set the sandbox mode; a new REPL is
     * started with only that mode's capabilities (definitions are gone, the
@@ -260,14 +298,6 @@ final class App(args: Main.Args):
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
     }
-
-  private def switchModel(arg: String): Unit =
-    if arg.isEmpty then tui.info(s"model: ${agent.model.alias} (${agent.model.providerKey} ${agent.model.modelId})")
-    else
-      try
-        agent.model = modelFor(arg)
-        tui.success(s"model -> ${agent.model.alias} (${agent.model.modelId})")
-      catch case e: IllegalArgumentException => tui.error(e.getMessage)
 
 object App:
   /** A path for display: under `~` when inside the home directory. */
