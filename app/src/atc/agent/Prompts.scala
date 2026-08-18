@@ -36,8 +36,8 @@ object Prompts:
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the
          |root: printing, asking, TODOs, `chat` work) and `given fs: FileSystem^{io.rd}` (read-only). Writes,
          |`exec`, network and writes inside `requestFiles` do not compile ("... cannot subsume a read-only capture set" /
-         |"Cannot call update method"); `requestFiles(path, reason = ...) { ... }` can still ask to read more (it grants a read-only
-         |file system here, matching your `fs`).
+         |"Cannot call update method"); `requestFiles(path, Access.Read, reason) { ... }` can still ask to read more (it
+         |grants a read-only file system here, matching your `fs`).
          |Do not try to work around this: explain what you would change and let the user switch to local or
          |full mode (`/mode local`, `/mode full`) if they want you to edit files.""".stripMargin
 
