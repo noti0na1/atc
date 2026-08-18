@@ -49,6 +49,23 @@ class ClassifiedSuite extends munit.FunSuite:
     assertEquals(failed.toString, "Classified(***)")
     assert(ClassifiedImpl.unwrap(failed).isFailure)
 
+  test("a fatal throwable inside map propagates, it is not masked as a classified failure"):
+    // `Try` traps only `NonFatal`, so a fatal throwable escapes `map` and aborts the
+    // evaluation (rather than becoming a masked failure). It cannot be turned into a
+    // per-bit oracle because agent code may not *catch* it — see CodeValidator. Here
+    // (host code, not agent code) we can catch it to observe that it did propagate.
+    // (Caught by hand rather than `intercept`, so no fatal error reaches the runner.)
+    var propagated = false
+    try ClassifiedImpl.wrap("x").map[Int](_ => throw OutOfMemoryError("boom"))
+    catch case _: OutOfMemoryError => propagated = true
+    assert(propagated)
+
+  test("ThreadDeath (the sandbox stop signal) propagates through map, never swallowed"):
+    var propagated = false
+    try ClassifiedImpl.wrap("x").map[Int](_ => throw ThreadDeath())
+    catch case _: ThreadDeath => propagated = true
+    assert(propagated)
+
   test("map on a failed value short-circuits without running the function"):
     val failed = ClassifiedImpl.wrap("secret").map(_ => throw RuntimeException("boom"))
     var executed = false

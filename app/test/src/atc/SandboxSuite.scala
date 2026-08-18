@@ -99,6 +99,41 @@ class SandboxSuite extends munit.FunSuite:
     assert(userOut.toString.contains("safe:secret"))
     assert(!r.output.contains("secret"), r.output)
 
+  test("classified map fatal-exception oracle is rejected before it runs"):
+    // A pure callback that throws only when a predicate over the secret holds would be a
+    // per-bit oracle *if* the fatal throwable it raises could be caught. `Try` traps only
+    // NonFatal, so the attack needs a fatal throwable (here InterruptedException) and a
+    // catch to observe it — and the validator rejects both, so the code never runs.
+    val attack =
+      """val c = readClassified("secrets/s.txt")
+        |def bit(i: Int, mid: Char): Boolean =
+        |  try { c.map(s => if i < s.length && s(i) < mid then throw new InterruptedException() else 0); false }
+        |  catch case _: InterruptedException => true
+        |println(bit(0, 'm'))""".stripMargin
+    val r = run(attack)
+    assert(!r.success, s"expected validation to reject the oracle, got: ${r.output}")
+    assert(r.error.exists(_.contains("throwable-interrupted")), r.error.toString)
+
+  test("classified map StackOverflow oracle is rejected: cannot catch the fatal error"):
+    // No explicit throw — a runaway recursion raises StackOverflowError — but observing it
+    // still requires catching a fatal Error, which the validator forbids.
+    val attack =
+      """val c = readClassified("secrets/s.txt")
+        |def bit(i: Int, mid: Char): Boolean =
+        |  try { c.map(s => if s(i) < mid then { def rec(n: Int): Int = rec(n + 1) + 1; rec(0) } else 0); false }
+        |  catch case _: StackOverflowError => true
+        |println(bit(0, 'm'))""".stripMargin
+    val r = run(attack)
+    assert(!r.success, s"expected validation to reject the oracle, got: ${r.output}")
+    assert(r.error.exists(_.contains("catch-fatal")), r.error.toString)
+
+  test("agent code cannot swallow the ThreadDeath stop signal with a catch-all"):
+    // A loop that catches everything could otherwise defeat the interrupt/timeout, which
+    // stops REPL loops by raising ThreadDeath at back-edges. The catch-all is rejected.
+    val r = run("""while true do try { val x = 1 } catch case _ => ()""")
+    assert(!r.success, s"expected validation to reject the catch-all, got: ${r.output}")
+    assert(r.error.exists(_.contains("catch-all")), r.error.toString)
+
   test("cannot construct capabilities or reach internals"):
     assertCompileError("""new atc.host.FileSystemImpl(0, null)""", "")
     assertCompileError("""atc.lib.Interface.current""", "")

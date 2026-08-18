@@ -72,7 +72,12 @@ object Prompts:
        |- Effects inside higher-order functions of `Option` are rejected (`opt.foreach(println)` —
        |  use `match` instead); `List`/`Map` iteration with effects is fine.
        |- Mutable collections (`ListBuffer`, `HashMap`, `Array` at top level) are not allowed in safe
-       |  mode; use immutable collections and `StringBuilder`.
+       |  mode, and neither is `StringBuilder`; use immutable collections and build strings by
+       |  concatenation or `List(...).mkString`.
+       |- Do not catch fatal throwables: `catch case _: Throwable` (or `Error`/`StackOverflowError`/…),
+       |  a bare `catch case _ =>`, and any use of `InterruptedException`/`ThreadDeath` are rejected.
+       |  Catch a specific type instead, e.g. `catch case _: Exception` (or a `RuntimeException` subtype);
+       |  a fatal error aborts the run by design. (`NonFatal(e)` is unavailable in safe mode.)
        |- Classified data: `readClassified` gives `Classified[String]`; you can only `map` it with
        |  pure functions, `println` it (the user sees the content, you see `Classified(***)`),
        |  `writeClassified` it, or `chat(classified)` with the safe model. You cannot read it yourself.

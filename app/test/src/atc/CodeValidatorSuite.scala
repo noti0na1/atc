@@ -314,6 +314,57 @@ class CodeValidatorSuite extends munit.FunSuite:
   }
   test("no-fp: 'atc' inside other identifiers") { assertAllowed("val matcher = 1; val watch = 2; val patch_host = 3") }
 
+  // ── Catching fatal throwables ────────────────────────────────────
+
+  test("reject catch of Throwable") { assertRejected("try f() catch case _: Throwable => ()", "catch-fatal") }
+  test("reject catch of Throwable with a binder"):
+    assertRejected("try f() catch case e: Throwable => ()", "catch-fatal")
+  test("reject catch of Error") { assertRejected("try f() catch case _: Error => ()", "catch-fatal") }
+  test("reject catch of StackOverflowError"):
+    assertRejected("try f() catch case _: StackOverflowError => ()", "catch-fatal")
+  test("reject catch of OutOfMemoryError"):
+    assertRejected("try f() catch case _: OutOfMemoryError => ()", "catch-fatal")
+  test("reject catch of VirtualMachineError"):
+    assertRejected("try f() catch case _: VirtualMachineError => ()", "catch-fatal")
+  test("reject catch of Any") { assertRejected("try f() catch case _: Any => ()", "catch-fatal") }
+  test("reject catch of a fully-qualified Throwable"):
+    assertRejected("try f() catch case _: java.lang.Throwable => ()", "catch-fatal")
+  test("reject catch of Throwable split across lines"):
+    assertRejected("try\n  f()\ncatch\n  case _: Throwable => ()", "catch-fatal")
+
+  test("reject bare catch-all (wildcard)") { assertRejected("try f() catch case _ => ()", "catch-all") }
+  test("reject bare catch-all (binder)") { assertRejected("try f() catch case e => ()", "catch-all") }
+  test("reject bare catch-all with a guard") { assertRejected("try f() catch case e if true => ()", "catch-all") }
+  test("reject braced bare catch-all") { assertRejected("try f() catch { case _ => () }", "catch-all") }
+  test("reject bare catch-all split across lines"):
+    assertRejected("try\n  f()\ncatch\n  case _ => ()", "catch-all")
+  test("reject a bare catch-all fallback after typed arms"):
+    assertRejected("try f() catch {\n  case _: RuntimeException => 1\n  case _ => 2\n}", "catch-all")
+
+  test("reject throwing InterruptedException") {
+    assertRejected("throw new InterruptedException()", "throwable-interrupted")
+  }
+  test("reject catching InterruptedException"):
+    assertRejected("try f() catch case _: InterruptedException => ()", "throwable-interrupted")
+  test("reject any use of ThreadDeath") { assertRejected("throw new ThreadDeath()", "throwable-threaddeath") }
+
+  test("allow catch of a specific non-fatal exception"):
+    assertAllowed("try read(\"x\") catch case _: RuntimeException => \"d\"")
+  test("allow catch of Exception (InterruptedException is banned separately)"):
+    assertAllowed("try read(\"x\") catch case _: Exception => \"d\"")
+  test("validator does not flag NonFatal (though safe mode rejects it; prefer case _: Exception)"):
+    assertAllowed("try read(\"x\") catch case NonFatal(e) => \"d\"")
+  test("allow a typed catch with a binder"):
+    assertAllowed("try read(\"x\") catch case e: IllegalStateException => e.getMessage")
+  test("allow a match with a wildcard arm (not a catch)"):
+    assertAllowed("val any: Any = 42\nany match\n  case i: Int => i\n  case _ => 0")
+  test("allow .recover with a wildcard (not a catch)"):
+    assertAllowed("scala.util.Try(read(\"x\")).recover { case _ => \"d\" }")
+  test("allow a case class with a Throwable field"):
+    assertAllowed("case class Wrapped(e: Throwable)")
+  test("allow identifiers containing Error/Throwable"):
+    assertAllowed("val parseError = 1; val myThrowable = 2")
+
   // ── Multiple violations of one rule count separately per line ────
 
   test("same rule on several lines yields one violation per line"):

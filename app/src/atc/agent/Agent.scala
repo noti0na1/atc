@@ -198,7 +198,7 @@ object Agent:
     ),
     Hint(
       out => out.contains("Cannot refer to") && out.contains("from safe code"),
-      "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, StringBuilder instead of ListBuffer."
+      "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, and an immutable `List`/`Vector` with `mkString` instead of `ListBuffer`/`StringBuilder`."
     ),
     Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),

@@ -81,6 +81,28 @@ object CodeValidator:
     ),
     Forbidden("sys-thread", raw"\bnew\s+Thread\b".r, "Creating threads is forbidden"),
     Forbidden("sys-thread2", raw"\bThread\s*\(".r, "Creating threads is forbidden"),
+    // Catching fatal throwables. Fatal throwables (StackOverflowError, OutOfMemoryError,
+    // the sandbox's ThreadDeath stop signal, ...) must propagate and abort the evaluation;
+    // agent code must not catch them, or a callback that throws conditionally on a secret
+    // becomes a per-bit oracle and a loop could swallow a timeout/interrupt. A typed catch
+    // of Throwable/Error/a fatal type is rejected here; a bare catch-all is caught by the
+    // cross-line `catch-all` rule below. A typed catch of a non-fatal type (`case _: Exception`,
+    // a RuntimeException subtype, ...) stays allowed. (NonFatal(e) is not usable under safe mode.)
+    Forbidden(
+      "catch-fatal",
+      raw"\bcase\s+(?!class\b|object\b)[^=]*:\s*(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef)\b".r,
+      "Catching Throwable/Error/a fatal error is forbidden; catch a specific non-fatal type instead, e.g. case _: Exception (or a RuntimeException subtype)"
+    ),
+    Forbidden(
+      "throwable-interrupted",
+      raw"\bInterruptedException\b".r,
+      "InterruptedException may not be used in agent code (throwing or catching it can defeat the interrupt/timeout)"
+    ),
+    Forbidden(
+      "throwable-threaddeath",
+      raw"\bThreadDeath\b".r,
+      "ThreadDeath is the sandbox stop signal and may not be used in agent code"
+    ),
     // Directives
     Forbidden("directive-using", raw"//>\s*using".r, "//> using directives are forbidden"),
     Forbidden("directive-import", """import\s+\$""".r, "import $ directives are forbidden"),
@@ -186,6 +208,30 @@ object CodeValidator:
           emit(c); i += 1
     sb.toString
 
+  /** Patterns matched against the whole stripped source (spanning line breaks),
+    * for constructs the per-line scan cannot see — e.g. a `catch` and its `case`
+    * on separate lines. */
+  private val crossLineForbidden: List[Forbidden] = List(
+    // A bare catch-all (`catch case _ =>`, `catch case e =>`, `catch { ... case _ => }`)
+    // also catches fatal errors and the ThreadDeath stop signal. Both rules require the
+    // `catch` keyword, so ordinary `match` arms and `.recover { case _ => }` are untouched;
+    // a bare `_`/lower-case binder is what marks a catch-all — `catch case _: Exception` has a
+    // type and an extractor like `catch case Foo(e)` starts upper-case, so neither is flagged.
+    // Braceless form — the catch-all as the first (or only) arm:
+    Forbidden(
+      "catch-all",
+      raw"\bcatch\b\s*case\s+(?:_|[a-z]\w*)\s*(?:if\b|=>)".r,
+      "A bare catch-all also catches fatal errors and the sandbox stop signal; catch a specific non-fatal type instead, e.g. case _: Exception"
+    ),
+    // Braced form — a bare catch-all arm anywhere inside `catch { ... }` (e.g. a `case _ =>`
+    // fallback after typed arms); scans the block allowing one level of nested braces.
+    Forbidden(
+      "catch-all",
+      raw"\bcatch\b\s*\{(?:[^{}]|\{[^{}]*\})*?\bcase\s+(?:_|[a-z]\w*)\s*(?:if\b|=>)".r,
+      "A bare catch-all also catches fatal errors and the sandbox stop signal; catch a specific non-fatal type instead, e.g. case _: Exception"
+    ),
+  )
+
   private val stringStrippedPatterns: Set[String] = Set("directive-using", "directive-import", "language-import")
 
   private val dotWhitespace = raw"\s*\.\s*".r
@@ -214,15 +260,23 @@ object CodeValidator:
     val strippedLines = stripped.linesIterator.toArray
     val stringStrippedLines = stripStringLiteralsOnly(code).linesIterator.toArray
     val logical = logicalLines(strippedLines)
-    for
-      pattern <- forbidden
-      lines =
-        if stringStrippedPatterns.contains(pattern.id)
-        then stringStrippedLines.zipWithIndex.toList
-        else logical
-      (line, idx) <- lines
-      if pattern.regex.findFirstIn(line).isDefined
-    yield Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse(line).trim)
+    val perLine =
+      for
+        pattern <- forbidden
+        lines =
+          if stringStrippedPatterns.contains(pattern.id)
+          then stringStrippedLines.zipWithIndex.toList
+          else logical
+        (line, idx) <- lines
+        if pattern.regex.findFirstIn(line).isDefined
+      yield Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse(line).trim)
+    val crossLine =
+      for
+        pattern <- crossLineForbidden
+        m <- pattern.regex.findAllMatchIn(stripped).toList
+        idx = stripped.substring(0, m.start).count(_ == '\n')
+      yield Violation(pattern.id, pattern.description, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+    perLine ++ crossLine
 
   def formatErrors(violations: List[Violation]): String =
     val header = s"Code validation failed (${violations.size} violation${if violations.size > 1 then "s" else ""}):"
