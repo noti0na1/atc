@@ -257,6 +257,15 @@ class ReplSessionSuite extends munit.FunSuite:
     assert(r.output.length < 5000, r.output.length.toString)
     val p = assertOk(run("""println("y" * 5000); ()"""))
     assert(p.output.count(_ == 'y') == 5000, p.output.length.toString)
+  test("the echo cap never splits a surrogate pair and counts the hidden characters exactly"):
+    // Default cap is 2000 chars; the echo `val emoji: String = "🙂🙂🙂…"` puts a pair's high half at
+    // index 1999 (21-char prefix), so a naive cut would leave a lone surrogate.
+    val r = assertOk(run("""val emoji = "\uD83D\uDE42" * 1200"""))
+    val shown = r.output.takeWhile(_ != '…')
+    assert(!Character.isHighSurrogate(shown.last), "cut inside a surrogate pair")
+    val hidden = """\[(\d+) more characters""".r.findFirstMatchIn(r.output).map(_.group(1).nn.toInt).getOrElse(-1)
+    val full = "val emoji: String = \"" + "\uD83D\uDE42" * 1200 + "\""
+    assertEquals(shown.length + hidden, full.length)
   test("Java-returning calls bound to top-level vals do not warn about flexible types"):
     val r = assertOk(run("""val s = "abc".replace("a", "b")"""))
     assert(!r.output.contains("flexible type"), r.output)

@@ -166,7 +166,8 @@ final class Host(
     finally policy.closeScope(id)
 
   def exec(command: String, args: List[String], workingDir: Option[String], timeoutMs: Long)(using
-    ex: Exec
+    ex: Exec,
+    fs: FileSystem
   ): ProcessResult =
     val argv = command :: args
     val line = argv.mkString(" ")
@@ -174,11 +175,19 @@ final class Host(
       throw SecurityException(
         s"""Access denied: command '$line' matches no permitted pattern. Use requestExec(Set("$command *"), reason) { ... } to ask the user."""
       )
-    val dir = workingDir.map(canonical).getOrElse(cwd)
+    // A command observes the directory it runs in (`git status` lists file names),
+    // so the working directory must be readable and unclassified for the FileSystem
+    // capability in scope. (What the command itself reads is up to the OS: the
+    // command pattern is the user's decision.) `cwd` is canonicalized like any
+    // other path so a symlinked project directory matches the rules.
+    val dir = workingDir.fold(canonical("."))(canonical)
+    val pm = requireRead(scopeOf(fs), dir, "running a command in")
+    requireNotClassified(pm, dir, "running a command there", "a working directory outside it")
     val pb = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
     Processes.run(pb, command, timeoutMs)
 
-  def execOutput(command: String, args: List[String])(using Exec): String = exec(command, args, None, 120000L).stdout
+  def execOutput(command: String, args: List[String])(using Exec, FileSystem): String =
+    exec(command, args, None, 120000L).stdout
 
   // ── Interface: network ────────────────────────────────────────────
 
@@ -202,6 +211,9 @@ final class Host(
     secretHeaders: Map[String, Classified[String]]
   ): HttpResponse =
     val uri = URI(url)
+    val scheme = Option(uri.getScheme).map(_.toLowerCase).getOrElse("")
+    if scheme != "http" && scheme != "https" then
+      throw SecurityException(s"Invalid URL (only http/https are supported): $url")
     val host = Option(uri.getHost).getOrElse(throw SecurityException(s"Invalid URL (no host): $url"))
     if !policy.hostAllowed(scopeOf(net), host) then
       throw SecurityException(
@@ -214,7 +226,9 @@ final class Host(
     val publisher = body match
       case None => HttpRequest.BodyPublishers.noBody().nn
       case Some(text) =>
-        if !headers.contains("Content-Type") then b.header("Content-Type", contentType)
+        // Header names are case-insensitive: do not add a duplicate Content-Type.
+        val hasContentType = (headers.keys ++ secretHeaders.keys).exists(_.equalsIgnoreCase("Content-Type"))
+        if !hasContentType then b.header("Content-Type", contentType)
         HttpRequest.BodyPublishers.ofString(text, StandardCharsets.UTF_8).nn
     b.method(method.toUpperCase, publisher)
     val resp = http.send(b.build(), JHttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).nn
@@ -246,7 +260,7 @@ final class Host(
       method,
       url,
       Option(body).filter(_.nonEmpty),
-      headers.getOrElse("Content-Type", "application/json"),
+      "application/json",
       headers,
       secretHeaders
     )

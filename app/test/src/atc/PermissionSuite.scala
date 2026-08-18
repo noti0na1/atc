@@ -1,13 +1,13 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Classified, Exec, Network}
+import atc.lib.{Classified, Exec, FileSystem, Network}
 import atc.perms.*
 import atc.sandbox.ReplSession
 
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
 import java.net.InetSocketAddress
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 
 /** Exec and network permission enforcement, at the host level and end-to-end
   * through a sandbox REPL (migrated from TACIT's ProcessPermissionSuite,
@@ -37,6 +37,10 @@ class PermissionSuite extends munit.FunSuite:
       handler(200, ex => Option(ex.getRequestHeaders.nn.getFirst("X-Token")).getOrElse("(none)"))
     )
     server.createContext("/method", handler(200, ex => ex.getRequestMethod.nn))
+    server.createContext(
+      "/content-type",
+      handler(200, ex => ex.getRequestHeaders.nn.get("Content-Type").nn.toString) // e.g. "[text/plain]"
+    )
     server.createContext("/not-found", handler(404, _ => """{"error":"not found"}"""))
     server.createContext("/boom", handler(500, _ => "internal error: broke"))
     server.start()
@@ -51,6 +55,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val r = env.host.exec("echo", List("hello", "world"))
     assertEquals(r.exitCode, 0)
     assertEquals(r.stdout.trim, "hello world")
@@ -61,6 +66,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val e = intercept[SecurityException](env.host.exec("rm", List("-rf", "/")))
     assert(e.getMessage.nn.contains("no permitted pattern"), e.getMessage)
     assert(e.getMessage.nn.contains("requestExec"), e.getMessage)
@@ -69,6 +75,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("ls"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val r = env.host.exec("ls", List("no-such-file-xyz"))
     assert(r.exitCode != 0)
     assert(r.stderr.nonEmpty)
@@ -78,13 +85,70 @@ class PermissionSuite extends munit.FunSuite:
     env.dir("sub")
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val r = env.host.exec("pwd", Nil, workingDir = Some(env.root.resolve("sub").toString))
     assert(r.stdout.trim.endsWith("/sub"), r.stdout)
+
+  test("exec rejects a working directory the agent cannot read"):
+    val env = TestEnv(commands = List("pwd"))
+    val outside = TestEnv.outsideDir()
+    import env.given
+    given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
+    val e = intercept[SecurityException](env.host.exec("pwd", Nil, workingDir = Some(outside.toString)))
+    assert(e.getMessage.nn.contains("Access denied"), e.getMessage)
+
+  test("exec rejects a working directory inside a classified area"):
+    val env = TestEnv(
+      mkRules = root =>
+        List(
+          FileRule(PathPattern(".", root), Some(Access.Write), None),
+          FileRule(PathPattern("secrets", root), None, Some(true)),
+        ),
+      commands = List("pwd"),
+    )
+    env.dir("secrets")
+    import env.given
+    given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
+    val secrets = env.root.resolve("secrets").toString
+    val e = intercept[SecurityException](env.host.exec("pwd", Nil, workingDir = Some(secrets)))
+    assert(e.getMessage.nn.contains("classified"), e.getMessage)
+    assert(e.getMessage.nn.contains(secrets), e.getMessage) // the path, not a literal "$dir"
+
+  test("exec's working-directory check honours a requestFiles grant (allow once)"):
+    val env = TestEnv(commands = List("pwd"))
+    val outside = TestEnv.outsideDir()
+    import env.given
+    given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
+    env.decisions = List(Decision.AllowOnce)
+    val out = env.host.requestFiles(outside.toString, atc.lib.Access.Read, "run there") {
+      env.host.exec("pwd", Nil, workingDir = Some(outside.toString)).stdout.trim
+    }
+    assertEquals(out, outside.toString)
+    assertEquals(env.requests.size, 1)
+    // the grant was for the block only
+    intercept[SecurityException](env.host.exec("pwd", Nil, workingDir = Some(outside.toString)))
+
+  test("exec's default working directory is allowed even when cwd is reached through a symlink"):
+    val env = TestEnv(commands = List("pwd"))
+    val link = Files.createTempDirectory("atc-link").nn.resolve("proj").nn
+    Files.createSymbolicLink(link, env.root)
+    // A host whose cwd is the symlink (as `atc -C /tmp/proj` would be on macOS, where /tmp -> /private/tmp).
+    val host = Host(env.policy, link, env.output, env.llm, env.ui)
+    import env.given
+    given ex: Exec = host.defaultExec
+    given fs: FileSystem = host.defaultFiles
+    val r = host.exec("pwd")
+    assertEquals(r.exitCode, 0, r.stderr)
+    assertEquals(host.execOutput("pwd").trim, env.root.toString)
 
   test("exec enforces a timeout"):
     val env = TestEnv(commands = List("sleep"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val e = intercept[RuntimeException](env.host.exec("sleep", List("30"), timeoutMs = 150))
     assert(e.getMessage.nn.contains("timed out"), e.getMessage)
 
@@ -104,6 +168,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     env.decisions = List(Decision.AllowOnce)
     val out = env.host.requestExec(Set("ls*"), "list") {
       env.host.exec("ls", List(env.root.toString)).exitCode
@@ -119,6 +184,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     env.decisions = List(Decision.AllowSession)
     env.host.requestExec(Set("ls*"), "list") { () }
     assertEquals(env.host.exec("ls", List(env.root.toString)).exitCode, 0)
@@ -127,6 +193,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     val r = env.host.requestExec(Set("echo")) { env.host.exec("echo", List("hi")).stdout.trim }
     assertEquals(r, "hi")
     assert(env.requests.isEmpty)
@@ -135,6 +202,7 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.defaultExec
+    given fs: FileSystem = env.host.defaultFiles
     env.decisions = List(Decision.Deny)
     var ran = false
     intercept[SecurityException](env.host.requestExec(Set("rm")) { ran = true })
@@ -186,7 +254,20 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given net: Network = env.host.defaultNetwork
     val e = intercept[SecurityException](env.host.httpGet("file:///etc/passwd"))
-    assert(e.getMessage.nn.contains("no host"), e.getMessage)
+    assert(e.getMessage.nn.contains("Invalid URL"), e.getMessage)
+    assert(e.getMessage.nn.contains("file:///etc/passwd"), e.getMessage) // the URL, not a literal "$url"
+
+  test("httpPost sends exactly one Content-Type: the caller's header wins over `contentType`"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.defaultNetwork
+    assertEquals(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty, Map.empty), "[text/plain]")
+    assertEquals(
+      env.host.httpPost(url("/content-type"), "x", "text/plain", Map("content-type" -> "application/xml"), Map.empty),
+      "[application/xml]"
+    )
+    val secret = Map("Content-Type" -> env.host.classify("text/csv"))
+    assertEquals(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty, secret), "[text/csv]")
 
   test("host matching honours glob patterns, case-insensitively"):
     assert(GlobMatcher.matchesHost("API.GitHub.com", "*.github.com"))

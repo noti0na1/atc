@@ -224,13 +224,17 @@ trait Interface:
   def requestExec[T](commands: Set[String], reason: String = "")
                     (op: Exec^ ?=> T)(using IOCap, Exec): T
 
-  /** Run `command` with `args` (no shell). Throws `SecurityException` if the
-   *  command line matches no permitted pattern; `RuntimeException` on timeout. */
+  /** Run `command` with `args` (no shell) in `workingDir` (default: the working
+   *  directory). Throws `SecurityException` if the command line matches no
+   *  permitted pattern, or if the working directory is not readable or is
+   *  classified — a command observes the directory it runs in, so that check
+   *  goes through the `FileSystem` capability (a `requestFiles` block covers it);
+   *  `RuntimeException` on timeout. */
   def exec(command: String, args: List[String] = Nil, workingDir: Option[String] = None,
-           timeoutMs: Long = 120000)(using Exec): ProcessResult
+           timeoutMs: Long = 120000)(using Exec, FileSystem): ProcessResult
 
-  /** Run `command` and return its stdout. */
-  def execOutput(command: String, args: List[String] = Nil)(using Exec): String
+  /** Run `command` in the working directory and return its stdout. */
+  def execOutput(command: String, args: List[String] = Nil)(using Exec, FileSystem): String
 
   // ── Network ─────────────────────────────────────────────────────
 
@@ -240,10 +244,13 @@ trait Interface:
                        (op: Network^ ?=> T)(using IOCap, Network): T
 
   /** HTTP GET. `secretHeaders` values (e.g. an `Authorization` token read with
-   *  `readClassified`) are sent to the host but never visible to you. */
+   *  `readClassified`) are sent to the host but never visible to you. Only
+   *  `http`/`https` URLs are accepted. */
   def httpGet(url: String, headers: Map[String, String] = Map.empty,
               secretHeaders: Map[String, Classified[String]] = Map.empty)(using Network): String
 
+  /** HTTP POST. `contentType` is sent as `Content-Type` unless `headers` (or
+   *  `secretHeaders`) already carry that header, in which case theirs wins. */
   def httpPost(url: String, body: String, contentType: String = "application/json",
                headers: Map[String, String] = Map.empty,
                secretHeaders: Map[String, Classified[String]] = Map.empty)(using Network): String

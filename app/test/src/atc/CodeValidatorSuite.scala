@@ -258,6 +258,18 @@ class CodeValidatorSuite extends munit.FunSuite:
     val vs = CodeValidator.validate("val a = 1\nimport java.\n  io.File")
     assertEquals(vs.map(_.lineNumber), List(2))
 
+  // ── Evasion: comments cannot hide the member-access dot ─────────
+
+  test("comment between the name and the dot"):
+    assertRejected("import java./*x*/io.File", "file-io-java")
+    assertRejected("import java./**/io.File", "file-io-java")
+  test("comment between the dot and the member"):
+    assertRejected("import java/*x*/.io.File", "file-io-java")
+  test("comment in a multi-line split"):
+    assertRejected("import java./* c */\nio.File", "file-io-java")
+  test("unrelated comments around a forbidden call are still caught"):
+    assertRejected("System./*a*/getenv(\"HOME\")", "sys-getenv")
+
   // ── Evasion: string interpolation is code ────────────────────────
 
   test("interp: System.getProperty") {

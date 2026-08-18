@@ -68,6 +68,24 @@ class HostSuite extends munit.FunSuite:
     assert(exists("README.md"))
     assertEquals(access("/a/b/c.txt").name, "c.txt")
 
+  test("forEachLine streams lines with 1-based numbers"):
+    write("lines.txt", "alpha\nbeta\ngamma")
+    val seen = collection.mutable.ListBuffer[(String, Int)]()
+    access("lines.txt").forEachLine((line, n) => seen += ((line, n)))
+    assertEquals(seen.toList, List(("alpha", 1), ("beta", 2), ("gamma", 3)))
+
+  test("forEachLine and grep tolerate non-UTF-8 bytes like read() does (no abort on binary files)"):
+    val bytes = "ok\n".getBytes("UTF-8") ++ Array[Byte](0xff.toByte, 0xfe.toByte) ++ " bad\nend\n".getBytes("UTF-8")
+    Files.write(root.resolve("latin.txt"), bytes)
+    val seen = collection.mutable.ListBuffer[String]()
+    access("latin.txt").forEachLine((line, _) => seen += line)
+    assertEquals(seen.size, 3)
+    assertEquals(seen.head, "ok")
+    assertEquals(seen.last, "end")
+    assertEquals(seen(1), read("latin.txt").linesIterator.toList(1)) // same replacement as read()
+    assertEquals(grep("latin.txt", "end").map(_.lineNumber), List(3))
+    assert(grepRecursive(".", "ok").exists(_.file.endsWith("latin.txt")))
+
   test("outside cwd is denied with a request hint"):
     val e = intercept[SecurityException](read("/etc/hosts"))
     assert(e.getMessage.nn.contains("requestFiles"), e.getMessage)

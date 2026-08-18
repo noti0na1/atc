@@ -7,6 +7,7 @@ import dotty.tools.dotc.reporting.Diagnostic
 
 import java.io.PrintStream
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.{CountDownLatch, TimeUnit}
 
 object ReplSession:
   val MaxOutputBytes: Int = 4 * 1024 * 1024
@@ -91,8 +92,18 @@ object ReplSession:
 
   /** System.out/err are swapped around each evaluation to capture compiler
     * diagnostics that bypass the driver's stream; that is process-global, so
-    * evaluations are serialized. */
-  private val outputLock = Object()
+    * evaluations are serialized. A `ReentrantLock` (rather than `synchronized`)
+    * lets a run give up when a previous evaluation was interrupted but its
+    * thread never died: that thread holds the stream forever, and waiting on
+    * it with `synchronized` would wedge the whole process. */
+  private val outputLock = java.util.concurrent.locks.ReentrantLock()
+  private val OutputLockWaitMs = 10000L
+
+  /** The lock is JVM-wide (so is `System.out`): a new session cannot recover
+    * from a stuck evaluation either, only a restart of the process can. */
+  val StuckEvaluationMessage: String =
+    "A previous evaluation is still running (it could not be stopped) and holds the output stream, " +
+      "so nothing can be evaluated until atc is restarted; tell the user."
 
   /** What one evaluation produced, before it is adopted into the session. */
   private case class Evaluated(state: State, output: String, thrown: Option[Throwable])
@@ -118,12 +129,12 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
   /** Load the preamble; errors here are programmer bugs and are thrown. */
   def init(): this.type =
     Sandbox.installHost(host)
-    val (out, thrown) = withOutputCapture { state = driver.run(preambleOverride.getOrElse(preamble))(using state) }
+    val (out, thrown) = withOutputCapture() { state = driver.run(preambleOverride.getOrElse(preamble))(using state) }
     thrown.foreach(throw _)
     if out.toLowerCase.contains("error") then
       throw IllegalStateException(s"Sandbox preamble failed to compile:\n$out")
     if config.safeMode then
-      val (out2, thrown2) = withOutputCapture { state = driver.run(safeModeImport)(using state) }
+      val (out2, thrown2) = withOutputCapture() { state = driver.run(safeModeImport)(using state) }
       thrown2.foreach(throw _)
       if out2.toLowerCase.contains("error") then
         throw IllegalStateException(s"Safe mode import failed:\n$out2")
@@ -160,9 +171,10 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
       case None => adopt(res, evaluate(res))
       case Some(limit) => dispatchWithTimeout(res, limit)
 
-  private def evaluate(res: ParseResult): Evaluated =
+  /** `started` is released once the output stream is ours (or we gave up waiting for it). */
+  private def evaluate(res: ParseResult, started: CountDownLatch = CountDownLatch(0)): Evaluated =
     var newState = state
-    val (output, thrown) = withOutputCapture {
+    val (output, thrown) = withOutputCapture(onEnter = started.countDown()) {
       driver.setStopFlag(false) // a previous evaluation may have been stopped
       newState = driver.runParseResult(res)(using state)
     }
@@ -198,14 +210,19 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
 
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val resultRef = java.util.concurrent.atomic.AtomicReference[Evaluated]()
-    val worker = Thread(() => resultRef.set(evaluate(res)))
+    val started = CountDownLatch(1)
+    val worker = Thread(() => resultRef.set(evaluate(res, started)))
     worker.setName("atc-repl-eval")
     worker.setDaemon(true)
     evalThread = worker
-    val start = System.nanoTime()
     worker.start()
     try
-      // Wait, but do not count time the host spends waiting for the user.
+      // The timeout is execution time: it starts once the worker owns the output
+      // stream (a stuck previous evaluation may hold it for up to OutputLockWaitMs,
+      // after which the worker gives up and reports that instead), and does not
+      // count time the host spends waiting for the user.
+      while worker.isAlive && !started.await(50, TimeUnit.MILLISECONDS) do ()
+      val start = System.nanoTime()
       var remaining = limitMs
       while worker.isAlive && remaining > 0 do
         worker.join(math.min(remaining, 200L))
@@ -214,32 +231,42 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
         interrupt()
         worker.join(2000)
         skipPoisonedWrapper()
-        ExecutionResult(false, "", Some(s"Execution timed out after ${limitMs}ms (session state unchanged)"))
+        val note = if worker.isAlive then "; the evaluation could not be stopped and is still running" else ""
+        ExecutionResult(false, "", Some(s"Execution timed out after ${limitMs}ms (session state unchanged)$note"))
       else
         resultRef.get() match
           case null => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
           case evaluated => adopt(res, evaluated)
     finally evalThread = null
 
-  private def withOutputCapture(run: => Unit): (String, Option[Throwable]) =
-    outputLock.synchronized:
-      outputCapture.resetCapture()
-      val oldOut = System.out
-      val oldErr = System.err
-      System.setOut(printStream)
-      System.setErr(printStream)
-      val thrown =
-        try { run; None }
-        catch case scala.util.control.NonFatal(e) => Option(e)
-        finally
-          System.setOut(oldOut)
-          System.setErr(oldErr)
-          printStream.flush()
-      // Only trailing whitespace is dropped: the UI removes the agent's own
-      // prints (already shown live) from this text and needs an exact match.
-      val captured = outputCapture.capturedString.stripTrailing()
-      val output = if outputCapture.truncated then captured + TruncationMarker else captured
-      (output, thrown)
+  /** Run `run` with System.out/err captured; `onEnter` fires as soon as the
+    * wait for the (process-wide) output stream is over, either way. */
+  private def withOutputCapture(onEnter: => Unit = ())(run: => Unit): (String, Option[Throwable]) =
+    val acquired =
+      try outputLock.tryLock(OutputLockWaitMs, TimeUnit.MILLISECONDS)
+      catch case _: InterruptedException => false
+    onEnter
+    if !acquired then ("", Some(RuntimeException(StuckEvaluationMessage)))
+    else
+      try
+        outputCapture.resetCapture()
+        val oldOut = System.out
+        val oldErr = System.err
+        System.setOut(printStream)
+        System.setErr(printStream)
+        val thrown =
+          try { run; None }
+          catch case scala.util.control.NonFatal(e) => Option(e)
+          finally
+            System.setOut(oldOut)
+            System.setErr(oldErr)
+            printStream.flush()
+        // Only trailing whitespace is dropped: the UI removes the agent's own
+        // prints (already shown live) from this text and needs an exact match.
+        val captured = outputCapture.capturedString.stripTrailing()
+        val output = if outputCapture.truncated then captured + TruncationMarker else captured
+        (output, thrown)
+      finally outputLock.unlock()
 
   private def formatDiagnostics(diags: List[Diagnostic]): String =
     diags.map: d =>

@@ -129,7 +129,10 @@ final class App(args: Main.Args):
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
-    try agent.turn(session.get, input, () => tui.isInterrupted)
+    try
+      session match
+        case Some(s) => agent.turn(s, input, () => tui.isInterrupted)
+        case None => tui.error("the sandbox is not running (a restart failed); try /reset")
     catch
       case e: Exception =>
         tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
@@ -186,8 +189,13 @@ final class App(args: Main.Args):
       case "/reset" =>
         session.foreach(_.close())
         session = None
-        session = Some(newSession())
-        tui.success("sandbox restarted")
+        try
+          session = Some(newSession())
+          tui.success("sandbox restarted")
+        catch
+          case e: Exception =>
+            tui.error(s"could not restart the sandbox: ${e.getMessage}")
+            Debug.trace(e)
       case "/clear" =>
         agent.clear()
         tui.success("conversation cleared")

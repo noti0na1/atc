@@ -4,7 +4,7 @@ import atc.lib.*
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success, Try, Using}
 
 /** Concrete capabilities. Each carries the id of its permission scope; the
   * policy resolves the effective permissions of that scope (its own grants
@@ -38,10 +38,22 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry(fs):
     host.requireNotClassified(pm, p, "read", "readClassified()")
     Files.readAllBytes(p).nn
   def readLines(): List[String] = read().linesIterator.toList
+  /** Stream the file line by line (never loaded whole); `op` receives each
+    * line with its 1-based number. Decoding is lenient like `read()` (invalid
+    * UTF-8 becomes U+FFFD, so binary or Latin-1 files do not abort a search);
+    * the file is closed when the iteration ends. */
   def forEachLine(op: (String, Int) => Unit): Unit =
-    var i = 0
-    read().linesIterator.foreach { line =>
-      i += 1; op(line, i)
+    val pm = host.requireRead(scope, p, "forEachLine")
+    host.requireNotClassified(pm, p, "forEachLine", "readClassified()")
+    // Not `Files.lines`/`newBufferedReader`: their decoder throws on malformed input.
+    val reader = java.io.BufferedReader(java.io.InputStreamReader(Files.newInputStream(p).nn, StandardCharsets.UTF_8))
+    Using.resource(reader) { r =>
+      var i = 0
+      var line = r.readLine()
+      while line != null do
+        i += 1
+        op(line, i)
+        line = r.readLine()
     }
   def write(content: String): Unit = host.writeFile(scope, p, content, append = false)
   def append(content: String): Unit = host.writeFile(scope, p, content, append = true)

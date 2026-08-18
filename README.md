@@ -174,7 +174,10 @@ Symlinks are judged by their target.
 
 `commands` are patterns over the full command line: `*` is a wildcard and a pattern
 without `*` matches by word prefix (`"git status"` allows `git status --short`; `"ls"`
-allows `ls -la` but not `lsblk`). `hosts` are glob patterns on host names.
+allows `ls -la` but not `lsblk`). A command also needs read access to the directory it
+runs in (the working directory by default), which must not be classified — checked
+through the `FileSystem` capability, so a `requestFiles` block covers it. `hosts` are
+glob patterns on host names; only `http`/`https` URLs are accepted.
 
 ## How the agent asks for more
 
