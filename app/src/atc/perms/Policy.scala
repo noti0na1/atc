@@ -83,12 +83,19 @@ final class Scope(val id: ScopeId, val parent: Option[Scope]):
   *    stricter by a more specific rule.
   *  - grants (from `request*`, once or for the session) can only *widen*
   *    access, never remove classification, and are ignored for locked paths.
+  *
+  * `denyCommands` / `denyHosts` are the other direction: patterns that are
+  * refused outright. They are checked at the point of use, so no grant, open
+  * scope or "allow for the session" can reach past them, and a `request*` that
+  * would permit a denied command or host fails at once instead of prompting.
   */
 final class Policy(
   val rules: List[FileRule],
   val baseCommands: List[String],
   val baseHosts: List[String],
   prompter: PermissionPrompter,
+  val denyCommands: List[String] = Nil,
+  val denyHosts: List[String] = Nil,
 ):
   val base: Scope = Scope(ScopeId.Base, None)
   private val scopes = TrieMap[ScopeId, Scope](ScopeId.Base -> base)
@@ -137,13 +144,19 @@ final class Policy(
 
   private def commandPatterns(s: Scope): List[String] = baseCommands ++ s.chain.flatMap(_.commands)
 
+  /** The `denyCommands` pattern refusing `commandLine`, if any. */
+  def commandDenied(commandLine: String): Option[String] =
+    denyCommands.find(GlobMatcher.matchesCommand(commandLine, _))
+
   def commandAllowed(scopeId: ScopeId, commandLine: String): Boolean =
-    mode.allowsExec && commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
+    mode.allowsExec && commandDenied(commandLine).isEmpty &&
+      commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
 
   def requestExec(parentId: ScopeId, commands: List[String], reason: String): ScopeId =
     val parent = scope(parentId)
     if !mode.allowsExec then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; commands cannot be run")
+    refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(commandPatterns(parent).toSet)
     if missing.nonEmpty then
       decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") { base.commands ++= missing }
@@ -153,17 +166,43 @@ final class Policy(
 
   private def hostPatterns(s: Scope): List[String] = baseHosts ++ s.chain.flatMap(_.hosts)
 
+  /** The `denyHosts` pattern refusing `host`, if any. */
+  def hostDenied(host: String): Option[String] = denyHosts.find(GlobMatcher.matchesHost(host, _))
+
   def hostAllowed(scopeId: ScopeId, host: String): Boolean =
-    mode.allowsNetwork && hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
+    mode.allowsNetwork && hostDenied(host).isEmpty &&
+      hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
 
   def requestNet(parentId: ScopeId, hosts: List[String], reason: String): ScopeId =
     val parent = scope(parentId)
     if !mode.allowsNetwork then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; the network is not reachable")
+    refuseDenied("host", hosts, denyHosts, GlobMatcher.matchesHost)
     val missing = hosts.filterNot(hostPatterns(parent).toSet)
     if missing.nonEmpty then
       decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") { base.hosts ++= missing }
     openScope(parent, hosts = hosts)
+
+  /** Refuse a `request*` whose patterns collide with the deny list, before the
+    * user is asked: a request is a widening, and the deny list is exactly what
+    * may not be widened into. Two patterns collide when either one, read as a
+    * concrete command line / host name, matches the other — so `denyCommands:
+    * ["rm *"]` refuses both `requestExec(Set("rm -rf build"))` (the deny
+    * pattern covers it) and `requestExec(Set("rm*"))` (granting it would
+    * cover the deny pattern). */
+  private def refuseDenied(
+    what: String,
+    requested: List[String],
+    denied: List[String],
+    matches: (String, String) => Boolean
+  ): Unit =
+    val hits = for r <- requested; d <- denied if matches(r, d) || matches(d, r) yield s"'$r' (deny pattern '$d')"
+    if hits.nonEmpty then
+      throw SecurityException(
+        s"Access denied by the configuration: the $what ${if hits.size == 1 then "pattern" else "patterns"} " +
+          s"${hits.distinct.mkString(", ")} may not be granted, so the user is not asked. " +
+          "Do not retry: report this to the user instead."
+      )
 
   // ── scopes ────────────────────────────────────────────────────────
 
@@ -207,5 +246,7 @@ final class Policy(
       lines += "Session file grants:"
       lines ++= base.fileGrants.reverse.map((p, a) => s"  $p: ${a.label}")
     lines += s"Commands: ${listOf(baseCommands)}${session(base.commands)}"
+    if denyCommands.nonEmpty then lines += s"  always refused: ${denyCommands.mkString(", ")}"
     lines += s"Hosts:    ${listOf(baseHosts)}${session(base.hosts)}"
+    if denyHosts.nonEmpty then lines += s"  always refused: ${denyHosts.mkString(", ")}"
     lines.result().mkString("\n")

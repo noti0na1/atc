@@ -41,8 +41,21 @@ object Prompts:
          |Do not try to work around this: explain what you would change and let the user switch to local or
          |full mode (`/mode local`, `/mode full`) if they want you to edit files.""".stripMargin
 
-  def system(cwd: Path, policy: Policy, safeModelName: Option[String], extra: Option[String]): String =
+  def system(
+    cwd: Path,
+    policy: Policy,
+    safeModelName: Option[String],
+    respectGitignore: Boolean,
+    extra: Option[String],
+  ): String =
     val os = s"${System.getProperty("os.name")} ${System.getProperty("os.arch")}"
+    // Injected as one extra line of the Environment block, so it must not start
+    // with a margin bar (`stripMargin` runs after the interpolation).
+    val gitignoreNote =
+      if respectGitignore then
+        "\n- listings (`ls`, `walk`, `find`, `grepRecursive`) leave out `.git` and everything `.gitignore`" +
+          " ignores; an ignored file can still be read by its path"
+      else ""
     s"""You are a helpful coding agent with tracked capabilities (ATC), working in the user's terminal.
        |You act only by writing Scala 3 code and running it with the `$ToolName` tool in a sandboxed REPL.
        |The sandbox is capability-safe: every effect requires a capability, capture checking guarantees
@@ -52,7 +65,7 @@ object Prompts:
        |- working directory: $cwd
        |- OS: $os
        |- REPL: Scala 3 with `-language:experimental.captureChecking` and `import language.experimental.safe`
-       |- safe model for classified data: ${safeModelName.getOrElse("(none configured)")}
+       |- safe model for classified data: ${safeModelName.getOrElse("(none configured)")}$gitignoreNote
        |
        |How to work
        |1. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
@@ -66,7 +79,10 @@ object Prompts:
        |4. Report results by `println`ing them; the value of the last expression is echoed too.
        |5. If an operation throws `SecurityException: Access denied ...`, the message tells you which
        |   `request*` block to use. Wrap only the operations that need it, give a short `reason`, and
-       |   never retry a denied request in a loop, because the user said no.
+       |   never retry a denied request in a loop, because the user said no. When the message says the
+       |   *configuration* refuses it (a `denyCommands` / `denyHosts` pattern), it is final: no
+       |   `request*` can widen it, so do not look for another route to the same effect — say what you
+       |   would have run and stop.
        |6. A *compile* error about capabilities is deterministic: retrying the same snippet, or the
        |   same snippet with a different spelling, will fail again. If a write, `exec` or network call
        |   does not compile, the current mode simply does not offer that capability. Say so at once,

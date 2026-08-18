@@ -57,7 +57,8 @@ final class Agent(
   private val tools = List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
-  def systemPrompt: String = Prompts.system(cwd, policy, safeModel.map(_.alias), extraInstructions)
+  def systemPrompt: String =
+    Prompts.system(cwd, policy, safeModel.map(_.alias), config.respectGitignore, extraInstructions)
 
   /** A note prepended to the next user message, e.g. that the sandbox was
     * restarted. It is carried this way rather than appended to the history on

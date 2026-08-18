@@ -21,8 +21,11 @@
     { "path": "~/notes", "access": "read", "locked": true }
   ],
   "commands": ["git status", "git diff*", "git log*"],
+  "denyCommands": ["git push*", "rm -rf *", "sudo *"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
+  "denyHosts": ["*.internal"],
   "safeMode": true,
+  "respectGitignore": true,
   "mode": "full",
   "executionTimeoutMs": 180000,
   "maxToolCalls": 60

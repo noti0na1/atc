@@ -165,6 +165,31 @@ class HostSuite extends munit.FunSuite:
     assertEquals(requestExec(Set("ls*"), "list") { exec("ls", List(root.toString)).exitCode }, 0)
     assertEquals(exec("ls", Nil, Some(root.toString)).exitCode, 0) // session grant persists
 
+  test("deny lists refuse commands and hosts, and cannot be granted"):
+    val denyPolicy = Policy(
+      List(rule(".", Some(Access.Write))),
+      List("echo*"), // allowed by the allow list ...
+      List("*"),
+      _ => Decision.AllowSession, // ... and the user would say yes to anything
+      List("echo secret*"), // ... but these are refused outright
+      List("*.internal")
+    )
+    val denyHost = Host(denyPolicy, root, output, llm, hostUi)
+    given fs: FileSystem = denyHost.fileSystem
+    given ex: Exec = denyHost.processes
+    given net: Network = denyHost.network
+    assertEquals(denyHost.exec("echo", List("ok")).stdout.trim, "ok")
+    val e = intercept[SecurityException](denyHost.exec("echo", List("secret", "key")))
+    assert(e.getMessage.nn.contains("denyCommands pattern 'echo secret*'"), e.getMessage)
+    assert(!e.getMessage.nn.contains("requestExec"), e.getMessage) // asking cannot help
+    val e2 = intercept[SecurityException](denyHost.requestExec(Set("echo secret*"), "try") { 1 })
+    assert(e2.getMessage.nn.contains("may not be granted"), e2.getMessage)
+    val e3 = intercept[SecurityException](denyHost.httpGet("http://db.internal/x"))
+    assert(e3.getMessage.nn.contains("denyHosts pattern '*.internal'"), e3.getMessage)
+    val e4 = intercept[SecurityException](denyHost.requestNetwork(Set("db.internal"), "try") { 1 })
+    assert(e4.getMessage.nn.contains("may not be granted"), e4.getMessage)
+    assertEquals(denyPolicy.openScopeCount, 0)
+
   test("network host policy"):
     val e = intercept[SecurityException](httpGet("http://nope.invalid/x"))
     assert(e.getMessage.nn.contains("requestNetwork"))

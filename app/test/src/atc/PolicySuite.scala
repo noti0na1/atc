@@ -127,6 +127,63 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(prompter.asked.size, 2)
     p.closeScope(e2)
 
+  test("deny patterns refuse commands and hosts whatever the allow list says"):
+    val prompter = ScriptedPrompter(Nil)
+    val p = Policy(
+      rules((".", Some(Access.Read), None, false)),
+      List("git *", "rm *"),
+      List("*.example.com", "internal.corp"),
+      prompter,
+      List("git push*", "rm -rf *"),
+      List("internal.corp")
+    )
+    // allowed by `commands`, refused by `denyCommands`
+    assert(!p.commandAllowed(ScopeId.Base, "git push origin main"))
+    assertEquals(p.commandDenied("git push origin main"), Some("git push*"))
+    assert(p.commandAllowed(ScopeId.Base, "git status")) // the allow list still works
+    assert(!p.commandAllowed(ScopeId.Base, "rm -rf build"))
+    assert(p.commandAllowed(ScopeId.Base, "rm build/x")) // narrower than the deny pattern
+    assert(!p.hostAllowed(ScopeId.Base, "internal.corp"))
+    assertEquals(p.hostDenied("internal.corp"), Some("internal.corp"))
+    assert(p.hostAllowed(ScopeId.Base, "docs.example.com"))
+    assertEquals(p.commandDenied("git status"), None)
+    assertEquals(p.hostDenied("docs.example.com"), None)
+    assertEquals(prompter.asked, Nil) // nothing was ever put to the user
+
+  test("a request that would permit a denied command or host fails without asking"):
+    // The prompter would allow everything: only the deny list stops these.
+    val prompter = ScriptedPrompter(List.fill(4)(Decision.AllowSession))
+    val p = Policy(
+      rules((".", Some(Access.Read), None, false)),
+      Nil,
+      Nil,
+      prompter,
+      List("rm -rf *"),
+      List("*.internal")
+    )
+    // the deny pattern covers the requested one ...
+    val e1 = intercept[SecurityException](p.requestExec(ScopeId.Base, List("rm -rf build"), "clean"))
+    assert(e1.getMessage.nn.contains("rm -rf *"), e1.getMessage)
+    // ... and the requested one would cover the deny pattern
+    intercept[SecurityException](p.requestExec(ScopeId.Base, List("rm *"), "clean"))
+    val e2 = intercept[SecurityException](p.requestNet(ScopeId.Base, List("db.internal"), "read"))
+    assert(e2.getMessage.nn.contains("*.internal"), e2.getMessage)
+    intercept[SecurityException](p.requestNet(ScopeId.Base, List("*"), "read"))
+    assertEquals(prompter.asked, Nil)
+    assertEquals(p.openScopeCount, 0) // no scope was opened for a refused request
+    // an unrelated request still prompts and is granted
+    val s = p.requestExec(ScopeId.Base, List("ls*"), "list")
+    assert(p.commandAllowed(s, "ls -la"))
+    assertEquals(prompter.asked.size, 1)
+    p.closeScope(s)
+
+  test("the summary names the always-refused patterns"):
+    val p = Policy(Nil, List("ls"), Nil, ScriptedPrompter(Nil), List("rm *"), List("*.internal"))
+    val summary = p.summary
+    assert(summary.contains("always refused: rm *"), summary)
+    assert(summary.contains("always refused: *.internal"), summary)
+    assert(!Policy(Nil, Nil, Nil, ScriptedPrompter(Nil)).summary.contains("always refused"))
+
   test("glob matcher semantics"):
     assert(GlobMatcher.matchesCommand("git diff --stat", "git diff*"))
     assert(GlobMatcher.matchesCommand("git difftool", "git diff*"))

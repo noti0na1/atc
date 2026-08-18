@@ -322,8 +322,11 @@ starting point.
     { "path": "~/notes",  "access": "read", "locked": true }
   ],
   "commands": ["git status", "git diff*", "git log*", "ls", "./mill *"],
+  "denyCommands": ["git push*", "rm -rf *", "sudo *"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
+  "denyHosts": ["*.internal"],
   "safeMode": true,
+  "respectGitignore": true,
   "mode": "full",
   "executionTimeoutMs": 180000,
   "maxToolCalls": 60,
@@ -376,6 +379,13 @@ working directory is writable. The built-in classified patterns (`.ssh`, `.gnupg
 `.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
 `*.pem`, `id_rsa`, `id_ed25519`) are always added unless `"defaultClassified": false`.
 
+`"respectGitignore": true` (the default) hides what git ignores: `ls`, `walk`, `find`,
+`grepRecursive` and the `Classified` listings leave out `.git` and every path matched by a
+`.gitignore` (the ones of the enclosing repository and any nested ones, with `!` negations,
+`**`, directory-only `dir/` and anchoring as git reads them). This is *visibility*, not
+permission: an ignored file is still readable and writable by name, so the agent can still
+open `out/log.txt` if you ask it to. Set it to `false` to list everything.
+
 **Classified** means the content is only observable as `Classified[String]`, and a
 classified **directory's structure is classified too**: the directory is visible in its
 parent, but listing it needs `childrenClassified`/`walkClassified` (returning
@@ -390,6 +400,16 @@ allows `ls -la` but not `lsblk`). A command also needs read access to the direct
 in (the working directory by default), which must not be classified — that check goes
 through the `FileSystem` capability, so a `requestFiles` block covers it. `hosts` are glob
 patterns on host names; only `http`/`https` URLs are accepted.
+
+`denyCommands` and `denyHosts` are the denylist to those allowlists, with the same pattern
+syntax. A matching command or host is refused outright: **deny wins over every allow rule**,
+over a session grant, over an open `request*` scope and over `--approve-all`, because it is
+checked where the effect happens. A `requestExec`/`requestNetwork` that would permit
+something denied fails immediately, without a pop-up — so `"denyCommands": ["git push*"]`
+refuses both `exec("git", List("push"))` and `requestExec(Set("git *"))`, and the agent is
+told the refusal is final rather than being pointed at a `request*` block. Deny patterns
+also *extend* across config layers, so a project config can add to the global denylist but
+never drop from it. They are listed in `/perms` and in the agent's system prompt.
 
 ## The terminal
 

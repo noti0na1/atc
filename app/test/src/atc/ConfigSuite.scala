@@ -42,6 +42,8 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(c.maxToolCalls, 60)
     assertEquals(c.maxToolOutputChars, 40000)
     assert(c.files.isEmpty && c.commands.isEmpty && c.hosts.isEmpty)
+    assert(c.denyCommands.isEmpty && c.denyHosts.isEmpty)
+    assertEquals(c.respectGitignore, true)
 
   test("default classified patterns cover the common secret files"):
     val p = Config.DefaultClassifiedPatterns
@@ -141,6 +143,14 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(c.commands, List("ls", "git status")) // list extended
     assertEquals(c.models.keySet, Set("a", "b")) // models merged
     assertEquals(c.models("a").model, "m1")
+
+  test("deny lists extend across layers, so a later layer cannot drop a deny pattern"):
+    val a = ujson.read("""{ "commands": ["ls"], "denyCommands": ["rm *"], "denyHosts": ["*.internal"] }""").obj
+    val b = ujson.read("""{ "commands": ["cat"], "denyCommands": ["curl *"] }""").obj
+    val c = upickle.default.read[Config](Config.mergeJson(a, b))
+    assertEquals(c.commands, List("ls", "cat"))
+    assertEquals(c.denyCommands, List("rm *", "curl *"))
+    assertEquals(c.denyHosts, List("*.internal"))
 
   test("merging the same model key keeps the later definition"):
     val a = ujson.read("""{ "models": { "m": { "provider": "anthropic", "model": "old" } } }""").obj

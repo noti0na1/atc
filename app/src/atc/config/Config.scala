@@ -53,8 +53,18 @@ case class Config(
   commands: List[String] = Nil,
   /** Host patterns the agent may reach without asking. */
   hosts: List[String] = Nil,
+  /** Command-line patterns that are always refused (same syntax as `commands`).
+    * A matching command fails, and a `requestExec` that would permit one is
+    * rejected without asking the user. Deny wins over every allow rule. */
+  denyCommands: List[String] = Nil,
+  /** Host patterns that are always refused, like `denyCommands` for `hosts`. */
+  denyHosts: List[String] = Nil,
   /** Add the built-in classified patterns (`.ssh`, `.env`, ...) — default true. */
   defaultClassified: Boolean = true,
+  /** Hide paths ignored by `.gitignore` (and `.git` itself) from directory
+    * listings and searches — default true. Reading such a path by name still
+    * works; this only keeps build output and dependencies out of the way. */
+  respectGitignore: Boolean = true,
   /** Compile agent code with `import language.experimental.safe`. */
   safeMode: Boolean = true,
   /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
@@ -149,8 +159,9 @@ object Config:
     }
     config
 
-  /** List settings extend rather than replace. */
-  private val ListKeys = Set("files", "commands", "hosts")
+  /** List settings extend rather than replace (a later layer can add a deny
+    * pattern, and cannot drop one an earlier layer set). */
+  private val ListKeys = Set("files", "commands", "hosts", "denyCommands", "denyHosts")
 
   /** `over` on top of `base`: list settings are concatenated, `models` is
     * merged by alias (a redefined alias replaces the whole entry), everything

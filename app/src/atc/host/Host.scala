@@ -1,7 +1,7 @@
 package atc.host
 
 import atc.lib.*
-import atc.perms.{PathPattern, Perm, Policy, ScopeId}
+import atc.perms.{GitIgnore, PathPattern, Perm, Policy, ScopeId}
 
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse as JHttpResponse}
@@ -19,6 +19,8 @@ final class Host(
   output: HostOutput,
   llm: HostLlm,
   ui: HostUi,
+  /** Paths git ignores are left out of listings (config `respectGitignore`). */
+  gitIgnore: GitIgnore = GitIgnore.Disabled,
 ) extends Interface:
 
   @volatile private var todoList: List[Todo] = Nil
@@ -82,11 +84,12 @@ final class Host(
     Option(p.getParent).foreach(Files.createDirectories(_))
     Files.writeString(p, content, StandardCharsets.UTF_8)
 
-  /** Children the scope may see (entries with no read access are omitted). */
+  /** Children the scope may see (entries with no read access, and — when
+    * `respectGitignore` is on — the ones git ignores, are omitted). */
   private[atc] def visibleChildren(scope: ScopeId, dir: Path): List[Path] =
     Using.resource(Files.list(dir).nn) { s =>
       s.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).filter { c =>
-        try policy.effective(scope, PathPattern.canonical(c)).canRead
+        try !gitIgnore.ignores(c) && policy.effective(scope, PathPattern.canonical(c)).canRead
         catch case _: Exception => false
       }
     }
@@ -223,10 +226,18 @@ final class Host(
   ): ProcessResult =
     val argv = command :: args
     val line = argv.mkString(" ")
-    if !policy.commandAllowed(scopeOf(ex), line) then
-      throw SecurityException(
-        s"""Access denied: command '$line' matches no permitted pattern. Use requestExec(Set("$command *"), reason) { ... } to ask the user."""
-      )
+    policy.commandDenied(line) match
+      case Some(pattern) =>
+        // Refused by the configuration: asking the user is not an option, so the
+        // message must not point at `requestExec` (which would fail too).
+        throw SecurityException(
+          s"Access denied: command '$line' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
+        )
+      case None =>
+        if !policy.commandAllowed(scopeOf(ex), line) then
+          throw SecurityException(
+            s"""Access denied: command '$line' matches no permitted pattern. Use requestExec(Set("$command *"), reason) { ... } to ask the user."""
+          )
     // A command observes the directory it runs in (`git status` lists file names),
     // so the working directory must be readable and unclassified for the FileSystem
     // capability in scope. (What the command itself reads is up to the OS: the
@@ -270,10 +281,16 @@ final class Host(
     if scheme != "http" && scheme != "https" then
       throw SecurityException(s"Invalid URL (only http/https are supported): $url")
     val host = Option(uri.getHost).getOrElse(throw SecurityException(s"Invalid URL (no host): $url"))
-    if !policy.hostAllowed(scopeOf(net), host) then
-      throw SecurityException(
-        s"""Access denied: host '$host' matches no permitted pattern. Use requestNetwork(Set("$host"), reason) { ... } to ask the user."""
-      )
+    policy.hostDenied(host) match
+      case Some(pattern) =>
+        throw SecurityException(
+          s"Access denied: host '$host' is refused by the configuration (denyHosts pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
+        )
+      case None =>
+        if !policy.hostAllowed(scopeOf(net), host) then
+          throw SecurityException(
+            s"""Access denied: host '$host' matches no permitted pattern. Use requestNetwork(Set("$host"), reason) { ... } to ask the user."""
+          )
     val b = HttpRequest.newBuilder(uri).nn.timeout(Duration.ofSeconds(60)).nn
     headers.foreach((k, v) => b.header(k, v))
     // Classified header values are unwrapped here and sent, never shown to the agent.

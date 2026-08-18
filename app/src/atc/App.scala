@@ -57,7 +57,8 @@ final class App(args: Main.Args):
   val prompter: PermissionPrompter =
     if args.approveAll then (_ => Decision.AllowSession)
     else request => whileUserDecides(tui.askPermission(request))
-  val policy = Policy(App.fileRules(config, cwd), config.commands, config.hosts, prompter)
+  val policy =
+    Policy(App.fileRules(config, cwd), config.commands, config.hosts, prompter, config.denyCommands, config.denyHosts)
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
 
   // ── host (the sandbox API implementation) and its ports ───────────
@@ -77,7 +78,9 @@ final class App(args: Main.Args):
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       whileUserDecides(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
-  val host = Host(policy, cwd, output, llm, hostUi)
+  /** Listings hide what git ignores unless the config turns that off. */
+  val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
+  val host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
 
   // ── agent ─────────────────────────────────────────────────────────
 
@@ -211,7 +214,7 @@ final class App(args: Main.Args):
       case "/config" =>
         tui.println(s"config files: ${if configFiles.isEmpty then "(none)" else configFiles.mkString(", ")}")
         tui.println(
-          s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls}"
+          s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore}"
         )
         tui.println(s"open permission scopes: ${policy.openScopeCount}")
       case "/interface" | "/api" => tui.println(Prompts.interfaceSource)
