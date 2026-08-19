@@ -246,6 +246,65 @@ terminal, marked `[classified]`; the model sees `Classified(***)`), `writeClassi
 classified path, `chat(Classified)` with the configured classified model, and
 `httpPostClassified` / `secretHeaders` to an allow-listed host.
 
+Here it is at work. `secrets/` is classified in the project config; the agent is asked a
+question about a key it must never see:
+
+```scala
+> secrets/api.env holds our vendor key. Is it a live key? They start with "sk-live".
+
+● run_scala
+  │ val key = readClassified("secrets/api.env")
+  │ val live = key.map(_.trim.stripPrefix("API_KEY=").startsWith("sk-live"))
+  ├ result
+  │ val key: Classified[String]^{} = Classified(***)
+  │ val live: Classified[Boolean]^{} = Classified(***)
+  └ ok 41 ms
+
+● The check ran, but a value computed from a secret is a secret too, so I cannot read
+  the answer either. I will print it for you.
+
+● run_scala
+  │ println(live)
+  ├ output
+  │ [classified] true
+  └ ok 9 ms
+
+● Your terminal shows the answer; on my side that line reads `Classified(***)`.
+```
+
+Now the part the types enforce. Every way of getting the key *out* of the `map` needs a full
+capability, and the function `map` accepts may only capture read-only ones, so each attempt
+is the same compile error, whether the channel is the terminal, a file, a process or the
+network:
+
+```scala
+● run_scala
+  │ key.map(k => println(k))                                   // or: write("leak.txt", k)
+  ├ error                                                      //     exec("curl", List(url + k))
+  │ Reference `rs$line$3` is not included in the allowed capture set {any.rd}
+  │ of an enclosing function literal with expected type String -> Unit.
+  │
+  │ Note that `rs$line$3` is a capability because it contains a field user: atc.lib.UserIO^.
+  └ failed 88 ms
+```
+
+(`rs$line$3` is the preamble line holding the `user` given; the `exec` and `write` attempts
+name the lines holding `ex` and `fs` instead.) And this is where the read-only/full
+distinction shows its teeth: **the same line compiles in one mode and not in another**,
+because what `fs` *is* differs. In full mode `fs` is the full view, so even a harmless read
+inside the `map` captures a full capability and is refused:
+
+```scala
+> key.map(k => k + read("notes.md"))               // full mode: fs is the full view
+Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
+```
+
+while in read-only mode `fs` is `FileSystem^{io.rd}`, a read-only view, and the identical
+line is accepted (`val res0: Classified[String]^{} = Classified(***)`): reading cannot leak
+anything, writing could, and the capability's view is what tells the two apart. The one
+thing the agent can always do with a secret is route it to a channel that is *allowed* to
+receive it: the terminal, a classified file, the classified model, or an allow-listed host.
+
 ### What the types do not know
 
 Types decide what compiles; they know nothing about your configuration. So every host method
