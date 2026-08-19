@@ -14,7 +14,14 @@ remember to write. The ideas come from [TACIT](https://github.com/lampepfl/tacit
 self-contained agent instead of an MCP server, with a redesigned file-permission model and
 interactive permission requests.
 
-## What a turn looks like
+This page is the user's guide: how to install and drive ATC, and the idea that makes it
+safe. Everything under the hood (architecture, the configuration semantics in depth, the
+sandbox, the terminal internals, building, testing, releases) is in
+[doc/development.md](doc/development.md).
+
+## What it looks like
+
+A request, the Scala the agent wrote for it, what the program printed, and the answer:
 
 ```scala
 > which methods in the library can mutate a file?
@@ -37,15 +44,53 @@ interactive permission requests.
 
 `grepRecursive` and `println` are not strings ATC parses: they are methods of
 `atc.lib.Interface`, each demanding a capability value that only the sandbox hands out.
-The snippet was compiled before it ran; had it tried to write a file in read-only mode,
-or reach the network without a `Network`, nothing would have happened. The REPL keeps its
-state between snippets, so a `val` defined in one turn is still there in the next.
+The snippet was compiled before it ran. The REPL keeps its state between snippets, so a
+`val` defined in one turn is still there in the next.
+
+The same agent in **read-only mode**, asked to change a file, cannot even express the
+write: the sandbox hands it a read-only file system, and `write` is a call to an `update`
+method through it. The compiler says no, and the agent says why:
+
+```scala
+read-only > add a "review the tests" item to TODO.md
+
+● run_scala
+  │ append("TODO.md", "- review the tests\n")
+  ├ error
+  │ Found:    (fs : atc.lib.FileSystem^{io.rd})
+  │ Required: atc.lib.FileSystem^{any}
+  │ … it cannot subsume a read-only capture set of the stateful type
+  │   (fs : atc.lib.FileSystem^{io.rd}).
+  └ failed 84 ms
+
+● I am in read-only mode, so I cannot write TODO.md. Switch to local mode (/mode local
+  or Shift-Tab) and I will add the line.
+```
+
+And when the agent needs something the configuration does not grant, it asks for exactly
+that, through a block whose extra permission cannot leak out of it; you decide at a pop-up:
+
+```scala
+> install the dependencies and run the tests
+
+● run_scala
+  │ requestExec(Set("npm *"), "install dependencies and run the test suite") {
+  │   println(exec("npm", List("install")).stdout.takeRight(400))
+  │   println(exec("npm", List("test")).stdout.takeRight(2000))
+  │ }
+
+  ⚠ Permission request: Run commands
+    patterns: npm *
+    reason:   install dependencies and run the test suite
+    Allow?
+    › Yes, this time
+      Yes, for the rest of this session
+      No
+```
 
 ## Setup
 
-You need JDK 17 or newer, and one of two ways to get `atc`:
-
-**Install a release.** The `atc` wrapper script downloads the jars of the latest
+You need JDK 17 or newer. The `atc` wrapper script downloads the jars of the latest
 [GitHub release](https://github.com/noti0na1/atc/releases), checks them against the
 digests GitHub records, and runs them:
 
@@ -57,14 +102,8 @@ chmod +x atc
 
 From then on `atc` runs ATC in the current directory, `atc update` fetches a newer release,
 `atc self update` refreshes the wrapper, `atc self uninstall` removes both, and `atc help`
-lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config
-(`ATC_CACHE_DIR` to move them; `GITHUB_TOKEN` raises the API rate limit; `ATC_JAVA_OPTS`
-adds JVM flags).
-
-**Run from a checkout.** The repository ships its own Mill launcher (`./mill`), so there is
-nothing else to install: `./start.sh` builds the distribution when sources changed and
-runs it (see [Working on ATC itself](#working-on-atc-itself)). The examples below use
-`atc`; with a checkout, `./start.sh` takes the same flags.
+lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
+(To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
 **1. Start it.** Change to the project you want to work on, then run `atc`:
 
@@ -82,10 +121,9 @@ ANTHROPIC_API_KEY=sk-ant-…
 OPENAI_API_KEY=
 ```
 
-Alternatively export the variables in your shell (`start.sh` also sources a `.env` in the
-repository, `cp .env.example .env`, without overriding what is already exported), or use a
-local model that needs no key. Answer no and nothing is written: the built-in starting
-config is used for that run (`atc --init-global` writes it later, on demand).
+Alternatively export the variables in your shell, or use a local model that needs no key.
+Answer no and nothing is written: the built-in starting config is used for that run
+(`atc --init-global` writes it later, on demand).
 
 **2. Start it again.** With the keys in place, run `atc` again. Started in a directory no
 config grants, atc offers to write a starting `.atc/config.json` there and uses it at
@@ -117,30 +155,7 @@ Useful flags: `-m <alias>` pick a model, `--mode readonly|local|full` pick a san
 working directory, `--approve-all` auto-approve permission requests (scripted use only);
 `atc run --help` lists them all (`atc --help` describes the wrapper).
 
-### Working on ATC itself
-
-```bash
-./mill app.test                  # ~200 munit tests, about 20 s
-./mill -i app.run -C ~/project   # run without building a dist (-i keeps the terminal attached)
-./mill __.reformat               # scalafmt; CI runs ./mill __.checkFormat
-./mill dist                      # self-contained out/dist.dest/{atc,atc.jar,atc-lib.jar}
-```
-
-`start.sh` rebuilds `out/dist.dest/` with `./mill dist` when sources changed, sources a
-`.env` (`cp .env.example .env`), and passes its flags through to `atc`; without the
-script: `./mill dist`, then `out/dist.dest/atc`. `ATC_DEBUG=1` prints stack traces and
-terminal diagnostics, `ATC_ASCII=1` draws the UI with ASCII glyphs only, `ATC_SKIP_BUILD=1`
-makes `start.sh` skip its rebuild check. To run a local build through the installed `atc`
-wrapper instead, `atc dev <checkout>` copies the checkout's `out/dist.dest/` jars into
-`~/.atc/jars/` in place of the release (it notes when the sources are newer than that
-build); every `atc` run then says so on stderr, and `atc update` restores the latest release.
-
-**Releases.** Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`)
-makes CI build the distribution and attach `atc.jar` and `atc-lib.jar` to the release;
-that is what the `atc` wrapper downloads (`tests/atc_test.sh` covers the wrapper, and runs
-in CI too).
-
-## Capabilities
+## The idea: capabilities instead of ambient authority
 
 In ordinary Scala, any code can call `Files.readString` or start a process: authority is
 *ambient*, available to anyone who can name the method. The agent-facing library takes that
@@ -155,12 +170,11 @@ def println(x: Any)(using UserIO^): Unit
 ```
 
 A snippet can therefore do exactly what the givens in its scope allow, and it cannot conjure
-a new one: the capability classes have `private[atc]` constructors (agent code is compiled
-into the empty package), the only instances are the ones the REPL preamble binds, and the
-object holding the roots (`atc.lib.Runtime`) is `@rejectSafe`: under safe mode, agent code
-cannot even name it.
+a new one: the capability classes cannot be constructed by agent code, the only instances
+are the ones the REPL preamble binds, and the object holding the roots is off limits under
+safe mode.
 
-### The capabilities, and where they come from
+### Two roots
 
 The preamble binds one root for effects on the machine and one for talking to the human.
 Everything else is derived from the first:
@@ -184,19 +198,16 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 
 `UserIO` is deliberately *not* derived from `IOCap`: reporting to the human is an effect on
 the conversation, not on the machine, so it survives even when the agent may touch nothing
-at all (see [Modes](#modes-read-only-local-full)).
+at all.
 
 ### Read-only and full views
 
-Each of these types has two views, following the nightly's
+Each capability type has two views, following the nightly's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html):
-
-* the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view;
-* `^`, or `^{io}` ("as capable as `io`"), is the **full** view.
-
-The mutating operations are declared `update def` in the library, and an `update` method can
-only be called through a full capture set. That one rule is what turns "read-only" from a
-runtime check into a typing rule:
+the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view; `^`, or `^{io}` ("as
+capable as `io`"), is the **full** view. The mutating operations are declared `update def`
+in the library, and an `update` method can only be called through a full capture set. That
+one rule is what turns "read-only" from a runtime check into a typing rule:
 
 ```scala
 val e: FileEntry^{fs} = fs.access("notes.md")   // as capable as `fs` itself
@@ -211,20 +222,13 @@ Cannot call update method write of e
 since its capture set {e} is read-only.
 ```
 
-It propagates into your own helpers, so a `def` that writes has to say so in its signature:
-
-```scala
-def save(path: String, text: String)(using fs: FileSystem^): Unit = write(path, text)
-```
-
-`x.rd` names the read-only view of `x` (`val ro: IOCap^{io.rd} = io`), and
-`readOnlyFileSystem` hands out a `FileSystem^{io.rd}` when you want a helper to be provably
-unable to write.
+It propagates into your own helpers, so a `def` that writes has to say so in its signature
+(`def save(path: String, text: String)(using fs: FileSystem^): Unit`).
 
 ### Capabilities cannot escape
 
 Because capture checking tracks capabilities in *types*, the compiler knows which values
-hold which capability, and refuses the ones that would outlive their scope. That is what
+hold which capability and refuses the ones that would outlive their scope. That is what
 makes [`request*` blocks](#asking-for-more) safe: the wider file system lent to a block
 cannot be stashed in a `val` that survives it, returned from it, or captured by a closure
 that escapes it.
@@ -233,33 +237,24 @@ that escapes it.
 
 Capabilities constrain *effects*. Confidential content gets a second, independent
 discipline: `readClassified(path)` gives a `Classified[String]`, whose `map`/`flatMap` take
-
-```scala
-def map[B](op: T ->{any.rd} B): Classified[B]
-```
-
-`->{any.rd}` means the function may capture **read-only** capabilities only. Every outward
-channel needs a *full* one (`println`/`ask`/`chat` need `UserIO^`, `write` needs
+a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
+outward channel needs a *full* one (`println`/`ask`/`chat` need `UserIO^`, `write` needs
 `FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
-inside a `map`. The agent can compute on a secret (and even read files, where its `fs` is
-itself read-only) but never see it; `toString` is `Classified(***)`.
-
-The ways out are deliberate and few: `println` (the human sees the value in the terminal,
-marked `[classified]`; the model sees `Classified(***)`), `writeClassified` into a
-classified path, `chat(Classified)` with the configured classified model, and `httpPostClassified`
-/ `secretHeaders` to an allow-listed host.
+inside a `map`. The agent can compute on a secret but never see it; `toString` is
+`Classified(***)`. The ways out are deliberate and few: `println` (you see the value in the
+terminal, marked `[classified]`; the model sees `Classified(***)`), `writeClassified` into a
+classified path, `chat(Classified)` with the configured classified model, and
+`httpPostClassified` / `secretHeaders` to an allow-listed host.
 
 ### What the types do not know
 
 Types decide what compiles; they know nothing about your configuration. So every host method
-*also* checks the permission [`Policy`](#file-permissions) for the path, command or host in
-question, and every capability value carries the id of the permission scope it was issued
-for: a capability from a `request*` block is refused once that block has closed. Two more
-layers sit underneath: a regex `CodeValidator` rejects the obvious escape hatches
-(`java.io`, reflection, `caps.unsafe`, `atc.host`, catching fatal throwables) before
-compilation, and the REPL's class loader exposes only the JDK, `scala.*` and `atc.lib.*`, so
-the application itself (host, policy, LLM clients, the compiler) is invisible to agent
-code.
+*also* checks the permission policy for the path, command or host in question, and a
+capability from a `request*` block is refused once that block has closed. Underneath sit a
+validator that rejects the obvious escape hatches (`java.io`, reflection, the application's
+own packages) before compilation, and a class loader that shows agent code only the JDK,
+`scala.*` and the agent library. The details are in
+[doc/development.md](doc/development.md#defence-in-depth).
 
 ## Modes: read-only, local, full
 
@@ -272,35 +267,13 @@ agent can express at all, before the permission policy even comes up.
 | **local** | `io: IOCap` (read-only), `fs: FileSystem^`, `ex: Exec^`, `user: UserIO^` | also write files and run commands |
 | **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `net: Network^{io}`, `user: UserIO^` | also reach the network |
 
-Read that table through the two views above. In **read-only** mode `fs` is a read-only view,
-so `write` is a call to an `update` method through a read-only capture set:
-
-```
-> write("notes.md", "hello")
-
-Found:    (fs : atc.lib.FileSystem^{io.rd})
-Required: atc.lib.FileSystem^{any}
-… it cannot subsume a read-only capture set of the stateful type
-  (fs : atc.lib.FileSystem^{io.rd}).
-```
-
-In **local** mode `fs` and `ex` are full, but `io` is only a read-only view, and `Network`
-is derived by `def network(using io: IOCap^): Network^{io}`. There is no full `IOCap` to
-derive one from, and none in scope, so a network call has nothing to resolve:
-
-```
-> def fetch(): String = httpGet("https://example.com")
-
-No given instance of type atc.lib.Network was found for parameter x$2 of method httpGet
-```
-
-This is why `Exec` and `Network` hang off `IOCap` while `UserIO` has its own root: a mode
-can withdraw the machine and leave the conversation intact, so the agent can always say what
-it *would* have done. The system prompt tells it to do exactly that rather than look for a
-way around a mode.
-
-The `Policy` enforces the same three levels again at run time (writes downgraded to read,
-`exec` and network refused), so nothing rests on the type check alone.
+In read-only mode a write is an `update` call through a read-only view (the error shown
+[above](#what-it-looks-like)); in local mode there is no full `IOCap` to derive a `Network`
+from, so a network call simply has no given to resolve. Either way a mode can withdraw the
+machine and leave the conversation intact, so the agent can always say what it *would* have
+done; the system prompt tells it to do exactly that rather than look for a way around a
+mode. The policy enforces the same three levels again at run time, so nothing rests on the
+type check alone.
 
 Switch modes with `/mode` (cycles read-only → local → full), **Shift-Tab** on an empty
 prompt, `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts a
@@ -324,17 +297,13 @@ requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github
 ```
 
 You get a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*) and the
-block runs with the extra permission. `locked` rules cannot be widened at all. The granted
-capability cannot leave the block (capture checking), and the host closes the permission
-scope when the block exits, so its scope id can never be used again.
-
-`requestFiles` works in every mode: the file system it lends the block is exactly as capable
-as the one you already hold (full in local and full mode, read-only in read-only mode), so
-the same call site compiles everywhere.
+block runs with the extra permission. `locked` rules cannot be widened at all, and a
+`denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
+leave the block (capture checking), and the host closes the permission scope when the block
+exits. `requestFiles` works in every mode: the file system it lends the block is exactly as
+capable as the one you already hold, so the same call site compiles everywhere.
 
 ## Configuration
-
-### Layers
 
 Config files are JSON, and there are three layers:
 
@@ -345,95 +314,29 @@ Config files are JSON, and there are three layers:
 | 3 | explicit | `-c <file>` | grant anything |
 
 **`~/.atc/config.json` is the base, and there is nothing behind it.** No policy is compiled
-into the program: what no config grants is not permitted. Nothing is written without asking
-either: when the file is missing, an interactive run offers to write
-[the starting config](app/resources/atc/config-template.json) (and the keys file beside it)
-and then stops so you can fill in the keys; decline, or run with `-p`, and the same
-starting config is used in memory for that run, as a layer `/config` shows as `(bundled)`.
-`--init-global` writes it on demand. Once written it is never touched again. The starting
-config protects without granting: it lists the providers, classifies the usual credential
-paths, puts `.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no
-file, no command and no host. Edit it to grant things machine-wide.
+into the program: what no config grants is not permitted. The
+[starting config](app/resources/atc/config-template.json) written on the first run protects
+without granting: it lists the providers, classifies the usual credential paths, puts `.atc`
+itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no file, no command and no
+host. Edit it to grant things machine-wide.
 
-**A directory is workable because a config says so.** The working directory is not special:
-`atc -C /tmp/scratch` with no config covering it can read and write nothing. An interactive
-run says so at startup and offers to write a
-[project config](app/resources/atc/project-template.json) there (`atc --init` writes it
-without asking); decline and the agent asks for each file. That config opens the project:
+**A directory is workable because a config says so.** The
+[project config](app/resources/atc/project-template.json) that `atc --init` writes (or the
+first run in a directory offers) opens the project: its own tree (with `./.git` read-only
+and `./secrets` classified), the read-only git commands, and a set of documentation hosts.
+The project layer is found by walking up from the working directory, the way git finds
+`.git`, and its relative patterns are read against the folder holding `.atc`.
 
-* it grants the project's own tree, with `./.git` read-only so the agent can read history
-  but not rewrite it by hand (git *commands* are unaffected; they are governed by
-  `commands`, not by file rules), and classifies `./secrets`;
-* it pre-approves the read-only git commands (`git status`, `git log`, `git diff`, …) and
-  refuses `git push*` and `git reset --hard*`;
-* it opens the network to language documentation and the usual paper hosts (MDN,
-  `docs.python.org`, `arxiv.org`, …): official docs and publishers, not package registries
-  or code-hosting sites, since a permitted host is also somewhere `httpPost` can send data.
-  Redirects are not followed, so a host the agent is sent on to has to be listed itself.
-
-Everything else is left to the global config. Alternatively, grant the path from
-`~/.atc/config.json` and skip the project config altogether.
-
-The project layer is found by **walking up** from the working directory, the way git finds
-`.git`: running atc in `repo/src/main` picks up `repo/.atc/config.json`. That config governs
-the folder its `.atc` sits in, and its relative patterns are read against that folder, so
-`"./build"` in `repo/.atc/config.json` always means `repo/build`, wherever atc was started.
-Should the search reach your home directory, `~/.atc/config.json` stays the granting layer
-rather than becoming a project one.
-
-Note the asymmetry: a relative pattern in the *global* config still means "relative to the
-working directory", since that config is not tied to any project. So `{ "path": ".",
-"access": "write" }` in `~/.atc/config.json` opens whatever directory atc is started in
-(and only that: started in `repo/src/main` it leaves the rest of `repo` alone), while the
-same rule in a project config always opens the whole project. Start atc at the project root
-if you want the agent to reach all of it.
-
-**Settings that are not permissions** (`model`, `classifiedModel`, `providers`,
-`instructions`, `predictInput`) merge in layer order, the later layer winning. Providers merge per provider
-and then per model alias, so a project config can add a model to a provider the global
-config defined without repeating its `api`, `url` or `key`.
-
-**Permissions do not merge that way.** A project's `.atc/config.json` ships inside the
-repository you are working in. It may open *that repository* (you chose to work there) but
-nothing beyond it, and never past a limit the machine's owner set. The global and `-c`
-layers grant anywhere; the project layer grants only what belongs to its project, and
-otherwise only takes away:
-
-* **`files`**: a path's access is what some rule *grants* it, clamped by the **minimum**
-  over every rule matching the path *or an ancestor of it*. A rule grants wherever it
-  matches, except a project rule outside its own project, which only clamps. So: nothing
-  is reachable until a rule grants it; a rule on a directory covers its whole subtree and a
-  deeper rule can only narrow that; a project config can open its own tree
-  (`{ "path": ".", "access": "write" }`) but `{ "path": "~/.ssh", "access": "read" }` in one
-  grants nothing, and neither does raising a path the global config restricted.
-  `classified` and `locked` only ever restrict, so they apply from any layer and no layer
-  can take them off again.
-* **`commands` / `hosts`**: the union of every layer's list. A project config may
-  pre-approve the commands and hosts its work needs, the way it opens its own files; there
-  is no "inside the project" for a command or a host, so this is the one place a project
-  config reaches beyond its tree. The deny lists are the backstop, and a repository you do
-  not trust deserves a look at its `.atc/config.json` before you run atc in it.
-* **`denyCommands` / `denyHosts`**: refusals, so every layer's patterns apply. Any layer can
-  add one and none can drop one, so `"denyCommands": ["sudo *"]` in `~/.atc/config.json`
-  holds against a project that lists `sudo apt` under `commands`.
-* **`mode`, `safeMode`, `respectGitignore`, `maxToolCalls`, `maxToolOutputChars`,
-  `executionTimeoutMs`**: the project layer moves each towards the stricter value (a lower
-  mode or limit, a flag switched on) or leaves it alone. A setting it does not mention is
-  not narrowed, which is why leaving a key out and setting it to its default are different
-  things. `safeMode` in particular is a **latch**: it is on unless a granting layer says
-  `"safeMode": false`, and a project config can switch it on but never back off.
-
-Two consequences worth knowing. The narrowing is **unconditional**: `-c` outranks the
-project config for the model it picks, but cannot undo a cap the project put on its files.
-And what the *user* grants at a permission prompt is **not** narrowed: the human is the
-authority, so the agent can still ask for something no config pre-authorised (unless a rule
-also says `locked`). Since every narrowing is a minimum, an "or" or a union, the order in
-which it is applied does not matter; only the granting layers care about theirs.
-
-`.gitignore` comes last and is not a permission at all: the policy decides access first,
-then `respectGitignore` hides ignored paths from listings (see
-[file permissions](#file-permissions)). It can only hide, and nested `.gitignore` files
-hide more the deeper you go, which mirrors the layering.
+A project's config ships inside the repository you are working in, so it may open *that
+repository* but nothing beyond it, and never past a limit the machine's owner set: its
+file rules grant only inside its own folder and otherwise only narrow; `commands` and
+`hosts` are the union of every layer (the one place a project reaches beyond its tree,
+with the deny lists as the backstop); `denyCommands`/`denyHosts` accumulate and nothing can
+drop one; the scalar limits (`mode`, `safeMode`, `maxToolCalls`, `executionTimeoutMs`, …)
+only move towards the stricter value. Non-permission settings (`model`, `providers`,
+`instructions`, …) merge in layer order, later wins. What *you* grant at a pop-up is not
+narrowed by any layer: the human is the authority. The exact rules are in
+[doc/development.md](doc/development.md#configuration-semantics).
 
 ```json
 {
@@ -483,198 +386,97 @@ hide more the deeper you go, which mirrors the layering.
 A **provider** is one endpoint: an `api` (the wire protocol), an optional `url` and key, and
 the `models` reachable through it. A **model** is an alias under that provider, whose `name`
 is the id the provider knows it by (`name` defaults to the alias, so `"models": { "gpt-5":
-{} }` is enough) plus the settings that apply to that model alone: `webSearch`, `reasoning`,
-`thinking`, `reasoningSummary`, `maxTokens`, `contextWindow`, `temperature`, `webSearchVersion`.
-
-`contextWindow` is the model's limit in tokens, as a number or with a suffix (`200000`,
-`"256k"`, `"1m"`, `"1.5m"`; `k` = 1000, `m` = 1000000). When the conversation would no longer fit,
-the oldest exchanges are dropped from the history before the next request (a cut always
-starts at a user message, so no tool result loses its call; the current request is always
-kept), the model gets a `[context notice]` saying how much is gone, and the terminal warns
-you; what was shown stays in your scrollback. Sizes are estimated from characters and
-calibrated against the token counts the provider reports, so leave the limit at the model's
-real window rather than padding it. Unset means never cut. (Compaction, summarising the
-dropped part instead of dropping it, is on the list.)
-
-A provider may list no models at all: an endpoint written down ready to use, which you or a
-later layer fills in. A model's `name` may contain a slash (`"name":
-"anthropic/claude-sonnet-4.5"` on OpenRouter); only the *alias* may not, since that is what
-`provider/alias` splits on.
-
+{} }` is enough) plus its own settings: `webSearch`, `reasoning`, `thinking`,
+`reasoningSummary`, `maxTokens`, `contextWindow`, `temperature`, `webSearchVersion`.
 A model is named by its **alias** (`"model": "claude"`, `/model sonnet`), or by
-**`provider/alias`** when two providers use the same alias; then the bare alias is refused
-with both candidates named. `/models` lists every model with the name that identifies it.
-
-One vendor reachable through two protocols is two providers (an `openai` entry with
-`"api": "openai-responses"` and an `openai-chat` entry with `"api": "openai"`), since the
-protocol belongs to the endpoint.
+**`provider/alias`** when two providers use the same alias; `/models` lists them.
 
 `api` is one of
 
-* `anthropic`: Messages API (official Java SDK). `webSearch: true` adds the server-side
-  `web_search` tool (`web_search_20260209`; set `"webSearchVersion": "20250305"` for older
-  models). Adaptive thinking is on unless `"thinking": false`; `reasoning` maps to
-  `output_config.effort` (`low|medium|high|xhigh|max`).
+* `anthropic`: Messages API. `webSearch: true` adds the server-side web search tool;
+  adaptive thinking is on unless `"thinking": false`; `reasoning` is the effort
+  (`low|medium|high|xhigh|max`).
 * `openai-responses`: Responses API; also works with other vendors that implement it (e.g.
-  DeepSeek: `"baseUrl": "https://api.deepseek.com"`). `webSearch: true` adds the built-in
-  `web_search` tool. `reasoning` maps to `reasoning.effort`; `"reasoningSummary": "auto"`
-  asks OpenAI to stream reasoning summaries (shown as thinking; DeepSeek streams its
-  reasoning without it).
-* `openai`: Chat Completions; also the adapter for any OpenAI-compatible server (Ollama,
-  vLLM, LM Studio, OpenRouter …) via `url`. `webSearch: true` sets `web_search_options`
-  (only search-enabled models accept it).
+  DeepSeek via `url`). `webSearch: true` adds the built-in web search; `reasoning` is the
+  effort; `"reasoningSummary": "auto"` streams reasoning summaries.
+* `openai`: Chat Completions; the adapter for any OpenAI-compatible server (Ollama, vLLM,
+  LM Studio, OpenRouter, …) via `url`. For both OpenAI-shaped adapters `"thinking":
+  true|false` sends the vendor thinking switch of DeepSeek/GLM/Kimi/MiniMax; leave it unset
+  for OpenAI itself.
+* `echo`: a key-less local model for smoke tests.
 
-  For both OpenAI-shaped adapters, `"thinking": true|false` sends the vendor thinking
-  switch `"thinking": {"type": "enabled"|"disabled"}` (DeepSeek, GLM, Kimi, MiniMax); leave
-  it unset for OpenAI itself, which rejects the parameter. Calls that should not think
-  (the next-input prediction) send `disabled` when the switch is configured, otherwise the
-  lowest `reasoning_effort` the model family accepts (`none`, `minimal` or `low`; nothing
-  for models not known to reason).
-* `echo`: the key-less local model used for smoke tests.
+`contextWindow` is the model's limit in tokens (`200000`, `"256k"`, `"1m"`). When the
+conversation would no longer fit, the oldest exchanges are dropped before the next request,
+the model is told, and the terminal warns you; leave it at the model's real window.
 
-**API keys** never sit in a config. A provider names the variable that holds its key:
+**API keys** never sit in a config. A provider names the variable that holds its key
+(`"key": "${DEEPSEEK_API_KEY}"`), and the values live in `.atc/keys.properties`, one
+`NAME=value` per line, looked up in the project's `.atc/keys.properties`, then
+`~/.atc/keys.properties`, then the environment (an empty value falls through to the next
+source). `atc --init` adds a `.atc/.gitignore` for it, and the starting policy makes `.atc`
+unreadable and `locked`, so the agent can read neither the keys nor the config. `/config`
+lists which variables are bound and from where, never their values.
 
-```json
-"deepseek": { "api": "openai-responses", "url": "https://api.deepseek.com",
-              "key": "${DEEPSEEK_API_KEY}", "models": { … } }
-```
+Two roles: **`model`** is the agent and never sees classified data; **`classifiedModel`**
+handles `Classified` values through `chat(Classified[String])`, so point it at something you
+trust with your secrets, typically a local model, or leave it unset. `/model [ref]` and
+`/classifiedmodel [ref]` switch them for the session (without an argument they open a
+pick-list; `off` unsets the classified one); the conversation survives a switch, and a
+project config in the working directory remembers the choice.
 
-The values live in `.atc/keys.properties`, a Java properties file with one `NAME=value` per
-line:
+### File permissions, commands and hosts
 
-```properties
-DEEPSEEK_API_KEY=sk-…
-OPENROUTER_API_KEY=
-```
+Each file rule has a `path` pattern and any of `access` (`none|read|write`), `classified`
+and `locked`. Patterns are gitignore-flavoured: no `/` in the pattern matches a path
+**component** anywhere (`.env`, `*.pem`, `node_modules`); relative with `/` is relative to
+the working directory (to the project folder in a project config), with `*`, `**`, `?`,
+`[…]`; absolute and `~/…` are absolute; `.` is the working directory itself. A rule applies
+to the path it matches **and its whole subtree**; the effective access of a path is the
+**minimum** over all matching rules (no matching rule, no access), it is classified or
+locked if any matching rule says so, and a deeper rule can only make things stricter.
 
-A `${VAR}` (or a `keyEnv` name) is looked up in the project's `.atc/keys.properties`, then
-`~/.atc/keys.properties`, then the process environment. **An empty value is not a binding**:
-the lookup passes over it and carries on, so blanking a line falls back to the next source
-instead of breaking. The file is read by `java.util.Properties`, so `#` and `!` comments,
-`NAME: value`, `\` escapes and line continuations all work as in any `.properties` file.
-
-The starting `~/.atc/keys.properties` is written beside the global config when you accept
-the first-run offer, with an empty line for each variable the starting config names. `atc --init` adds a
-`.atc/.gitignore` holding `keys.properties`, and the starting policy makes `.atc` `none` and
-`locked`, so the agent can read neither the bindings nor the config. `/config` lists which
-variables are bound and from where, never their values.
-
-Two roles. **`model`** is the agent; it never sees classified data. **`classifiedModel`** is
-the model that handles `Classified` values through `chat(Classified[String])`; point it at
-something you trust with your secrets, typically a local model; leave it unset and classified
-data never reaches any model. Both are switched for the session with **`/model [ref]`** and
-**`/classifiedmodel [ref]`**: with a reference they switch directly, without one they open a
-pick-list of every configured model (`/classifiedmodel off` unsets the role). The
-conversation survives a switch, since the history is provider-neutral. When the working directory
-has its own `.atc/config.json` the choice is also written there (`"model"` / `"classifiedModel"`,
-`null` for `off`; the rest of the file is left as it is), so the next run there starts with it;
-a `-c` file that sets the same key still wins.
-
-Layers merge per provider: a project config can add a model to a provider the global config
-defined without repeating its `url` and `key`, and a redefined alias replaces that model
-entry outright.
-
-### File permissions
-
-Each rule has a `path` pattern and any of `access` (`none|read|write`), `classified` (bool),
-`locked` (bool). Patterns are gitignore-flavoured, as in TACIT:
-
-* no `/` in the pattern → matches any path **component** anywhere (`.env`, `*.pem`,
-  `node_modules`); use `./name` for a project-relative directory;
-* relative with `/` → relative to the working directory (to the project's folder in a
-  project config), with `*`, `**`, `?`, `[…]`;
-* absolute or `~/…` → absolute; `.` is the working directory (or project) itself.
-
-A rule applies to the path it matches **and its whole subtree**. The effective access of a
-path is the **minimum** over all matching rules (a path matched by no rule with an access
-level is inaccessible); it is **classified** if any matching rule says so, and **locked** if
-any does. So a sub-folder inherits its parent's permission and can only be made stricter:
-`build/generated: write` under `build: read` still yields `read`. A rule from the project
-layer grants only inside its own project and is a cap everywhere else, as described under
-[layers](#layers).
-
-There is no default compiled into the program: the base rules are whatever
-`~/.atc/config.json` says. The [starting one](app/resources/atc/config-template.json)
-grants no path at all (the [project config](app/resources/atc/project-template.json) that
-`atc --init` writes is what opens a project), classifies the usual credential paths
-(`.ssh`, `.gnupg`, `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.docker`, `.kube`,
-`.aws`, `.azure`, `.gcloud`, `*.pem`, `id_rsa`, `id_ed25519`), and sets **`.atc` to `none`
-and `locked`**: the configuration decides what the agent may do, so the agent can neither
-read nor write it and no prompt can open it. That pattern has no `/`, so it covers `~/.atc`
-and any project's `.atc` alike. Edit the file to change any of this; delete a rule and it is
-gone.
-
-`"respectGitignore": true` (the default) hides what git ignores: `ls`, `walk`, `find`,
-`grepRecursive` and the `Classified` listings leave out `.git` and every path matched by a
-`.gitignore` (the ones of the enclosing repository and any nested ones, with `!` negations,
-`**`, directory-only `dir/` and anchoring as git reads them). This is *visibility*, not
-permission: an ignored file is still readable and writable by name, so the agent can still
-open `out/log.txt` if you ask it to. Set it to `false` to list everything.
-
-**Classified** means the content is only observable as `Classified[String]`, and a
-classified **directory's structure is classified too**: the directory is visible in its
-parent, but listing it needs `childrenClassified`/`walkClassified` (returning
-`Classified[List[String]]`), and `walk`/`grepRecursive`/`find` do not descend into it. A
-plain `write` to a classified path is refused (use `writeClassified`), and `writeClassified`
-to a *non*-classified path is refused too, since that would declassify the content. Symlinks
-are judged by their target.
+**Classified** content is only observable as `Classified[String]`, and a classified
+directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
+`walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
+is refused, and so is `writeClassified` to a non-classified path. **Locked** means no prompt
+can widen the rule. `"respectGitignore": true` (the default) additionally hides what git
+ignores from listings; that is visibility, not permission, so an ignored file is still
+readable by name.
 
 `commands` are patterns over the whole command line: `*` is a wildcard, and a pattern
-without `*` matches by word prefix (`"git status"` allows `git status --short`; `"ls"`
-allows `ls -la` but not `lsblk`, and `"git diff"` allows `git diff HEAD` but not
-`git difftool`). A command also needs read access to the directory it runs in (the working
-directory by default), which must not be classified; that check goes through the
-`FileSystem` capability, so a `requestFiles` block covers it. Beyond that, a pre-approved
-command runs with your privileges and is *not* subject to the file rules (`git diff
---no-index a b` reads any two files, `git log --output=f` writes one), so pre-approve the
+without `*` matches by word prefix (`"git status"` allows `git status --short` but not
+`git statusx`). A command also needs read access to the directory it runs in. A pre-approved
+command runs with your privileges and is *not* subject to the file rules, so pre-approve the
 subcommands you mean rather than `git *`. `hosts` are glob patterns on host names; only
-`http`/`https` URLs are accepted.
-
-`denyCommands` and `denyHosts` are the denylist to those allowlists, with the same pattern
-syntax. A matching command or host is refused outright: **deny wins over every allow rule**,
-over a session grant, over an open `request*` scope and over `--approve-all`, because it is
-checked where the effect happens. A `requestExec`/`requestNetwork` that would permit
-something denied fails immediately, without a pop-up, so `"denyCommands": ["git push*"]`
-refuses both `exec("git", List("push"))` and `requestExec(Set("git *"))`, and the agent is
-told the refusal is final rather than being pointed at a `request*` block. Deny patterns
-also *extend* across config layers, so a project config can add to the global denylist but
-never drop from it. They are listed in `/perms` and in the agent's system prompt.
+`http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
+`denyHosts` are the denylists, same syntax: **deny wins over every allow**, over a session
+grant, over an open `request*` scope and over `--approve-all`.
 
 ## The terminal
 
-`/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`, `/perms`, `/todos`, `/config`,
-`/interface` (print the API the model sees), `/run [code]` (run Scala in the sandbox
-yourself, against the same API, givens and permissions as the agent; the block is shown
-like an agent tool call, and since the REPL is shared the agent is told what you ran and
-what came of it on its next turn), `/new` (start over: fresh REPL, and the
-conversation, TODO list and every "allow for this session" grant are forgotten; mode and
-models stay), `/reset` (fresh REPL, conversation kept), `/clear` (forget the conversation,
-REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
-current turn including the running snippet (also a `/run`), Shift-Tab cycles the mode on an empty prompt,
-Ctrl-O toggles the expanded view, Ctrl-D exits. Tab completes a slash command and its
-argument (`/mo`⇥, `/model an`⇥, `/mode `⇥), by plain string matching.
+Slash commands: `/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`,
+`/perms`, `/todos`, `/config`, `/interface` (print the API the model sees), `/run [code]`
+(run Scala in the sandbox yourself, with the same API, givens and permissions as the agent;
+the agent is told what you ran on its next turn, since the REPL is shared), `/new` (start
+over: fresh REPL, conversation, TODO list and session grants forgotten), `/reset` (fresh
+REPL, conversation kept), `/clear` (forget the conversation, REPL kept), `/cost` (token
+usage and how full the context is), `/quit`. Ctrl-C interrupts the current turn including
+the running snippet, Shift-Tab cycles the mode on an empty prompt, Ctrl-O toggles the
+expanded view, Ctrl-D exits. Tab completes a slash command and its argument.
 
-Multi-line input: Shift+Enter or Alt+Enter inserts a newline (where the terminal reports
-those keys: kitty, Ghostty, WezTerm, foot, an iTerm2 or VS Code set up to send `\`+Enter
-for Shift+Enter, as Claude Code's terminal setup does), as does a `\` typed at the end of
+Multi-line input: Shift+Enter or Alt+Enter inserts a newline where the terminal reports
+those keys (kitty, Ghostty, WezTerm, foot, or an iTerm2/VS Code set up to send `\`+Enter for
+Shift+Enter, as Claude Code's terminal setup does), and so does a `\` typed at the end of
 the line before Enter; a pasted block keeps its newlines; a `/run` continues while a
 bracket, string or comment is still open, indented like a REPL; and a bare `/run` reads a
-whole block. In every case Enter on an empty line submits and Ctrl-C clears. `/cost` counts every
-model call since the start (or the last `/clear`/`/new`): the agent's turns, `chat()` and
-`chat(Classified)` from the sandbox, and the next-input predictions, each shown separately
-when more than one kind occurred. The summary line after each turn (`● worked for 3 s · 2
-tool calls · 1.2k tokens · context 45.2k/200k (23%)`) and `/cost` also show how full the
-model's context is: the estimated size of the next request (system prompt, tool schema and
-conversation, calibrated against the provider's token count for the last one) against the
-model's `contextWindow` when the config states it (`context ~45.2k` otherwise).
+whole block. In every case Enter on an empty line submits and Ctrl-C clears.
 
-After each turn the agent model is asked to guess your next request, and the guess appears
-as faint ghost text at the prompt: Tab or → accepts it (also once you have typed the start
-of it), typing anything else replaces it. It is one small extra model call per turn;
-`"predictInput": false` in the config turns it off. The classified model is never used for
-this, the guess is made only from the conversation the agent model already saw, it is asked
-for without thinking (Anthropic: thinking disabled; OpenAI: the lowest reasoning effort the
-model takes), and its tokens show up in `/cost`.
+After each turn the agent model is asked to guess your next request, shown as faint ghost
+text at the prompt: Tab or → accepts it, typing anything else replaces it. It is one small
+extra model call per turn (`"predictInput": false` turns it off), never made with the
+classified model, and counted in `/cost`. The summary line after each turn (`● worked for
+3 s · 2 tool calls · 1.2k tokens · context 45.2k/200k (23%)`) also shows how full the
+model's context is.
 
 Every kind of content has its own shape, so a glance tells them apart:
 
@@ -688,7 +490,7 @@ Every kind of content has its own shape, so a glance tells them apart:
   ├ output                              the program's own println output, live
   │ hello
   │ $ ./mill test                       a command (exec) that keeps running: its
-  │ compiling ...                         output as it comes (not in the tool result)
+  │ compiling ...                         output as it comes
   ├ result   (or  ├ error)              what the REPL added: echoed values, diagnostics
   │ val x: Int = 1
   └ ok 34 ms (or └ failed 34 ms)
@@ -697,63 +499,12 @@ Every kind of content has its own shape, so a glance tells them apart:
   ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
 ```
 
-A command the agent runs with `exec` that keeps running for a moment is shown in the output
-section as `$ command` followed by its stdout and stderr as they are produced (what it
-printed before that moment first), so a long build or test run is visible while it runs; a
-quick command shows nothing, since the agent gets and usually prints its result anyway. This is display only: the tool result carries the command's `ProcessResult`, not a
-second copy.
-
-Long things are kept short on purpose: streamed reasoning shows its last few lines under
-`● thinking…` and collapses to `● thought for 4.2 s · 12 lines`; live program output folds
-once it fills a number of terminal rows, leaving a live tail (`⋯ N more lines` + the last
-few); echoed values are cut after a number of characters, and a long result panel is cut in
-the middle with each line trimmed to one row (the limits are the constants in `Tui`'s
-companion and `SandboxConfig.maxEchoChars`). **Ctrl-O** during a turn switches to the expanded view for the rest
-of the session (reasoning in full, nothing folded). Keys typed during a turn are kept as
-type-ahead for the next prompt.
-
-The agent's code is syntax-coloured by the Scala compiler's own highlighter, and its prose
-is rendered as Markdown while it streams: headings, lists, quotes, rules, `**bold**`,
-`` `code` ``, fenced code blocks (coloured when the fence says `scala`, verbatim otherwise)
-and pipe tables, drawn aligned once the table is complete. Without a real terminal (`-p` in
-a pipe) there are no colours, menus, live windows or folding; everything is printed in
-full, and pop-ups fall back to a plain `answer>` line. `ATC_ASCII=1` uses ASCII glyphs.
-
-## Project layout
-
-| Module | What it is |
-|--------|------------|
-| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking, every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current` and the root capabilities) sits in its own file, outside the API the model reads. |
-| `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions, TODO list, LLM calls), and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
-
-Built with [Mill](https://mill-build.org) on the Scala 3
-nightly version.
-
-```
-lib/src/atc/lib/   Interface.scala: the agent-facing API (capabilities, data types, Interface)
-                   Runtime.scala: the sandbox's injection point (@rejectSafe, not part of the API)
-app/src/atc/
-  (root)           Main → App: command line, wiring, the interactive loop and its slash commands
-  agent/           the loop (model ⇄ run_scala), the system prompt and tool spec, next-input prediction
-  config/          the JSON config model: layers, merging, validation, keys, model catalog, templates
-  host/            the Interface implementation: policy checks, file/process/network effects, Classified
-  llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
-  perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
-  sandbox/         the in-process REPL: preamble, validator, class-loader isolation, timeouts, interrupts
-  ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
-app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
-atc                the wrapper: installs, updates and runs the release jars (tests/atc_test.sh)
-start.sh           builds a checkout and runs it
-```
-
-A few behaviours that are easy to miss when reading the code: there is one REPL session per
-conversation (definitions persist across turns until `/reset` or a mode switch); a runtime
-error in agent code does not fail the REPL (it prints the trace), so the session learns
-from the REPL's renderer that the code threw and reports it to the model as an error, with
-host stack frames trimmed and hints appended for common capture-checking stumbles; and the agent loop resumes by
-itself when a provider cuts a response after a server-side tool call (web search, Anthropic
-`pause_turn`), nudging the model at most twice per turn when it ends a turn on "Let me …"
-without acting.
+Long things are kept short on purpose: streamed reasoning shows its last few lines and
+collapses to `● thought for 4.2 s · 12 lines`, live program output folds into a live tail
+once it fills the screen, and long result panels are cut in the middle; **Ctrl-O** switches
+to the expanded view (nothing folded) for the rest of the session. Without a real terminal
+(`-p` in a pipe) there are no colours, menus or folding; everything is printed in full.
+`ATC_ASCII=1` uses ASCII glyphs, `ATC_DEBUG=1` prints stack traces.
 
 ## License
 
