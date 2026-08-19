@@ -363,7 +363,7 @@ same rule in a project config always opens the whole project. Start atc at the p
 if you want the agent to reach all of it.
 
 **Settings that are not permissions** (`model`, `classifiedModel`, `providers`,
-`instructions`) merge in layer order, the later layer winning. Providers merge per provider
+`instructions`, `predictInput`) merge in layer order, the later layer winning. Providers merge per provider
 and then per model alias, so a project config can add a model to a provider the global
 config defined without repeating its `api`, `url` or `key`.
 
@@ -447,6 +447,7 @@ hide more the deeper you go, which mirrors the layering.
   "mode": "full",
   "executionTimeoutMs": 180000,
   "maxToolCalls": 60,
+  "predictInput": true,
   "instructions": "Use 2-space indentation."
 }
 ```
@@ -486,6 +487,13 @@ protocol belongs to the endpoint.
 * `openai`: Chat Completions; also the adapter for any OpenAI-compatible server (Ollama,
   vLLM, LM Studio, OpenRouter …) via `url`. `webSearch: true` sets `web_search_options`
   (only search-enabled models accept it).
+
+  For both OpenAI-shaped adapters, `"thinking": true|false` sends the vendor thinking
+  switch `"thinking": {"type": "enabled"|"disabled"}` (DeepSeek, GLM, Kimi, MiniMax); leave
+  it unset for OpenAI itself, which rejects the parameter. Calls that should not think
+  (the next-input prediction) send `disabled` when the switch is configured, otherwise the
+  lowest `reasoning_effort` the model family accepts (`none`, `minimal` or `low`; nothing
+  for models not known to reason).
 * `echo`: the key-less local model used for smoke tests.
 
 **API keys** never sit in a config. A provider names the variable that holds its key:
@@ -604,7 +612,19 @@ conversation, TODO list and every "allow for this session" grant are forgotten; 
 models stay), `/reset` (fresh REPL, conversation kept), `/clear` (forget the conversation,
 REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
 current turn including the running snippet, Shift-Tab cycles the mode on an empty prompt,
-Ctrl-O toggles the expanded view, Ctrl-D exits.
+Ctrl-O toggles the expanded view, Ctrl-D exits. Tab completes a slash command and its
+argument (`/mo`⇥, `/model an`⇥, `/mode `⇥), by plain string matching. `/cost` counts every
+model call since the start (or the last `/clear`/`/new`): the agent's turns, `chat()` and
+`chat(Classified)` from the sandbox, and the next-input predictions, each shown separately
+when more than one kind occurred.
+
+After each turn the agent model is asked to guess your next request, and the guess appears
+as faint ghost text at the prompt: Tab or → accepts it (also once you have typed the start
+of it), typing anything else replaces it. It is one small extra model call per turn;
+`"predictInput": false` in the config turns it off. The classified model is never used for
+this, the guess is made only from the conversation the agent model already saw, it is asked
+for without thinking (Anthropic: thinking disabled; OpenAI: the lowest reasoning effort the
+model takes), and its tokens show up in `/cost`.
 
 Every kind of content has its own shape, so a glance tells them apart:
 

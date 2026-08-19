@@ -49,10 +49,7 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
       .systemOfTextBlockParams(List(
         TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()
       ).asJava)
-    if cfg.thinking.getOrElse(true) then b.thinking(ThinkingConfigAdaptive.builder().build())
-    cfg.reasoning.foreach(e =>
-      b.outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase)).build())
-    )
+    configuredThinking(b)
     // `temperature` is not applied: current Anthropic models reject sampling parameters.
     tools.foreach(t => b.addTool(toolUnion(t)))
     if webSearch then
@@ -104,9 +101,7 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
         calls += ToolCall(tu.id(), tu.name(), json)
       }
     }
-    val u = m.usage()
-    val usage =
-      TokenUsage(u.inputTokens(), u.outputTokens(), u.cacheReadInputTokens().toScala.map(_.longValue).getOrElse(0L))
+    val usage = usageOf(m)
     val stop = m.stopReason().toScala.map(_.toString).getOrElse("end_turn").toLowerCase
     val lastBlock = m.content().asScala.lastOption
     val unfinished = stop == "pause_turn" ||
@@ -143,10 +138,23 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
     )
     extract(m)
 
-  def simple(system: Option[String], prompt: String): String =
+  /** Thinking and effort as the model is configured (adaptive thinking unless
+    * `"thinking": false`, `output_config.effort` from `reasoning`). */
+  private def configuredThinking(b: MessageCreateParams.Builder): Unit =
+    if cfg.thinking.getOrElse(true) then b.thinking(ThinkingConfigAdaptive.builder().build())
+    cfg.reasoning.foreach(e =>
+      b.outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase)).build())
+    )
+
+  private def usageOf(m: Message): TokenUsage =
+    val u = m.usage()
+    TokenUsage(u.inputTokens(), u.outputTokens(), u.cacheReadInputTokens().toScala.map(_.longValue).getOrElse(0L))
+
+  def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
     val b = MessageCreateParams.builder().model(
       modelId
     ).maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(16000L)).addUserMessage(prompt)
     system.foreach(b.system)
+    if thinking then configuredThinking(b) else b.thinking(ThinkingConfigDisabled.builder().build())
     val m = client.messages().create(b.build())
-    m.content().asScala.flatMap(_.text().toScala).map(_.text()).mkString
+    Reply(m.content().asScala.flatMap(_.text().toScala).map(_.text()).mkString, usageOf(m))

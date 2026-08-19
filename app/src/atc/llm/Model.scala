@@ -36,6 +36,9 @@ case class Completion(
   unfinished: Boolean = false
 )
 
+/** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
+case class Reply(text: String, usage: TokenUsage)
+
 /** Thrown when the user cancels a streaming completion. */
 class CancelledException extends RuntimeException("cancelled")
 
@@ -87,8 +90,12 @@ trait ChatModel:
     cancelled: () => Boolean
   ): Completion
 
-  /** One-shot completion without tools or streaming. */
-  def simple(system: Option[String], prompt: String): String
+  /** One-shot completion without tools or streaming. `thinking = false` asks
+    * the model not to reason (Anthropic: thinking disabled; OpenAI: the lowest
+    * reasoning effort the model accepts), for small side questions such as the
+    * next-input prediction where speed matters more than depth; `true` uses
+    * the model's configured settings. */
+  def simple(system: Option[String], prompt: String, thinking: Boolean = true): Reply
 
 object ChatModel:
   /** The client for one configured model, chosen by its provider's `api`. */

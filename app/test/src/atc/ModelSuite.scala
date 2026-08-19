@@ -14,6 +14,30 @@ class ModelSuite extends munit.FunSuite:
     val c = m.complete("sys", history, Nil, StreamSink(sb.append(_)), () => false)
     (c, sb.toString)
 
+  // ── OpenAI reasoning effort for non-thinking calls ──────────────
+
+  test("the lowest reasoning effort follows the model family, and is not sent to models not known to reason"):
+    def lowest(id: String, configured: Boolean = false) = Providers.lowestEffort(id, configured)
+    assertEquals(lowest("gpt-5.1"), Some("none"))
+    assertEquals(lowest("gpt-5.2-codex"), Some("none"))
+    assertEquals(lowest("gpt-5"), Some("minimal"))
+    assertEquals(lowest("gpt-5-mini"), Some("minimal"))
+    assertEquals(lowest("gpt-5-mini-2025-08-07"), Some("minimal"))
+    assertEquals(lowest("o3"), Some("low"))
+    assertEquals(lowest("o4-mini"), Some("low"))
+    assertEquals(lowest("openai/o1"), Some("low"))
+    assertEquals(lowest("gpt-4.1"), None)
+    assertEquals(lowest("gpt-4o-mini"), None)
+    assertEquals(lowest("llama3.1"), None)
+    // a model the config gives an effort to takes the parameter, so ask for the universal minimum
+    assertEquals(lowest("deepseek-v4-pro", configured = true), Some("low"))
+
+  test("the thinking switch of OpenAI-compatible vendors is `{\"type\": \"enabled\"|\"disabled\"}`"):
+    import scala.jdk.OptionConverters.*
+    def typeOf(on: Boolean) = Providers.thinkingSwitch(on).asObject().toScala.get.get("type").asString().toScala
+    assertEquals(typeOf(true), Some("enabled"))
+    assertEquals(typeOf(false), Some("disabled"))
+
   // ── EchoModel ───────────────────────────────────────────────────
 
   test("EchoModel echoes a plain user message"):
@@ -38,7 +62,7 @@ class ModelSuite extends munit.FunSuite:
 
   test("EchoModel.simple and metadata"):
     val m = EchoModel("myalias")
-    assertEquals(m.simple(None, "q"), "echo: q")
+    assertEquals(m.simple(None, "q").text, "echo: q")
     assertEquals(m.alias, "myalias")
     assertEquals(m.providerKey, "echo")
     assertEquals(m.webSearch, false)

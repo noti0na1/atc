@@ -19,7 +19,10 @@ case class ModelConfig(
   /** Reasoning effort: OpenAI `none|minimal|low|medium|high|xhigh|max`,
     * Anthropic `low|medium|high|xhigh|max` (`output_config.effort`). */
   reasoning: Option[String] = None,
-  /** Anthropic: adaptive thinking (default on). Set `false` to disable. */
+  /** Anthropic: adaptive thinking (default on); `false` disables it. OpenAI-
+    * compatible vendors with a `thinking: {"type": ...}` switch (DeepSeek, GLM,
+    * Kimi, MiniMax): sends `enabled`/`disabled`; leave it unset for OpenAI
+    * itself, which rejects the parameter. */
   thinking: Option[Boolean] = None,
   /** OpenAI Responses: stream reasoning summaries (`auto|concise|detailed`);
     * OpenAI only sends them when asked. */
@@ -97,6 +100,10 @@ case class Config(
   maxToolOutputChars: Int = 40000,
   /** Extra text appended to the system prompt (project conventions etc.). */
   instructions: Option[String] = None,
+  /** After each turn, ask the agent model to guess the next request and offer
+    * it as ghost text at the prompt (Tab / → accepts). One extra, small model
+    * call per turn; `false` turns it off. */
+  predictInput: Boolean = true,
 ) derives ReadWriter
 
 object Config:

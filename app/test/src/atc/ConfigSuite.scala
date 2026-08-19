@@ -305,6 +305,12 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(summary.linesIterator.count(_.contains("classified patterns")), 1, summary)
     assert(summary.contains("classified patterns: secrets"), summary)
 
+  test("predictInput is on by default and a later layer can turn it off"):
+    assertEquals(upickle.default.read[Config](ujson.read("{}")).predictInput, true)
+    val merged =
+      Config.mergeJson(ujson.read("""{ "predictInput": true }""").obj, ujson.read("""{ "predictInput": false }""").obj)
+    assertEquals(upickle.default.read[Config](merged).predictInput, false)
+
   // ── template ────────────────────────────────────────────────────
 
   test("the --init-global template is valid JSON that parses into a Config"):

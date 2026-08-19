@@ -28,7 +28,8 @@ final class ScriptedModel(val alias: String, steps: Seq[ScriptedModel.Step]) ext
       case ScriptedModel.Throw(e) => throw e
       case ScriptedModel.Comp(c) => onText(c.text); c
       case ScriptedModel.Reply(t) => onText(t); Completion(t, Nil, None, TokenUsage(1, 1), "end_turn")
-  def simple(system: Option[String], prompt: String): String = s"scripted: $prompt"
+  def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
+    Reply(s"scripted: $prompt", TokenUsage(1, 1))
 
 object ScriptedModel:
   sealed trait Step
@@ -322,9 +323,15 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.usage.input, 2L) // two completions, TokenUsage(1,1) each
     assertEquals(agent.usage.output, 2L)
     assert(agent.toolCalls >= 1)
+    // other model calls (chat(), predictions) are recorded under their own purpose and add to the total
+    agent.recordUsage(Agent.Prediction, TokenUsage(10, 5))
+    agent.recordUsage(Agent.Prediction, TokenUsage(10, 5))
+    assertEquals(agent.usage, TokenUsage(22, 12))
+    assertEquals(agent.usageByPurpose, List(Agent.Turns -> TokenUsage(2, 2), Agent.Prediction -> TokenUsage(20, 10)))
     agent.clear()
     assertEquals(agent.history, Nil)
     assertEquals(agent.usage, TokenUsage())
+    assertEquals(agent.usageByPurpose, Nil)
     assertEquals(agent.toolCalls, 0)
 
   test("history threads across turns and state persists in the session"):

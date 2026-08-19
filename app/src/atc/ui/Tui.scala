@@ -8,10 +8,21 @@ import atc.sandbox.ExecutionResult
 
 import org.jline.prompt.{CheckboxResult, ListResult, PromptBuilder, PromptResult, PrompterConfig, PrompterFactory}
 import org.jline.keymap.KeyMap
-import org.jline.reader.{EndOfFileException, LineReader, LineReaderBuilder, Reference, UserInterruptException, Widget}
+import org.jline.reader.{
+  Binding,
+  Candidate,
+  Completer,
+  EndOfFileException,
+  LineReader,
+  LineReaderBuilder,
+  Reference,
+  UserInterruptException,
+  Widget,
+}
+import org.jline.reader.impl.DefaultHighlighter
 import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
-import org.jline.utils.{AttributedString, InfoCmp, NonBlockingReader}
+import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader}
 
 import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -55,11 +66,40 @@ final class Tui(historyFile: Path) extends AgentUI:
   Debug.log(
     s"terminal: ${terminal.getClass.getSimpleName} type=${terminal.getType} size=${terminal.getSize} encoding=${terminal.encoding()}"
   )
+  /** The predicted next message (`suggest`), drawn as ghost text after what
+    * is typed as long as that is a prefix of it. */
+  @volatile private var suggestion: Option[String] = None
+  /** What the ghost text would add to `typed`: the rest of the suggestion. */
+  private def ghost(typed: String): Option[String] =
+    suggestion.filter(s => s.length > typed.length && s.startsWith(typed)).map(_.drop(typed.length))
+  /** The line reader's highlighter, with the ghost text appended in faint
+    * style. The cursor is positioned from the buffer, not from this string,
+    * so the extra text is display only. */
+  private object ghostHighlighter extends DefaultHighlighter:
+    override def highlight(r: LineReader, buffer: String): AttributedString =
+      val base = super.highlight(r, buffer).nn
+      ghost(buffer) match
+        case Some(rest) if !plain =>
+          AttributedStringBuilder().append(base).styled(AttributedStyle.DEFAULT.faint(), rest).toAttributedString.nn
+        case _ => base
+
+  /** Tab completion for slash commands, by plain string matching: given the
+    * words typed so far (the last one possibly empty or partial), the values
+    * the last word may take. The app fills this in with its commands and
+    * their arguments; nothing else on the line is completed. */
+  @volatile var completions: List[String] => List[String] = _ => Nil
+  private val commandCompleter: Completer = (_, line, candidates) =>
+    val words = line.words.asScala.toList
+    if words.headOption.exists(_.startsWith("/")) then
+      completions(words.take(line.wordIndex + 1)).foreach(c => candidates.add(Candidate(c)))
+
   private val reader: LineReader =
     Files.createDirectories(historyFile.getParent)
     LineReaderBuilder.builder()
       .terminal(terminal)
       .history(DefaultHistory())
+      .highlighter(ghostHighlighter)
+      .completer(commandCompleter)
       .variable(LineReader.HISTORY_FILE, historyFile)
       .variable(LineReader.SECONDARY_PROMPT_PATTERN, "%M> ")
       .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
@@ -84,6 +124,25 @@ final class Tui(historyFile: Path) extends AgentUI:
       val seqs =
         (Option(KeyMap.key(terminal, InfoCmp.Capability.back_tab)).toList :+ "\u001b[Z").distinct.filter(_.nonEmpty)
       keyMap.bind(Reference("atc-cycle-mode"), seqs*)
+      // Tab and → accept the ghost text (when the cursor is at the end and
+      // there is some); otherwise they do what they did before.
+      def accepting(name: String, previous: Binding | Null): Unit =
+        val widget: Widget = () =>
+          val buf = reader.getBuffer
+          ghost(buf.toString) match
+            case Some(rest) if buf.cursor == buf.length => buf.write(rest); true
+            case _ =>
+              previous match
+                case r: Reference => reader.callWidget(r.name); true
+                case w: Widget => w.apply()
+                case _ => true
+        reader.getWidgets.put(name, widget)
+      accepting("atc-accept-suggestion-tab", keyMap.getBound("\t"))
+      accepting("atc-accept-suggestion-right", Reference(LineReader.FORWARD_CHAR))
+      keyMap.bind(Reference("atc-accept-suggestion-tab"), "\t")
+      val rights = (Option(KeyMap.key(terminal, InfoCmp.Capability.key_right)).toList ++ List("\u001b[C", "\u001bOC"))
+        .distinct.filter(_.nonEmpty)
+      keyMap.bind(Reference("atc-accept-suggestion-right"), rights*)
   private val g: Tui.Glyphs =
     if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then
       Tui.Glyphs.unicode
@@ -766,6 +825,18 @@ final class Tui(historyFile: Path) extends AgentUI:
           throw e
       finally tail = "\n" // the reader echoed the line and moved to the next one
     result
+
+  /** Offer `text` as the predicted next message: ghost text at the prompt,
+    * redrawn at once if the user is already at it. `None` withdraws it. */
+  def suggest(text: Option[String]): Unit =
+    suggestion = if plain then None else text.map(_.trim).filter(_.nonEmpty)
+    if !plain then
+      // Redraws under the reader's lock, and only while it is actually reading.
+      try reader.callWidget(LineReader.REDISPLAY)
+      catch case _: IllegalStateException => ()
+
+  /** Whether the terminal can show ghost text (a real terminal). */
+  def suggestionsAvailable: Boolean = !plain
 
   def close(): Unit =
     stopSpinner()

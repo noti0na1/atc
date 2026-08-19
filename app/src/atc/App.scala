@@ -1,10 +1,10 @@
 package atc
 
-import atc.agent.{Agent, Prompts}
+import atc.agent.{Agent, InputPredictor, Prompts}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
-import atc.llm.ChatModel
+import atc.llm.{ChatModel, TokenUsage}
 import atc.perms.*
 import atc.sandbox.{ReplSession, SandboxConfig}
 import atc.ui.Tui
@@ -78,12 +78,21 @@ final class App(args: Main.Args):
       session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
   val llm = new HostLlm:
-    def chat(message: String): String = agent.model.simple(None, message)
+    def chat(message: String): String =
+      val reply = agent.model.simple(None, message)
+      agent.recordUsage(Agent.Chat, reply.usage)
+      reply.text
     def chatClassified(message: String): String =
-      agent.classifiedModel.getOrElse(throw RuntimeException(
+      val model = agent.classifiedModel.getOrElse(throw RuntimeException(
         "No classified model configured: set \"classifiedModel\" in the config to a model that may see classified data."
       ))
-        .simple(Some("You are a trusted assistant handling confidential data. Answer directly and concisely."), message)
+      val reply =
+        model.simple(
+          Some("You are a trusted assistant handling confidential data. Answer directly and concisely."),
+          message
+        )
+      agent.recordUsage(Agent.ClassifiedChat, reply.usage)
+      reply.text
   val hostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       whileUserDecides(tui.askUser(question, options, multiple))
@@ -183,10 +192,21 @@ final class App(args: Main.Args):
           s"max ${config.maxToolCalls} tool calls/turn"
         ).mkString(" · "),
       ),
-      "Type a request · /help commands · Shift-Tab or /mode cycle mode · Ctrl-C interrupt · Ctrl-O expand/collapse · Ctrl-D quit",
+      (List("Type a request", "/help commands", "Shift-Tab or /mode cycle mode")
+        ++ Option.when(predicting)("Tab or → accept the suggested next request")
+        ++ List("Ctrl-C interrupt", "Ctrl-O expand/collapse", "Ctrl-D quit")).mkString(" · "),
     )
 
+  // ── next-input prediction ─────────────────────────────────────────
+
+  /** Guesses the next request after each turn (config `predictInput`), shown
+    * as ghost text at the prompt. Interactive runs on a real terminal only. */
+  private val predictor =
+    InputPredictor(() => agent.model, () => agent.history, tui.suggest, agent.recordUsage(Agent.Prediction, _))
+  private val predicting: Boolean = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty
+
   private def runTurn(input: String): Unit =
+    predictor.invalidate()
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
@@ -201,6 +221,7 @@ final class App(args: Main.Args):
     finally
       val tokens = (agent.usage.input + agent.usage.output) - (usageBefore.input + usageBefore.output)
       tui.endTurn(Some(Tui.TurnStats((System.nanoTime() - started) / 1e9, agent.toolCalls - callsBefore, tokens)))
+      if predicting then predictor.start()
 
   private def interactive(): Unit =
     var running = true
@@ -221,6 +242,31 @@ final class App(args: Main.Args):
     case m => s"${m.label} > "
 
   // ── slash commands ────────────────────────────────────────────────
+
+  /** The commands `/help` lists, for Tab completion (aliases are accepted but not offered). */
+  private val commandNames = List(
+    "/help",
+    "/model",
+    "/classifiedmodel",
+    "/models",
+    "/mode",
+    "/perms",
+    "/config",
+    "/interface",
+    "/new",
+    "/reset",
+    "/clear",
+    "/todos",
+    "/cost",
+    "/quit",
+  )
+  tui.completions = {
+    case _ :: Nil => commandNames
+    case "/model" :: _ :: Nil => catalog.labels
+    case "/classifiedmodel" :: _ :: Nil => catalog.labels :+ "off"
+    case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
+    case _ => Nil
+  }
 
   private val helpText =
     """Commands:
@@ -266,24 +312,26 @@ final class App(args: Main.Args):
         if keys.sources.nonEmpty then
           tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
         tui.println(
-          s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore}"
+          s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput}"
         )
         tui.println(s"open permission scopes: ${policy.openScopeCount}")
       case "/interface" | "/api" => tui.println(Prompts.interfaceSource)
       case "/new" =>
+        predictor.invalidate()
         if newSession() then
           tui.success("new session: conversation, TODO list and session grants forgotten; sandbox restarted")
       case "/reset" =>
         if restartSession("you asked for /reset") then tui.success("sandbox restarted")
       case "/clear" =>
         agent.clear()
+        predictor.invalidate()
         tui.success("conversation cleared")
       case "/todos" | "/todo" => tui.showTodosNow(host.currentTodos)
       case "/cost" | "/usage" =>
-        val u = agent.usage
-        tui.println(
-          s"tokens: input=${u.input} (cached ${u.cacheRead}) output=${u.output}; tool calls: ${agent.toolCalls}"
-        )
+        def show(u: TokenUsage) = s"input=${u.input} (cached ${u.cacheRead}) output=${u.output}"
+        tui.println(s"tokens: ${show(agent.usage)}; tool calls: ${agent.toolCalls}")
+        val by = agent.usageByPurpose
+        if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
       case other => tui.error(s"unknown command $other (try /help)")
 
   /** One line per configured model: its name, `provider/model-id`, and the

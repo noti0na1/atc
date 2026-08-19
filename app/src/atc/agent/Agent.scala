@@ -50,9 +50,20 @@ final class Agent(
   extraInstructions: Option[String],
 ):
   var history: List[Msg] = Nil
-  var usage: TokenUsage = TokenUsage()
+  /** Every model call since the last `clear()`, by what it was for
+    * ([[Agent.Turns]], [[Agent.Chat]], ...). Guarded: the next-input
+    * prediction records from its own thread. */
+  private var usageBy: Map[String, TokenUsage] = Map.empty
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
+
+  /** Everything spent on the model(s) since the last `clear()`. */
+  def usage: TokenUsage = synchronized(usageBy.values.foldLeft(TokenUsage())(_ + _))
+  /** The same, by purpose, in the order the purposes first occurred. */
+  def usageByPurpose: List[(String, TokenUsage)] = synchronized(usageBy.toList)
+  /** Add what one model call cost. */
+  def recordUsage(purpose: String, u: TokenUsage): Unit =
+    synchronized { usageBy = usageBy.updated(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
 
   /** The one and only native tool: everything else is a Scala function. */
   private val tools = List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))
@@ -77,7 +88,7 @@ final class Agent(
 
   def clear(): Unit =
     history = Nil
-    usage = TokenUsage()
+    synchronized { usageBy = Map.empty }
     toolCalls = 0
     pendingNote = None
 
@@ -114,7 +125,7 @@ final class Agent(
             ui.assistantEnd()
             return interrupted()
       ui.assistantEnd()
-      usage += completion.usage
+      recordUsage(Agent.Turns, completion.usage)
       history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
       if completion.stopReason == "refusal" then
         ui.warn("The model refused this request (stop_reason=refusal).")
@@ -192,6 +203,12 @@ final class Agent(
       ToolResult(call.id, Agent.renderForModel(result, config.maxToolOutputChars), isError = !result.success)
 
 object Agent:
+  /** Purposes a model call is recorded under (`/cost`). */
+  val Turns = "agent turns"
+  val Chat = "chat()"
+  val ClassifiedChat = "chat(Classified)"
+  val Prediction = "next-input prediction"
+
   val MaxNudges = 2
   val MaxResumes = 6
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */

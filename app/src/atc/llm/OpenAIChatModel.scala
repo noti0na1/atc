@@ -4,6 +4,7 @@ import atc.config.ModelSpec
 
 import com.openai.client.OpenAIClient
 import com.openai.core.JsonValue
+import com.openai.errors.BadRequestException
 import com.openai.helpers.ChatCompletionAccumulator
 import com.openai.models.{FunctionDefinition, FunctionParameters, ReasoningEffort}
 import com.openai.models.chat.completions.*
@@ -23,6 +24,24 @@ final class OpenAIChatModel(val spec: ModelSpec) extends ChatModel:
   val webSearch: Boolean = cfg.webSearch
 
   private lazy val client: OpenAIClient = Providers.openAiClient(spec)
+  /** Set once the model rejected `reasoning_effort`: it takes no such parameter. */
+  @volatile private var effortRejected = false
+
+  /** The effort for a call: as configured, or the lowest the model takes for a
+    * non-thinking one (not needed when the model has a thinking switch). */
+  private def effort(thinking: Boolean): Option[ReasoningEffort] =
+    val e =
+      if thinking then cfg.reasoning
+      else if effortRejected || cfg.thinking.isDefined then None
+      else Providers.lowestEffort(modelId, cfg.reasoning.isDefined)
+    e.map(x => ReasoningEffort.of(x.toLowerCase))
+
+  /** `thinking: {"type": "enabled"|"disabled"}`, the switch of the
+    * OpenAI-compatible vendors that have one (DeepSeek, GLM, Kimi, MiniMax).
+    * Sent only when the config sets `thinking` for the model: OpenAI itself
+    * rejects the parameter. A non-thinking call always says `disabled`. */
+  private def thinkingSwitch(thinking: Boolean): Option[JsonValue] =
+    cfg.thinking.map(on => Providers.thinkingSwitch(thinking && on))
 
   private def functionTool(t: ToolSpec): ChatCompletionFunctionTool =
     val schema = ujson.read(t.parametersJson)
@@ -36,7 +55,8 @@ final class OpenAIChatModel(val spec: ModelSpec) extends ChatModel:
     val b = ChatCompletionCreateParams.builder().model(modelId).addSystemMessage(system)
     cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
     cfg.temperature.foreach(b.temperature)
-    cfg.reasoning.foreach(e => b.reasoningEffort(ReasoningEffort.of(e.toLowerCase)))
+    effort(thinking = true).foreach(b.reasoningEffort)
+    thinkingSwitch(thinking = true).foreach(b.putAdditionalBodyProperty("thinking", _))
     tools.foreach(t => b.addTool(functionTool(t)))
     if webSearch then b.webSearchOptions(ChatCompletionCreateParams.WebSearchOptions.builder().build())
     history.foreach {
@@ -69,10 +89,7 @@ final class OpenAIChatModel(val spec: ModelSpec) extends ChatModel:
     val calls = msg.flatMap(_.toolCalls().toScala).map(_.asScala.toList).getOrElse(Nil).flatMap { tc =>
       tc.function().toScala.map(f => ToolCall(f.id(), f.function().name(), f.function().arguments()))
     }
-    val usage = c.usage().toScala.map { u =>
-      val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
-      TokenUsage(u.promptTokens(), u.completionTokens(), cached)
-    }.getOrElse(TokenUsage())
+    val usage = usageOf(c)
     val stop = choice.map(_.finishReason().toString.toLowerCase).getOrElse("stop")
     Completion(text, calls, msg.map(m => NativeTurn(providerKey, m.toParam())), usage, stop)
 
@@ -99,9 +116,26 @@ final class OpenAIChatModel(val spec: ModelSpec) extends ChatModel:
     }
     extract(acc.chatCompletion())
 
-  def simple(system: Option[String], prompt: String): String =
-    val b = ChatCompletionCreateParams.builder().model(modelId)
-    system.foreach(b.addSystemMessage)
-    b.addUserMessage(prompt)
-    val c = client.chat().completions().create(b.build())
-    c.choices().asScala.headOption.flatMap(_.message().content().toScala).getOrElse("")
+  private def usageOf(c: ChatCompletion): TokenUsage =
+    c.usage().toScala.map { u =>
+      val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
+      TokenUsage(u.promptTokens(), u.completionTokens(), cached)
+    }.getOrElse(TokenUsage())
+
+  def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
+    def request(effort: Option[ReasoningEffort]): ChatCompletion =
+      val b = ChatCompletionCreateParams.builder().model(modelId)
+      system.foreach(b.addSystemMessage)
+      b.addUserMessage(prompt)
+      effort.foreach(b.reasoningEffort)
+      thinkingSwitch(thinking).foreach(b.putAdditionalBodyProperty("thinking", _))
+      client.chat().completions().create(b.build())
+    val e = effort(thinking)
+    val c =
+      try request(e)
+      catch
+        // A guessed lowest effort the model does not take: remember, and ask plainly.
+        case _: BadRequestException if !thinking && e.isDefined =>
+          effortRejected = true
+          request(None)
+    Reply(c.choices().asScala.headOption.flatMap(_.message().content().toScala).getOrElse(""), usageOf(c))

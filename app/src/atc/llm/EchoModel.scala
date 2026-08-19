@@ -36,4 +36,5 @@ final class EchoModel(val alias: String, override val ref: String) extends ChatM
       case Some(Msg.User(text)) => reply(s"echo: $text")
       case _ => Completion("", Nil, None, TokenUsage(), "end_turn")
 
-  def simple(system: Option[String], prompt: String): String = s"echo: $prompt"
+  def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
+    Reply(s"echo: $prompt", TokenUsage(1, 1))
