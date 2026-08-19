@@ -210,6 +210,29 @@ class PolicySuite extends munit.FunSuite:
     assert(summary.contains("always refused: *.internal"), summary)
     assert(!Policy(Nil, Nil, Nil, ScriptedPrompter(Nil)).summary.contains("always refused"))
 
+  test("prompt decisions are logged; session grants show in summary but not in configSummary (the prompt's view)"):
+    val p =
+      Policy(Nil, List("ls"), Nil, ScriptedPrompter(List(Decision.AllowSession, Decision.AllowOnce, Decision.Deny)))
+    assertEquals(p.decisionCount, 0)
+    val before = p.configSummary
+    p.closeScope(p.requestExec(ScopeId.Base, List("npm *"), "deps")) // allowed for the session
+    p.closeScope(p.requestNet(ScopeId.Base, List("example.com"), "docs")) // allowed once
+    intercept[SecurityException](p.requestNet(ScopeId.Base, List("evil.example"), "no"))
+    assertEquals(
+      p.decisionsSince(0),
+      List(
+        Decision.AllowSession -> "commands npm *",
+        Decision.AllowOnce -> "hosts example.com",
+        Decision.Deny -> "hosts evil.example",
+      )
+    )
+    assertEquals(p.decisionsSince(2).map(_._1), List(Decision.Deny))
+    assert(p.summary.contains("+ session: npm *"), p.summary)
+    assertEquals(p.configSummary, before) // the prompt text does not move with a grant
+    assert(!p.configSummary.contains("npm"), p.configSummary)
+    p.resetSession()
+    assertEquals(p.decisionCount, 0)
+
   test("glob matcher semantics"):
     assert(GlobMatcher.matchesCommand("git diff --stat", "git diff*"))
     assert(GlobMatcher.matchesCommand("git difftool", "git diff*"))

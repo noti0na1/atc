@@ -2,7 +2,7 @@ package atc.agent
 
 import atc.config.Config
 import atc.llm.*
-import atc.perms.Policy
+import atc.perms.{Decision, Policy}
 import atc.sandbox.{ExecutionResult, ReplSession}
 
 import java.nio.file.Path
@@ -76,7 +76,7 @@ final class Agent(
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
   def systemPrompt: SystemPrompt =
-    Prompts.system(cwd, policy, classifiedModel.map(_.ref), config.respectGitignore, extraInstructions)
+    Prompts.system(cwd, policy, classifiedModel.isDefined, config.respectGitignore, extraInstructions)
 
   /** Tokens of every request besides the history: the system prompt and the tool schema. */
   private def fixedTokens: Long =
@@ -109,10 +109,10 @@ final class Agent(
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
     * continues in, and the result may be what the next request is about. */
-  def noteUserRan(code: String, result: ExecutionResult): Unit =
+  def noteUserRan(code: String, result: ExecutionResult, decisions: List[(Decision, String)] = Nil): Unit =
     pendingNotes :+=
       s"[user ran code] The user ran this in the sandbox REPL themselves (its definitions persist for you too):\n" +
-        s"```scala\n$code\n```\nResult:\n${Agent.renderForModel(result, config.maxToolOutputChars)}"
+        s"```scala\n$code\n```\nResult:\n${Agent.renderForModel(result, config.maxToolOutputChars, decisions)}"
 
   def clear(): Unit =
     history = Nil
@@ -252,11 +252,13 @@ final class Agent(
       if code.trim.isEmpty then return ToolResult(call.id, "Missing 'code' argument.", isError = true)
       ui.toolStart(code)
       val start = System.nanoTime()
+      val decisionsBefore = policy.decisionCount
       val result = session.run(code)
       // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
       val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
       ui.toolEnd(result, millis)
-      ToolResult(call.id, Agent.renderForModel(result, config.maxToolOutputChars), isError = !result.success)
+      val rendered = Agent.renderForModel(result, config.maxToolOutputChars, policy.decisionsSince(decisionsBefore))
+      ToolResult(call.id, rendered, isError = !result.success)
 
 object Agent:
   /** Purposes a model call is recorded under (`/cost`). */
@@ -345,11 +347,34 @@ object Agent:
 
   /** Tool output as the model sees it: hint-annotated and bounded (cut in the
     * middle so both the first diagnostics and the tail survive). */
-  def renderForModel(r: ExecutionResult, maxChars: Int): String =
+  def renderForModel(r: ExecutionResult, maxChars: Int): String = renderForModel(r, maxChars, Nil)
+
+  /** The result as the model sees it: the rendered output with a hint for the
+    * usual stumbles, cut in the middle beyond `maxChars`, then a note for every
+    * decision the user made at a permission prompt during the run. The note
+    * comes last and uncut: the model cannot see the pop-ups, so this is how it
+    * learns whether a grant was for this call or for the session (and the
+    * system prompt never changes with one). */
+  def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)]): String =
     val base = r.render
     val hinted = hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
-    if hinted.length <= maxChars then hinted
-    else
-      val head = hinted.take(maxChars * 2 / 3)
-      val tail = hinted.takeRight(maxChars / 3)
-      s"$head\n... [${hinted.length - maxChars} characters omitted] ...\n$tail"
+    val bounded =
+      if hinted.length <= maxChars then hinted
+      else
+        val head = hinted.take(maxChars * 2 / 3)
+        val tail = hinted.takeRight(maxChars / 3)
+        s"$head\n... [${hinted.length - maxChars} characters omitted] ...\n$tail"
+    if decisions.isEmpty then bounded else s"$bounded\n${decisionNote(decisions)}"
+
+  /** What the user decided at the prompts of one call, for the model:
+    * `[permissions: the user allowed commands npm * once (this call only; a
+    * later call must ask again); the user allowed read on '/x' for the rest of
+    * this session (no request needed from now on)]`. */
+  def decisionNote(decisions: List[(Decision, String)]): String =
+    val parts = decisions.map {
+      case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
+      case (Decision.AllowSession, what) =>
+        s"the user allowed $what for the rest of this session (no request needed from now on)"
+      case (Decision.Deny, what) => s"the user denied $what (do not ask again for the same thing)"
+    }
+    s"[permissions: ${parts.mkString("; ")}]"

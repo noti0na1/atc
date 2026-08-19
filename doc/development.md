@@ -92,13 +92,13 @@ capture-checking-bug/  a runnable repro of an upstream separate-compilation bug 
 `Host` installed as the API implementation → `ExecutionResult` → `Agent.renderForModel`
 (bounded, hint-annotated) back into `Msg.ToolResults` → the model again, until it answers.
 
-`ChatModel.complete` takes a `SystemPrompt(stable, dynamic)`: `Prompts.system` puts
-everything configuration-derived in `stable` and the permission summary, which session
-grants extend, in `dynamic`. Each adapter sends the stable part first and alone under the
-provider's cache marker (Anthropic: two system blocks, `cache_control` on the first; Chat
-Completions: two system messages; Responses: `instructions` plus a leading system input
-item), so a grant mid-turn does not evict the cached prefix. Completions stream into a
-`StreamSink` (text / notes / thinking) that the UI renders live.
+`ChatModel.complete` takes one `SystemPrompt(text)` built by `Prompts.system` from the
+configuration, the working directory and the mode, the configured permissions included;
+nothing in it changes during a session (a mode switch restarts the sandbox anyway), and a
+permission the user grants for the session is reported in the tool result of the call that
+asked. So every request of a session is the same prefix plus what was appended, whatever
+caching the provider offers (see [What the model sees](#what-the-model-sees-the-context)).
+Completions stream into a `StreamSink` (text / notes / thinking) that the UI renders live.
 
 History (`llm.Msg`) is provider-neutral, so `/model` can switch vendors mid-conversation;
 each provider stashes a `NativeTurn` on the assistant message for exact replay when the
@@ -475,33 +475,34 @@ message and everything until the model's final answer; within it, every **round*
 model call) re-sends the whole context so far, plus the tool results of the previous round.
 
 ```
-┌ system prompt, stable part ────────────────────────────────────────────────┐  Prompts.system(...).stable
+┌ system prompt (one text, the same for the whole session) ──────────────────┐  Prompts.system(...).text
 │ identity: "a coding agent with tracked capabilities … acts only by         │  changes only with cwd, config,
 │   writing Scala and running it with run_scala"                             │  mode (→ REPL restart)
-│ Environment: working directory, OS, REPL flags, the classified model,      │
-│   the gitignore note                                                       │
+│ Environment: working directory, OS, REPL flags, whether a classified       │
+│   model is configured (never which), the gitignore note                    │
 │ How to work: explore → replace/write → verify with exec → println,         │
-│   request* on "Access denied", do not retry capability compile errors,     │
-│   small snippets, todos/ask, never end on a plan                           │
+│   request* on "Access denied", session grants are reported in results,     │
+│   do not retry capability compile errors, small snippets, todos/ask,       │
+│   never end on a plan                                                      │
 │ Sandbox mode paragraph (Prompts.modeSection): the givens of the mode       │
 │   and what does not compile in it                                          │
 │ Rules of the sandbox: what is forbidden, read-only vs full views,          │
 │   top-level val/var quirks, Option/effects, fatal throwables, Classified   │
 │ API reference: the full source of lib/…/Interface.scala                    │  Prompts.interfaceSource
 │ Project instructions: config "instructions", if any                        │
-├ system prompt, dynamic part ───────────────────────────────────────────────┤  .dynamic = policy.summary
-│ Current permissions: mode, file rules (classified-only patterns folded     │  changes with every session
-│   into one line), session file grants, commands (+ session grants,         │  grant → only this part
-│   always-refused), hosts (+ session grants, always-refused)                │  re-sent uncached
+│ Current permissions: mode, file rules (classified-only patterns folded     │  policy.configSummary:
+│   into one line), commands, hosts, the always-refused lists; never the     │  no session grants, so
+│   session grants                                                           │  it never changes
 ├ tools ─────────────────────────────────────────────────────────────────────┤  Prompts.ToolName, toolDescription,
 │ run_scala(code: String): the only tool                                     │  toolParameters (JSON schema)
-├ history (agent.history: List[Msg]), turn by turn ──────────────────────────┤
+├ history (agent.history: List[Msg]), turn by turn, append-only ─────────────┤
 │ turn 1                                                                     │
 │   User("fix the failing test")                                             │  round 1 sends everything above + this
 │   Assistant("Let me look at it.", [run_scala(code₁)], native)              │  the model answered with a call
 │   ToolResults([ToolResult(id₁, rendered result₁, isError)])                │  round 2 sends all of it again + these
-│   Assistant("", [run_scala(code₂)], native)                                │
-│   ToolResults([ToolResult(id₂, rendered result₂, isError)])                │  round 3 …
+│   Assistant("", [run_scala(code₂)], native)                                │  code₂ asked with requestExec …
+│   ToolResults([ToolResult(id₂, rendered result₂ +                          │  … and the user allowed it for
+│       "[permissions: the user allowed … for the session …]", isError)])    │  the session: said here, once
 │   Assistant("Fixed: the assertion compared …", [], native)                 │  no call: final answer, turn over
 │ turn 2                                                                     │  the REPL was reset in between
 │   User("[sandbox notice] The Scala REPL was restarted …                    │  pending notes, then the request,
@@ -515,16 +516,38 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**The system prompt** is `SystemPrompt(stable, dynamic)`. Each adapter sends the stable
-part first and alone under the provider's cache marker (Anthropic: two system blocks with
-`cache_control` on the first; Chat Completions: two system messages; Responses:
-`instructions` plus a leading system input item), then the dynamic part, then the tools
-and the history; so a permission granted mid-turn changes the dynamic part only and the
-cached prefix survives. The stable part embeds the *whole* source of `Interface.scala`
-(the same text `/interface` prints), which is why wording in that file is prompt wording,
-and a mode paragraph, which is why a mode switch restarts the REPL and re-renders the prompt.
-`Agent.systemPrompt` is recomputed before every round from the live `Policy`, so nothing
-is cached on the ATC side.
+**The system prompt** is one text, `SystemPrompt(text)`, and it is the same for the
+whole session on purpose: everything in it (including the permission summary,
+`Policy.configSummary`, which leaves session grants out) changes only together with a
+sandbox restart (mode switch, config). That is the general, provider-independent way to
+keep a request cacheable: the request is always the same prefix plus what was appended
+since, so automatic prefix caching (OpenAI-shaped APIs) hits up to the newest messages,
+explicit breakpoints (Anthropic: one on the system block and one on the last message of the
+history, so each round reads the previous round's prefix and writes only the new messages)
+do too, and a provider with no cache loses nothing. The alternative, a "current
+permissions" block kept up to date in the prompt, would invalidate the cached history on
+every grant (or, with a single breakpoint on the system prompt, never cache the history at
+all), which is what an earlier design did. The prompt embeds the *whole* source of
+`Interface.scala` (the same text `/interface` prints), which is why wording in that file is
+prompt wording, and a mode paragraph, which is why a mode switch restarts the REPL and
+re-renders the prompt. It says *whether* a classified model is configured (so the model
+knows if `chat(Classified)` works), never which one. `Agent.systemPrompt` is recomputed
+before every round from the live `Policy`, so nothing is cached on the ATC side; it just
+comes out the same.
+
+**Prompt decisions travel in the history.** The model cannot see the pop-ups, so without
+feedback it takes an "allow once" for a standing grant and a later "no" for a revocation
+(both observed live). `Policy.decide` therefore logs every decision
+(`decisionCount`/`decisionsSince`: once, session, denied, with the phrase it was about);
+`Agent.runScala` reads what was logged during a tool call and `renderForModel` appends
+`[permissions: the user allowed commands npm * once (this call only; a later call must ask
+again); the user allowed read on '/x' for the rest of this session (no request needed from
+now on); the user denied …]` after the (possibly cut) result, so the model learns exactly
+where it happened, keeps seeing it in later rounds, and the already-sent messages never
+change. `/run` does the same for decisions made while the user's own code ran. A session
+grant later dropped by the context cut or forgotten by `/clear` costs at most a needless
+`request*`, which the policy answers without a prompt since the grant still holds; `/new`
+resets grants and history together.
 
 **The history** (`llm.Msg`, provider-neutral; `Agent.history`) holds exactly what was
 said and done, never the terminal's rendering:
@@ -535,7 +558,8 @@ said and done, never the terminal's rendering:
   `[user ran code]` (what the user ran with `/run`, as a fenced block, and its rendered
   result), and, on the first kept message after a context cut, `[context notice] The N
   oldest messages … were dropped`. The loop's own `ContinueNudge` ("you ended your turn
-  with a plan …") is also a user message.
+  with a plan …") is also a user message. Notes are *prepended* to the next user message
+  rather than inserted as messages of their own, again so that nothing already sent changes.
 * `Msg.Assistant(text, toolCalls, native)`: the model's prose and its `run_scala` calls
   (`ToolCall(id, name, arguments)`, the code as JSON), plus the provider's `NativeTurn` for
   exact replay when the same provider continues (Anthropic content blocks including
@@ -548,8 +572,9 @@ said and done, never the terminal's rendering:
   `ERROR: <message>` for a compile/validation/timeout error, or `(no output)` /
   `(failed, no output)`), a `Hint:` line when `Agent.hints` recognises the error (read-only
   capture / missing `Exec` or `Network` → "switch mode" advice), the whole thing cut in
-  the middle with `… [N characters omitted] …` beyond `maxToolOutputChars`; `isError` is
-  `!result.success`. The budget and cancellation cases are results too ("Tool budget of N
+  the middle with `… [N characters omitted] …` beyond `maxToolOutputChars`, then the
+  `[permissions: …]` note when a prompt was answered during the call (uncut, last);
+  `isError` is `!result.success`. The budget and cancellation cases are results too ("Tool budget of N
   calls per turn exhausted; answer the user now.", "Cancelled by the user before
   execution.", "Missing 'code' argument."), as is an unknown tool name.
 

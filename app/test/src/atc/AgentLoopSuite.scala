@@ -3,6 +3,7 @@ package atc
 import atc.agent.*
 import atc.config.Config
 import atc.llm.*
+import atc.perms.Decision
 import atc.sandbox.{ExecutionResult, ReplSession}
 
 import scala.collection.mutable.ListBuffer
@@ -394,6 +395,34 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent2.contextUsage.window, Some(100_000))
     assert(agent2.contextUsage.tokens < after.tokens, "clear() leaves only the fixed part")
 
+  test("what the user decided at a prompt is reported in that tool result; the system prompt never changes"):
+    // The model cannot see the pop-ups, so each decision is said in the result
+    // (once vs. session vs. denied); the prompt stays the same for the whole
+    // session so every request keeps its cacheable prefix.
+    val code = """requestExec(Set("ls*"), "list the directory") { exec("ls", List(".")).exitCode }"""
+    val (env, s, _, agent) = setup(ScriptedModel(
+      "m",
+      Seq(ScriptedModel.tool(code), ScriptedModel.tool(code), ScriptedModel.tool(code), ScriptedModel.Reply("done"))
+    ))
+    env.decisions = List(Decision.AllowOnce, Decision.AllowSession)
+    val promptBefore = agent.systemPrompt.text
+    assert(promptBefore.contains("Current permissions"), promptBefore)
+    agent.turn(s, "list it", never)
+    val results = toolResults(agent).flatMap(_.results)
+    assertEquals(results.size, 3)
+    assert(
+      results(0).output.contains("[permissions: the user allowed commands ls* once (this call only"),
+      results(0).output
+    )
+    assert(
+      results(1).output.contains("[permissions: the user allowed commands ls* for the rest of this session"),
+      results(1).output
+    )
+    assert(!results(2).output.contains("[permissions:"), results(2).output) // covered by the session grant: no prompt
+    assertEquals(env.requests.size, 2) // once, then session, then nothing to ask
+    assertEquals(agent.systemPrompt.text, promptBefore)
+    assert(!agent.systemPrompt.text.contains("ls*"))
+
   test("usage is accumulated across the turn and reset by clear()"):
     val (_, s, _, agent) = setup(ScriptedModel(
       "m",
@@ -443,10 +472,14 @@ class AgentLoopSuite extends munit.FunSuite:
     agent.turn(s, "go", never)
     assertEquals(agent.history.last, Msg.Assistant("with native", Nil, Some(native)))
 
-  test("the system prompt reflects the configured classified model"):
+  test("the system prompt says whether a classified model exists, never which one"):
     val (_, _, _, without) = setup(ScriptedModel("m", Nil))
     assert(without.systemPrompt.text.contains("classified model"), "the line is there either way")
-    assert(without.systemPrompt.text.contains("(none configured)"), without.systemPrompt.text)
+    assert(without.systemPrompt.text.contains("none configured"), without.systemPrompt.text)
     val (_, _, _, withClassified) =
       setup(ScriptedModel("m", Nil), classified = Some(ScriptedModel("private-llm", Nil)))
-    assert(withClassified.systemPrompt.text.contains("private-llm"), "the prompt should name the classified model")
+    assert(
+      withClassified.systemPrompt.text.contains("`chat(Classified)`): configured"),
+      withClassified.systemPrompt.text
+    )
+    assert(!withClassified.systemPrompt.text.contains("private-llm"), "the agent model is not told which model it is")

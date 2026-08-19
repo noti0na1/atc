@@ -297,7 +297,9 @@ requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github
 ```
 
 You get a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*) and the
-block runs with the extra permission. `locked` rules cannot be widened at all, and a
+block runs with the extra permission; the agent is told what you decided in that call's
+result, so "this time" means it asks again next time and "for the session" means it does
+not. `locked` rules cannot be widened at all, and a
 `denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
 leave the block (capture checking), and the host closes the permission scope when the block
 exits. `requestFiles` works in every mode: the file system it lends the block is exactly as

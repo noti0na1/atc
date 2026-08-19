@@ -37,14 +37,15 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     Tool.builder().name(t.name).description(t.description).inputSchema(is.build()).build()
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): MessageCreateParams =
-    // The stable part (rules + API reference) is large and cached; the dynamic
-    // part (permissions) follows it outside the cache breakpoint.
-    val stable = TextBlockParam.builder().text(system.stable).cacheControl(CacheControlEphemeral.builder().build())
-    val dynamic = Option.when(system.dynamic.nonEmpty)(TextBlockParam.builder().text(system.dynamic).build())
+    // Two cache breakpoints: the system prompt (large, the same for the whole
+    // session) and the last message of the history, so each round reads the
+    // previous round's prefix from the cache and writes only what was added.
+    val cache = CacheControlEphemeral.builder().build()
+    val systemBlock = TextBlockParam.builder().text(system.text).cacheControl(cache).build()
     val b = MessageCreateParams.builder()
       .model(modelId)
       .maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(32000L))
-      .systemOfTextBlockParams((stable.build() :: dynamic.toList).asJava)
+      .systemOfTextBlockParams(List(systemBlock).asJava)
     configuredThinking(b)
     // `temperature` is not applied: current Anthropic models reject sampling parameters.
     tools.foreach(t => b.addTool(toolUnion(t)))
@@ -52,35 +53,42 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       cfg.webSearchVersion.getOrElse("20260209") match
         case "20250305" => b.addTool(ToolUnion.ofWebSearchTool20250305(WebSearchTool20250305.builder().build()))
         case _ => b.addTool(ToolUnion.ofWebSearchTool20260209(WebSearchTool20260209.builder().build()))
-    history.foreach {
-      case Msg.User(text) => b.addUserMessage(text)
-      case Msg.Assistant(text, calls, native) =>
-        native match
-          case Some(NativeTurn(`providerKey`, p: MessageParam)) => b.addMessage(p)
-          case _ =>
-            val blocks = List.newBuilder[ContentBlockParam]
-            if text.nonEmpty then blocks += ContentBlockParam.ofText(text)
-            calls.foreach { c =>
-              val input = ToolUseBlockParam.Input.builder()
-              Json.parseObject(c.arguments).value.foreach((k, v) =>
-                input.putAdditionalProperty(k, JsonValue.from(Json.toJava(v)))
-              )
-              blocks += ContentBlockParam.ofToolUse(
-                ToolUseBlockParam.builder().id(c.id).name(c.name).input(input.build()).build()
-              )
-            }
-            val bs = blocks.result()
-            if bs.nonEmpty then
-              b.addMessage(
-                MessageParam.builder().role(MessageParam.Role.ASSISTANT).contentOfBlockParams(bs.asJava).build()
-              )
-      case Msg.ToolResults(results) =>
-        val blocks = results.map { r =>
-          ContentBlockParam.ofToolResult(
-            ToolResultBlockParam.builder().toolUseId(r.callId).content(r.output).isError(r.isError).build()
-          )
-        }
-        b.addUserMessageOfBlockParams(blocks.asJava)
+    val last = history.length - 1
+    history.zipWithIndex.foreach { (msg, i) =>
+      // The request always ends with a user-role message (a request or tool results): mark it.
+      val mark = i == last
+      msg match
+        case Msg.User(text) =>
+          val block = TextBlockParam.builder().text(text)
+          if mark then block.cacheControl(cache)
+          b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
+        case Msg.Assistant(text, calls, native) =>
+          native match
+            case Some(NativeTurn(`providerKey`, p: MessageParam)) => b.addMessage(p)
+            case _ =>
+              val blocks = List.newBuilder[ContentBlockParam]
+              if text.nonEmpty then blocks += ContentBlockParam.ofText(text)
+              calls.foreach { c =>
+                val input = ToolUseBlockParam.Input.builder()
+                Json.parseObject(c.arguments).value.foreach((k, v) =>
+                  input.putAdditionalProperty(k, JsonValue.from(Json.toJava(v)))
+                )
+                blocks += ContentBlockParam.ofToolUse(
+                  ToolUseBlockParam.builder().id(c.id).name(c.name).input(input.build()).build()
+                )
+              }
+              val bs = blocks.result()
+              if bs.nonEmpty then
+                b.addMessage(
+                  MessageParam.builder().role(MessageParam.Role.ASSISTANT).contentOfBlockParams(bs.asJava).build()
+                )
+        case Msg.ToolResults(results) =>
+          val blocks = results.zipWithIndex.map { (r, j) =>
+            val block = ToolResultBlockParam.builder().toolUseId(r.callId).content(r.output).isError(r.isError)
+            if mark && j == results.length - 1 then block.cacheControl(cache)
+            ContentBlockParam.ofToolResult(block.build())
+          }
+          b.addUserMessageOfBlockParams(blocks.asJava)
     }
     b.build()
 

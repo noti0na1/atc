@@ -47,7 +47,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     }
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): ResponseCreateParams =
-    val b = ResponseCreateParams.builder().model(modelId).instructions(system.stable).store(false)
+    val b = ResponseCreateParams.builder().model(modelId).instructions(system.text).store(false)
     cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
     cfg.temperature.foreach(b.temperature)
     reasoning(thinking = true).foreach(b.reasoning)
@@ -55,11 +55,6 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     tools.foreach(t => b.addTool(functionTool(t)))
     if webSearch then b.addTool(Tool.ofWebSearch(WebSearchTool.builder().`type`(WebSearchTool.Type.WEB_SEARCH).build()))
     val input = List.newBuilder[ResponseInputItem]
-    // The dynamic part of the system prompt leads the input, so `instructions` stays a cacheable prefix.
-    if system.dynamic.nonEmpty then
-      input += ResponseInputItem.ofEasyInputMessage(
-        EasyInputMessage.builder().role(EasyInputMessage.Role.SYSTEM).content(system.dynamic).build()
-      )
     history.foreach {
       case Msg.User(text) =>
         input += ResponseInputItem.ofEasyInputMessage(

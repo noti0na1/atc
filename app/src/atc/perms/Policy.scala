@@ -235,10 +235,23 @@ final class Policy(
     * "allow for the session" also runs `remember`, which records the grant on
     * the base scope. Returns normally when the caller may open its scope. */
   private def decide(request: PermissionRequest, what: String)(remember: => Unit): Unit =
-    prompter.ask(request) match
+    val decision = prompter.ask(request)
+    decisionLog.synchronized(decisionLog += (decision -> what))
+    decision match
       case Decision.Deny => throw SecurityException(s"Access denied by the user: $what")
       case Decision.AllowOnce => ()
       case Decision.AllowSession => remember
+
+  /** Every decision the user made at a prompt, in order, with what it was
+    * about as a phrase (`write on '/tmp/x'`, `commands npm *`). The agent
+    * reads what was added during a tool call and tells the model in that
+    * call's result, since the model cannot see the pop-ups: it would otherwise
+    * take an "allow once" for a standing grant, or a later "no" for a
+    * revocation. The prompt itself never changes with a decision, so every
+    * request keeps its prefix. */
+  private val decisionLog = scala.collection.mutable.ListBuffer[(Decision, String)]()
+  def decisionCount: Int = decisionLog.synchronized(decisionLog.length)
+  def decisionsSince(count: Int): List[(Decision, String)] = decisionLog.synchronized(decisionLog.drop(count).toList)
 
   private def openScope(
     parent: Scope,
@@ -264,23 +277,33 @@ final class Policy(
     base.fileGrants = Nil
     base.commands = Nil
     base.hosts = Nil
+    decisionLog.synchronized(decisionLog.clear())
 
   def openScopeCount: Int = scopes.size - 1
 
-  /** Human-readable summary for the UI and the system prompt. */
-  def summary: String =
+  /** Human-readable summary for the UI (`/perms`): the configuration, the mode
+    * and what the user granted for the session. */
+  def summary: String = render(withSession = true)
+
+  /** The same without the session grants: what the system prompt states.
+    * Grants reach the model through the tool results instead, so the prompt
+    * stays the same for the whole session (see `decisionsSince`). */
+  def configSummary: String = render(withSession = false)
+
+  private def render(withSession: Boolean): String =
     // Rules that only mark paths classified are folded into one line; there are
     // a dozen of them in a normal config and each says the same thing.
     val (classifiedOnly, explicit) = rules.partition(r => r.grantsWithin.isEmpty && r.classifiedOnly)
     def listOf(patterns: List[String]) = if patterns.isEmpty then "(none)" else patterns.mkString(", ")
-    def session(patterns: List[String]) = if patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
+    def session(patterns: List[String]) =
+      if !withSession || patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
     val lines = List.newBuilder[String]
     lines += s"Mode: ${mode.label} (${mode.description})"
     lines += "File rules (strictest matching rule wins; unmatched paths are inaccessible):"
     lines ++= explicit.map(r => s"  ${r.describe}")
     if classifiedOnly.nonEmpty then
       lines += s"  classified patterns: ${classifiedOnly.map(_.pattern).mkString(", ")}"
-    if base.fileGrants.nonEmpty then
+    if withSession && base.fileGrants.nonEmpty then
       lines += "Session file grants:"
       lines ++= base.fileGrants.reverse.map((p, a) => s"  $p: ${a.label}")
     lines += s"Commands: ${listOf(baseCommands)}${session(base.commands)}"

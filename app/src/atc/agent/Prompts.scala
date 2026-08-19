@@ -43,12 +43,14 @@ object Prompts:
          |full mode (`/mode local`, `/mode full`) if they want you to edit files.""".stripMargin
 
   /** The system prompt: everything that depends on the configuration, the
-    * working directory and the mode in the stable part; the permission summary,
-    * which session grants extend, in the dynamic one (see [[SystemPrompt]]). */
+    * working directory and the mode, including the configured permissions.
+    * Nothing in it changes with a session grant (those are reported in the
+    * tool results), so every request of a session starts with the same
+    * prefix (see [[SystemPrompt]]). */
   def system(
     cwd: Path,
     policy: Policy,
-    classifiedModelName: Option[String],
+    classifiedModelConfigured: Boolean,
     respectGitignore: Boolean,
     extra: Option[String],
   ): SystemPrompt =
@@ -69,9 +71,9 @@ object Prompts:
        |- working directory: $cwd
        |- OS: $os
        |- REPL: Scala 3 with `-language:experimental.captureChecking` and `import language.experimental.safe`
-       |- classified model (the only one that may see `Classified` data): ${classifiedModelName.getOrElse(
-        "(none configured)"
-      )}$gitignoreNote
+       |- classified model (the only one that may see `Classified` data, through `chat(Classified)`): ${
+        if classifiedModelConfigured then "configured" else "none configured, so `chat(Classified)` fails"
+      }$gitignoreNote
        |
        |How to work
        |1. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
@@ -82,10 +84,18 @@ object Prompts:
        |   or rewriting most of it (read it first, then write the full new content). Either way, keep
        |   unrelated code untouched.
        |3. Verify with the project's own commands via `exec` (tests, build) when the user allows them.
+       |   `exec` returns `ProcessResult(exitCode, stdout, stderr)`: print the exit code and *both* streams
+       |   (build tools and test runners write most of their output to stderr), or end the snippet with the
+       |   result so it is echoed whole. A command runs with the user's own privileges and network; the
+       |   `commands` patterns decide whether it may run, the `hosts` list only governs your `http*` calls.
        |4. Report results by `println`ing them; the value of the last expression is echoed too.
        |5. If an operation throws `SecurityException: Access denied ...`, the message tells you which
        |   `request*` block to use. Wrap only the operations that need it, give a short `reason`, and
-       |   never retry a denied request in a loop, because the user said no. When the message says the
+       |   never retry a denied request in a loop, because the user said no. You do not see the prompt;
+       |   every decision is reported at the end of that call's result: *allowed once* covers that call
+       |   only, so the next call needs its own `request*` block again (normal, not a revocation);
+       |   *allowed for the rest of this session* needs no request afterwards; *denied* is a no. The
+       |   permissions listed below never change. When the message says the
        |   *configuration* refuses it (a `denyCommands` / `denyHosts` pattern), it is final: no
        |   `request*` can widen it, so do not look for another route to the same effect — say what you
        |   would have run and stop.
@@ -148,6 +158,7 @@ object Prompts:
        |```scala
        |$interfaceSource
        |```
-       |${extra.map(e => s"\nProject instructions\n$e\n").getOrElse("")}""".stripMargin
-    val permissions = s"Current permissions\n${policy.summary.linesIterator.map("  " + _).mkString("\n")}"
-    SystemPrompt(stable, permissions)
+       |${extra.map(e => s"\nProject instructions\n$e\n").getOrElse("")}
+       |Current permissions (from the configuration; session grants are reported in tool results)
+       |${policy.configSummary.linesIterator.map("  " + _).mkString("\n")}""".stripMargin
+    SystemPrompt(stable)

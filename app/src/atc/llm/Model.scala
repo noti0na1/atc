@@ -36,15 +36,13 @@ case class Completion(
   unfinished: Boolean = false
 )
 
-/** The system prompt of an agent request, in two parts: `stable` changes only
-  * with the configuration and the sandbox mode (rules, API reference), `dynamic`
-  * with the session (the permission summary, which every "allow for the
-  * session" extends). Providers send the stable part first, with the cache
-  * marker where the API has one, so a grant in the middle of a turn does not
-  * evict the cached prefix that is the bulk of every request. */
-final case class SystemPrompt(stable: String, dynamic: String = ""):
-  /** Both parts as one text. */
-  def text: String = if dynamic.isEmpty then stable else s"$stable\n\n$dynamic"
+/** The system prompt of a request. It is one text on purpose: everything in
+  * it changes only together with a sandbox restart (configuration, mode), so
+  * every request starts with the same prefix and whatever cache the provider
+  * has (a marker, automatic prefix caching, none) works as well as it can.
+  * Anything that changes during a session (a permission granted at a prompt)
+  * is reported in the history instead, which is append-only. */
+final case class SystemPrompt(text: String)
 
 /** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
 case class Reply(text: String, usage: TokenUsage)

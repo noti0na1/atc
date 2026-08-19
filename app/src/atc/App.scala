@@ -309,10 +309,11 @@ final class App(args: Main.Args):
         try
           tui.toolStart(code, "/run")
           val start = System.nanoTime()
+          val decisionsBefore = policy.decisionCount
           val result = s.run(code)
           val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
           tui.toolEnd(result, millis)
-          agent.noteUserRan(code, result)
+          agent.noteUserRan(code, result, policy.decisionsSince(decisionsBefore))
         catch
           case e: Exception =>
             tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")

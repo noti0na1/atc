@@ -30,9 +30,7 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
       .build()
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): ChatCompletionCreateParams =
-    // Two system messages: the stable prefix stays cacheable when the dynamic part changes.
-    val b = ChatCompletionCreateParams.builder().model(modelId).addSystemMessage(system.stable)
-    if system.dynamic.nonEmpty then b.addSystemMessage(system.dynamic)
+    val b = ChatCompletionCreateParams.builder().model(modelId).addSystemMessage(system.text)
     cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
     cfg.temperature.foreach(b.temperature)
     effort(thinking = true).foreach(b.reasoningEffort)
