@@ -130,7 +130,10 @@ working directory, `--approve-all` auto-approve permission requests (scripted us
 `.env` (`cp .env.example .env`), and passes its flags through to `atc`; without the
 script: `./mill dist`, then `out/dist.dest/atc`. `ATC_DEBUG=1` prints stack traces and
 terminal diagnostics, `ATC_ASCII=1` draws the UI with ASCII glyphs only, `ATC_SKIP_BUILD=1`
-makes `start.sh` skip its rebuild check.
+makes `start.sh` skip its rebuild check. To run a local build through the installed `atc`
+wrapper instead, `atc dev <checkout>` copies the checkout's `out/dist.dest/` jars into
+`~/.atc/jars/` in place of the release (it notes when the sources are newer than that
+build); every `atc` run then says so on stderr, and `atc update` restores the latest release.
 
 **Releases.** Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`)
 makes CI build the distribution and attach `atc.jar` and `atc-lib.jar` to the release;

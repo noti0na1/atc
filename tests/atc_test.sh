@@ -262,6 +262,74 @@ assert_contains "old Java message" "Java 17+ is required. Found Java 11" \
   "$(env PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main" 2>&1 >/dev/null || true)"
 
 # ---------------------------------------------------------------------------
+echo "--- dev: a checkout's local build in place of the release ---"
+
+# Java 17 again (the section above left the old-Java mock in place).
+cat > "$TEST_TMP/mockbin/java" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-version" ]]; then echo 'openjdk version "17.0.2" 2022-01-18' >&2; exit 0; fi
+printf '%s\n' "$@"
+EOF
+chmod +x "$TEST_TMP/mockbin/java"
+export PATH="$TEST_TMP/mockbin:$PATH"
+
+CHECKOUT="$TEST_TMP/checkout"
+DIST="$CHECKOUT/out/dist.dest"
+mkdir -p "$CHECKOUT/app/src" "$CHECKOUT/lib/src" "$DIST"
+printf 'object build\n' > "$CHECKOUT/build.mill"
+rm -rf "$CACHE_DIR"
+
+assert_contains "help mentions dev" "atc dev <checkout>" "$(main help)"
+assert_fails "dev without a path fails" main dev
+assert_contains "dev without a path says what it needs" "atc dev <checkout>" "$(stderr_of main dev)"
+assert_fails "dev rejects extra arguments" main dev "$CHECKOUT" extra
+assert_fails "dev rejects a missing directory" main dev "$TEST_TMP/nope"
+assert_fails "dev needs a build" main dev "$CHECKOUT"
+assert_contains "missing build names the dist dir" "no local build in $DIST" "$(stderr_of main dev "$CHECKOUT")"
+assert_fails "dev without a build leaves no cache behind" test -e "$CACHE_DIR"
+
+printf 'dev app\n' > "$DIST/atc.jar"
+printf 'dev lib\n' > "$DIST/atc-lib.jar"
+out="$(cd "$TEST_TMP" && main dev "$CHECKOUT")"
+assert_contains "dev says what it installed" "Installed the local build from $DIST" "$out"
+assert_eq "dev copies the app jar" "dev app" "$(cat "$APP_JAR")"
+assert_eq "dev copies the lib jar" "dev lib" "$(cat "$LIB_JAR")"
+assert_eq "dev marks the cache with the checkout" "dev|$CHECKOUT" "$(cat "$RELEASE_MARKER")"
+assert_eq "dev_source reads the marker" "$CHECKOUT" "$(dev_source)"
+(cd "$CHECKOUT" && main dev . >/dev/null)
+assert_eq "a relative path is stored absolute" "dev|$CHECKOUT" "$(cat "$RELEASE_MARKER")"
+
+run_out="$(main -C /work 2>/dev/null)"
+assert_contains "atc runs the copied jars" $'-jar\n'"$APP_JAR" "$run_out"
+assert_contains "atc says it runs a local build" "running the local build from $CHECKOUT" "$(stderr_of main -C /work)"
+
+# A build older than the sources is noted, not refused.
+touch -t 202001010000 "$DIST/atc.jar" "$DIST/atc-lib.jar"
+assert_contains "stale build is noted" "sources in $CHECKOUT changed since this build" "$(stderr_of main dev "$CHECKOUT")"
+assert_eq "stale build is still installed" "dev app" "$(cat "$APP_JAR")"
+
+# 'atc update' treats the dev marker as "not the latest release" and restores it.
+if have_sha256_tool; then
+  ASSETS_DIR="$TEST_TMP/assets-dev"
+  mkdir -p "$ASSETS_DIR"
+  printf 'released app\n' > "$ASSETS_DIR/atc.jar"
+  printf 'released lib\n' > "$ASSETS_DIR/atc-lib.jar"
+  RELEASE_JSON_OVERRIDE="$(printf '%s' "$FIXTURE_JSON" \
+    | sed -e "s/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890/$(sha256_of "$ASSETS_DIR/atc.jar")/" \
+          -e "s/fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321/$(sha256_of "$ASSETS_DIR/atc-lib.jar")/")"
+  release_json() { printf '%s\n' "$RELEASE_JSON_OVERRIDE"; }
+  curl() { local url="$2" out="$4"; cp "$ASSETS_DIR/$(basename "$url")" "$out"; }
+  out="$(main update)"
+  assert_contains "update downloads the release over a dev install" "Downloading ATC v0.2.0" "$out"
+  assert_eq "update restores the released app jar" "released app" "$(cat "$APP_JAR")"
+  assert_eq "update restores the release marker" "12345678|v0.2.0" "$(cat "$RELEASE_MARKER")"
+  assert_eq "no dev source after update" "" "$(dev_source)"
+  assert_eq "no local-build notice after update" "" "$(stderr_of main -C /work | grep 'local build' || true)"
+  unset -f release_json curl
+fi
+rm -rf "$CACHE_DIR" "$CHECKOUT"
+
+# ---------------------------------------------------------------------------
 echo "--- download flow (stubbed GitHub) ---"
 
 if have_sha256_tool; then
