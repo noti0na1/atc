@@ -15,22 +15,34 @@ object ScopeId:
   private[perms] def apply(id: Long): ScopeId = id
 
 /** One configured file rule. Missing fields mean "no constraint from this rule".
-  * `builtin` marks the default classified patterns (`.ssh`, `.env`, ...) so
-  * summaries can fold them into one line. */
+  *
+  * `grantsWithin` marks a rule from a project config and names the folder its
+  * `.atc` sits in: such a rule *grants* only inside that folder (the project
+  * you opened) while its ceiling applies wherever it matches. A rule without
+  * it comes from a granting layer and grants wherever it matches. */
 case class FileRule(
   pattern: PathPattern,
   access: Option[Access],
   classified: Option[Boolean],
   locked: Boolean = false,
-  builtin: Boolean = false
+  grantsWithin: Option[Path] = None,
+  /** Where the rule comes from, when that is not "a `files` entry"; shown by
+    * `/perms` so a rule nobody wrote is not a mystery. */
+  why: Option[String] = None
 ):
+  /** Whether this rule may grant `p` access, or only take it away. */
+  def grants(p: Path): Boolean = grantsWithin.forall(root => p == root || p.startsWith(root))
+
+  /** A rule that only marks paths classified; the summary folds these. */
+  def classifiedOnly: Boolean = classified.contains(true) && access.isEmpty && !locked
   def describe: String =
     val parts = List(
       access.map(a => s"access=${a.label}"),
       classified.filter(identity).map(_ => "classified"),
       Option.when(locked)("locked"),
     ).flatten
-    s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}"
+    val note = why.orElse(grantsWithin.map(root => s"from the project config, granting only inside $root"))
+    s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(" — " + _)}"
 
 /** What the user answers to a permission prompt. */
 enum Decision:
@@ -76,11 +88,15 @@ final class Scope(val id: ScopeId, val parent: Option[Scope]):
   *
   * Effective file permission of a path `p` in scope `s`:
   *
-  *  - configuration: `access` is the *minimum* over all rules matching `p` or
-  *    an ancestor of `p` (a path matched by no rule with an access level has
-  *    `none`); `classified` if any matching rule says so; `locked` likewise.
-  *    So a sub-folder inherits its parent's permission and can only be made
-  *    stricter by a more specific rule.
+  *  - configuration: a path's access is what some rule *grants* it, clamped by
+  *    every rule that matches. A rule matching `p` or an ancestor of `p` grants
+  *    `p` its `access` (except a project rule outside its own project, which
+  *    only clamps) and the *minimum* over all matching rules is the ceiling
+  *    (unmatched: no grant at all, and no ceiling). So a sub-folder inherits
+  *    its parent's permission and can only be made stricter by a more specific
+  *    rule; a project config can open its own tree but never reach outside it,
+  *    and never past a limit a granting layer set. `classified` and `locked`
+  *    hold if any matching rule says so, from any layer.
   *  - grants (from `request*`, once or for the session) can only *widen*
   *    access, never remove classification, and are ignored for locked paths.
   *
@@ -116,8 +132,15 @@ final class Policy(
   /** Permission from the configuration only. `p` must be canonical. */
   def configPerm(p: Path): Perm =
     val matching = rules.filter(_.pattern.matches(p))
-    val access = matching.flatMap(_.access).reduceOption(_.min(_)).getOrElse(Access.None)
-    Perm(access, classified = matching.exists(_.classified.contains(true)), locked = matching.exists(_.locked))
+    // Nothing grants by default; every matching rule is a ceiling, so the most
+    // restrictive one wins however many layers wrote it.
+    val granted = matching.filter(_.grants(p)).flatMap(_.access).reduceOption(_.max(_)).getOrElse(Access.None)
+    val ceiling = matching.flatMap(_.access).reduceOption(_.min(_)).getOrElse(Access.Write)
+    Perm(
+      granted.min(ceiling),
+      classified = matching.exists(_.classified.contains(true)),
+      locked = matching.exists(_.locked)
+    )
 
   private def grantedAccess(s: Scope, p: Path): Access =
     s.chain.flatMap(_.fileGrants).collect { case (g, a) if p == g || p.startsWith(g) => a }
@@ -142,6 +165,8 @@ final class Policy(
 
   // ── commands ──────────────────────────────────────────────────────
 
+  /** What may run without asking in `s`: the configured patterns plus what the
+    * user granted in this scope or one enclosing it. */
   private def commandPatterns(s: Scope): List[String] = baseCommands ++ s.chain.flatMap(_.commands)
 
   /** The `denyCommands` pattern refusing `commandLine`, if any. */
@@ -234,14 +259,17 @@ final class Policy(
 
   /** Human-readable summary for the UI and the system prompt. */
   def summary: String =
-    val (builtin, explicit) = rules.partition(_.builtin)
+    // Rules that only mark paths classified are folded into one line; there are
+    // a dozen of them in a normal config and each says the same thing.
+    val (classifiedOnly, explicit) = rules.partition(r => r.grantsWithin.isEmpty && r.classifiedOnly)
     def listOf(patterns: List[String]) = if patterns.isEmpty then "(none)" else patterns.mkString(", ")
     def session(patterns: List[String]) = if patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
     val lines = List.newBuilder[String]
     lines += s"Mode: ${mode.label} (${mode.description})"
     lines += "File rules (strictest matching rule wins; unmatched paths are inaccessible):"
     lines ++= explicit.map(r => s"  ${r.describe}")
-    if builtin.nonEmpty then lines += s"  built-in classified patterns: ${builtin.map(_.pattern).mkString(", ")}"
+    if classifiedOnly.nonEmpty then
+      lines += s"  classified patterns: ${classifiedOnly.map(_.pattern).mkString(", ")}"
     if base.fileGrants.nonEmpty then
       lines += "Session file grants:"
       lines ++= base.fileGrants.reverse.map((p, a) => s"  $p: ${a.label}")

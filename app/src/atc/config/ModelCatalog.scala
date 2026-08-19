@@ -70,14 +70,15 @@ final class ModelCatalog(val models: List[ModelSpec]):
     )
 
 object ModelCatalog:
-  /** Resolve every model of every provider. `providers` falls back to
-    * [[Config.DefaultProviders]] when the config defines none. */
-  def from(config: Config): ModelCatalog =
-    val providers = if config.providers.isEmpty then Config.DefaultProviders else config.providers
+  /** Resolve every model of every provider. A provider's `${VAR}` key is
+    * resolved through `keys` (a project's `.atc/keys.properties`, then the global one)
+    * and then the environment. */
+  def from(config: Config, keys: KeyBindings = KeyBindings.empty): ModelCatalog =
     ModelCatalog(
-      providers.toList.sortBy(_._1).flatMap { (name, p) =>
+      config.providers.toList.sortBy(_._1).flatMap { (name, p) =>
+        val key = Config.resolveApiKey(p, keys)
         p.models.toList.sortBy(_._1).map { (alias, m) =>
-          ModelSpec(name, alias, p.api, m.name.getOrElse(alias), p.url, Config.resolveApiKey(p), m)
+          ModelSpec(name, alias, p.api.getOrElse(""), m.name.getOrElse(alias), p.url, key, m)
         }
       }
     )

@@ -18,6 +18,7 @@ object Main:
     prompt: Option[String] = None,
     approveAll: Boolean = false,
     init: Boolean = false,
+    initGlobal: Boolean = false,
     help: Boolean = false,
     version: Boolean = false,
   )
@@ -31,6 +32,7 @@ object Main:
     case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
     case "--approve-all" :: rest => parseArgs(rest, acc.copy(approveAll = true))
     case "--init" :: rest => parseArgs(rest, acc.copy(init = true))
+    case "--init-global" :: rest => parseArgs(rest, acc.copy(initGlobal = true))
     case ("-h" | "--help") :: rest => parseArgs(rest, acc.copy(help = true))
     case ("-v" | "--version") :: rest => parseArgs(rest, acc.copy(version = true))
     case other :: _ => throw IllegalArgumentException(s"Unknown argument: $other (try --help)")
@@ -45,7 +47,8 @@ object Main:
        |  -p, --prompt <text>   run one turn non-interactively and exit
        |      --mode <mode>     sandbox mode: readonly | local | full (default: the config's "mode", else full)
        |      --approve-all     auto-approve permission requests (use with -p in trusted setups only)
-       |      --init            write a starter ./.atc/config.json and exit
+       |      --init            write a starter ./.atc/config.json (project layer) and exit
+       |      --init-global     write a starter ~/.atc/config.json (global layer) and exit
        |  -h, --help            show this help
        |  -v, --version         show the version
        |""".stripMargin
@@ -59,7 +62,14 @@ object Main:
           sys.exit(2)
     if args.help then { println(usage); return }
     if args.version then { println(s"atc $Version"); return }
-    if args.init then { sys.exit(init(args.cwd)) }
+    if args.initGlobal then { sys.exit(write(Config.globalPath, Config.globalTemplate, "models and permissions")) }
+    if args.init then
+      val status = write(Config.projectPath(args.cwd), Config.projectTemplate, "project's permissions")
+      // The config travels with the repository; `.atc/keys.properties` must not.
+      if status == 0 then
+        val ignore = Config.projectPath(args.cwd).getParent.nn.resolve(".gitignore").nn
+        if !Files.exists(ignore) then Files.writeString(ignore, Config.KeysFile + "\n")
+      sys.exit(status)
     val exit: Int =
       try App(args).run()
       catch
@@ -69,14 +79,13 @@ object Main:
           1
     sys.exit(exit)
 
-  /** `--init`: write the starter project config, refusing to overwrite. */
-  private def init(cwd: Path): Int =
-    val target = Config.projectPath(cwd)
+  /** `--init` / `--init-global`: write a starter config, refusing to overwrite. */
+  private def write(target: Path, content: String, what: String): Int =
     if Files.exists(target) then
       System.err.println(s"$target already exists")
       1
     else
       Files.createDirectories(target.getParent)
-      Files.writeString(target, Config.template)
-      println(s"Wrote $target — edit the providers and permissions, then run atc again.")
+      Files.writeString(target, content)
+      println(s"Wrote $target; edit the $what, then run atc again.")
       0

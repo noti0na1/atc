@@ -26,14 +26,9 @@ class AgentSuite extends munit.FunSuite:
       case Nil => Decision.Deny
 
   val policy = Policy(
-    App.fileRules(
-      Config(files =
-        List(
-          atc.config.FileRuleConfig(".", access = Some("write")),
-          atc.config.FileRuleConfig("secrets", classified = Some(true)),
-        )
-      ),
-      root
+    List(
+      FileRule(PathPattern(".", root), Some(Access.Write), None),
+      FileRule(PathPattern("secrets", root), None, Some(true)),
     ),
     List("echo"),
     Nil,

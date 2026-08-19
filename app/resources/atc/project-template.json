@@ -1,0 +1,53 @@
+{
+  "model": "chat",
+  "classifiedModel": "local",
+
+  "files": [
+    { "path": ".", "access": "write" },
+    { "path": "./.git", "access": "read" },
+    { "path": "./secrets", "classified": true }
+  ],
+
+  "commands": [
+    "git status", "git log", "git show", "git diff", "git blame",
+    "git branch --list", "git rev-parse", "git ls-files", "git stash list"
+  ],
+  "denyCommands": ["git push*", "git reset --hard*"],
+
+  "hosts": [
+    "developer.mozilla.org", "man7.org", "git-scm.com", "*.git-scm.com",
+
+    "docs.oracle.com", "openjdk.org", "javadoc.io", "maven.apache.org", "gradle.org",
+    "*.scala-lang.org", "kotlinlang.org", "*.kotlinlang.org",
+
+    "*.python.org", "docs.python.org",
+    "nodejs.org", "*.nodejs.org", "*.typescriptlang.org", "www.typescriptlang.org",
+
+    "*.rust-lang.org", "docs.rs",
+    "go.dev", "pkg.go.dev", "*.golang.org",
+
+    "en.cppreference.com", "isocpp.org",
+    "docs.ruby-lang.org", "ruby-doc.org",
+    "php.net", "*.php.net",
+    "learn.microsoft.com",
+    "*.swift.org", "developer.apple.com",
+    "*.haskell.org", "hackage.haskell.org", "hexdocs.pm",
+    "perldoc.perl.org",
+
+    "lean-lang.org", "*.lean-lang.org", "leanprover.github.io", "leanprover-community.github.io",
+    "rocq-prover.org", "*.rocq-prover.org", "coq.inria.fr",
+
+    "www.postgresql.org", "dev.mysql.com", "www.sqlite.org",
+
+    "arxiv.org", "*.arxiv.org", "openreview.net", "aclanthology.org",
+    "proceedings.mlr.press", "proceedings.neurips.cc", "papers.nips.cc", "openaccess.thecvf.com",
+    "www.jmlr.org", "jmlr.org", "dl.acm.org", "ieeexplore.ieee.org", "link.springer.com",
+    "www.semanticscholar.org", "api.semanticscholar.org", "dblp.org", "doi.org"
+  ],
+  "denyHosts": [],
+
+  "respectGitignore": true,
+  "safeMode": true,
+
+  "instructions": "Match the conventions of the surrounding code. Run the project's build and tests before reporting that the work is done."
+}

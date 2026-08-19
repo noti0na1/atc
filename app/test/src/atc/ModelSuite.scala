@@ -63,7 +63,7 @@ class ModelSuite extends munit.FunSuite:
 
   private def catalog(providers: (String, String, List[String])*): ModelCatalog =
     ModelCatalog.from(Config(providers = providers.map { (name, api, aliases) =>
-      name -> ProviderConfig(api, models = aliases.map(_ -> ModelConfig()).toMap)
+      name -> ProviderConfig(Some(api), models = aliases.map(_ -> ModelConfig()).toMap)
     }.toMap))
 
   test("a model is found by its alias, or by provider/alias"):

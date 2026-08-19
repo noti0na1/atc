@@ -1,16 +1,16 @@
 {
-  "model": "claude",
-  "classifiedModel": "local",
   "providers": {
     "anthropic": {
       "api": "anthropic",
+      "key": "${ANTHROPIC_API_KEY}",
       "models": {
-        "claude":  { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
-        "sonnet":  { "name": "claude-sonnet-5", "webSearch": true }
+        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
+        "sonnet": { "name": "claude-sonnet-5", "webSearch": true, "reasoning": "high"  }
       }
     },
     "openai": {
       "api": "openai-responses",
+      "key": "${OPENAI_API_KEY}",
       "models": {
         "gpt":  { "name": "gpt-5", "webSearch": true },
         "chat": { "name": "gpt-4.1" }
@@ -21,8 +21,15 @@
       "url": "https://api.deepseek.com",
       "key": "${DEEPSEEK_API_KEY}",
       "models": {
-        "deepseek": { "name": "deepseek-v4-flash", "reasoning": "high", "webSearch": true }
+        "deepseek-flash": { "name": "deepseek-v4-flash", "reasoning": "max",  "webSearch": true },
+        "deepseek-pro":   { "name": "deepseek-v4-pro",   "reasoning": "high", "webSearch": true }
       }
+    },
+    "openrouter": {
+      "api": "openai",
+      "url": "https://openrouter.ai/api/v1",
+      "key": "${OPENROUTER_API_KEY}",
+      "models": {}
     },
     "ollama": {
       "api": "openai",
@@ -31,20 +38,33 @@
       "models": { "local": { "name": "llama3.1" } }
     }
   },
+
   "files": [
-    { "path": ".", "access": "write" },
     { "path": ".atc", "access": "none", "locked": true },
-    { "path": "./build", "access": "read" },
-    { "path": "secrets", "classified": true },
-    { "path": "~/notes", "access": "read", "locked": true }
+    { "path": ".ssh",       "classified": true },
+    { "path": ".gnupg",     "classified": true },
+    { "path": ".env",       "classified": true },
+    { "path": ".env.*",     "classified": true },
+    { "path": ".netrc",     "classified": true },
+    { "path": ".npmrc",     "classified": true },
+    { "path": ".pypirc",    "classified": true },
+    { "path": ".docker",    "classified": true },
+    { "path": ".kube",      "classified": true },
+    { "path": ".aws",       "classified": true },
+    { "path": ".azure",     "classified": true },
+    { "path": ".gcloud",    "classified": true },
+    { "path": "*.pem",      "classified": true },
+    { "path": "id_rsa",     "classified": true },
+    { "path": "id_ed25519", "classified": true }
   ],
-  "commands": ["git status", "git diff*", "git log*"],
-  "denyCommands": ["git push*", "rm -rf *", "sudo *"],
-  "hosts": ["*.scala-lang.org", "docs.oracle.com"],
-  "denyHosts": ["*.internal"],
+
+  "commands": [],
+  "denyCommands": ["rm -rf *", "sudo *"],
+
+  "mode": "full",
   "safeMode": true,
   "respectGitignore": true,
-  "mode": "full",
   "executionTimeoutMs": 180000,
-  "maxToolCalls": 60
+  "maxToolCalls": 60,
+  "maxToolOutputChars": 40000
 }

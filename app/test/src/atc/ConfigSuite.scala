@@ -9,6 +9,10 @@ import java.nio.file.{Files, Path}
   * access-level parsing and API-key resolution. (ATC has no scopt CLI config
   * like TACIT; this covers the equivalent surface.) */
 class ConfigSuite extends munit.FunSuite:
+  /** Load with an absent global layer, so a test never depends on the machine's
+    * own `~/.atc/config.json`. Layer combination itself is `LayerSuite`. */
+  private def load(dir: Path, explicit: Option[Path]): Configuration =
+    Config.load(dir, explicit, dir.resolve("no-such-global.json").nn)
 
   private def writeCfg(dir: Path, name: String, json: String): Path =
     val p = dir.resolve(name)
@@ -37,7 +41,6 @@ class ConfigSuite extends munit.FunSuite:
     val c = Config()
     assertEquals(c.model, None)
     assertEquals(c.safeMode, true)
-    assertEquals(c.defaultClassified, true)
     assertEquals(c.executionTimeoutMs, Some(180000L))
     assertEquals(c.maxToolCalls, 60)
     assertEquals(c.maxToolOutputChars, 40000)
@@ -45,18 +48,49 @@ class ConfigSuite extends munit.FunSuite:
     assert(c.denyCommands.isEmpty && c.denyHosts.isEmpty)
     assertEquals(c.respectGitignore, true)
 
-  test("default classified patterns cover the common secret files"):
-    val p = Config.DefaultClassifiedPatterns
+  test("the starting global config protects the usual secrets and its own directory"):
+    // Asserted as properties, not as a list: the template is meant to be edited.
+    val start = upickle.default.read[Config](ujson.read(Config.globalTemplate))
+    val classified = start.files.filter(_.classified.contains(true)).map(_.path)
     for expected <- List(".ssh", ".env", ".env.*", "*.pem", "id_rsa", ".aws") do
-      assert(p.contains(expected), s"missing $expected")
+      assert(classified.contains(expected), s"missing $expected")
+    val ownConfig = start.files.find(_.path == ".atc").get
+    assertEquals(ownConfig.access, Some("none"))
+    assert(ownConfig.locked, "the config that grants everything must not be reachable")
+    assert(start.commands.isEmpty, "a fresh config grants no command")
 
-  test("built-in default providers are Anthropic + OpenAI"):
-    assertEquals(Config.DefaultProviders("anthropic").api, "anthropic")
-    assertEquals(Config.DefaultProviders("openai").api, "openai-responses")
-    val catalog = ModelCatalog.from(Config())
-    assertEquals(catalog.labels, List("claude", "gpt"))
-    assertEquals(catalog.find("claude").modelId, "claude-opus-5")
-    assertEquals(catalog.default.ref, "anthropic/claude")
+  test("a provider may list no models: an endpoint written down, ready to be filled in"):
+    val dir = Files.createTempDirectory("atc-cfg-empty-provider").nn
+    val cfg = writeCfg(
+      dir,
+      "config.json",
+      """{ "providers": { "openrouter": { "api": "openai", "url": "https://openrouter.ai/api/v1" } } }"""
+    )
+    val loaded = load(dir, Some(cfg))
+    assertEquals(loaded.settings.providers("openrouter").models, Map.empty[String, ModelConfig])
+    assert(ModelCatalog.from(loaded.settings).isEmpty, "it contributes no model until one is added")
+    // and a later layer can add one without repeating the endpoint
+    val withModel = upickle.default.read[Config](Config.mergeJson(
+      ujson.read(Files.readString(cfg)).obj,
+      ujson.read(
+        """{ "providers": { "openrouter": { "models": { "sonnet": { "name": "anthropic/claude-sonnet-4.5" } } } } }"""
+      ).obj
+    ))
+    val spec = ModelCatalog.from(withModel).find("sonnet")
+    assertEquals(spec.modelId, "anthropic/claude-sonnet-4.5") // a model *name* may contain a slash
+    assertEquals(spec.baseUrl, Some("https://openrouter.ai/api/v1"))
+
+  test("the starting global config is a usable set of providers"):
+    val start = upickle.default.read[Config](ujson.read(Config.globalTemplate))
+    assert(start.providers.nonEmpty)
+    assert(start.providers.forall((_, p) => p.api.exists(_.nonEmpty)), start.toString)
+    assert(start.providers.exists((_, p) => p.models.nonEmpty), "at least one provider must be usable as it stands")
+    val catalog = ModelCatalog.from(start)
+    assert(catalog.models.forall(_.modelId.nonEmpty))
+    assert(catalog.labels.distinct == catalog.labels, s"ambiguous aliases: ${catalog.labels}")
+    // the roles it names have to resolve
+    start.model.foreach(catalog.find)
+    start.classifiedModel.foreach(catalog.find)
 
   // ── parsing a single file ───────────────────────────────────────
 
@@ -71,7 +105,7 @@ class ConfigSuite extends munit.FunSuite:
         "providers": {
           "anthropic": { "api": "anthropic",
             "models": { "claude": { "name": "claude-opus-5", "webSearch": true } } },
-          "ollama": { "api": "openai", "url": "http://localhost:11434/v1", "key": "ollama",
+          "ollama": { "api": "openai", "url": "http://localhost:11434/v1",
             "models": { "local": {} } }
         },
         "files": [ { "path": ".", "access": "write" }, { "path": "secrets", "classified": true } ],
@@ -80,8 +114,9 @@ class ConfigSuite extends munit.FunSuite:
       }
     """
     )
-    val (c, present) = Config.load(dir, Some(cfg))
-    assertEquals(present, List(cfg))
+    val loaded = load(dir, Some(cfg))
+    val c = loaded.settings
+    assertEquals(loaded.sources, List(cfg))
     assertEquals(c.model, Some("claude"))
     assertEquals(c.classifiedModel, Some("local"))
     assertEquals(c.providers("anthropic").models("claude").name, Some("claude-opus-5"))
@@ -90,9 +125,10 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(local.modelId, "local")
     assertEquals(local.api, "openai")
     assertEquals(local.baseUrl, Some("http://localhost:11434/v1"))
-    assertEquals(local.apiKey, Some("ollama"))
-    assertEquals(c.files.map(_.path), List(".", "secrets"))
-    assertEquals(c.files(1).classified, Some(true))
+    assertEquals(local.apiKey, None) // keys live in keys.properties, never in a config
+    // the file's own rules come after the built-in layer's
+    assertEquals(loaded.rules.takeRight(2).map(_.rule.path), List(".", "secrets"))
+    assertEquals(loaded.rules.last.rule.classified, Some(true))
     assertEquals(c.commands, List("git status"))
     assertEquals(c.safeMode, false)
     assertEquals(c.maxToolCalls, 10)
@@ -100,34 +136,38 @@ class ConfigSuite extends munit.FunSuite:
   test("a malformed config file is a clear error"):
     val dir = Files.createTempDirectory("atc-cfg-bad").nn
     val bad = writeCfg(dir, "config.json", "{ not json ]")
-    val e = intercept[IllegalArgumentException](Config.load(dir, Some(bad)))
+    val e = intercept[IllegalArgumentException](load(dir, Some(bad)))
     assert(e.getMessage.nn.contains("Cannot parse config"), e.getMessage)
 
   test("a non-object config file is rejected"):
     val dir = Files.createTempDirectory("atc-cfg-arr").nn
     val arr = writeCfg(dir, "config.json", "[1, 2, 3]")
-    val e = intercept[IllegalArgumentException](Config.load(dir, Some(arr)))
+    val e = intercept[IllegalArgumentException](load(dir, Some(arr)))
     assert(e.getMessage.nn.contains("must be a JSON object"), e.getMessage)
 
   test("invalid runtime limits are rejected while loading config"):
     val dir = Files.createTempDirectory("atc-cfg-limits").nn
     val bad = writeCfg(dir, "config.json", """{ "maxToolOutputChars": 0 }""")
-    val e = intercept[IllegalArgumentException](Config.load(dir, Some(bad)))
+    val e = intercept[IllegalArgumentException](load(dir, Some(bad)))
     assert(e.getMessage.nn.contains("maxToolOutputChars"), e.getMessage)
 
-  test("absent config files are simply skipped"):
+  test("with no config file at all, nothing is configured and nothing is permitted"):
     val dir = Files.createTempDirectory("atc-cfg-none").nn
-    val (c, present) = Config.load(dir, None)
-    assert(present.isEmpty)
-    assertEquals(c, Config())
+    val loaded = load(dir, None)
+    assert(loaded.sources.isEmpty)
+    assertEquals(loaded.layers, Nil)
+    assertEquals(loaded.rules, Nil)
+    assertEquals(loaded.settings.commands, Nil)
 
   test("the same config path is not merged twice"):
     val dir = Files.createTempDirectory("atc-cfg-dedup").nn
     val projectDir = Files.createDirectories(dir.resolve(".atc")).nn
     val project = writeCfg(projectDir, "config.json", """{ "commands": ["git status"] }""")
-    val (config, present) = Config.load(dir, Some(project))
-    assertEquals(present, List(project))
-    assertEquals(config.commands, List("git status"))
+    val loaded = load(dir, Some(project))
+    assertEquals(loaded.sources, List(project))
+    // read once, in its project role
+    assertEquals(loaded.layers.map(_.origin), List(Origin.Project))
+    assertEquals(loaded.settings.commands, List("git status"))
 
   // ── layered merge (global ← project ← explicit) ─────────────────
 
@@ -179,7 +219,7 @@ class ConfigSuite extends munit.FunSuite:
     val c = upickle.default.read[Config](Config.mergeJson(a, b))
     val p = c.providers("openai")
     assertEquals(p.url, Some("http://new")) // provider scalar overridden
-    assertEquals(p.key, Some("k")) // untouched field kept from the earlier layer
+    assertEquals(p.url, Some("http://new")) // provider scalars still override
     assertEquals(p.models.keySet, Set("old", "fresh")) // model added, not replaced wholesale
     assertEquals(p.models("old").name, Some("v2")) // redefined alias replaced entirely
     assertEquals(p.models("old").webSearch, false) // ... including its dropped settings
@@ -187,67 +227,88 @@ class ConfigSuite extends munit.FunSuite:
 
   // ── API-key resolution ──────────────────────────────────────────
 
-  test("resolveApiKey handles literals, ${ENV} refs and keyEnv"):
-    val varName = "ATC_TEST_KEY_" + ProcessHandle.current().pid()
-    def provider(key: Option[String] = None, keyEnv: Option[String] = None) =
-      ProviderConfig("openai", key = key, keyEnv = keyEnv)
-    assertEquals(Config.resolveApiKey(provider(key = Some("literal-key"))), Some("literal-key"))
-    // an unset ${VAR} resolves to None
-    assertEquals(Config.resolveApiKey(provider(key = Some(s"$${$varName}"))), None)
-    assertEquals(Config.resolveApiKey(provider()), None)
-    // keyEnv falls back to the environment (unset here → None)
-    assertEquals(Config.resolveApiKey(provider(keyEnv = Some(varName))), None)
-    // a resolved key never reaches a message or a log through toString
-    val spec = ModelCatalog.from(Config(providers =
-      Map("p" -> ProviderConfig("openai", key = Some("sk-secret"), models = Map("m" -> ModelConfig())))
-    )).find("m")
-    assertEquals(spec.apiKey, Some("sk-secret"))
-    assert(!spec.toString.contains("sk-secret"), spec.toString)
+  test("a keys file is a properties file, and an empty value is not a binding"):
+    val unset = "ATC_TEST_KEY_" + ProcessHandle.current().pid()
+    val dir = Files.createTempDirectory("atc-keys").nn
+    val file = dir.resolve(Config.KeysFile).nn
+    Files.writeString(
+      file,
+      s"""|# a comment
+          |! also a comment
+          |
+          |DEEPSEEK_API_KEY=sk-secret
+          |COLON_KEY: colon value
+          |SPACED_KEY = spaced
+          |ESCAPED_KEY=with\\=sign
+          |BLANK_KEY=
+          |""".stripMargin
+    )
+    val keys = KeyBindings.load(List(file))
+    assertEquals(keys.get("DEEPSEEK_API_KEY"), Some("sk-secret"))
+    assertEquals(keys.get("COLON_KEY"), Some("colon value")) // `:` separates too, as in any .properties
+    assertEquals(keys.get("SPACED_KEY"), Some("spaced"))
+    assertEquals(keys.get("ESCAPED_KEY"), Some("with=sign"))
+    assertEquals(keys.get("BLANK_KEY"), None) // an empty value means "not set"
+    assertEquals(keys.get(unset), None)
+    // the blank one is not listed
+    assertEquals(keys.names, List("COLON_KEY", "DEEPSEEK_API_KEY", "ESCAPED_KEY", "SPACED_KEY"))
+
+  test("a ${VAR} in a provider's key is resolved through the bindings, then the environment"):
+    val dir = Files.createTempDirectory("atc-keys-provider").nn
+    val file = dir.resolve(Config.KeysFile).nn
+    Files.writeString(file, "DEEPSEEK_API_KEY=sk-secret\n")
+    val keys = KeyBindings.load(List(file))
+    def spec(p: ProviderConfig) =
+      ModelCatalog.from(Config(providers = Map("deepseek" -> p)), keys).find("m")
+    val models = Map("m" -> ModelConfig())
+    assertEquals(
+      spec(ProviderConfig(Some("openai"), key = Some("${DEEPSEEK_API_KEY}"), models = models)).apiKey,
+      Some("sk-secret")
+    )
+    assertEquals(
+      spec(ProviderConfig(Some("openai"), keyEnv = Some("DEEPSEEK_API_KEY"), models = models)).apiKey,
+      Some("sk-secret")
+    )
+    assertEquals(spec(ProviderConfig(Some("openai"), key = Some("literal"), models = models)).apiKey, Some("literal"))
+    assertEquals(spec(ProviderConfig(Some("openai"), models = models)).apiKey, None)
+    // and it never reaches a message or a log through toString
+    val s = spec(ProviderConfig(Some("openai"), key = Some("${DEEPSEEK_API_KEY}"), models = models))
+    assert(!s.toString.contains("sk-secret"), s.toString)
+
+  test("the starting keys file binds the variables the starting config names"):
+    val named = "\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}".r
+      .findAllMatchIn(Config.globalTemplate).map(_.group(1).nn).toSet
+    val bound = Config.keysTemplate.linesIterator.filter(_.contains("=")).map(_.takeWhile(_ != '=').trim).toSet
+    assertEquals(named -- bound, Set.empty[String], "every ${VAR} the config names should have a line to fill in")
 
   // ── App.fileRules ──────────────────────────────────────────────
 
-  test("fileRules defaults to a writable cwd plus the built-in classified patterns"):
-    val cwd = Files.createTempDirectory("atc-rules").nn
-    val rules = App.fileRules(Config(), cwd)
-    // first rule: writable cwd
-    assertEquals(rules.head.access, Some(Access.Write))
-    // the classified defaults are appended, all classified with no access constraint
-    val classifiedPatterns = rules.tail
-    assertEquals(classifiedPatterns.size, Config.DefaultClassifiedPatterns.size)
-    assert(classifiedPatterns.forall(_.classified.contains(true)))
-    assert(classifiedPatterns.forall(_.builtin) && !rules.head.builtin)
-    // a `.env` file anywhere under cwd is classified
-    assert(rules.exists(_.pattern.matches(cwd.resolve("sub/.env"))))
-    // the policy summary folds the built-in patterns into one line
-    val summary = Policy(rules, Nil, Nil, _ => Decision.Deny).summary
-    assert(summary.linesIterator.count(_.contains("classified")) == 1, summary)
-    assert(summary.contains("built-in classified patterns: .ssh, .gnupg"), summary)
-
-  test("explicit file rules replace the default cwd rule and parse access levels"):
-    val cwd = Files.createTempDirectory("atc-rules2").nn
-    val cfg = Config(files =
-      List(
-        FileRuleConfig(".", access = Some("read")),
-        FileRuleConfig("build", access = Some("write"), locked = true),
-        FileRuleConfig("secrets", classified = Some(true)),
-      )
+  test("fileRules carries each rule's origin and parses its access level"):
+    val dir = Files.createTempDirectory("atc-rules").nn
+    val cfg = writeCfg(
+      dir,
+      "config.json",
+      """
+      { "files": [ { "path": ".", "access": "read" },
+                   { "path": "build", "access": "write", "locked": true },
+                   { "path": "secrets", "classified": true } ] }
+    """
     )
-    val rules = App.fileRules(cfg, cwd)
-    assertEquals(rules.head.access, Some(Access.Read))
-    val build = rules.find(_.pattern.toString == "build").get
-    assertEquals(build.access, Some(Access.Write))
-    assert(build.locked)
-
-  test("disabling defaultClassified drops the built-in patterns"):
-    val cwd = Files.createTempDirectory("atc-rules3").nn
-    val rules = App.fileRules(Config(defaultClassified = false), cwd)
-    assertEquals(rules.size, 1)
-    assertEquals(rules.head.access, Some(Access.Write))
+    val rules = App.fileRules(load(dir, Some(cfg)), dir)
+    val configured = rules
+    assertEquals(configured.map(_.access), List(Some(Access.Read), Some(Access.Write), None))
+    assert(configured.forall(_.grantsWithin.isEmpty), "an explicit -c file grants wherever it matches")
+    assert(configured(1).locked)
+    assert(configured(2).pattern.matches(dir.resolve("sub/secrets/k")))
+    // the summary folds the classified-only rules into one line
+    val summary = Policy(rules, Nil, Nil, _ => Decision.Deny).summary
+    assertEquals(summary.linesIterator.count(_.contains("classified patterns")), 1, summary)
+    assert(summary.contains("classified patterns: secrets"), summary)
 
   // ── template ────────────────────────────────────────────────────
 
-  test("the --init template is valid JSON that parses into a Config"):
-    val json = Config.template
+  test("the --init-global template is valid JSON that parses into a Config"):
+    val json = Config.globalTemplate
     val c = upickle.default.read[Config](ujson.read(json))
     assert(c.providers.nonEmpty, "template should define providers")
     val catalog = ModelCatalog.from(c)

@@ -35,12 +35,15 @@ case class ModelConfig(
   * `openai-responses` (the Responses API), or `echo` (the key-less test
   * model). */
 case class ProviderConfig(
-  api: String,
+  /** Optional only so a later layer can add models to a provider an earlier
+    * one defined; every provider needs an `api` once the layers are combined. */
+  api: Option[String] = None,
   /** Base URL override for this endpoint. */
   url: Option[String] = None,
-  /** Literal key, or `${ENV_VAR}`. When absent, `keyEnv` / the SDK's own
-    * credential resolution (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...) is used. */
+  /** The key: a literal, or a `${VAR}` reference resolved from `.atc/keys.properties`
+    * and then the environment (see [[KeyBindings]]). */
   key: Option[String] = None,
+  /** The name of a variable holding the key, resolved the same way. */
   keyEnv: Option[String] = None,
   /** The provider's models, by alias. */
   models: Map[String, ModelConfig] = Map.empty,
@@ -75,13 +78,13 @@ case class Config(
   denyCommands: List[String] = Nil,
   /** Host patterns that are always refused, like `denyCommands` for `hosts`. */
   denyHosts: List[String] = Nil,
-  /** Add the built-in classified patterns (`.ssh`, `.env`, ...) — default true. */
-  defaultClassified: Boolean = true,
   /** Hide paths ignored by `.gitignore` (and `.git` itself) from directory
     * listings and searches — default true. Reading such a path by name still
     * works; this only keeps build output and dependencies out of the way. */
   respectGitignore: Boolean = true,
-  /** Compile agent code with `import language.experimental.safe`. */
+  /** Compile agent code with `import language.experimental.safe`. On unless a
+    * *granting* layer turns it off explicitly: it is a latch, so a narrowing
+    * layer can switch it on and never back off. */
   safeMode: Boolean = true,
   /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
     * files, run commands) or `full` (also network). `/mode` switches at run time. */
@@ -96,62 +99,164 @@ case class Config(
 ) derives ReadWriter
 
 object Config:
-  val DefaultClassifiedPatterns: List[String] = List(
-    ".ssh",
-    ".gnupg",
-    ".env",
-    ".env.*",
-    ".netrc",
-    ".npmrc",
-    ".pypirc",
-    ".docker",
-    ".kube",
-    ".aws",
-    ".azure",
-    ".gcloud",
-    "*.pem",
-    "id_rsa",
-    "id_ed25519",
-  )
+  /** `~/.atc/config.json`: the base of the whole policy. Nothing is permitted
+    * behind it, so it is also where every grant has to be written. */
+  def globalPath: Path = Paths.get(System.getProperty("user.home"), ".atc", "config.json").nn
 
-  /** Built-in providers used when the config defines none. */
-  val DefaultProviders: Map[String, ProviderConfig] = Map(
-    "anthropic" -> ProviderConfig(
-      api = "anthropic",
-      models = Map("claude" -> ModelConfig(name = Some("claude-opus-5"), webSearch = true))
-    ),
-    "openai" -> ProviderConfig(
-      api = "openai-responses",
-      models = Map("gpt" -> ModelConfig(name = Some("gpt-5"), webSearch = true))
-    ),
-  )
+  /** `<dir>/.atc/config.json`, the project config of `dir`. */
+  def projectPath(dir: Path): Path = dir.resolve(".atc").resolve("config.json")
 
-  def globalPath: Path =
-    val xdg = Option(System.getenv("XDG_CONFIG_HOME")).filter(_.nonEmpty).map(Paths.get(_))
-    xdg.getOrElse(Paths.get(System.getProperty("user.home"), ".config")).resolve("atc").resolve("config.json")
+  /** `<dir>/.atc/keys.properties`, the key bindings of `dir`. */
+  def keysPath(dir: Path): Path = dir.resolve(".atc").resolve(KeysFile)
 
-  def projectPath(cwd: Path): Path = cwd.resolve(".atc").resolve("config.json")
+  /** The name of the key bindings file, in `.atc` beside a `config.json`. */
+  val KeysFile = "keys.properties"
 
-  /** Load and merge: global ← project ← explicit. Later layers override
-    * scalars, extend the list settings and merge `providers` (see [[mergeJson]]). */
-  def load(cwd: Path, explicit: Option[Path]): (Config, List[Path]) =
-    // The explicit path may name the project/global file again. Since list
-    // settings are additive, loading a layer twice would duplicate its rules.
-    val candidates = (List(globalPath, projectPath(cwd)) ++ explicit.toList)
-      .distinctBy(_.toAbsolutePath.normalize)
-    val present = candidates.filter(Files.isRegularFile(_))
-    val merged = present.foldLeft(ujson.Obj()) { (acc, p) =>
-      val parsed =
-        try ujson.read(Files.readString(p))
-        catch case e: Exception => throw IllegalArgumentException(s"Cannot parse config $p: ${e.getMessage}")
-      parsed match
-        case o: ujson.Obj => mergeJson(acc, o)
-        case _ => throw IllegalArgumentException(s"Config $p must be a JSON object")
+  /** The project a directory belongs to: the nearest ancestor of `from`
+    * (itself included) whose `.atc` holds a `config.json` or a `keys.properties`. A
+    * project config governs the folder its `.atc` sits in, so running atc in a
+    * sub-directory still picks up (and is bound by) the project's own
+    * configuration and keys. */
+  def projectRoot(from: Path): Option[Path] =
+    def isProject(d: Path) = Files.isRegularFile(projectPath(d)) || Files.isRegularFile(keysPath(d))
+    def up(p: Path | Null): Option[Path] = p match
+      case null => None
+      case d: Path => if isProject(d) then Some(d) else up(d.getParent)
+    up(from.toAbsolutePath.nn.normalize)
+
+  /** Write the global config, and the key bindings beside it, if they are
+    * missing: there has to be a base to narrow. Returns what it created. */
+  def ensureGlobal(path: Path = globalPath): List[Path] =
+    val keys = path.getParent.nn.resolve(KeysFile).nn
+    List(path -> globalTemplate, keys -> keysTemplate).flatMap { (target, content) =>
+      Option.when(!Files.exists(target)) {
+        Option(target.getParent).foreach(Files.createDirectories(_))
+        Files.writeString(target, content)
+        target
+      }
     }
-    val cfg =
-      try read[Config](merged)
-      catch case e: Exception => throw IllegalArgumentException(s"Invalid config: ${e.getMessage}")
-    (validate(cfg), present)
+
+  // ── layers ────────────────────────────────────────────────────────
+
+  /** Load every layer and combine them: `~/.atc/config.json` ← the project's
+    * `.atc/config.json` ← `-c <file>`. See [[combine]] for what "later" means
+    * per setting. */
+  def load(cwd: Path, explicit: Option[Path]): Configuration = load(cwd, explicit, globalPath)
+
+  /** As [[load]], with the global path given explicitly (tests). */
+  def load(cwd: Path, explicit: Option[Path], global: Path): Configuration =
+    val root = projectRoot(cwd)
+    val project = root.map(projectPath)
+    val candidates =
+      List(Origin.Global -> global) ++ project.map(Origin.Project -> _) ++ explicit.map(Origin.Explicit -> _)
+    // A path named twice is read once, in the first role it appears in. That
+    // keeps `~/.atc/config.json` a granting layer when atc runs in the home
+    // directory, and keeps `-c ./.atc/config.json` a narrowing one.
+    val present = candidates
+      .filter((_, p) => Files.isRegularFile(p))
+      .distinctBy((_, p) => p.toAbsolutePath.normalize)
+    // Keys are read separately, most specific first: they are secrets, not
+    // settings, so they never take part in the layer merge.
+    val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
+    combine(present.map((origin, path) => readLayer(origin, path)), keys)
+
+  private def readLayer(origin: Origin, path: Path): ConfigLayer =
+    val text =
+      try Files.readString(path).nn
+      catch
+        case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
+    // Relative patterns of a project config are read against the folder its
+    // `.atc` sits in; every other layer reads them against the working directory.
+    val base = Option.when(origin == Origin.Project)(path.getParent.nn.getParent.nn)
+    ConfigLayer(origin, Some(path), readObj(text, path.toString), parse(text, path.toString), base)
+
+  private def readObj(text: String, where: String): ujson.Obj =
+    val parsed =
+      try ujson.read(text)
+      catch case e: Exception => throw IllegalArgumentException(s"Cannot parse config $where: ${e.getMessage}")
+    parsed match
+      case o: ujson.Obj => o
+      case _ => throw IllegalArgumentException(s"Config $where must be a JSON object")
+
+  private def parse(text: String, where: String): Config =
+    try read[Config](readObj(text, where))
+    catch case e: Exception => throw IllegalArgumentException(s"Invalid config $where: ${e.getMessage}")
+
+  /** Settings that are policy: a narrowing layer may only make these stricter,
+    * so they are taken from the granting layers and then tightened. Everything
+    * else (models, providers, instructions, and the `commands` / `hosts` lists,
+    * which every layer may add to) simply merges in layer order. */
+  private val PolicyKeys =
+    Set("files", "denyCommands", "denyHosts") ++
+      Set("mode", "safeMode", "respectGitignore") ++
+      Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
+
+  /** Combine the layers.
+    *
+    *  - **models, providers, instructions** (nothing to do with permissions)
+    *    merge in layer order, the later layer winning; providers merge per
+    *    provider and then per model alias, so a project config can add a model
+    *    to a provider the global config defined.
+    *  - **`commands` / `hosts`** are the union of every layer's list: a project
+    *    config may pre-approve the commands and hosts its work needs, the way
+    *    it may open its own files. The deny lists are the backstop.
+    *  - **policy settings** come from the *granting* layers (global, `-c`)
+    *    merged the same way, and are then narrowed by the project layer:
+    *    limits and the sandbox mode by the stricter value, `safeMode` /
+    *    `respectGitignore` only towards "on".
+    *  - **file rules** from every layer are kept with their anchor: a project
+    *    layer's rules grant only inside its own folder, and clamp everywhere
+    *    (see [[LayeredRule]] and `Policy.configPerm`).
+    *  - **`denyCommands` / `denyHosts`** are refusals, so every layer's patterns
+    *    apply; a narrowing layer can add to them but never drop one.
+    *
+    * Narrowing is order-independent (every combination is a min, an `or` or an
+    * intersection), so only the granting layers care about their order.
+    */
+  def combine(layers: List[ConfigLayer], keys: KeyBindings = KeyBindings.empty): Configuration =
+    val (granting, narrowing) = layers.partition(_.origin.grants)
+    def merged(ls: List[ConfigLayer]) = ls.map(_.json).foldLeft(ujson.Obj())(mergeJson)
+    val everything = merged(layers)
+    val granted = merged(granting)
+    // Non-policy settings from every layer, policy settings from the granting ones.
+    val effective = ujson.Obj()
+    for (k, v) <- everything.value do if !PolicyKeys.contains(k) then effective(k) = v
+    for (k, v) <- granted.value do if PolicyKeys.contains(k) then effective(k) = v
+    val base = parse(ujson.write(effective), "the merged configuration")
+    val settings = narrowing.foldLeft(base)(tighten)
+    val rules = layers.flatMap(l => l.config.files.map(LayeredRule(_, base = l.base)))
+    Configuration(layers, validate(settings), rules, keys)
+
+  /** Apply one narrowing layer to the settings it defines. Every field moves
+    * towards "stricter" or stays put, so this can never widen the policy. */
+  private def tighten(base: Config, layer: ConfigLayer): Config =
+    val n = layer.config
+    def onlyIfSet[T](key: String)(stricter: => T)(keep: => T): T = if layer.defines(key) then stricter else keep
+    base.copy(
+      mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
+      // A latch: `|| ` can only move it towards on, whatever the layer says.
+      safeMode = base.safeMode || onlyIfSet("safeMode")(n.safeMode)(false),
+      respectGitignore = base.respectGitignore || onlyIfSet("respectGitignore")(n.respectGitignore)(false),
+      // A missing timeout means "no limit", so it is the *least* strict value.
+      executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
+        (base.executionTimeoutMs, n.executionTimeoutMs) match
+          case (Some(a), Some(b)) => Some(a.min(b))
+          case (a, None) => a
+          case (None, b) => b
+      }(base.executionTimeoutMs),
+      maxToolCalls = onlyIfSet("maxToolCalls")(base.maxToolCalls.min(n.maxToolCalls))(base.maxToolCalls),
+      maxToolOutputChars =
+        onlyIfSet("maxToolOutputChars")(base.maxToolOutputChars.min(n.maxToolOutputChars))(base.maxToolOutputChars),
+      // Refusals only ever add (the same pattern in two layers is still one rule).
+      denyCommands = (base.denyCommands ++ n.denyCommands).distinct,
+      denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
+    )
+
+  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an
+    * unset mode means the most permissive one. */
+  private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
+    def parsed(o: Option[String]) = o.map(atc.perms.Mode.parse).getOrElse(atc.perms.Mode.Full)
+    Some(atc.perms.Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
 
   /** Reject limits that would otherwise fail much later in output slicing,
     * timeout accounting, or provider request construction. */
@@ -169,10 +274,14 @@ object Config:
     }
     config.providers.foreach { (name, provider) =>
       if name.trim.isEmpty then throw IllegalArgumentException("Invalid config: provider names must not be blank")
-      if provider.api.trim.isEmpty then
-        throw IllegalArgumentException(s"Invalid config: api for provider '$name' must not be blank")
-      if provider.models.isEmpty then
-        throw IllegalArgumentException(s"Invalid config: provider '$name' defines no models")
+      // `api` may be left out by a layer that only adds models to a provider an
+      // earlier layer defined; the combined provider must have one.
+      if !provider.api.exists(_.trim.nonEmpty) then
+        throw IllegalArgumentException(
+          s"Invalid config: provider '$name' has no api (expected anthropic | openai | openai-responses | echo)"
+        )
+      // A provider with no models is fine: an endpoint written down ready to
+      // use, or one a later layer fills in.
       provider.models.foreach { (alias, model) =>
         val where = s"providers.$name.models.$alias"
         if alias.trim.isEmpty then
@@ -238,15 +347,28 @@ object Config:
 
   private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
 
-  /** The provider's key: `key` (a literal or `${VAR}`), else `keyEnv`, else
-    * none — leaving the SDK to resolve its own default environment variable. */
-  def resolveApiKey(p: ProviderConfig): Option[String] =
-    p.key.flatMap {
-      case EnvRef(name) => Option(System.getenv(name)).filter(_.nonEmpty)
-      case literal => Some(literal)
-    }.orElse(p.keyEnv.flatMap(n => Option(System.getenv(n)).filter(_.nonEmpty)))
+  /** A `${VAR}` reference resolved through `bindings`; anything else is the
+    * literal value. `None` when nothing binds the variable. */
+  def resolveEnvRef(value: String, bindings: KeyBindings = KeyBindings.empty): Option[String] = value match
+    case EnvRef(name) => bindings.get(name.nn)
+    case literal => Some(literal)
 
-  /** The starter config written by `--init` (`app/resources/atc/config-template.json`). */
-  def template: String = atc.Resources.text("/atc/config-template.json").getOrElse(
-    throw IllegalStateException("config template resource missing (atc/config-template.json)")
+  /** The provider's key: `key` (a literal or `${VAR}`), else the variable
+    * `keyEnv` names, else none — leaving the SDK to resolve its own default
+    * variable. `${VAR}` and `keyEnv` are looked up in `.atc/keys.properties`
+    * before the environment. */
+  def resolveApiKey(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Option[String] =
+    p.key.flatMap(resolveEnvRef(_, bindings)).orElse(p.keyEnv.flatMap(bindings.get))
+
+  /** The starter global config written by `--init-global`. */
+  def globalTemplate: String = resource("/atc/config-template.json")
+
+  /** The starter key bindings written beside it. */
+  def keysTemplate: String = resource("/atc/keys-template.properties")
+
+  /** The starter project config written by `--init`. */
+  def projectTemplate: String = resource("/atc/project-template.json")
+
+  private def resource(path: String): String = atc.Resources.text(path).getOrElse(
+    throw IllegalStateException(s"config template resource missing ($path)")
   )

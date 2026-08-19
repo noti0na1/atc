@@ -4,8 +4,8 @@
 
 ATC is a small terminal coding agent (in the spirit of Claude Code) whose **only tool is a
 Scala 3 REPL** protected by [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
-and Scala's experimental *safe mode*. Every action the model wants to take — read a file,
-run a command, fetch a URL — has to be written as Scala against a small, capability-typed
+and Scala's experimental *safe mode*. Every action the model wants to take (read a file,
+run a command, fetch a URL) has to be written as Scala against a small, capability-typed
 library, and that code is compiled before it is allowed to run.
 
 What the agent may do is therefore decided by **which capabilities are in scope**, and an
@@ -38,7 +38,7 @@ interactive permission requests.
 
 `grepRecursive` and `println` are not strings ATC parses: they are methods of
 `atc.lib.Interface`, each demanding a capability value that only the sandbox hands out.
-The snippet was compiled before it ran — had it tried to write a file in read-only mode,
+The snippet was compiled before it ran; had it tried to write a file in read-only mode,
 or reach the network without a `Network`, nothing would have happened. The REPL keeps its
 state between snippets, so a `val` defined in one turn is still there in the next.
 
@@ -47,14 +47,18 @@ state between snippets, so a `val` defined in one turn is still there in the nex
 You need JDK 17 or newer. The repository ships its own Mill launcher (`./mill`), so there
 is nothing else to install.
 
-**1. API keys.** Copy the example environment file and fill in the providers you use:
+**1. API keys.** The first run writes `~/.atc/config.json` (providers, machine-wide
+permissions) and `~/.atc/keys.properties` beside it, with an empty line per provider key.
+Fill in the ones you use:
 
-```bash
-cp .env.example .env       # ANTHROPIC_API_KEY / OPENAI_API_KEY, plus optional ATC_* settings
+```properties
+ANTHROPIC_API_KEY=sk-ant-…
+OPENAI_API_KEY=
 ```
 
-`start.sh` sources this file without overriding variables your shell already exports. Skip
-it if you export the keys yourself, or use a local model that needs none.
+Alternatively export the variables in your shell (`start.sh` also sources a `.env` in the
+repository, `cp .env.example .env`, without overriding what is already exported), or use a
+local model that needs no key.
 
 **2. A project config.** Run ATC once with `--init` in the project it should work on:
 
@@ -62,9 +66,11 @@ it if you export the keys yourself, or use a local model that needs none.
 ./start.sh -C ~/my-project --init      # writes ~/my-project/.atc/config.json
 ```
 
-Then open that file and decide two things: which **models** to use, and which **files,
-commands and hosts** the agent may touch without asking. Both have working defaults; the
-permissions are the part worth reading — see [Configuration](#configuration).
+That file opens the project to the agent: without it (or a rule in `~/.atc/config.json`)
+nothing is readable and the agent has to ask for every file. Open it and decide two things:
+which **models** to use, and which **files, commands and hosts** the agent may touch without
+asking. Both have working defaults; the permissions are the part worth reading; see
+[Configuration](#configuration).
 
 **3. Run it.**
 
@@ -122,7 +128,7 @@ def println(x: Any)(using UserIO^): Unit
 A snippet can therefore do exactly what the givens in its scope allow, and it cannot conjure
 a new one: the capability classes have `private[atc]` constructors (agent code is compiled
 into the empty package), the only instances are the ones the REPL preamble binds, and the
-object holding the roots (`atc.lib.Runtime`) is `@rejectSafe` — under safe mode, agent code
+object holding the roots (`atc.lib.Runtime`) is `@rejectSafe`: under safe mode, agent code
 cannot even name it.
 
 ### The capabilities, and where they come from
@@ -140,7 +146,7 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 
 | Capability | What it authorises | Where one comes from |
 |---|---|---|
-| `IOCap` | nothing by itself — it is the root the others are derived from | the preamble (`given io`) |
+| `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
 | `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | `fileSystem(using io: IOCap^)`, or the preamble's `fs` |
 | `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `fs.access(path)` |
 | `Exec` | running commands | `processes(using io: IOCap^)` |
@@ -156,7 +162,7 @@ at all (see [Modes](#modes-read-only-local-full)).
 Each of these types has two views, following the nightly's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html):
 
-* the **bare** type — `FileSystem`, `IOCap` — is the **read-only** view;
+* the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view;
 * `^`, or `^{io}` ("as capable as `io`"), is the **full** view.
 
 The mutating operations are declared `update def` in the library, and an `update` method can
@@ -204,8 +210,8 @@ def map[B](op: T ->{any.rd} B): Classified[B]
 ```
 
 `->{any.rd}` means the function may capture **read-only** capabilities only. Every outward
-channel needs a *full* one — `println`/`ask`/`chat` need `UserIO^`, `write` needs
-`FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network` — so none of them can appear
+channel needs a *full* one (`println`/`ask`/`chat` need `UserIO^`, `write` needs
+`FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
 inside a `map`. The agent can compute on a secret (and even read files, where its `fs` is
 itself read-only) but never see it; `toString` is `Classified(***)`.
 
@@ -219,11 +225,11 @@ classified path, `chat(Classified)` with the configured classified model, and `h
 Types decide what compiles; they know nothing about your configuration. So every host method
 *also* checks the permission [`Policy`](#file-permissions) for the path, command or host in
 question, and every capability value carries the id of the permission scope it was issued
-for — a capability from a `request*` block is refused once that block has closed. Two more
+for: a capability from a `request*` block is refused once that block has closed. Two more
 layers sit underneath: a regex `CodeValidator` rejects the obvious escape hatches
 (`java.io`, reflection, `caps.unsafe`, `atc.host`, catching fatal throwables) before
 compilation, and the REPL's class loader exposes only the JDK, `scala.*` and `atc.lib.*`, so
-the application itself — host, policy, LLM clients, the compiler — is invisible to agent
+the application itself (host, policy, LLM clients, the compiler) is invisible to agent
 code.
 
 ## Modes: read-only, local, full
@@ -249,7 +255,7 @@ Required: atc.lib.FileSystem^{any}
   (fs : atc.lib.FileSystem^{io.rd}).
 ```
 
-In **local** mode `fs` and `ex` are full, but `io` is only a read-only view — and `Network`
+In **local** mode `fs` and `ex` are full, but `io` is only a read-only view, and `Network`
 is derived by `def network(using io: IOCap^): Network^{io}`. There is no full `IOCap` to
 derive one from, and none in scope, so a network call has nothing to resolve:
 
@@ -269,7 +275,7 @@ The `Policy` enforces the same three levels again at run time (writes downgraded
 
 Switch modes with `/mode` (cycles read-only → local → full), **Shift-Tab** on an empty
 prompt, `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts a
-fresh REPL — the agent's `val`s and `def`s are gone — but keeps the conversation. The
+fresh REPL (the agent's `val`s and `def`s are gone) but keeps the conversation. The
 default is full.
 
 ## Asking for more
@@ -288,22 +294,113 @@ requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-You get a pop-up — *Yes, this time* / *Yes, for the rest of this session* / *No* — and the
+You get a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*) and the
 block runs with the extra permission. `locked` rules cannot be widened at all. The granted
 capability cannot leave the block (capture checking), and the host closes the permission
 scope when the block exits, so its scope id can never be used again.
 
 `requestFiles` works in every mode: the file system it lends the block is exactly as capable
-as the one you already hold — full in local and full mode, read-only in read-only mode — so
+as the one you already hold (full in local and full mode, read-only in read-only mode), so
 the same call site compiles everywhere.
 
 ## Configuration
 
-Config files are JSON, merged in this order: `~/.config/atc/config.json` (global),
-`./.atc/config.json` (project), then `-c <file>`. Later files override scalars, extend
-`files`/`commands`/`hosts`, and merge `models` by alias. `atc --init` writes
-[`app/resources/atc/config-template.json`](app/resources/atc/config-template.json) as a
-starting point.
+### Layers
+
+Config files are JSON, and there are three layers:
+
+| | layer | file | may |
+|---|---|---|---|
+| 1 | global | `~/.atc/config.json` | grant anything |
+| 2 | project | the nearest `.atc/config.json` at or above the working directory | open **its own project** (files inside its folder, commands, hosts); narrow anything |
+| 3 | explicit | `-c <file>` | grant anything |
+
+**`~/.atc/config.json` is the base, and there is nothing behind it.** No policy is compiled
+into the program: what no config grants is not permitted. atc writes that file from
+[a starting config](app/resources/atc/config-template.json) the first time it runs
+(`--init-global` writes it on demand) and never touches it again. The starting config
+protects without granting: it lists the providers, classifies the usual credential paths,
+puts `.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no file, no
+command and no host. Edit it to grant things machine-wide.
+
+**A directory is workable because a config says so.** The working directory is not special:
+`atc -C /tmp/scratch` with no config covering it can read and write nothing, says so at
+startup, and leaves the agent to ask for each file. `atc --init` writes a
+[project config](app/resources/atc/project-template.json) that opens the project:
+
+* it grants the project's own tree, with `./.git` read-only so the agent can read history
+  but not rewrite it by hand (git *commands* are unaffected; they are governed by
+  `commands`, not by file rules), and classifies `./secrets`;
+* it pre-approves the read-only git commands (`git status`, `git log`, `git diff`, …) and
+  refuses `git push*` and `git reset --hard*`;
+* it opens the network to language documentation and the usual paper hosts (MDN,
+  `docs.python.org`, `arxiv.org`, …): official docs and publishers, not package registries
+  or code-hosting sites, since a permitted host is also somewhere `httpPost` can send data.
+  Redirects are not followed, so a host the agent is sent on to has to be listed itself.
+
+Everything else is left to the global config. Alternatively, grant the path from
+`~/.atc/config.json` and skip the project config altogether.
+
+The project layer is found by **walking up** from the working directory, the way git finds
+`.git`: running atc in `repo/src/main` picks up `repo/.atc/config.json`. That config governs
+the folder its `.atc` sits in, and its relative patterns are read against that folder, so
+`"./build"` in `repo/.atc/config.json` always means `repo/build`, wherever atc was started.
+Should the search reach your home directory, `~/.atc/config.json` stays the granting layer
+rather than becoming a project one.
+
+Note the asymmetry: a relative pattern in the *global* config still means "relative to the
+working directory", since that config is not tied to any project. So `{ "path": ".",
+"access": "write" }` in `~/.atc/config.json` opens whatever directory atc is started in
+(and only that: started in `repo/src/main` it leaves the rest of `repo` alone), while the
+same rule in a project config always opens the whole project. Start atc at the project root
+if you want the agent to reach all of it.
+
+**Settings that are not permissions** (`model`, `classifiedModel`, `providers`,
+`instructions`) merge in layer order, the later layer winning. Providers merge per provider
+and then per model alias, so a project config can add a model to a provider the global
+config defined without repeating its `api`, `url` or `key`.
+
+**Permissions do not merge that way.** A project's `.atc/config.json` ships inside the
+repository you are working in. It may open *that repository* (you chose to work there) but
+nothing beyond it, and never past a limit the machine's owner set. The global and `-c`
+layers grant anywhere; the project layer grants only what belongs to its project, and
+otherwise only takes away:
+
+* **`files`**: a path's access is what some rule *grants* it, clamped by the **minimum**
+  over every rule matching the path *or an ancestor of it*. A rule grants wherever it
+  matches, except a project rule outside its own project, which only clamps. So: nothing
+  is reachable until a rule grants it; a rule on a directory covers its whole subtree and a
+  deeper rule can only narrow that; a project config can open its own tree
+  (`{ "path": ".", "access": "write" }`) but `{ "path": "~/.ssh", "access": "read" }` in one
+  grants nothing, and neither does raising a path the global config restricted.
+  `classified` and `locked` only ever restrict, so they apply from any layer and no layer
+  can take them off again.
+* **`commands` / `hosts`**: the union of every layer's list. A project config may
+  pre-approve the commands and hosts its work needs, the way it opens its own files; there
+  is no "inside the project" for a command or a host, so this is the one place a project
+  config reaches beyond its tree. The deny lists are the backstop, and a repository you do
+  not trust deserves a look at its `.atc/config.json` before you run atc in it.
+* **`denyCommands` / `denyHosts`**: refusals, so every layer's patterns apply. Any layer can
+  add one and none can drop one, so `"denyCommands": ["sudo *"]` in `~/.atc/config.json`
+  holds against a project that lists `sudo apt` under `commands`.
+* **`mode`, `safeMode`, `respectGitignore`, `maxToolCalls`, `maxToolOutputChars`,
+  `executionTimeoutMs`**: the project layer moves each towards the stricter value (a lower
+  mode or limit, a flag switched on) or leaves it alone. A setting it does not mention is
+  not narrowed, which is why leaving a key out and setting it to its default are different
+  things. `safeMode` in particular is a **latch**: it is on unless a granting layer says
+  `"safeMode": false`, and a project config can switch it on but never back off.
+
+Two consequences worth knowing. The narrowing is **unconditional**: `-c` outranks the
+project config for the model it picks, but cannot undo a cap the project put on its files.
+And what the *user* grants at a permission prompt is **not** narrowed: the human is the
+authority, so the agent can still ask for something no config pre-authorised (unless a rule
+also says `locked`). Since every narrowing is a minimum, an "or" or a union, the order in
+which it is applied does not matter; only the granting layers care about theirs.
+
+`.gitignore` comes last and is not a permission at all: the policy decides access first,
+then `respectGitignore` hides ignored paths from listings (see
+[file permissions](#file-permissions)). It can only hide, and nested `.gitignore` files
+hide more the deeper you go, which mirrors the layering.
 
 ```json
 {
@@ -352,11 +449,16 @@ starting point.
 A **provider** is one endpoint: an `api` (the wire protocol), an optional `url` and key, and
 the `models` reachable through it. A **model** is an alias under that provider, whose `name`
 is the id the provider knows it by (`name` defaults to the alias, so `"models": { "gpt-5":
-{} }` is enough) plus the settings that apply to that model alone — `webSearch`, `reasoning`,
+{} }` is enough) plus the settings that apply to that model alone: `webSearch`, `reasoning`,
 `thinking`, `reasoningSummary`, `maxTokens`, `temperature`, `webSearchVersion`.
 
+A provider may list no models at all: an endpoint written down ready to use, which you or a
+later layer fills in. A model's `name` may contain a slash (`"name":
+"anthropic/claude-sonnet-4.5"` on OpenRouter); only the *alias* may not, since that is what
+`provider/alias` splits on.
+
 A model is named by its **alias** (`"model": "claude"`, `/model sonnet`), or by
-**`provider/alias`** when two providers use the same alias — then the bare alias is refused
+**`provider/alias`** when two providers use the same alias; then the bare alias is refused
 with both candidates named. `/models` lists every model with the name that identifies it.
 
 One vendor reachable through two protocols is two providers (an `openai` entry with
@@ -365,25 +467,49 @@ protocol belongs to the endpoint.
 
 `api` is one of
 
-* `anthropic` — Messages API (official Java SDK). `webSearch: true` adds the server-side
+* `anthropic`: Messages API (official Java SDK). `webSearch: true` adds the server-side
   `web_search` tool (`web_search_20260209`; set `"webSearchVersion": "20250305"` for older
   models). Adaptive thinking is on unless `"thinking": false`; `reasoning` maps to
   `output_config.effort` (`low|medium|high|xhigh|max`).
-* `openai-responses` — Responses API; also works with other vendors that implement it (e.g.
+* `openai-responses`: Responses API; also works with other vendors that implement it (e.g.
   DeepSeek: `"baseUrl": "https://api.deepseek.com"`). `webSearch: true` adds the built-in
   `web_search` tool. `reasoning` maps to `reasoning.effort`; `"reasoningSummary": "auto"`
   asks OpenAI to stream reasoning summaries (shown as thinking; DeepSeek streams its
   reasoning without it).
-* `openai` — Chat Completions; also the adapter for any OpenAI-compatible server (Ollama,
+* `openai`: Chat Completions; also the adapter for any OpenAI-compatible server (Ollama,
   vLLM, LM Studio, OpenRouter …) via `url`. `webSearch: true` sets `web_search_options`
   (only search-enabled models accept it).
-* `echo` — the key-less local model used for smoke tests.
+* `echo`: the key-less local model used for smoke tests.
 
-API keys are per provider: `key` (a literal or `"${SOME_ENV_VAR}"`), `keyEnv`, or the SDK's
-own resolution (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …).
+**API keys** never sit in a config. A provider names the variable that holds its key:
+
+```json
+"deepseek": { "api": "openai-responses", "url": "https://api.deepseek.com",
+              "key": "${DEEPSEEK_API_KEY}", "models": { … } }
+```
+
+The values live in `.atc/keys.properties`, a Java properties file with one `NAME=value` per
+line:
+
+```properties
+DEEPSEEK_API_KEY=sk-…
+OPENROUTER_API_KEY=
+```
+
+A `${VAR}` (or a `keyEnv` name) is looked up in the project's `.atc/keys.properties`, then
+`~/.atc/keys.properties`, then the process environment. **An empty value is not a binding**:
+the lookup passes over it and carries on, so blanking a line falls back to the next source
+instead of breaking. The file is read by `java.util.Properties`, so `#` and `!` comments,
+`NAME: value`, `\` escapes and line continuations all work as in any `.properties` file.
+
+The starting `~/.atc/keys.properties` is written beside the global config on first run, with
+an empty line for each variable the starting config names. `atc --init` adds a
+`.atc/.gitignore` holding `keys.properties`, and the starting policy makes `.atc` `none` and
+`locked`, so the agent can read neither the bindings nor the config. `/config` lists which
+variables are bound and from where, never their values.
 
 Two roles. **`model`** is the agent; it never sees classified data. **`classifiedModel`** is
-the model that handles `Classified` values through `chat(Classified[String])` — point it at
+the model that handles `Classified` values through `chat(Classified[String])`; point it at
 something you trust with your secrets, typically a local model; leave it unset and classified
 data never reaches any model. Both are switched for the session with **`/model [ref]`** and
 **`/classifiedmodel [ref]`**: with a reference they switch directly, without one they open a
@@ -400,18 +526,29 @@ Each rule has a `path` pattern and any of `access` (`none|read|write`), `classif
 `locked` (bool). Patterns are gitignore-flavoured, as in TACIT:
 
 * no `/` in the pattern → matches any path **component** anywhere (`.env`, `*.pem`,
-  `node_modules`) — use `./name` for a project-relative directory;
-* relative with `/` → relative to the working directory, with `*`, `**`, `?`, `[…]`;
-* absolute or `~/…` → absolute; `.` is the working directory itself.
+  `node_modules`); use `./name` for a project-relative directory;
+* relative with `/` → relative to the working directory (to the project's folder in a
+  project config), with `*`, `**`, `?`, `[…]`;
+* absolute or `~/…` → absolute; `.` is the working directory (or project) itself.
 
 A rule applies to the path it matches **and its whole subtree**. The effective access of a
 path is the **minimum** over all matching rules (a path matched by no rule with an access
 level is inaccessible); it is **classified** if any matching rule says so, and **locked** if
-any does. So a sub-folder inherits its parent's permission and can only be made stricter —
-`build/generated: write` under `build: read` still yields `read`. If `files` is empty the
-working directory is writable. The built-in classified patterns (`.ssh`, `.gnupg`, `.env`,
-`.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
-`*.pem`, `id_rsa`, `id_ed25519`) are always added unless `"defaultClassified": false`.
+any does. So a sub-folder inherits its parent's permission and can only be made stricter:
+`build/generated: write` under `build: read` still yields `read`. A rule from the project
+layer grants only inside its own project and is a cap everywhere else, as described under
+[layers](#layers).
+
+There is no default compiled into the program: the base rules are whatever
+`~/.atc/config.json` says. The [starting one](app/resources/atc/config-template.json)
+grants no path at all (the [project config](app/resources/atc/project-template.json) that
+`atc --init` writes is what opens a project), classifies the usual credential paths
+(`.ssh`, `.gnupg`, `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.docker`, `.kube`,
+`.aws`, `.azure`, `.gcloud`, `*.pem`, `id_rsa`, `id_ed25519`), and sets **`.atc` to `none`
+and `locked`**: the configuration decides what the agent may do, so the agent can neither
+read nor write it and no prompt can open it. That pattern has no `/`, so it covers `~/.atc`
+and any project's `.atc` alike. Edit the file to change any of this; delete a rule and it is
+gone.
 
 `"respectGitignore": true` (the default) hides what git ignores: `ls`, `walk`, `find`,
 `grepRecursive` and the `Classified` listings leave out `.git` and every path matched by a
@@ -430,16 +567,20 @@ are judged by their target.
 
 `commands` are patterns over the whole command line: `*` is a wildcard, and a pattern
 without `*` matches by word prefix (`"git status"` allows `git status --short`; `"ls"`
-allows `ls -la` but not `lsblk`). A command also needs read access to the directory it runs
-in (the working directory by default), which must not be classified — that check goes
-through the `FileSystem` capability, so a `requestFiles` block covers it. `hosts` are glob
-patterns on host names; only `http`/`https` URLs are accepted.
+allows `ls -la` but not `lsblk`, and `"git diff"` allows `git diff HEAD` but not
+`git difftool`). A command also needs read access to the directory it runs in (the working
+directory by default), which must not be classified; that check goes through the
+`FileSystem` capability, so a `requestFiles` block covers it. Beyond that, a pre-approved
+command runs with your privileges and is *not* subject to the file rules (`git diff
+--no-index a b` reads any two files, `git log --output=f` writes one), so pre-approve the
+subcommands you mean rather than `git *`. `hosts` are glob patterns on host names; only
+`http`/`https` URLs are accepted.
 
 `denyCommands` and `denyHosts` are the denylist to those allowlists, with the same pattern
 syntax. A matching command or host is refused outright: **deny wins over every allow rule**,
 over a session grant, over an open `request*` scope and over `--approve-all`, because it is
 checked where the effect happens. A `requestExec`/`requestNetwork` that would permit
-something denied fails immediately, without a pop-up — so `"denyCommands": ["git push*"]`
+something denied fails immediately, without a pop-up, so `"denyCommands": ["git push*"]`
 refuses both `exec("git", List("push"))` and `requestExec(Set("git *"))`, and the agent is
 told the refusal is final rather than being pointed at a `request*` block. Deny patterns
 also *extend* across config layers, so a project config can add to the global denylist but
@@ -484,7 +625,7 @@ The agent's code is syntax-coloured by the Scala compiler's own highlighter, and
 is rendered as Markdown while it streams: headings, lists, quotes, rules, `**bold**`,
 `` `code` ``, fenced code blocks (coloured when the fence says `scala`, verbatim otherwise)
 and pipe tables, drawn aligned once the table is complete. Without a real terminal (`-p` in
-a pipe) there are no colours, menus, live windows or folding — everything is printed in
+a pipe) there are no colours, menus, live windows or folding; everything is printed in
 full, and pop-ups fall back to a plain `answer>` line. `ATC_ASCII=1` uses ASCII glyphs.
 
 ## Project layout
@@ -492,7 +633,7 @@ full, and pop-ups fall back to a plain `answer>` line. `ATC_ASCII=1` uses ASCII 
 | Module | What it is |
 |--------|------------|
 | `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking, every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current` and the root capabilities) sits in its own file, outside the API the model reads. |
-| `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** — permission policy, file/process/network effects, questions, TODO list, LLM calls — and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
+| `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions, TODO list, LLM calls), and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
 
 Built with [Mill](https://mill-build.org) (`./mill`, pinned to 1.1.8) on the same Scala 3
 nightly TACIT uses (`3.10.0-RC1-bin-20260816-3adfcbd-NIGHTLY`).
@@ -505,7 +646,9 @@ app/src/atc/
   App.scala                          wiring (config, models, policy, host, sandbox, agent, TUI), slash commands
   Resources.scala, Debug.scala       bundled text resources (version, API source, template); ATC_DEBUG tracing
   agent/   Agent.scala, Prompts.scala          the loop (model ⇄ run_scala), system prompt & tool spec
-  config/  Config.scala                        JSON config model, merging, validation, --init template
+  config/  Config.scala                        JSON config model, layering, validation, templates
+           Layers.scala, Keys.scala            layer/origin types; the keys.properties bindings
+           ModelCatalog.scala                  providers × models → resolved ModelSpecs
   host/    Host.scala                          Interface implementation: policy checks + real effects
            Capabilities.scala                  FileSystem/FileEntry/Exec/Network impls (carry a scope id)
            HostPorts.scala                     what the host needs from the app (output, user, LLM)

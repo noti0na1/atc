@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.{Agent, Prompts}
-import atc.config.{Config, FileRuleConfig, ModelCatalog, ModelSpec}
+import atc.config.{Config, Configuration, ModelCatalog, ModelSpec}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
@@ -18,13 +18,22 @@ import scala.collection.mutable
   * slash commands. */
 final class App(args: Main.Args):
   val cwd: Path = args.cwd
-  val (config, configFiles) = Config.load(cwd, args.config)
+  /** Written on first run: the global config is the base of the policy, so
+    * there has to be one, and the key bindings sit beside it. Never touched
+    * again. */
+  val createdGlobalConfig: List[Path] = Config.ensureGlobal()
+
+  /** Every configuration layer in force (global ← project ← `-c`). */
+  val configuration: Configuration = Config.load(cwd, args.config)
+  /** The effective settings. The *policy* lists live on `configuration`. */
+  val config: Config = configuration.settings
+  val configFiles: List[Path] = configuration.sources
   val tui = Tui(Paths.get(System.getProperty("user.home"), ".atc", "history"))
 
   // ── models ────────────────────────────────────────────────────────
 
-  /** Every model of every configured provider, resolved. */
-  val catalog: ModelCatalog = ModelCatalog.from(config)
+  /** Every model of every configured provider, resolved with its key. */
+  val catalog: ModelCatalog = configuration.catalog
   private val modelCache = mutable.Map[String, ChatModel]()
 
   /** The client for one configured model, created once per session. */
@@ -54,7 +63,14 @@ final class App(args: Main.Args):
     if args.approveAll then (_ => Decision.AllowSession)
     else request => whileUserDecides(tui.askPermission(request))
   val policy =
-    Policy(App.fileRules(config, cwd), config.commands, config.hosts, prompter, config.denyCommands, config.denyHosts)
+    Policy(
+      App.fileRules(configuration, cwd),
+      config.commands,
+      config.hosts,
+      prompter,
+      config.denyCommands,
+      config.denyHosts
+    )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
 
   // ── host (the sandbox API implementation) and its ports ───────────
@@ -106,6 +122,19 @@ final class App(args: Main.Args):
 
   def run(): Int =
     try
+      // Both modes: a first run should say where the policy now comes from.
+      if createdGlobalConfig.nonEmpty then
+        tui.info(
+          s"Wrote a starting configuration to ${createdGlobalConfig.mkString(" and ")}; " +
+            "nothing is permitted that it does not grant."
+        )
+      // A directory no config covers is unreachable; say so rather than let the
+      // agent discover it one denial at a time.
+      if !policy.effective(ScopeId.Base, PathPattern.canonical(cwd)).canRead then
+        tui.info(
+          s"No configuration grants access to $cwd, so the agent has to ask for every file. " +
+            "Run `atc --init` to give this project a config, or add a rule to ~/.atc/config.json."
+        )
       args.prompt match
         case Some(p) =>
           session = Some(newSession())
@@ -210,7 +239,12 @@ final class App(args: Main.Args):
       case "/perms" | "/permissions" => tui.println(policy.summary)
       case "/mode" => switchMode(arg)
       case "/config" =>
-        tui.println(s"config files: ${if configFiles.isEmpty then "(none)" else configFiles.mkString(", ")}")
+        tui.println("config layers, in order:")
+        configuration.layers.foreach(l => tui.println(l.describe))
+        // Which providers have a key, never the keys themselves.
+        val keys = configuration.keys
+        if keys.sources.nonEmpty then
+          tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
         tui.println(
           s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore}"
         )
@@ -305,15 +339,19 @@ object App:
     val home = Paths.get(System.getProperty("user.home"))
     if p == home then "~" else if p.startsWith(home) then "~/" + home.relativize(p) else p.toString
 
-  /** Build the file rules from the config: explicit rules (default: the
-    * working directory is writable) plus the built-in classified patterns. */
-  def fileRules(cfg: Config, cwd: Path): List[FileRule] =
-    val explicit = if cfg.files.isEmpty then List(FileRuleConfig(".", access = Some("write"))) else cfg.files
-    val rules = explicit.map { r =>
-      FileRule(PathPattern(r.path, cwd), r.access.map(Access.parse), r.classified, r.locked)
+  /** The configured file rules, in layer order. Nothing is granted here or
+    * anywhere else in the program: a path is reachable only because a config
+    * says so: `~/.atc/config.json` for anything, a project's own
+    * `.atc/config.json` for paths inside that project. */
+  def fileRules(configuration: Configuration, cwd: Path): List[FileRule] =
+    configuration.rules.map { r =>
+      FileRule(
+        // A project layer reads its relative patterns against its own folder,
+        // and grants only inside it.
+        PathPattern(r.rule.path, r.base.getOrElse(cwd)),
+        r.rule.access.map(Access.parse),
+        r.rule.classified,
+        r.rule.locked,
+        grantsWithin = r.base,
+      )
     }
-    val classified =
-      if cfg.defaultClassified then
-        Config.DefaultClassifiedPatterns.map(p => FileRule(PathPattern(p, cwd), None, Some(true), builtin = true))
-      else Nil
-    rules ++ classified
