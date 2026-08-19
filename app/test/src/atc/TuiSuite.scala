@@ -42,3 +42,46 @@ class TuiSuite extends munit.FunSuite:
   test("uniqueIds keeps labels and disambiguates duplicates"):
     assertEquals(Tui.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)
+
+  // ── multi-line input (Continuation) ───────────────────────────────
+
+  import atc.ui.Continuation.{pending, unclosed}
+
+  test("unclosed: brackets nest, innermost first; balanced code leaves nothing open"):
+    assertEquals(unclosed("foo(a, List(1"), List(")", ")"))
+    assertEquals(unclosed("def f = { x.map { y => (y, "), List(")", "}", "}"))
+    assertEquals(unclosed("foo(List(1, 2)).map(_ + 1)"), Nil)
+    assertEquals(unclosed("1 + 1"), Nil)
+    assertEquals(unclosed("Map(1 -> 2)))"), Nil) // a stray closer is not waited on
+
+  test("unclosed: strings, char literals and comments hide brackets"):
+    assertEquals(unclosed("println(\"a (b\")"), Nil)
+    assertEquals(unclosed("\"(\\\"\" + x"), Nil) // an escaped quote does not close the string
+    assertEquals(unclosed("println(\"abc"), List("\"", ")"))
+    assertEquals(unclosed("println(\"abc\nfoo)"), Nil) // an unterminated string ends at its line
+    assertEquals(unclosed("\"\"\"a ( \" b"), List("\"\"\""))
+    assertEquals(unclosed("\"\"\"a\"\"\"\" + (1"), List(")")) // `""""` closes it
+    assertEquals(unclosed("List('(', '\\'', 'x')"), Nil)
+    assertEquals(unclosed("x // a comment with (\nfoo"), Nil)
+    assertEquals(unclosed("/* a ( comment"), List("*/"))
+    assertEquals(unclosed("/* nested /* ( */ still open"), List("*/"))
+    assertEquals(unclosed("/* ( */ ok(1)"), Nil)
+
+  test("pending: a /run continues while brackets are open, indented by their depth; other input does not"):
+    assertEquals(pending("/run foo(List(1,", block = false), Some(2))
+    assertEquals(pending("/RUN x.map { y =>", block = false), Some(1))
+    assertEquals(pending("/scala \"\"\"multi", block = false), Some(0)) // a string: continue, no indent
+    assertEquals(pending("/run 1 + 1", block = false), None)
+    assertEquals(pending("please fix foo(", block = false), None) // a request, not code
+    assertEquals(pending("/mode local", block = false), None)
+
+  test("pending: an empty last line always submits"):
+    assertEquals(pending("/run foo(\n  ", block = false), None) // Enter on the (indented) empty line: submit anyway
+    assertEquals(pending("/run foo(\nbar", block = false), Some(1))
+    assertEquals(pending("first line \\", block = false), None) // a backslash is a key sequence, not a parse rule
+
+  test("pending: block mode continues until an empty line"):
+    assertEquals(pending("val x = 1", block = true), Some(0))
+    assertEquals(pending("val x = 1\nx + 1", block = true), Some(0))
+    assertEquals(pending("val x = 1\n", block = true), None)
+    assertEquals(pending("", block = true), None)

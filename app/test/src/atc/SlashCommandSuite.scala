@@ -29,6 +29,9 @@ class SlashCommandSuite extends munit.FunSuite:
     assertEquals(parse("  /model   gpt-5  "), Right((Model, "gpt-5")))
     assertEquals(parse("/classified off"), Right((ClassifiedModel, "off")))
     assertEquals(parse("/mode read only"), Right((Mode, "read only")))
+    // Code keeps its case and its newlines (a pasted block).
+    assertEquals(parse("/run val X = 1\nX + 1"), Right((Run, "val X = 1\nX + 1")))
+    assertEquals(parse("/scala"), Right((Run, "")))
 
   test("parse reports an unknown command by what was typed"):
     assertEquals(parse("/bogus 1 2"), Left("/bogus"))

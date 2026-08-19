@@ -640,13 +640,23 @@ never drop from it. They are listed in `/perms` and in the agent's system prompt
 ## The terminal
 
 `/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`, `/perms`, `/todos`, `/config`,
-`/interface` (print the API the model sees), `/new` (start over: fresh REPL, and the
+`/interface` (print the API the model sees), `/run [code]` (run Scala in the sandbox
+yourself, against the same API, givens and permissions as the agent; the block is shown
+like an agent tool call, and since the REPL is shared the agent is told what you ran and
+what came of it on its next turn), `/new` (start over: fresh REPL, and the
 conversation, TODO list and every "allow for this session" grant are forgotten; mode and
 models stay), `/reset` (fresh REPL, conversation kept), `/clear` (forget the conversation,
 REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
-current turn including the running snippet, Shift-Tab cycles the mode on an empty prompt,
+current turn including the running snippet (also a `/run`), Shift-Tab cycles the mode on an empty prompt,
 Ctrl-O toggles the expanded view, Ctrl-D exits. Tab completes a slash command and its
-argument (`/mo`⇥, `/model an`⇥, `/mode `⇥), by plain string matching. `/cost` counts every
+argument (`/mo`⇥, `/model an`⇥, `/mode `⇥), by plain string matching.
+
+Multi-line input: Shift+Enter or Alt+Enter inserts a newline (where the terminal reports
+those keys: kitty, Ghostty, WezTerm, foot, an iTerm2 or VS Code set up to send `\`+Enter
+for Shift+Enter, as Claude Code's terminal setup does), as does a `\` typed at the end of
+the line before Enter; a pasted block keeps its newlines; a `/run` continues while a
+bracket, string or comment is still open, indented like a REPL; and a bare `/run` reads a
+whole block. In every case Enter on an empty line submits and Ctrl-C clears. `/cost` counts every
 model call since the start (or the last `/clear`/`/new`): the agent's turns, `chat()` and
 `chat(Classified)` from the sandbox, and the next-input predictions, each shown separately
 when more than one kind occurred.

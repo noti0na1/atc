@@ -114,6 +114,22 @@ class AgentLoopSuite extends munit.FunSuite:
     val second = agent.history.collect { case u: Msg.User => u }.last.text
     assertEquals(second, "and now?")
 
+  test("code the user ran (/run) is reported to the model on the next turn, after a restart notice, once"):
+    // The REPL is shared: the user's definitions now exist in the session the
+    // model continues in, so it must hear what was run and what came of it.
+    val (_, s, _, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("a"), ScriptedModel.Reply("b"))))
+    agent.noteSandboxRestarted("you asked for /reset")
+    agent.noteUserRan("val answer = 42", s.run("val answer = 42"))
+    agent.turn(s, "double it", never)
+    val first = agent.history.head.asInstanceOf[Msg.User].text
+    val (restart, ran) = (first.indexOf("[sandbox notice]"), first.indexOf("[user ran code]"))
+    assert(restart >= 0 && ran > restart, first)
+    assert(first.contains("```scala\nval answer = 42\n```"), first)
+    assert(first.contains("answer: Int = 42"), first)
+    assert(first.endsWith("double it"), first)
+    agent.turn(s, "and now?", never)
+    assertEquals(agent.history.collect { case u: Msg.User => u }.last.text, "and now?")
+
   test("clear() drops a pending restart notice"):
     val (_, s, _, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("a"))))
     agent.noteSandboxRestarted("whatever")

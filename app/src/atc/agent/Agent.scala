@@ -78,19 +78,27 @@ final class Agent(
   def systemPrompt: SystemPrompt =
     Prompts.system(cwd, policy, classifiedModel.map(_.ref), config.respectGitignore, extraInstructions)
 
-  /** A note prepended to the next user message, e.g. that the sandbox was
-    * restarted. It is carried this way rather than appended to the history on
-    * its own so the transcript never holds two user messages in a row. */
-  private var pendingNote: Option[String] = None
+  /** Notes prepended to the next user message, in order: that the sandbox was
+    * restarted, code the user ran themselves. They are carried this way rather
+    * than appended to the history on their own so the transcript never holds
+    * two user messages in a row. */
+  private var pendingNotes: List[String] = Nil
 
   /** Tell the model that its REPL was replaced, so it does not conclude that
     * the documented "definitions persist between calls" guarantee is false when
     * its earlier `val`s and `def`s have vanished. */
   def noteSandboxRestarted(reason: String): Unit =
-    pendingNote = Some(
+    pendingNotes :+=
       s"[sandbox notice] The Scala REPL was restarted ($reason). Every `val`, `def` and `import` " +
         "you defined earlier is gone, so re-create anything you still need. The conversation itself is unchanged."
-    )
+
+  /** Tell the model what the user ran in the shared REPL (`/run`) and what came
+    * of it: the user's definitions are now part of the session the model
+    * continues in, and the result may be what the next request is about. */
+  def noteUserRan(code: String, result: ExecutionResult): Unit =
+    pendingNotes :+=
+      s"[user ran code] The user ran this in the sandbox REPL themselves (its definitions persist for you too):\n" +
+        s"```scala\n$code\n```\nResult:\n${Agent.renderForModel(result, config.maxToolOutputChars)}"
 
   def clear(): Unit =
     history = Nil
@@ -98,12 +106,12 @@ final class Agent(
     toolCalls = 0
     tokenCalibration = 1.0
     contextDropped = 0
-    pendingNote = None
+    pendingNotes = Nil
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
   def turn(session: ReplSession, input: String, cancelled: () => Boolean): Unit =
-    history :+= Msg.User(pendingNote.fold(input)(n => s"$n\n\n$input"))
-    pendingNote = None
+    history :+= Msg.User((pendingNotes :+ input).mkString("\n\n"))
+    pendingNotes = Nil
     Turn(session, cancelled).run()
 
   private enum Outcome:

@@ -22,6 +22,12 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Perms extends SlashCommand("/perms", "show the effective permission policy", "/permissions")
   case Config extends SlashCommand("/config", "show config files and settings")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
+  case Run
+      extends SlashCommand(
+        "/run [code]",
+        "run Scala in the sandbox yourself, as the agent would (no code: type lines, an empty one runs them)",
+        "/scala",
+      )
   case New extends SlashCommand("/new", "start over: fresh REPL, conversation, TODOs and session grants forgotten")
   case Reset extends SlashCommand("/reset", "restart the sandbox REPL (keeps the conversation)")
   case Clear extends SlashCommand("/clear", "forget the conversation (keeps the REPL)")

@@ -12,14 +12,17 @@ import org.jline.reader.{
   Binding,
   Candidate,
   Completer,
+  EOFError,
   EndOfFileException,
   LineReader,
   LineReaderBuilder,
+  ParsedLine,
+  Parser,
   Reference,
   UserInterruptException,
   Widget,
 }
-import org.jline.reader.impl.DefaultHighlighter
+import org.jline.reader.impl.{DefaultHighlighter, DefaultParser, LineReaderImpl}
 import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
 import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader}
@@ -95,6 +98,17 @@ final class Tui(historyFile: Path) extends AgentUI:
     if words.headOption.exists(_.startsWith("/")) then
       completions(words.take(line.wordIndex + 1)).foreach(c => candidates.add(Candidate(c)))
 
+  /** `readBlock` is reading: Enter continues until an empty line. */
+  @volatile private var blockMode = false
+  /** Multi-line input ([[Continuation]]): on Enter, an `EOFError` tells JLine
+    * to insert a newline (indented by the open-bracket depth) instead of
+    * accepting; everything else is the default word splitting the completer uses. */
+  private val continuationParser: Parser = new DefaultParser:
+    override def parse(line: String, cursor: Int, context: Parser.ParseContext): ParsedLine =
+      if context == Parser.ParseContext.ACCEPT_LINE then
+        Continuation.pending(line, blockMode).foreach(depth => throw EOFError(-1, -1, "incomplete", "", depth, null))
+      super.parse(line, cursor, context)
+
   private val reader: LineReader =
     Files.createDirectories(historyFile.getParent)
     LineReaderBuilder.builder()
@@ -102,8 +116,9 @@ final class Tui(historyFile: Path) extends AgentUI:
       .history(DefaultHistory())
       .highlighter(ghostHighlighter)
       .completer(commandCompleter)
+      .parser(continuationParser)
       .variable(LineReader.HISTORY_FILE, historyFile)
-      .variable(LineReader.SECONDARY_PROMPT_PATTERN, "%M> ")
+      .variable(LineReader.INDENTATION, 2)
       .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
       .build()
 
@@ -145,6 +160,38 @@ final class Tui(historyFile: Path) extends AgentUI:
       val rights = (Option(KeyMap.key(terminal, InfoCmp.Capability.key_right)).toList ++ List("\u001b[C", "\u001bOC"))
         .distinct.filter(_.nonEmpty)
       keyMap.bind(Reference("atc-accept-suggestion-right"), rights*)
+
+  // Multi-line input by key (the parser handles open brackets, block mode and
+  // pastes): Enter on a line ending in `\` turns the backslash into a newline
+  // (typed by hand, or how terminals set up to send `\`+Enter for Shift+Enter
+  // arrive), and a Shift+Enter / Alt+Enter the terminal reports as such
+  // inserts one directly. Bound in every mode: piped input uses it too.
+  locally:
+    val keyMap = reader.getKeyMaps.get(LineReader.MAIN)
+    if keyMap != null then
+      val newline: Widget = () => { reader.getBuffer.write("\n"); true }
+      val enter: Widget = () =>
+        val buf = reader.getBuffer
+        if buf.length > 0 && buf.atChar(buf.length - 1) == '\\' then
+          buf.cursor(buf.length)
+          buf.backspace()
+          buf.write("\n")
+          // VS Code's Shift+Enter (as Claude Code's terminal setup binds it)
+          // sends `\`, CR, LF: drop the LF, or it would submit the new empty line.
+          if reader.getLastBinding == "\r" then
+            reader match
+              case impl: LineReaderImpl => if impl.peekCharacter(50) == '\n' then impl.readCharacter()
+              case _ => ()
+          true
+        else
+          reader.callWidget(LineReader.ACCEPT_LINE)
+          true
+      reader.getWidgets.put("atc-newline", newline)
+      reader.getWidgets.put("atc-enter", enter)
+      keyMap.bind(Reference("atc-enter"), "\r", "\n")
+      // Shift+Enter as CSI u (kitty, Ghostty, WezTerm, foot, iTerm2 with it
+      // on), as xterm's modifyOtherKeys, and Alt/Option+Enter as ESC CR.
+      keyMap.bind(Reference("atc-newline"), "\u001b[13;2u", "\u001b[27;2;13~", "\u001b\r")
   private val g: Glyphs =
     if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then Glyphs.unicode
     else Glyphs.ascii
@@ -156,6 +203,10 @@ final class Tui(historyFile: Path) extends AgentUI:
     if plain then 0
     else Option(terminal.getNumericCapability(InfoCmp.Capability.max_colors)).map(_.intValue).getOrElse(0)
   private def styled(s: String, codes: Int*): String = if colors <= 0 then s else Ansi.styled(s, codes*)
+  // Continuation lines: a bar under the prompt, padded (`%P`) to the prompt's
+  // width. ASCII on purpose: JLine turns box glyphs in a prompt into DEC
+  // line-drawing escapes.
+  reader.setVariable(LineReader.SECONDARY_PROMPT_PATTERN, "%P " + styled("| ", Cyan, Bold))
   private val Indent = "  "
   private def width: Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
 
@@ -388,9 +439,11 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   // ── tool blocks ───────────────────────────────────────────────────
 
-  def toolStart(code: String): Unit = synchronized:
+  def toolStart(code: String): Unit = toolStart(code, "run_scala")
+  /** Open a code block titled `title`: the agent's `run_scala`, or the user's own `/run`. */
+  def toolStart(code: String, title: String): Unit = synchronized:
     beginBlock()
-    write(styled(g.bullet, Magenta) + " " + styled("run_scala", Magenta, Bold) + "\n")
+    write(styled(g.bullet, Magenta) + " " + styled(title, Magenta, Bold) + "\n")
     val lines = if colors > 0 then Highlight.scala(code) else code.linesIterator.toList
     lines.foreach(l => write(gutter(Magenta) + l + "\n"))
     toolOpen = true
@@ -784,9 +837,20 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   // ── input ─────────────────────────────────────────────────────────
 
-  /** Read a line; `None` on EOF (Ctrl-D). Ctrl-C clears the line. Keys typed
-    * during the previous turn are pre-filled. */
-  def readLine(prompt: String): Option[String] =
+  /** Read one input; `None` on EOF (Ctrl-D). Ctrl-C clears it. Keys typed
+    * during the previous turn are pre-filled. The input may span lines (a
+    * pasted block, Shift+Enter or `\`+Enter, a `/run` with brackets still
+    * open: [[Continuation]]); the trailing empty line that submits is removed. */
+  def readLine(prompt: String): Option[String] = readBuffer(prompt).map(_.stripTrailing)
+
+  /** Read a block of code: Enter adds a line until one is left empty, which
+    * submits the block (without that line); `None` on EOF. */
+  def readBlock(prompt: String): Option[String] =
+    blockMode = true
+    try readBuffer(prompt).map(_.stripTrailing)
+    finally blockMode = false
+
+  private def readBuffer(prompt: String): Option[String] =
     var result: Option[String] = None
     var again = true
     while again do

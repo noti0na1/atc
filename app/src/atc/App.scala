@@ -268,6 +268,7 @@ final class App(args: Main.Args):
     case Cmd.Perms => tui.println(policy.summary)
     case Cmd.Config => showConfig()
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
+    case Cmd.Run => runCode(arg)
     case Cmd.New =>
       predictor.invalidate()
       if newSession() then
@@ -280,6 +281,40 @@ final class App(args: Main.Args):
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     case Cmd.Cost => showCost()
     case Cmd.Quit => () // `command` ends the loop instead
+
+  /** `/run`: the user runs Scala in the sandbox themselves, against the same
+    * API, givens and permissions as the agent, shown as a code block like an
+    * agent tool call and with the same keys (Ctrl-C interrupts, Ctrl-O
+    * expands). The code is on the line (Enter continues it while brackets
+    * are open, see `Continuation`; a pasted block keeps its newlines) or,
+    * with none, typed as a block that an empty line submits. The REPL is
+    * shared, so the agent is told what was run and what came of it on its
+    * next turn. */
+  private def runCode(arg: String): Unit =
+    val code = if arg.nonEmpty then arg else readCode()
+    if code.trim.isEmpty then return
+    session match
+      case None => tui.error("the sandbox is not running (a restart failed); try /reset")
+      case Some(s) =>
+        tui.beginTurn()
+        try
+          tui.toolStart(code, "/run")
+          val start = System.nanoTime()
+          val result = s.run(code)
+          val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
+          tui.toolEnd(result, millis)
+          agent.noteUserRan(code, result)
+        catch
+          case e: Exception =>
+            tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+            Debug.trace(e)
+        finally tui.endTurn()
+
+  /** The block of code typed after a bare `/run`; empty when cancelled (Ctrl-C, Ctrl-D). */
+  private def readCode(): String =
+    tui.info("Scala code; Enter on an empty line runs it, Ctrl-C cancels")
+    tui.suggest(None) // no ghost text while typing code
+    tui.readBlock(prompt).getOrElse("")
 
   /** `/config`: the layers, which key names are bound (never the values), and the scalar settings. */
   private def showConfig(): Unit =
