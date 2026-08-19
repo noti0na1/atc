@@ -646,8 +646,28 @@ for the model. It is not counted as a tool call.
 
 ## The terminal
 
-`ui/Tui.scala` implements `AgentUI` directly. Every content kind has one shape (`● prose`,
-`● run_scala` blocks with `│ code / ├ output / ├ result|error / └ ok`, `▸ TODO`, pop-ups).
+`ui/Tui.scala` implements `AgentUI` directly. Every content kind has one shape, so a glance
+tells them apart:
+
+```
+> your request
+
+● assistant prose                       bullet + indent, Markdown rendered as it streams
+
+● run_scala                             tool block (magenta)
+  │ code the agent runs
+  ├ output                              the program's own println output, live
+  │ hello
+  │ $ ./mill test                       a command (exec) that keeps running: its
+  │ compiling ...                         output as it comes
+  ├ result   (or  ├ error)              what the REPL added: echoed values, diagnostics
+  │ val x: Int = 1
+  └ ok 34 ms (or └ failed 34 ms)
+
+  ▸ TODO  ✓ done  ▶ in progress  ○ pending      redrawn once per snippet
+  ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
+```
+
 All output goes through one `write` that tracks the last two chars (`tail`) so gutters can
 be inserted into arbitrarily chunked streams; `LiveRegion` redraws in place, and the two
 things that use it own their state as inner components (`thinking` = the reasoning window /

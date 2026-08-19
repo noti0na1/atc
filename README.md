@@ -444,46 +444,26 @@ narrowed by any layer: the human is the authority. The exact rules are in
 
 ### Providers and models
 
-A **provider** is one endpoint: an `api` (the wire protocol), an optional `url` and key, and
-the `models` reachable through it. A **model** is an alias under that provider, whose `name`
-is the id the provider knows it by (`name` defaults to the alias, so `"models": { "gpt-5":
-{} }` is enough) plus its own settings: `webSearch`, `reasoning`, `thinking`,
-`reasoningSummary`, `maxTokens`, `contextWindow`, `temperature`, `webSearchVersion`.
-A model is named by its **alias** (`"model": "claude"`, `/model sonnet`), or by
-**`provider/alias`** when two providers use the same alias; `/models` lists them.
+A **provider** is one endpoint (`api`, optional `url`, key) with `models` under it; a
+**model** is an alias whose `name` is the provider's id for it (it defaults to the alias)
+plus its own settings (`contextWindow`, `reasoning`, `webSearch`, `thinking`, `maxTokens`,
+…). `api` is `anthropic` (Messages API), `openai-responses` (Responses API, also DeepSeek
+and others via `url`), `openai` (Chat Completions: any OpenAI-compatible server such as
+Ollama, vLLM or OpenRouter, via `url`) or `echo` (key-less, for smoke tests). Name a model
+by its alias (`"model": "claude"`, `/model sonnet`), or by `provider/alias` when two
+providers share one; `/models` lists them. Set `contextWindow` to the model's real window:
+when the conversation no longer fits, the oldest exchanges are dropped and you are warned.
 
-`api` is one of
+**Keys** never sit in a config: a provider names a variable (`"key": "${DEEPSEEK_API_KEY}"`)
+whose value comes from `.atc/keys.properties` (the project's, then `~/.atc/`, then the
+environment). The starting policy hides `.atc` from the agent, and `/config` shows only
+which variables are bound, never values.
 
-* `anthropic`: Messages API. `webSearch: true` adds the server-side web search tool;
-  adaptive thinking is on unless `"thinking": false`; `reasoning` is the effort
-  (`low|medium|high|xhigh|max`).
-* `openai-responses`: Responses API; also works with other vendors that implement it (e.g.
-  DeepSeek via `url`). `webSearch: true` adds the built-in web search; `reasoning` is the
-  effort; `"reasoningSummary": "auto"` streams reasoning summaries.
-* `openai`: Chat Completions; the adapter for any OpenAI-compatible server (Ollama, vLLM,
-  LM Studio, OpenRouter, …) via `url`. For both OpenAI-shaped adapters `"thinking":
-  true|false` sends the vendor thinking switch of DeepSeek/GLM/Kimi/MiniMax; leave it unset
-  for OpenAI itself.
-* `echo`: a key-less local model for smoke tests.
-
-`contextWindow` is the model's limit in tokens (`200000`, `"256k"`, `"1m"`). When the
-conversation would no longer fit, the oldest exchanges are dropped before the next request,
-the model is told, and the terminal warns you; leave it at the model's real window.
-
-**API keys** never sit in a config. A provider names the variable that holds its key
-(`"key": "${DEEPSEEK_API_KEY}"`), and the values live in `.atc/keys.properties`, one
-`NAME=value` per line, looked up in the project's `.atc/keys.properties`, then
-`~/.atc/keys.properties`, then the environment (an empty value falls through to the next
-source). `atc --init` adds a `.atc/.gitignore` for it, and the starting policy makes `.atc`
-unreadable and `locked`, so the agent can read neither the keys nor the config. `/config`
-lists which variables are bound and from where, never their values.
-
-Two roles: **`model`** is the agent and never sees classified data; **`classifiedModel`**
-handles `Classified` values through `chat(Classified[String])`, so point it at something you
-trust with your secrets, typically a local model, or leave it unset. `/model [ref]` and
-`/classifiedmodel [ref]` switch them for the session (without an argument they open a
-pick-list; `off` unsets the classified one); the conversation survives a switch, and a
-project config in the working directory remembers the choice.
+**Two roles**: `model` is the agent and never sees classified data; `classifiedModel`
+handles `Classified` values (`chat(Classified)`), so point it at something you trust with
+your secrets, or leave it unset. `/model` and `/classifiedmodel` switch them for the
+session. Per-adapter settings are listed in
+[doc/development.md](doc/development.md#models-and-providers).
 
 ### File permissions, commands and hosts
 
@@ -515,57 +495,22 @@ grant, over an open `request*` scope and over `--approve-all`.
 
 ## The terminal
 
-Slash commands: `/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`,
-`/perms`, `/todos`, `/config`, `/interface` (print the API the model sees), `/run [code]`
-(run Scala in the sandbox yourself, with the same API, givens and permissions as the agent;
-the agent is told what you ran on its next turn, since the REPL is shared), `/new` (start
-over: fresh REPL, conversation, TODO list and session grants forgotten), `/reset` (fresh
-REPL, conversation kept), `/clear` (forget the conversation, REPL kept), `/cost` (token
-usage and how full the context is), `/quit`. Ctrl-C interrupts the current turn including
-the running snippet, Shift-Tab cycles the mode on an empty prompt, Ctrl-O toggles the
-expanded view, Ctrl-D exits. Tab completes a slash command and its argument.
+`/help` lists the slash commands: `/model`, `/classifiedmodel`, `/models`, `/mode`, `/perms`,
+`/config`, `/todos`, `/cost` (tokens, and how full the context is), `/interface` (the API the
+model sees), `/run <code>` (run Scala in the sandbox yourself, with the agent's API and
+permissions; the agent is told what you ran), `/reset` (fresh REPL), `/clear` (forget the
+conversation), `/new` (both, plus the session's grants), `/quit`. Ctrl-C interrupts the
+turn, Ctrl-O shows folded output and reasoning in full, Shift-Tab cycles the mode, Ctrl-D
+quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a
+`/run` also continues while a bracket is open; Enter on an empty line submits.
 
-Multi-line input: Shift+Enter or Alt+Enter inserts a newline where the terminal reports
-those keys (kitty, Ghostty, WezTerm, foot, or an iTerm2/VS Code set up to send `\`+Enter for
-Shift+Enter, as Claude Code's terminal setup does), and so does a `\` typed at the end of
-the line before Enter; a pasted block keeps its newlines; a `/run` continues while a
-bracket, string or comment is still open, indented like a REPL; and a bare `/run` reads a
-whole block. In every case Enter on an empty line submits and Ctrl-C clears.
-
-After each turn the agent model is asked to guess your next request, shown as faint ghost
-text at the prompt: Tab or → accepts it, typing anything else replaces it. It is one small
-extra model call per turn (`"predictInput": false` turns it off), never made with the
-classified model, and counted in `/cost`. The summary line after each turn (`● worked for
-3 s · 2 tool calls · 1.2k tokens · context 45.2k/200k (23%)`) also shows how full the
-model's context is.
-
-Every kind of content has its own shape, so a glance tells them apart:
-
-```
-> your request
-
-● assistant prose                       bullet + indent, Markdown rendered as it streams
-
-● run_scala                             tool block (magenta)
-  │ code the agent runs
-  ├ output                              the program's own println output, live
-  │ hello
-  │ $ ./mill test                       a command (exec) that keeps running: its
-  │ compiling ...                         output as it comes
-  ├ result   (or  ├ error)              what the REPL added: echoed values, diagnostics
-  │ val x: Int = 1
-  └ ok 34 ms (or └ failed 34 ms)
-
-  ▸ TODO  ✓ done  ▶ in progress  ○ pending      redrawn once per snippet
-  ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
-```
-
-Long things are kept short on purpose: streamed reasoning shows its last few lines and
-collapses to `● thought for 4.2 s · 12 lines`, live program output folds into a live tail
-once it fills the screen, and long result panels are cut in the middle; **Ctrl-O** switches
-to the expanded view (nothing folded) for the rest of the session. Without a real terminal
-(`-p` in a pipe) there are no colours, menus or folding; everything is printed in full.
-`ATC_ASCII=1` uses ASCII glyphs, `ATC_DEBUG=1` prints stack traces.
+After each turn the agent model guesses your next request, shown as ghost text (Tab or →
+accepts it; `"predictInput": false` turns it off), and a summary line says what the turn
+cost and how full the context is. Output is kept short: long program output folds into a
+live tail, long results are cut in the middle, reasoning collapses to one line. Without a
+terminal (`-p` in a pipe) everything is printed plainly; `ATC_ASCII=1` draws with ASCII
+glyphs. The content shapes, keys and multi-line rules are in
+[doc/development.md](doc/development.md#the-terminal).
 
 ## License
 
