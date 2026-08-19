@@ -1,7 +1,7 @@
 package atc.perms
 
 import java.nio.file.{Files, Path}
-import java.util.regex.Pattern as Regex
+import scala.util.matching.Regex
 import scala.collection.concurrent.TrieMap
 import scala.jdk.CollectionConverters.*
 
@@ -72,7 +72,7 @@ object GitIgnore:
   /** One `.gitignore` line, compiled against paths relative to its own directory. */
   private final class Rule(val negated: Boolean, dirOnly: Boolean, regex: Regex):
     def matches(rel: String, isDir: Boolean): Boolean =
-      (isDir || !dirOnly) && regex.matcher(rel).nn.matches()
+      (isDir || !dirOnly) && regex.matches(rel)
 
   private object Rule:
     /** `None` for blank lines and comments. */
@@ -91,7 +91,7 @@ object GitIgnore:
           val core = pattern.stripPrefix("/")
           val anchored = pattern.startsWith("/") || core.contains('/')
           val prefix = if anchored then "" else "(?:.*/)?"
-          Some(Rule(negated, dirOnly, Regex.compile(prefix + toRegex(core)).nn))
+          Some(Rule(negated, dirOnly, Regex(prefix + toRegex(core))))
 
     /** Trailing spaces are not part of the pattern unless backslash-escaped. */
     private def trimTrailing(line: String): String =
@@ -134,9 +134,9 @@ object GitIgnore:
               out ++= (if cls.startsWith("[!") then "[^" + cls.substring(2) else cls)
               i = end + 1
           case '\\' if i + 1 < glob.length =>
-            out ++= Regex.quote(glob.charAt(i + 1).toString).nn
+            out ++= Regex.quote(glob.charAt(i + 1).toString)
             i += 2
           case c =>
-            out ++= Regex.quote(c.toString).nn
+            out ++= Regex.quote(c.toString)
             i += 1
       out.toString

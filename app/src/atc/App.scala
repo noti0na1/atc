@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.{Agent, Prompts}
-import atc.config.{Config, Configuration, ModelCatalog, ModelSpec}
+import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
@@ -11,6 +11,7 @@ import atc.ui.Tui
 
 import java.nio.file.{Files, Path, Paths}
 import scala.collection.mutable
+import scala.util.Properties
 
 /** The running application: wires configuration, models, permission policy,
   * host, sandbox session, agent loop and terminal UI together, then runs
@@ -18,7 +19,7 @@ import scala.collection.mutable
   * slash commands. */
 final class App(args: Main.Args):
   val cwd: Path = args.cwd
-  val tui = Tui(Paths.get(System.getProperty("user.home"), ".atc", "history"))
+  val tui = Tui(Paths.get(Properties.userHome, ".atc", "history"))
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
     * first-run offers of [[App.setup]] (which may end the program instead). */
@@ -139,8 +140,11 @@ final class App(args: Main.Args):
       session.foreach(_.close())
       tui.close()
 
+  /** `provider/alias — model-id`, how a model in use is named everywhere. */
+  private def describe(m: ChatModel): String =
+    s"${m.ref} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
+
   private def banner(): Unit =
-    def describe(m: ChatModel): String = s"${m.ref} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
     val noClassifiedModel = "(none — set \"classifiedModel\" in the config to chat about classified data)"
     val noConfig = "(none; built-in defaults — try `atc --init`)"
     tui.banner(
@@ -254,15 +258,16 @@ final class App(args: Main.Args):
         )
       case other => tui.error(s"unknown command $other (try /help)")
 
-  /** One line per configured model, marked with the role it currently plays. */
+  /** One line per configured model: its name, `provider/model-id`, and the
+    * role it currently plays. */
   private def modelRow(spec: ModelSpec): String =
     val marks = List(
       Option.when(agent.model.ref == spec.ref)("agent"),
       Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
     ).flatten
-    val search = if spec.settings.webSearch then " web-search" else ""
     val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-    f"${catalog.label(spec)}%-14s ${spec.provider}%-12s ${spec.api}%-17s ${spec.modelId}%-26s$search$role"
+    val width = catalog.labels.map(_.length).maxOption.getOrElse(0)
+    s"${catalog.label(spec).padTo(width, ' ')}  ${spec.provider}/${spec.modelId}$role"
 
   private def showModels(): Unit = catalog.models.foreach(m => tui.println("  " + modelRow(m)))
 
@@ -278,32 +283,69 @@ final class App(args: Main.Args):
 
   /** `/model`: pick from the list, or switch to the named one. */
   private def switchModel(arg: String): Unit =
-    setModel(arg, "model", agent.model) { m =>
-      agent.model = m
-      tui.success(s"model -> ${m.ref} (${m.modelId})")
+    setModel(arg, "model", agent.model) { spec =>
+      agent.model = modelFor(spec)
+      tui.success(s"model -> ${describe(agent.model)}" + remember("model", Some(spec)))
     }
 
   /** `/classifiedmodel`: the model that may see classified data. `off` unsets it. */
   private def switchClassifiedModel(arg: String): Unit =
     if arg.trim.toLowerCase == "off" || arg.trim.toLowerCase == "none" then
       agent.classifiedModel = None
-      tui.success("classified model -> (none): classified data is no longer sent to any model")
+      tui.success(
+        "classified model -> (none): classified data is no longer sent to any model" + remember("classifiedModel", None)
+      )
     else
-      setModel(arg, "classified model", agent.classifiedModel.getOrElse(agent.model)) { m =>
+      setModel(arg, "classified model", agent.classifiedModel.getOrElse(agent.model)) { spec =>
+        val m = modelFor(spec)
         agent.classifiedModel = Some(m)
-        tui.success(s"classified model -> ${m.ref} (${m.modelId})")
+        tui.success(s"classified model -> ${describe(m)}" + remember("classifiedModel", Some(spec)))
       }
 
   /** Shared by the two switches: an argument names a model, no argument opens
     * the picker; the current one is reported when nothing is chosen. */
-  private def setModel(arg: String, what: String, current: ChatModel)(use: ChatModel => Unit): Unit =
+  private def setModel(arg: String, what: String, current: ChatModel)(use: ModelSpec => Unit): Unit =
     if arg.nonEmpty then
-      try use(modelFor(arg))
+      try use(catalog.find(arg))
       catch case e: IllegalArgumentException => tui.error(e.getMessage)
     else
       pickModel(s"Choose the $what") match
-        case Some(spec) => use(modelFor(spec))
-        case None => tui.info(s"$what: ${current.ref} (${current.providerKey} ${current.modelId})")
+        case Some(spec) => use(spec)
+        case None => tui.info(s"$what: ${describe(current)}")
+
+  /** The working directory's own `.atc/config.json`, if it has one. Only that
+    * file is ever written: a project config found in a parent directory
+    * governs this run but is not touched from a sub-directory. */
+  private def projectConfig: Option[Path] =
+    Some(Config.projectPath(cwd)).filter(Files.isRegularFile(_))
+
+  /** Keep a model choice in the working directory's config, so the next run
+    * here starts with it (`None` unsets the role: `"classifiedModel": null`).
+    * Without a config in `cwd` there is nothing to write. Returns the note to
+    * append to the confirmation. */
+  private def remember(key: String, choice: Option[ModelSpec]): String =
+    def show(p: Path): String =
+      val abs = p.toAbsolutePath.nn.normalize.nn
+      if abs.startsWith(cwd) then cwd.relativize(abs).toString else App.pretty(abs)
+    projectConfig match
+      case None => ""
+      case Some(path) =>
+        val value = choice.map(m => ujson.Str(catalog.label(m))).getOrElse(ujson.Null)
+        try
+          Config.setTopLevel(path, key, value, after = List("model"))
+          // A `-c` file that sets the same key wins over the project config on the next start.
+          val overridden = configuration.layers
+            .filter(l => l.origin == Origin.Explicit && l.defines(key))
+            .flatMap(_.path)
+            .filterNot(_.toAbsolutePath.nn.normalize == path.toAbsolutePath.nn.normalize)
+            .headOption
+            .map(p => s"; ${show(p)} also sets $key and wins over it")
+            .getOrElse("")
+          s" (saved to ${show(path)}$overridden)"
+        catch
+          case e: Exception =>
+            tui.error(s"could not save the choice to ${show(path)}: ${e.getMessage}")
+            ""
 
   /** `/mode`: cycle (no argument) or set the sandbox mode; a new REPL is
     * started with only that mode's capabilities (definitions are gone, the
@@ -385,7 +427,7 @@ object App:
 
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =
-    val home = Paths.get(System.getProperty("user.home"))
+    val home = Paths.get(Properties.userHome)
     if p == home then "~" else if p.startsWith(home) then "~/" + home.relativize(p) else p.toString
 
   /** The configured file rules, in layer order. Nothing is granted here or

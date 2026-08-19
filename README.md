@@ -521,7 +521,10 @@ something you trust with your secrets, typically a local model; leave it unset a
 data never reaches any model. Both are switched for the session with **`/model [ref]`** and
 **`/classifiedmodel [ref]`**: with a reference they switch directly, without one they open a
 pick-list of every configured model (`/classifiedmodel off` unsets the role). The
-conversation survives a switch, since the history is provider-neutral.
+conversation survives a switch, since the history is provider-neutral. When the working directory
+has its own `.atc/config.json` the choice is also written there (`"model"` / `"classifiedModel"`,
+`null` for `off`; the rest of the file is left as it is), so the next run there starts with it;
+a `-c` file that sets the same key still wins.
 
 Layers merge per provider: a project config can add a model to a provider the global config
 defined without repeating its `url` and `key`, and a redefined alias replaces that model

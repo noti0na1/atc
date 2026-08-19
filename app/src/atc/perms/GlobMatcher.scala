@@ -1,16 +1,16 @@
 package atc.perms
 
-import java.util.regex.Pattern
+import scala.util.matching.Regex
 
 /** Simple glob matching for command lines and host names: `*` matches any
   * sequence of characters, everything else is literal. Adapted from TACIT. */
 object GlobMatcher:
   /** `*` becomes `.*`; every other segment is quoted, so it stays literal. */
-  private def compile(pattern: String): Pattern =
-    Pattern.compile(pattern.split("\\*", -1).map(Pattern.quote).mkString(".*"))
+  private def compile(pattern: String): Regex =
+    Regex(pattern.split("\\*", -1).map(Regex.quote).mkString(".*"))
 
   def matches(value: String, pattern: String): Boolean =
-    compile(pattern).matcher(value).matches()
+    compile(pattern).matches(value)
 
   /** Command-line matching. A pattern matches the command line if it matches
     * as a glob, or — when it contains no `*` — if it equals the command line

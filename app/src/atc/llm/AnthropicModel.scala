@@ -46,9 +46,9 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
       .model(modelId)
       .maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(32000L))
       // The system prompt (API reference + policy) is large and stable: cache it.
-      .systemOfTextBlockParams(java.util.List.of(
+      .systemOfTextBlockParams(List(
         TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()
-      ))
+      ).asJava)
     if cfg.thinking.getOrElse(true) then b.thinking(ThinkingConfigAdaptive.builder().build())
     cfg.reasoning.foreach(e =>
       b.outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase)).build())

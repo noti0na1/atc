@@ -54,7 +54,7 @@ object PathPattern:
 
   /** `~` / `~/x` resolved against the home directory (also used by `Host` for agent-supplied paths). */
   def expandHome(p: String): String =
-    if p == "~" || p.startsWith("~/") then System.getProperty("user.home") + p.drop(1) else p
+    if p == "~" || p.startsWith("~/") then scala.util.Properties.userHome + p.drop(1) else p
 
   /** Split an absolute path into its longest glob-free prefix and the rest. */
   private def splitGlob(abs: Path): (Path, String) =

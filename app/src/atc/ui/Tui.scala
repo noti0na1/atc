@@ -85,7 +85,7 @@ final class Tui(historyFile: Path) extends AgentUI:
         (Option(KeyMap.key(terminal, InfoCmp.Capability.back_tab)).toList :+ "\u001b[Z").distinct.filter(_.nonEmpty)
       keyMap.bind(Reference("atc-cycle-mode"), seqs*)
   private val g: Tui.Glyphs =
-    if terminal.encoding().name.toUpperCase.contains("UTF") && System.getenv("ATC_ASCII") == null then
+    if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then
       Tui.Glyphs.unicode
     else Tui.Glyphs.ascii
 
@@ -598,7 +598,7 @@ final class Tui(historyFile: Path) extends AgentUI:
     val prompter = PrompterFactory.create(terminal, PrompterConfig.defaults().withCancellableFirstPrompt(true))
     val builder = prompter.newBuilder()
     define(builder)
-    try Option(prompter.prompt(java.util.List.of[AttributedString](), builder.build()).get("a")).flatMap(read)
+    try Option(prompter.prompt(List.empty[AttributedString].asJava, builder.build()).get("a")).flatMap(read)
     catch case _: UserInterruptException | _: EndOfFileException => None
     finally tail = "\n" // the prompter leaves the cursor at a fresh line
 

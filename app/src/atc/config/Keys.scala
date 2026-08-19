@@ -27,7 +27,7 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
     * environment; `None` when nothing binds it to a non-empty value. */
   def get(name: String): Option[String] =
     files.iterator.flatMap((_, bindings) => bindings.get(name)).nextOption()
-      .orElse(Option(System.getenv(name)).filter(_.nonEmpty))
+      .orElse(sys.env.get(name).filter(_.nonEmpty))
 
   /** The names these files bind, for `/config`. Never the values. */
   def names: List[String] = files.flatMap(_._2.keys).distinct.sorted

@@ -63,7 +63,7 @@ class PolicySuite extends munit.FunSuite:
     assert(absoluteGlob.matches(root.resolve("src/main/A.scala")))
     assert(!absoluteGlob.matches(root.resolve("src/main/B.scala")))
     val home = PathPattern("~", root)
-    assert(home.matches(Path.of(System.getProperty("user.home")).resolve("x")))
+    assert(home.matches(Path.of(scala.util.Properties.userHome).resolve("x")))
 
   test("requests widen access once or for the session, deny throws"):
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.Deny, Decision.AllowSession))

@@ -28,7 +28,7 @@ object Sandbox:
 
   /** The compile classpath for agent code, from `-Datc.lib.classpath=<path list>`. */
   lazy val libraryClasspath: Seq[Path] =
-    Option(System.getProperty(ClasspathProperty)).map(_.trim).filter(_.nonEmpty) match
+    sys.props.get(ClasspathProperty).map(_.trim).filter(_.nonEmpty) match
       case Some(cp) =>
         val paths = cp.split(File.pathSeparator).toSeq.filter(_.nonEmpty)
           .map(p => Paths.get(p).toAbsolutePath.nn.normalize.nn).filter(Files.exists(_))

@@ -235,7 +235,7 @@ class LayerSuite extends munit.FunSuite:
     val w = World(project = """
       { "files": [ { "path": "~/.ssh", "access": "read" }, { "path": "/etc", "access": "read" } ] }
     """)
-    assertEquals(w.outside(Path.of(System.getProperty("user.home"), ".ssh")), Access.None)
+    assertEquals(w.outside(Path.of(scala.util.Properties.userHome, ".ssh")), Access.None)
     assertEquals(w.outside(Path.of("/etc/passwd")), Access.None)
 
   test("a project rule can add classification and locking, which only restrict"):
@@ -536,7 +536,7 @@ class LayerSuite extends munit.FunSuite:
   test("gitignore hides, after the policy has decided, and only ever hides"):
     val w = World(project = """{ "respectGitignore": true }""")
     Files.createDirectories(w.cwd.resolve(".git"))
-    Files.writeString(w.cwd.resolve(".gitignore"), "out/" + System.lineSeparator)
+    Files.writeString(w.cwd.resolve(".gitignore"), "out/" + scala.util.Properties.lineSeparator)
     Files.createDirectories(w.cwd.resolve("out"))
     Files.writeString(w.cwd.resolve("out/log.txt"), "x")
     Files.writeString(w.cwd.resolve("kept.txt"), "y")

@@ -3,6 +3,7 @@ package atc.config
 import upickle.default.*
 
 import java.nio.file.{Files, Path, Paths}
+import scala.util.Properties
 
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
@@ -101,7 +102,7 @@ case class Config(
 object Config:
   /** `~/.atc/config.json`: the base of the whole policy. Nothing is permitted
     * behind it, so it is also where every grant has to be written. */
-  def globalPath: Path = Paths.get(System.getProperty("user.home"), ".atc", "config.json").nn
+  def globalPath: Path = Paths.get(Properties.userHome, ".atc", "config.json").nn
 
   /** `<dir>/.atc/config.json`, the project config of `dir`. */
   def projectPath(dir: Path): Path = dir.resolve(".atc").resolve("config.json")
@@ -384,6 +385,102 @@ object Config:
     * before the environment. */
   def resolveApiKey(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Option[String] =
     p.key.flatMap(resolveEnvRef(_, bindings)).orElse(p.keyEnv.flatMap(bindings.get))
+
+  // ── editing a config file in place ────────────────────────────────
+
+  /** Set one top-level key of a config file, keeping the rest of the text as
+    * it is (a config is hand-formatted: blank lines, several patterns per
+    * line, and re-serialising it would lose that). See [[withTopLevel]]. */
+  def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
+    val text =
+      try Files.readString(path).nn
+      catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
+    Files.writeString(path, withTopLevel(text, key, value, after, path.toString))
+
+  /** `text` (a JSON object) with the top-level `key` set to `value`: an
+    * existing key keeps its place and only its value changes; a new one is
+    * added after the first of `after` that is present, else first, indented
+    * like the others. Everything else in the text is untouched. */
+  def withTopLevel(
+    text: String,
+    key: String,
+    value: ujson.Value,
+    after: List[String] = Nil,
+    where: String = "config"
+  ): String =
+    readObj(text, where) // fail clearly on anything that is not a JSON object
+    val obj = ObjectText.scan(text)
+    val rendered = ujson.write(value)
+    obj.members.find(_.key == key) match
+      case Some(m) => text.substring(0, m.valueStart) + rendered + text.substring(m.valueEnd)
+      case None =>
+        val entry = s"${ujson.write(ujson.Str(key))}: $rendered"
+        after.flatMap(k => obj.members.find(_.key == k)).headOption match
+          case Some(prev) =>
+            text.substring(0, prev.valueEnd) + s",${obj.separator}$entry" + text.substring(prev.valueEnd)
+          case None if obj.members.isEmpty =>
+            text.substring(0, obj.open + 1) + s"\n  $entry\n" + text.substring(obj.close)
+          case None =>
+            text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
+
+  /** The top-level members of a JSON object's text, with their positions. */
+  private[config] case class ObjectText(text: String, open: Int, close: Int, members: List[ObjectText.Member]):
+    /** What goes between two members: the newline and indent before the first
+      * one, or a single space in a one-line object. */
+    def separator: String =
+      members.headOption match
+        case Some(first) =>
+          val nl = text.lastIndexOf('\n', first.keyStart)
+          if nl > open then text.substring(nl, first.keyStart) else " "
+        case None => "\n  "
+
+  private[config] object ObjectText:
+    /** A member: `keyStart` is its opening quote, `valueStart`/`valueEnd` bound
+      * the value (no surrounding whitespace, no trailing comma). */
+    case class Member(key: String, keyStart: Int, valueStart: Int, valueEnd: Int)
+
+    /** Positions of the top-level members of `text`, which must already be
+      * known to be a well-formed JSON object. */
+    def scan(text: String): ObjectText =
+      var i = 0
+      def skipSpace(): Unit = while i < text.length && text(i).isWhitespace do i += 1
+      /** From an opening quote at `i` to just past the closing one. */
+      def skipString(): Unit =
+        i += 1
+        while text(i) != '"' do i += (if text(i) == '\\' then 2 else 1)
+        i += 1
+      skipSpace()
+      val open = i
+      i += 1
+      val members = List.newBuilder[Member]
+      var close = -1
+      while close < 0 do
+        skipSpace()
+        text(i) match
+          case '}' => close = i
+          case ',' => i += 1
+          case _ =>
+            val keyStart = i
+            skipString()
+            val key = ujson.read(text.substring(keyStart, i)).str
+            skipSpace()
+            i += 1 // the colon
+            skipSpace()
+            val valueStart = i
+            var depth = 0
+            var done = false
+            while !done do
+              text(i) match
+                case '"' => skipString()
+                case '{' | '[' => depth += 1; i += 1
+                case '}' | ']' if depth == 0 => done = true
+                case '}' | ']' => depth -= 1; i += 1
+                case ',' if depth == 0 => done = true
+                case _ => i += 1
+            var valueEnd = i
+            while text(valueEnd - 1).isWhitespace do valueEnd -= 1
+            members += Member(key, keyStart, valueStart, valueEnd)
+      ObjectText(text, open, close, members.result())
 
   /** The starter global config written by `--init-global`. */
   def globalTemplate: String = resource("/atc/config-template.json")

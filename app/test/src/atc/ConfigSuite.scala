@@ -317,3 +317,80 @@ class ConfigSuite extends munit.FunSuite:
     c.model.foreach(catalog.find)
     c.classifiedModel.foreach(catalog.find)
     assert(c.files.nonEmpty, "template should define file rules")
+
+  // ── editing a config in place (`/model` remembers the choice) ───
+
+  test("withTopLevel replaces an existing key's value and leaves the rest of the text alone"):
+    val text =
+      "{\n  \"model\": \"chat\",\n  \"classifiedModel\": \"local\",\n\n  \"commands\": [\"git status\", \"git log\"]\n}\n"
+    val out = Config.withTopLevel(text, "model", ujson.Str("anthropic/sonnet"))
+    assertEquals(out, text.replace("\"model\": \"chat\"", "\"model\": \"anthropic/sonnet\""))
+    // a value that is not a string, e.g. unsetting the classified model
+    val off = Config.withTopLevel(text, "classifiedModel", ujson.Null)
+    assertEquals(off, text.replace("\"classifiedModel\": \"local\"", "\"classifiedModel\": null"))
+    assertEquals(ujson.read(off)("classifiedModel"), ujson.Null)
+
+  test("withTopLevel adds a missing key first, or after the named key, matching the file's indentation"):
+    val text = "{\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
+    val first = Config.withTopLevel(text, "model", ujson.Str("gpt"))
+    assertEquals(
+      first,
+      "{\n    \"model\": \"gpt\",\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
+    )
+    val after = Config.withTopLevel(first, "classifiedModel", ujson.Str("local"), after = List("model"))
+    assertEquals(
+      after,
+      "{\n    \"model\": \"gpt\",\n    \"classifiedModel\": \"local\",\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
+    )
+    // after a key that is the last member (no trailing comma to reuse)
+    val last = Config.withTopLevel("{\n  \"model\": \"a\"\n}", "classifiedModel", ujson.Str("b"), after = List("model"))
+    assertEquals(last, "{\n  \"model\": \"a\",\n  \"classifiedModel\": \"b\"\n}")
+    // one-line and empty objects
+    assertEquals(
+      Config.withTopLevel("""{ "safeMode": true }""", "model", ujson.Str("x")),
+      """{ "model": "x", "safeMode": true }"""
+    )
+    assertEquals(Config.withTopLevel("{}", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
+    assertEquals(Config.withTopLevel("{ }", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
+
+  test("withTopLevel only touches the top level: nested keys, strings and brackets do not confuse it"):
+    val text =
+      """{
+        |  "providers": { "p": { "api": "openai", "models": { "model": { "name": "m }, \" { [" } } } },
+        |  "hosts": ["a.example", "b}example"],
+        |  "instructions": "no \"model\" here, {and} [there]",
+        |  "model": "old"
+        |}""".stripMargin
+    val out = Config.withTopLevel(text, "model", ujson.Str("new"))
+    assertEquals(out, text.replace("\"model\": \"old\"", "\"model\": \"new\""))
+    assertEquals(ujson.read(out)("providers")("p")("models")("model")("name").str, "m }, \" { [")
+    // the whole template survives a round trip with only the value changed
+    val template = Config.projectTemplate
+    val edited = Config.withTopLevel(template, "model", ujson.Str("gpt"))
+    assertEquals(edited, template.replace("\"model\": \"chat\"", "\"model\": \"gpt\""))
+    assertEquals(upickle.default.read[Config](ujson.read(edited)).model, Some("gpt"))
+
+  test("withTopLevel rejects text that is not a JSON object"):
+    intercept[IllegalArgumentException](Config.withTopLevel("[1, 2]", "model", ujson.Str("x")))
+    intercept[IllegalArgumentException](Config.withTopLevel("{ oops", "model", ujson.Str("x")))
+
+  test("setTopLevel rewrites the project config, and a null classifiedModel there unsets a global one"):
+    val dir = Files.createTempDirectory("atc-cfg-set").nn
+    val projectDir = Files.createDirectories(dir.resolve(".atc")).nn
+    val project = writeCfg(projectDir, "config.json", "{\n  \"model\": \"a\",\n  \"commands\": [\"ls\"]\n}\n")
+    val global = writeCfg(
+      dir,
+      "global.json",
+      """{ "model": "b", "classifiedModel": "b",
+        |  "providers": { "p": { "api": "echo", "models": { "a": {}, "b": {} } } } }""".stripMargin
+    )
+    Config.setTopLevel(project, "model", ujson.Str("b"))
+    Config.setTopLevel(project, "classifiedModel", ujson.Null, after = List("model"))
+    assertEquals(
+      Files.readString(project),
+      "{\n  \"model\": \"b\",\n  \"classifiedModel\": null,\n  \"commands\": [\"ls\"]\n}\n"
+    )
+    val loaded = Config.load(dir, None, global)
+    assertEquals(loaded.settings.model, Some("b"))
+    assertEquals(loaded.settings.classifiedModel, None)
+    assertEquals(loaded.settings.commands, List("ls"))

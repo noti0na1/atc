@@ -85,9 +85,9 @@ class HostSuite extends munit.FunSuite:
   test("readBytes/writeBytes round-trip a binary file byte for byte"):
     val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
     Files.write(root.resolve("bin.dat"), bytes)
-    assert(java.util.Arrays.equals(readBytes("bin.dat"), bytes))
+    assert(readBytes("bin.dat").sameElements(bytes))
     writeBytes("copy.dat", readBytes("bin.dat"))
-    assert(java.util.Arrays.equals(Files.readAllBytes(root.resolve("copy.dat")), bytes))
+    assert(Files.readAllBytes(root.resolve("copy.dat")).nn.sameElements(bytes))
 
   test("writeBytes is refused on a classified path, like write"):
     intercept[SecurityException](writeBytes("secrets/x.dat", Array[Byte](1, 2)))
