@@ -17,16 +17,16 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Test the atc wrapper script
       run: bash tests/atc_test.sh
     - name: Set up JDK 17
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v5
       with:
         java-version: '17'
         distribution: 'temurin'
     - name: Cache Mill and Coursier
-      uses: coursier/cache-action@v6
+      uses: coursier/cache-action@v8
     - name: Check formatting
       run: ./mill __.checkFormat
     - name: Compile
@@ -54,7 +54,7 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - name: Check that the release tag matches Versions.atc in build.mill
       env:
         TAG: ${{ github.event.release.tag_name }}
@@ -66,12 +66,12 @@ jobs:
           exit 1
         fi
     - name: Set up JDK 17
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v5
       with:
         java-version: '17'
         distribution: 'temurin'
     - name: Cache Mill and Coursier
-      uses: coursier/cache-action@v6
+      uses: coursier/cache-action@v8
     - name: Build distribution
       run: ./mill dist
     - name: Smoke-test the built jars
