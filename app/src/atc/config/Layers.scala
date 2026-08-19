@@ -40,7 +40,7 @@ case class ConfigLayer(
   def keys: Set[String] = json.value.keySet.toSet
   def defines(key: String): Boolean = json.value.contains(key)
   def describe: String =
-    val role = if origin.grants then "grants" else "narrows only"
+    val role = if origin.grants then "grants anywhere" else "grants its own project, otherwise narrows"
     f"  ${origin.label}%-9s ${path.map(_.toString).getOrElse("(bundled)")}%-52s $role"
 
 /** A file rule with the folder its layer is anchored at: the folder holding

@@ -136,15 +136,32 @@ object Config:
       }
     }
 
+  /** Write the starting project config for `dir`, and a `.gitignore` beside
+    * it keeping the keys out of version control (the config travels with the
+    * repository; `.atc/keys.properties` must not). Returns what it created:
+    * nothing when the config already exists. */
+  def initProject(dir: Path): List[Path] =
+    val config = projectPath(dir)
+    if Files.exists(config) then Nil
+    else
+      Files.createDirectories(config.getParent)
+      Files.writeString(config, projectTemplate)
+      val ignore = config.getParent.nn.resolve(".gitignore").nn
+      val ignored = Option.when(!Files.exists(ignore)) { Files.writeString(ignore, KeysFile + "\n"); ignore }
+      config :: ignored.toList
+
   // ── layers ────────────────────────────────────────────────────────
 
   /** Load every layer and combine them: `~/.atc/config.json` ← the project's
     * `.atc/config.json` ← `-c <file>`. See [[combine]] for what "later" means
-    * per setting. */
-  def load(cwd: Path, explicit: Option[Path]): Configuration = load(cwd, explicit, globalPath)
+    * per setting. With `bundledGlobal`, the starting config stands in for a
+    * missing `~/.atc/config.json` (the user declined to write it), as a layer
+    * with no path. */
+  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean): Configuration =
+    load(cwd, explicit, globalPath, bundledGlobal)
 
   /** As [[load]], with the global path given explicitly (tests). */
-  def load(cwd: Path, explicit: Option[Path], global: Path): Configuration =
+  def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
     val root = projectRoot(cwd)
     val project = root.map(projectPath)
     val candidates =
@@ -155,10 +172,18 @@ object Config:
     val present = candidates
       .filter((_, p) => Files.isRegularFile(p))
       .distinctBy((_, p) => p.toAbsolutePath.normalize)
+    val layers = present.map((origin, path) => readLayer(origin, path))
+    val bundled = Option.when(bundledGlobal && !layers.exists(_.origin == Origin.Global))(bundledLayer)
     // Keys are read separately, most specific first: they are secrets, not
     // settings, so they never take part in the layer merge.
     val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
-    combine(present.map((origin, path) => readLayer(origin, path)), keys)
+    combine(bundled.toList ++ layers, keys)
+
+  /** The starting global config as an in-memory layer, for a run without a
+    * `~/.atc/config.json`. */
+  private def bundledLayer: ConfigLayer =
+    val where = "the bundled starting config"
+    ConfigLayer(Origin.Global, None, readObj(globalTemplate, where), parse(globalTemplate, where), None)
 
   private def readLayer(origin: Origin, path: Path): ConfigLayer =
     val text =

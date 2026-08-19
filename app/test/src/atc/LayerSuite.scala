@@ -143,6 +143,34 @@ class LayerSuite extends munit.FunSuite:
     val alone = World(global = Config.globalTemplate)
     assert(!alone.policy.hostAllowed(ScopeId.Base, "docs.python.org"))
 
+  test("the bundled starting config stands in for a missing ~/.atc/config.json only when asked to"):
+    val w = World(global = "", project = GrantCwd)
+    assertEquals(w.configuration.layers.map(_.origin), List(Origin.Project)) // not by default
+    val bundled = Config.load(w.cwd, None, w.globalPath, bundledGlobal = true)
+    assertEquals(
+      bundled.layers.map(l => (l.origin, l.path)),
+      List(Origin.Global -> None, Origin.Project -> Some(Config.projectPath(w.cwd)))
+    )
+    assert(bundled.layers.head.describe.contains("(bundled)"))
+    assertEquals(bundled.sources, List(Config.projectPath(w.cwd))) // no file to report for it
+    // it is the config the file would hold, and nothing was written
+    assertEquals(bundled.settings.providers.keySet, ujson.read(Config.globalTemplate)("providers").obj.keySet)
+    assert(!Files.exists(w.globalPath))
+    // with the file present, the flag changes nothing
+    Files.createDirectories(w.globalPath.getParent)
+    Files.writeString(w.globalPath, """{ "commands": ["ls"] }""")
+    assertEquals(Config.load(w.cwd, None, w.globalPath, bundledGlobal = true).layers.head.path, Some(w.globalPath))
+
+  test("initProject writes the starting project config and its .gitignore once, and never again"):
+    val w = World(global = "")
+    val config = Config.projectPath(w.cwd)
+    val ignore = config.getParent.nn.resolve(".gitignore").nn
+    assertEquals(Config.initProject(w.cwd), List(config, ignore))
+    assertEquals(Files.readString(config), Config.projectTemplate)
+    assertEquals(Files.readString(ignore), Config.KeysFile + "\n")
+    assertEquals(Config.initProject(w.cwd), Nil) // refuses to overwrite
+    assertEquals(Config.projectRoot(w.cwd), Some(w.cwd)) // and the directory is a project now
+
   test("ensureGlobal writes the starting config and key bindings once, and never again"):
     val home = Files.createTempDirectory("atc-ensure").nn
     val path = home.resolve(".atc").resolve("config.json").nn

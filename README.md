@@ -47,9 +47,9 @@ state between snippets, so a `val` defined in one turn is still there in the nex
 You need JDK 17 or newer. The repository ships its own Mill launcher (`./mill`), so there
 is nothing else to install.
 
-**1. API keys.** The first run writes `~/.atc/config.json` (providers, machine-wide
-permissions) and `~/.atc/keys.properties` beside it, with an empty line per provider key.
-Fill in the ones you use:
+**1. API keys.** On the first run atc finds no `~/.atc/config.json` and offers to write the
+starting one (providers, machine-wide permissions) together with `~/.atc/keys.properties`
+beside it, then exits so you can fill in the keys you use:
 
 ```properties
 ANTHROPIC_API_KEY=sk-ant-…
@@ -58,9 +58,12 @@ OPENAI_API_KEY=
 
 Alternatively export the variables in your shell (`start.sh` also sources a `.env` in the
 repository, `cp .env.example .env`, without overriding what is already exported), or use a
-local model that needs no key.
+local model that needs no key. Answer no and nothing is written: the built-in starting
+config is used for that run (`atc --init-global` writes it later, on demand).
 
-**2. A project config.** Run ATC once with `--init` in the project it should work on:
+**2. A project config.** Started in a directory no config grants, atc offers to write a
+starting `.atc/config.json` there, and uses it at once; `--init` writes the same file
+without asking:
 
 ```bash
 ./start.sh -C ~/my-project --init      # writes ~/my-project/.atc/config.json
@@ -316,17 +319,21 @@ Config files are JSON, and there are three layers:
 | 3 | explicit | `-c <file>` | grant anything |
 
 **`~/.atc/config.json` is the base, and there is nothing behind it.** No policy is compiled
-into the program: what no config grants is not permitted. atc writes that file from
-[a starting config](app/resources/atc/config-template.json) the first time it runs
-(`--init-global` writes it on demand) and never touches it again. The starting config
-protects without granting: it lists the providers, classifies the usual credential paths,
-puts `.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no file, no
-command and no host. Edit it to grant things machine-wide.
+into the program: what no config grants is not permitted. Nothing is written without asking
+either: when the file is missing, an interactive run offers to write
+[the starting config](app/resources/atc/config-template.json) (and the keys file beside it)
+and then stops so you can fill in the keys; decline, or run with `-p`, and the same
+starting config is used in memory for that run, as a layer `/config` shows as `(bundled)`.
+`--init-global` writes it on demand. Once written it is never touched again. The starting
+config protects without granting: it lists the providers, classifies the usual credential
+paths, puts `.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no
+file, no command and no host. Edit it to grant things machine-wide.
 
 **A directory is workable because a config says so.** The working directory is not special:
-`atc -C /tmp/scratch` with no config covering it can read and write nothing, says so at
-startup, and leaves the agent to ask for each file. `atc --init` writes a
-[project config](app/resources/atc/project-template.json) that opens the project:
+`atc -C /tmp/scratch` with no config covering it can read and write nothing. An interactive
+run says so at startup and offers to write a
+[project config](app/resources/atc/project-template.json) there (`atc --init` writes it
+without asking); decline and the agent asks for each file. That config opens the project:
 
 * it grants the project's own tree, with `./.git` read-only so the agent can read history
   but not rewrite it by hand (git *commands* are unaffected; they are governed by
@@ -502,8 +509,8 @@ the lookup passes over it and carries on, so blanking a line falls back to the n
 instead of breaking. The file is read by `java.util.Properties`, so `#` and `!` comments,
 `NAME: value`, `\` escapes and line continuations all work as in any `.properties` file.
 
-The starting `~/.atc/keys.properties` is written beside the global config on first run, with
-an empty line for each variable the starting config names. `atc --init` adds a
+The starting `~/.atc/keys.properties` is written beside the global config when you accept
+the first-run offer, with an empty line for each variable the starting config names. `atc --init` adds a
 `.atc/.gitignore` holding `keys.properties`, and the starting policy makes `.atc` `none` and
 `locked`, so the agent can read neither the bindings nor the config. `/config` lists which
 variables are bound and from where, never their values.

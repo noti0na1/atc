@@ -3,7 +3,7 @@ package atc
 import atc.config.Config
 import atc.perms.Mode
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
 
 /** Command line entry point: parses the flags and starts [[App]]. */
 object Main:
@@ -62,30 +62,25 @@ object Main:
           sys.exit(2)
     if args.help then { println(usage); return }
     if args.version then { println(s"atc $Version"); return }
-    if args.initGlobal then { sys.exit(write(Config.globalPath, Config.globalTemplate, "models and permissions")) }
+    if args.initGlobal then
+      sys.exit(report(Config.globalPath, Config.ensureGlobal(), "fill in the API keys and edit the permissions"))
     if args.init then
-      val status = write(Config.projectPath(args.cwd), Config.projectTemplate, "project's permissions")
-      // The config travels with the repository; `.atc/keys.properties` must not.
-      if status == 0 then
-        val ignore = Config.projectPath(args.cwd).getParent.nn.resolve(".gitignore").nn
-        if !Files.exists(ignore) then Files.writeString(ignore, Config.KeysFile + "\n")
-      sys.exit(status)
+      sys.exit(report(Config.projectPath(args.cwd), Config.initProject(args.cwd), "edit the project's permissions"))
     val exit: Int =
       try App(args).run()
       catch
+        case App.Exit(code) => code
         case e: Throwable =>
           System.err.println(s"atc: ${e.getMessage}")
           Debug.trace(e)
           1
     sys.exit(exit)
 
-  /** `--init` / `--init-global`: write a starter config, refusing to overwrite. */
-  private def write(target: Path, content: String, what: String): Int =
-    if Files.exists(target) then
+  /** `--init` / `--init-global`: say what was written, or refuse to overwrite. */
+  private def report(target: Path, created: List[Path], todo: String): Int =
+    if created.isEmpty then
       System.err.println(s"$target already exists")
       1
     else
-      Files.createDirectories(target.getParent)
-      Files.writeString(target, content)
-      println(s"Wrote $target; edit the $what, then run atc again.")
+      println(s"Wrote ${created.mkString(" and ")}; $todo, then run atc again.")
       0

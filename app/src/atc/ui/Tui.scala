@@ -666,6 +666,19 @@ final class Tui(historyFile: Path) extends AgentUI:
     blankLine()
     decision
 
+  /** A yes/no question from the app itself (setup, not the agent): a menu
+    * when there is a terminal, a `[y/N]` line otherwise. Cancelling means no. */
+  def confirm(question: String): Boolean =
+    synchronized { flushTodos(); beginBlock() }
+    write(Indent + styled("? " + question, Cyan, Bold) + "\n")
+    val yes =
+      if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase.startsWith("y"))
+      else menu("Choose", List(Tui.YesLabel, Tui.NoLabel)).contains(Tui.YesLabel)
+    if plain then
+      write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
+    blankLine()
+    yes
+
   /** Ask the user a question on behalf of the agent. Options render as a
     * menu (or checkboxes when `multiple`), always with an "Other" free-text
     * entry; no options → a free-text line. `None` on Ctrl-C/Ctrl-D. */
@@ -805,6 +818,8 @@ object Tui:
   val AllowSession = "Yes, for the rest of this session"
   val DenyLabel = "No"
   val OtherLabel = "Other (type an answer)"
+  val YesLabel = "Yes"
+  val NoLabel = "No"
 
   /** The characters that draw the layout; ASCII when the terminal is not UTF-8
     * (or `ATC_ASCII` is set). Always constructed with named arguments — a bare

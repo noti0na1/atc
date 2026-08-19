@@ -9,7 +9,7 @@ import atc.perms.*
 import atc.sandbox.{ReplSession, SandboxConfig}
 import atc.ui.Tui
 
-import java.nio.file.{Path, Paths}
+import java.nio.file.{Files, Path, Paths}
 import scala.collection.mutable
 
 /** The running application: wires configuration, models, permission policy,
@@ -18,17 +18,14 @@ import scala.collection.mutable
   * slash commands. */
 final class App(args: Main.Args):
   val cwd: Path = args.cwd
-  /** Written on first run: the global config is the base of the policy, so
-    * there has to be one, and the key bindings sit beside it. Never touched
-    * again. */
-  val createdGlobalConfig: List[Path] = Config.ensureGlobal()
+  val tui = Tui(Paths.get(System.getProperty("user.home"), ".atc", "history"))
 
-  /** Every configuration layer in force (global ← project ← `-c`). */
-  val configuration: Configuration = Config.load(cwd, args.config)
+  /** Every configuration layer in force (global ← project ← `-c`), after the
+    * first-run offers of [[App.setup]] (which may end the program instead). */
+  val configuration: Configuration = App.setup(args, tui)
   /** The effective settings. The *policy* lists live on `configuration`. */
   val config: Config = configuration.settings
   val configFiles: List[Path] = configuration.sources
-  val tui = Tui(Paths.get(System.getProperty("user.home"), ".atc", "history"))
 
   // ── models ────────────────────────────────────────────────────────
 
@@ -122,12 +119,6 @@ final class App(args: Main.Args):
 
   def run(): Int =
     try
-      // Both modes: a first run should say where the policy now comes from.
-      if createdGlobalConfig.nonEmpty then
-        tui.info(
-          s"Wrote a starting configuration to ${createdGlobalConfig.mkString(" and ")}; " +
-            "nothing is permitted that it does not grant."
-        )
       // A directory no config covers is unreachable; say so rather than let the
       // agent discover it one denial at a time.
       if !policy.effective(ScopeId.Base, PathPattern.canonical(cwd)).canRead then
@@ -334,6 +325,64 @@ final class App(args: Main.Args):
     }
 
 object App:
+  /** Thrown to end the program from setup, before there is anything to run. */
+  final case class Exit(code: Int) extends RuntimeException(s"exit $code")
+
+  /** Load the configuration, offering to write what is missing first. No
+    * configuration is written without asking, and nothing is asked in a
+    * scripted (`-p`) run:
+    *
+    *  - no `~/.atc/config.json`: offer to write the starting config and the
+    *    key bindings beside it. Declined (or `-p`), the bundled starting config
+    *    stands in for this run.
+    *  - no config grants the working directory and it has no `.atc/config.json`
+    *    of its own: offer to write the starting project config there (as
+    *    `--init` does), and use it at once.
+    *
+    * When the global config was written the program then stops (via [[Exit]]),
+    * so the user can fill in the keys or export them and start again. */
+  def setup(args: Main.Args, tui: Tui): Configuration =
+    val interactive = args.prompt.isEmpty
+    val global = Config.globalPath
+    val globalMissing = !Files.isRegularFile(global)
+    val writeGlobal = globalMissing && interactive && {
+      tui.println(s"No configuration at ${pretty(global)}.")
+      tui.confirm("Write the starting config and key bindings there? (No: use the built-in ones for now)")
+    }
+    if writeGlobal then tui.println(s"Wrote ${Config.ensureGlobal().map(pretty).mkString(" and ")}.")
+    else if globalMissing then
+      tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
+    val bundledGlobal = globalMissing && !writeGlobal
+    var configuration = Config.load(args.cwd, args.config, bundledGlobal)
+
+    def cwdReadable(c: Configuration): Boolean =
+      Policy(fileRules(c, args.cwd), Nil, Nil, _ => Decision.Deny)
+        .effective(ScopeId.Base, PathPattern.canonical(args.cwd)).canRead
+    // Offered whenever cwd has no `.atc/config.json` of its own and nothing
+    // grants it, whatever an ancestor's project config (or the home `.atc`,
+    // which the walk-up also finds) says: the new file becomes the nearest
+    // project config and takes over from there.
+    if interactive && !cwdReadable(configuration) && !Files.exists(Config.projectPath(args.cwd)) then
+      tui.println(
+        s"No configuration grants access to ${pretty(args.cwd)}, so the agent would have to ask for every file."
+      )
+      val project = Config.projectPath(args.cwd)
+      if tui.confirm(s"Write a starting project config to ${pretty(project)}? (It opens this directory to the agent)")
+      then
+        tui.println(
+          s"Wrote ${Config.initProject(args.cwd).map(pretty).mkString(" and ")}; edit it to change what the agent may touch here."
+        )
+        configuration = Config.load(args.cwd, args.config, bundledGlobal)
+
+    if writeGlobal then
+      tui.println(
+        s"Fill in the API keys in ${pretty(global.getParent.nn.resolve(Config.KeysFile).nn)} " +
+          "(or export them in the environment), then start atc again."
+      )
+      tui.close()
+      throw Exit(0)
+    configuration
+
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =
     val home = Paths.get(System.getProperty("user.home"))
