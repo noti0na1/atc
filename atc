@@ -1,0 +1,586 @@
+#!/usr/bin/env bash
+# atc: install, update and run ATC from the jars published on GitHub releases.
+#
+#   curl -fsSL https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atc -o atc
+#   chmod +x atc && ./atc setup      # installs ~/.local/bin/atc, downloads the latest release
+#   atc -C ~/my-project              # runs ATC (any argument that is not a wrapper command)
+#
+# `atc help` lists the wrapper commands. Developers working on ATC itself use
+# ./start.sh, which builds and runs the checkout instead of a release.
+set -euo pipefail
+
+OWNER_REPO="noti0na1/atc"
+SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/${OWNER_REPO}/refs/heads/main/atc"
+# The jars go beside ATC's own config (~/.atc/config.json, keys.properties), in
+# their own directory so uninstall can remove them without touching those.
+CACHE_DIR="${ATC_CACHE_DIR:-${HOME}/.atc/jars}"
+INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
+INSTALL_PATH="${INSTALL_DIR}/atc"
+APP_JAR_NAME="atc.jar"
+LIB_JAR_NAME="atc-lib.jar"
+APP_JAR="${CACHE_DIR}/${APP_JAR_NAME}"
+LIB_JAR="${CACHE_DIR}/${LIB_JAR_NAME}"
+RELEASE_MARKER="${CACHE_DIR}/release.txt"
+PATH_MARKER_BEGIN="# >>> atc path >>>"
+PATH_MARKER_END="# <<< atc path <<<"
+
+print_help() {
+  cat <<EOF
+atc: install, update and run ATC
+
+Usage:
+  atc [atc-args...]        Run ATC with the downloaded release jars (same as 'atc run').
+  atc run [atc-args...]    Run ATC; every argument is passed to it ('atc run --help').
+  atc setup                Install this wrapper into ~/.local/bin, put ~/.local/bin on
+                           PATH, check for Java 17+ and download the latest release.
+  atc update               Download the latest release jars when they are missing or
+                           out of date.
+  atc self update          Replace this wrapper with the latest one from GitHub.
+  atc self uninstall       Remove the wrapper, the downloaded jars and the PATH snippet
+                           (~/.atc/config.json and keys.properties are kept).
+  atc help                 Show this help.
+
+Locations:
+  Wrapper:   ${INSTALL_PATH}
+  Jars:      ${CACHE_DIR}/  (override with ATC_CACHE_DIR)
+
+Environment:
+  ATC_JAVA_OPTS   extra JVM flags for 'atc run'
+  GITHUB_TOKEN    raises the GitHub API rate limit for 'setup' and 'update'
+
+Examples:
+  atc setup
+  atc -C ~/my-project 
+  atc run -p 'run: 1 + 1'
+  atc update
+EOF
+}
+
+print_self_help() {
+  cat <<EOF
+atc self: manage the wrapper itself
+
+Usage:
+  atc self update      Download the latest wrapper from GitHub and replace this
+                       script when it has changed.
+  atc self uninstall   Remove the installed wrapper, the downloaded jars and the PATH
+                       snippet added by 'atc setup' (~/.atc/config.json and
+                       keys.properties are kept).
+EOF
+}
+
+fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required but was not found."
+}
+
+# ---------------------------------------------------------------------------
+# Java
+# ---------------------------------------------------------------------------
+
+# The major version in the first line of `java -version` ("17.0.2" -> 17,
+# "1.8.0_292" -> 8); fails when the line has no version.
+java_major_from_line() {
+  local version_line="$1" raw_version major
+
+  if [[ "$version_line" =~ \"([0-9]+)(\.([0-9]+))?([._][0-9]+)? ]]; then
+    raw_version="${BASH_REMATCH[1]}"
+    if [[ "$raw_version" == "1" && -n "${BASH_REMATCH[3]:-}" ]]; then
+      major="${BASH_REMATCH[3]}"
+    else
+      major="$raw_version"
+    fi
+    printf '%s\n' "$major"
+    return 0
+  fi
+  return 1
+}
+
+java_major_version() {
+  local version_line
+  version_line="$(java -version 2>&1 | head -n1 || true)"
+  [[ -n "$version_line" ]] || return 1
+  java_major_from_line "$version_line"
+}
+
+ensure_java() {
+  local major
+
+  command -v java >/dev/null 2>&1 || fail "Java 17+ is required. Install Java and try again."
+  major="$(java_major_version)" || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
+  (( major >= 17 )) || fail "Java 17+ is required. Found Java ${major}. Install a newer Java version and try again."
+}
+
+# ---------------------------------------------------------------------------
+# Release metadata
+# ---------------------------------------------------------------------------
+
+release_json() {
+  local api_url="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
+  local curl_args=(-sSL -H "Accept: application/vnd.github+json")
+  local response http_code body
+
+  require_command curl
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
+
+  response="$(curl "${curl_args[@]}" -w $'\n%{http_code}' "$api_url")" \
+    || fail "failed to query the GitHub API at ${api_url}."
+  http_code="${response##*$'\n'}"
+  body="${response%$'\n'*}"
+
+  case "$http_code" in
+    2*) ;;
+    403) fail "GitHub API returned 403 Forbidden for ${api_url}. You may be rate limited; set GITHUB_TOKEN to raise the rate limit." ;;
+    404) fail "GitHub API returned 404 for ${api_url}: ${OWNER_REPO} has no published release yet." ;;
+    *) fail "GitHub API returned HTTP ${http_code} for ${api_url}." ;;
+  esac
+
+  printf '%s\n' "$body"
+}
+
+extract_release_field() {
+  local json="$1" field="$2"
+  printf '%s' "$json" \
+    | grep -m1 -oE "\"${field}\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" \
+    | sed -E 's/^[^"]*"[^"]*"[[:space:]]*:[[:space:]]*"([^"]+)"$/\1/'
+}
+
+extract_release_id() {
+  local json="$1"
+  printf '%s' "$json" | grep -m1 -oE '"id"[[:space:]]*:[[:space:]]*[0-9]+' | sed -E 's/.*:[[:space:]]*//'
+}
+
+# "<release id>|<tag>": what the cache marker records.
+release_key_from_json() {
+  local json="$1" release_id tag_name
+
+  release_id="$(extract_release_id "$json")"
+  tag_name="$(extract_release_field "$json" "tag_name")"
+  [[ -n "$release_id" && -n "$tag_name" ]] || fail "failed to parse the latest release metadata."
+  printf '%s|%s\n' "$release_id" "$tag_name"
+}
+
+release_tag_of_key() {
+  printf '%s\n' "${1#*|}"
+}
+
+# One "name<TAB>url<TAB>digest" line per required jar. jq parses the JSON
+# structurally when available; the grep fallback relies on the field order
+# GitHub uses (name before digest before browser_download_url in each asset).
+extract_assets() {
+  if command -v jq >/dev/null 2>&1; then
+    extract_assets_jq "$1"
+  else
+    extract_assets_grep "$1"
+  fi
+}
+
+extract_assets_jq() {
+  local json="$1" parsed
+
+  parsed="$(printf '%s' "$json" | jq -r --arg app "$APP_JAR_NAME" --arg lib "$LIB_JAR_NAME" '
+    [ .assets[]?
+      | select(.name == $app or .name == $lib)
+      | "\(.name)\t\(.browser_download_url)\t\(.digest // "")"
+    ] | unique | .[]
+  ' 2>/dev/null)" || fail "failed to parse the latest release metadata with jq."
+
+  printf '%s\n' "$parsed" | grep -qF "${APP_JAR_NAME}"$'\t' \
+    || fail "required asset ${APP_JAR_NAME} not found in the latest release."
+  printf '%s\n' "$parsed" | grep -qF "${LIB_JAR_NAME}"$'\t' \
+    || fail "required asset ${LIB_JAR_NAME} not found in the latest release."
+
+  printf '%s\n' "$parsed"
+}
+
+extract_assets_grep() {
+  local json="$1"
+  local app_url="" app_digest="" lib_url="" lib_digest=""
+  local current_name="" current_digest="" token
+
+  while IFS= read -r token; do
+    if [[ "$token" =~ \"name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+      current_name="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$token" =~ \"digest\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+      current_digest="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$token" =~ \"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+      case "$current_name" in
+        "$APP_JAR_NAME") app_url="${BASH_REMATCH[1]}"; app_digest="$current_digest" ;;
+        "$LIB_JAR_NAME") lib_url="${BASH_REMATCH[1]}"; lib_digest="$current_digest" ;;
+      esac
+      current_name=""
+      current_digest=""
+    fi
+  done < <(printf '%s' "$json" | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"|"digest"[[:space:]]*:[[:space:]]*"[^"]+"|"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"')
+
+  [[ -n "$app_url" ]] || fail "required asset ${APP_JAR_NAME} not found in the latest release."
+  [[ -n "$lib_url" ]] || fail "required asset ${LIB_JAR_NAME} not found in the latest release."
+
+  printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+    "$APP_JAR_NAME" "$app_url" "$app_digest" \
+    "$LIB_JAR_NAME" "$lib_url" "$lib_digest"
+}
+
+# ---------------------------------------------------------------------------
+# Checksums
+# ---------------------------------------------------------------------------
+
+have_sha256_tool() {
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1
+}
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+# Verify a downloaded jar against the "sha256:<hex>" digest from the release
+# metadata. Fails closed: a jar without a digest is never installed.
+verify_jar() {
+  local file="$1" digest="$2" name expected actual
+
+  name="$(basename "$file")"
+  [[ -n "$digest" ]] || fail "no digest in release metadata for ${name}; refusing to install an unverified jar."
+  if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
+    expected="${BASH_REMATCH[1]}"
+  else
+    fail "unrecognised digest format '${digest}' for ${name}; expected 'sha256:' followed by 64 hex characters."
+  fi
+  actual="$(sha256_of "$file")" \
+    || fail "cannot verify ${name}: no sha256 tool found. Install coreutils (sha256sum) or use macOS shasum."
+  [[ "$actual" == "$expected" ]] || fail "Checksum mismatch for ${name}: expected ${expected}, got ${actual}"
+  echo "  ${name}: verified (sha256)"
+}
+
+cached_release_matches() {
+  local release_key="$1"
+  [[ -f "$APP_JAR" && -f "$LIB_JAR" && -f "$RELEASE_MARKER" ]] || return 1
+  [[ "$(cat "$RELEASE_MARKER")" == "$release_key" ]]
+}
+
+# Whether the cached jars still match the digests of the release they came
+# from. Without a sha256 tool the cache is trusted; an asset without a digest
+# cannot be checked and is skipped.
+cached_jars_match_digests() {
+  local assets_info="$1" name _url digest expected actual
+
+  have_sha256_tool || return 0
+  while IFS=$'\t' read -r name _url digest; do
+    [[ -n "$name" && -n "$digest" ]] || continue
+    if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
+      expected="${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+    actual="$(sha256_of "${CACHE_DIR}/${name}" 2>/dev/null)" || return 1
+    [[ "$actual" == "$expected" ]] || return 1
+  done <<< "$assets_info"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Download
+# ---------------------------------------------------------------------------
+
+download_latest_release() {
+  local json release_key assets_info tmp_dir name url _digest digest
+
+  mkdir -p "$CACHE_DIR"
+  json="$(release_json)"
+  release_key="$(release_key_from_json "$json")"
+  assets_info="$(extract_assets "$json")"
+
+  if cached_release_matches "$release_key"; then
+    if cached_jars_match_digests "$assets_info"; then
+      echo "ATC $(release_tag_of_key "$release_key") is already up to date in ${CACHE_DIR}."
+      return 0
+    fi
+    echo "Cached ATC jars failed checksum verification; downloading again."
+    # Invalidate first: if the download fails, 'atc run' must not keep using
+    # jars that just failed verification.
+    rm -f "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR"
+  fi
+
+  tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")"
+  trap "rm -rf '$tmp_dir'" EXIT
+
+  echo "Downloading ATC $(release_tag_of_key "$release_key") to ${CACHE_DIR}"
+  while IFS=$'\t' read -r name url _digest; do
+    [[ -n "$name" && -n "$url" ]] || continue
+    echo "- ${name}"
+    curl -fL "$url" -o "${tmp_dir}/${name}" || fail "failed to download ${name} from ${url}."
+  done <<< "$assets_info"
+
+  echo "Verifying checksums..."
+  while IFS=$'\t' read -r name url digest; do
+    [[ -n "$name" ]] || continue
+    [[ -f "${tmp_dir}/${name}" ]] || fail "${name} was not downloaded."
+    verify_jar "${tmp_dir}/${name}" "$digest"
+  done <<< "$assets_info"
+
+  mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR"
+  mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR"
+  printf '%s\n' "$release_key" > "$RELEASE_MARKER"
+
+  trap - EXIT
+  rmdir "$tmp_dir" 2>/dev/null || true
+
+  echo "ATC $(release_tag_of_key "$release_key") is ready:"
+  echo "- ${APP_JAR}"
+  echo "- ${LIB_JAR}"
+}
+
+# ---------------------------------------------------------------------------
+# PATH and the wrapper itself
+# ---------------------------------------------------------------------------
+
+profile_candidates() {
+  case "$(basename "${SHELL:-}")" in
+    zsh) printf '%s\n' "${HOME}/.zshrc" "${HOME}/.zprofile" ;;
+    bash) printf '%s\n' "${HOME}/.bashrc" "${HOME}/.bash_profile" "${HOME}/.profile" ;;
+    *) printf '%s\n' "${HOME}/.profile" ;;
+  esac
+}
+
+path_snippet() {
+  cat <<EOF
+${PATH_MARKER_BEGIN}
+case ":\$PATH:" in
+  *":\$HOME/.local/bin:"*) ;;
+  *) export PATH="\$HOME/.local/bin:\$PATH" ;;
+esac
+${PATH_MARKER_END}
+EOF
+}
+
+update_profile_path() {
+  local updated_any=false file content snippet
+
+  snippet="$(path_snippet)"
+  while IFS= read -r file; do
+    [[ -n "$file" && -f "$file" ]] || continue
+    content="$(cat "$file")"
+    if [[ "$content" == *"$PATH_MARKER_BEGIN"* || "$content" == *'$HOME/.local/bin'* || "$content" == *"${HOME}/.local/bin"* ]]; then
+      continue
+    fi
+    {
+      printf '\n'
+      printf '%s\n' "$snippet"
+    } >> "$file"
+    echo "Updated ${file} to include ~/.local/bin in PATH."
+    updated_any=true
+  done < <(profile_candidates)
+
+  if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
+    export PATH="${INSTALL_DIR}:${PATH}"
+  fi
+
+  if [[ "$updated_any" == true ]]; then
+    echo "Open a new shell or source your profile to pick up PATH changes."
+  else
+    echo "~/.local/bin is already configured in PATH profiles."
+  fi
+}
+
+remove_profile_path() {
+  local file content cleaned
+
+  while IFS= read -r file; do
+    [[ -n "$file" && -f "$file" ]] || continue
+    content="$(cat "$file")"
+    [[ "$content" == *"$PATH_MARKER_BEGIN"* ]] || continue
+    if [[ "$content" != *"$PATH_MARKER_END"* ]]; then
+      echo "Warning: ${file} contains the atc begin marker but no end marker; leaving it untouched." >&2
+      continue
+    fi
+    cleaned="$(awk -v begin="$PATH_MARKER_BEGIN" -v end="$PATH_MARKER_END" '
+      index($0, begin) { skip=1; next }
+      index($0, end)   { skip=0; next }
+      !skip
+    ' "$file")"
+    # Drop the blank lines left at the end.
+    cleaned="$(printf '%s\n' "$cleaned" | awk '
+      { lines[NR] = $0 }
+      END {
+        last = NR
+        while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--
+        for (i = 1; i <= last; i++) print lines[i]
+      }
+    ')"
+    printf '%s\n' "$cleaned" > "$file"
+    echo "Cleaned PATH snippet from ${file}"
+  done < <(profile_candidates)
+}
+
+self_path() {
+  printf '%s\n' "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
+}
+
+install_self() {
+  local source_path
+  source_path="$(self_path)"
+  mkdir -p "$INSTALL_DIR"
+  if [[ "$source_path" != "$INSTALL_PATH" ]]; then
+    cp "$source_path" "$INSTALL_PATH"
+  fi
+  chmod +x "$INSTALL_PATH"
+  echo "Installed atc to ${INSTALL_PATH}"
+}
+
+download_latest_self() {
+  local output_path="$1" curl_args=(-fsSL)
+
+  require_command curl
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  fi
+  curl "${curl_args[@]}" -o "$output_path" "$SCRIPT_SOURCE_URL"
+}
+
+require_cached_jars() {
+  [[ -f "$APP_JAR" && -f "$LIB_JAR" ]] \
+    || fail "No ATC jars were found in ${CACHE_DIR}. Run 'atc setup' (first time) or 'atc update'."
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_setup() {
+  ensure_java
+  install_self
+  update_profile_path
+  download_latest_release
+}
+
+cmd_update() {
+  download_latest_release
+}
+
+cmd_self_update() {
+  local source_path source_dir tmp_path
+
+  source_path="$(self_path)"
+  [[ -f "$source_path" ]] || fail "Current atc script was not found at ${source_path}."
+  source_dir="$(dirname "$source_path")"
+  tmp_path="$(mktemp "${source_dir}/atc.self-update.XXXXXX")" || fail "Unable to create a temporary file in ${source_dir}."
+
+  echo "Checking ${SCRIPT_SOURCE_URL}"
+  if ! download_latest_self "$tmp_path"; then
+    rm -f "$tmp_path"
+    fail "Failed to download the latest atc wrapper."
+  fi
+  if ! "$BASH" -n "$tmp_path"; then
+    rm -f "$tmp_path"
+    fail "Downloaded atc wrapper is not a valid Bash script."
+  fi
+  if cmp -s "$source_path" "$tmp_path"; then
+    rm -f "$tmp_path"
+    echo "atc is already up to date at ${source_path}."
+    return 0
+  fi
+  chmod +x "$tmp_path"
+  if ! mv "$tmp_path" "$source_path"; then
+    rm -f "$tmp_path"
+    fail "Unable to replace ${source_path}. Check file permissions and try again."
+  fi
+  echo "Updated atc at ${source_path}"
+}
+
+cmd_uninstall() {
+  if [[ -f "$INSTALL_PATH" ]]; then
+    rm -f "$INSTALL_PATH"
+    echo "Removed ${INSTALL_PATH}"
+  else
+    echo "No installed atc wrapper was found at ${INSTALL_PATH}."
+  fi
+  if [[ -d "$CACHE_DIR" ]]; then
+    rm -rf "$CACHE_DIR"
+    echo "Removed ${CACHE_DIR}"
+  else
+    echo "No downloaded ATC jars were found at ${CACHE_DIR}."
+  fi
+  remove_profile_path
+}
+
+cmd_run() {
+  ensure_java
+  require_cached_jars
+  # shellcheck disable=SC2086
+  exec java ${ATC_JAVA_OPTS:-} -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" "$@"
+}
+
+main() {
+  local command="${1:-}" subcommand
+
+  case "$command" in
+    help|-h|--help)
+      print_help
+      ;;
+    setup)
+      shift
+      [[ $# -eq 0 ]] || fail "setup does not accept additional arguments."
+      cmd_setup
+      ;;
+    update)
+      shift
+      [[ $# -eq 0 ]] || fail "update does not accept additional arguments."
+      cmd_update
+      ;;
+    self)
+      shift
+      subcommand="${1:-help}"
+      case "$subcommand" in
+        help|-h|--help)
+          print_self_help
+          ;;
+        update)
+          shift
+          [[ $# -eq 0 ]] || fail "self update does not accept additional arguments."
+          cmd_self_update
+          ;;
+        uninstall)
+          shift
+          [[ $# -eq 0 ]] || fail "self uninstall does not accept additional arguments."
+          cmd_uninstall
+          ;;
+        *)
+          fail "Unknown self command: ${subcommand} (try 'atc self help')"
+          ;;
+      esac
+      ;;
+    run)
+      shift
+      cmd_run "$@"
+      ;;
+    ""|-*)
+      # No command, or ATC's own flags (-C, -m, -p, --mode, --init, --version...): run ATC.
+      cmd_run "$@"
+      ;;
+    *)
+      echo "Unknown command: ${command}" >&2
+      echo >&2
+      print_help >&2
+      exit 1
+      ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

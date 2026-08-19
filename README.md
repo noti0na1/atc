@@ -44,12 +44,41 @@ state between snippets, so a `val` defined in one turn is still there in the nex
 
 ## Setup
 
-You need JDK 17 or newer. The repository ships its own Mill launcher (`./mill`), so there
-is nothing else to install.
+You need JDK 17 or newer, and one of two ways to get `atc`:
 
-**1. API keys.** On the first run atc finds no `~/.atc/config.json` and offers to write the
-starting one (providers, machine-wide permissions) together with `~/.atc/keys.properties`
-beside it, then exits so you can fill in the keys you use:
+**Install a release.** The `atc` wrapper script downloads the jars of the latest
+[GitHub release](https://github.com/noti0na1/atc/releases), checks them against the
+digests GitHub records, and runs them:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atc -o atc
+chmod +x atc
+./atc setup      # installs ~/.local/bin/atc, puts it on PATH, downloads the latest release
+```
+
+From then on `atc` runs ATC (`atc -C ~/my-project`), `atc update` fetches a newer release,
+`atc self update` refreshes the wrapper, `atc self uninstall` removes both, and `atc help`
+lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config
+(`ATC_CACHE_DIR` to move them; `GITHUB_TOKEN` raises the API rate limit; `ATC_JAVA_OPTS`
+adds JVM flags).
+
+**Run from a checkout.** The repository ships its own Mill launcher (`./mill`), so there is
+nothing else to install: `./start.sh` builds the distribution when sources changed and
+runs it (see [Working on ATC itself](#working-on-atc-itself)). The examples below use
+`atc`; with a checkout, `./start.sh` takes the same flags.
+
+**1. Start it.** Go to the project you want to work on and run `atc` (or pass the folder
+with `-C`):
+
+```bash
+cd ~/my-project 
+atc      
+# or: atc -C ~/my-project
+```
+
+The first run finds no `~/.atc/config.json` and offers to write the starting one
+(providers, machine-wide permissions) together with `~/.atc/keys.properties` beside it,
+then exits so you can fill in the keys you use:
 
 ```properties
 ANTHROPIC_API_KEY=sk-ant-…
@@ -61,46 +90,35 @@ repository, `cp .env.example .env`, without overriding what is already exported)
 local model that needs no key. Answer no and nothing is written: the built-in starting
 config is used for that run (`atc --init-global` writes it later, on demand).
 
-**2. A project config.** Started in a directory no config grants, atc offers to write a
-starting `.atc/config.json` there, and uses it at once; `--init` writes the same file
-without asking:
+**2. Start it again.** With the keys in place, run the same command. Started in a
+directory no config grants, atc offers to write a starting `.atc/config.json` there and
+uses it at once, so you land in the prompt with the project open:
 
 ```bash
-./start.sh -C ~/my-project --init      # writes ~/my-project/.atc/config.json
+cd ~/my-project && atc      # offers ~/my-project/.atc/config.json, then starts
 ```
 
 That file opens the project to the agent: without it (or a rule in `~/.atc/config.json`)
-nothing is readable and the agent has to ask for every file. Open it and decide two things:
-which **models** to use, and which **files, commands and hosts** the agent may touch without
-asking. Both have working defaults; the permissions are the part worth reading; see
-[Configuration](#configuration).
+nothing is readable and the agent has to ask for every file. Open it when you like and
+decide two things: which **models** to use, and which **files, commands and hosts** the
+agent may touch without asking. Both have working defaults; the permissions are the part
+worth reading; see [Configuration](#configuration). (`atc --init` writes the same file
+without asking, for scripts.)
 
-**3. Run it.**
+**3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
+Scala in the sandbox, and asks before touching anything the config does not grant.
+`/help` lists the slash commands (`/model`, `/mode`, `/cost`, `/new`, …), Ctrl-C
+interrupts a turn, Ctrl-D quits, and `-p "<request>"` runs a single turn from the shell
+instead:
 
 ```bash
-./start.sh -C ~/my-project
+atc -p 'summarise the README'
 ```
-
-`start.sh` rebuilds `out/dist.dest/` with `./mill dist` when sources changed, and passes
-its flags through to `atc`. Without the script: `./mill dist`, then `out/dist.dest/atc`.
 
 Useful flags: `-m <alias>` pick a model, `--mode readonly|local|full` pick a sandbox mode,
 `-p "<request>"` run one turn and exit, `-c <file>` add a config file, `-C <dir>` set the
-working directory, `--approve-all` auto-approve permission requests (scripted use only).
-
-### Trying it without an API key
-
-`"api": "echo"` is a built-in provider whose model echoes your text and turns a message of the
-form `run: <code>` into a `run_scala` call. It needs no key, and is the quickest way to see
-the sandbox, the modes and the permission pop-ups for yourself:
-
-```bash
-mkdir -p .atc && cat > .atc/config.json <<'EOF'
-{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }
-EOF
-out/dist.dest/atc -p 'run: println(read("README.md").take(80))'
-out/dist.dest/atc --mode readonly -p 'run: write("notes.md", "hello")'   # a compile error
-```
+working directory, `--approve-all` auto-approve permission requests (scripted use only);
+`atc run --help` lists them all (`atc --help` describes the wrapper).
 
 ### Working on ATC itself
 
@@ -111,8 +129,16 @@ out/dist.dest/atc --mode readonly -p 'run: write("notes.md", "hello")'   # a com
 ./mill dist                      # self-contained out/dist.dest/{atc,atc.jar,atc-lib.jar}
 ```
 
-`ATC_DEBUG=1` prints stack traces and terminal diagnostics, `ATC_ASCII=1` draws the UI with
-ASCII glyphs only, `ATC_SKIP_BUILD=1` makes `start.sh` skip its rebuild check.
+`start.sh` rebuilds `out/dist.dest/` with `./mill dist` when sources changed, sources a
+`.env` (`cp .env.example .env`), and passes its flags through to `atc`; without the
+script: `./mill dist`, then `out/dist.dest/atc`. `ATC_DEBUG=1` prints stack traces and
+terminal diagnostics, `ATC_ASCII=1` draws the UI with ASCII glyphs only, `ATC_SKIP_BUILD=1`
+makes `start.sh` skip its rebuild check.
+
+**Releases.** Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`)
+makes CI build the distribution and attach `atc.jar` and `atc-lib.jar` to the release;
+that is what the `atc` wrapper downloads (`tests/atc_test.sh` covers the wrapper, and runs
+in CI too).
 
 ## Capabilities
 
@@ -712,6 +738,8 @@ app/test/src/atc/                    munit suites (TestEnv.scala + ReplAssertion
   CapabilitySuite   the capability type system: read-only vs full, UserIO, escapes, Classified.map
   ModeSuite         the read-only / local / full matrix, and how a mode reaches the sandbox
   SandboxSuite      the sandbox: session, isolation, validator and fatal-throwable safety nets
+atc                                  the wrapper: installs, updates and runs the release jars (tests/atc_test.sh)
+start.sh                             builds a checkout and runs it
 ```
 
 A few behaviours that are easy to miss when reading the code: there is one REPL session per

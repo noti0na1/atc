@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  release:
+    types: [ published ]
 
 permissions:
   contents: read
@@ -12,9 +14,12 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
+    - name: Test the atc wrapper script
+      run: bash tests/atc_test.sh
     - name: Set up JDK 17
       uses: actions/setup-java@v4
       with:
@@ -36,3 +41,45 @@ jobs:
         out/dist.dest/atc --version
         out/dist.dest/atc -c /tmp/echo.json -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee /tmp/smoke.log
         grep -q 'val res1: Int = 42' /tmp/smoke.log
+
+  # Publishing a GitHub release (tag vX.Y.Z) builds the distribution and
+  # attaches atc.jar + atc-lib.jar to it; the `atc` wrapper script downloads
+  # those two assets and checks them against the digests GitHub records.
+  publish-release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Check that the release tag matches Versions.atc in build.mill
+      env:
+        TAG: ${{ github.event.release.tag_name }}
+      run: |
+        version=$(sed -nE 's/^ *val atc = "([^"]+)".*/\1/p' build.mill)
+        echo "tag: $TAG, Versions.atc: $version"
+        if [ "$TAG" != "v$version" ] && [ "$TAG" != "$version" ]; then
+          echo "::error::release tag '$TAG' does not match Versions.atc = \"$version\" in build.mill (atc --version would disagree with the tag); bump the version, move the tag and publish again"
+          exit 1
+        fi
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+    - name: Cache Mill and Coursier
+      uses: coursier/cache-action@v6
+    - name: Build distribution
+      run: ./mill dist
+    - name: Smoke-test the built jars
+      run: out/dist.dest/atc --version
+    - name: Upload the jars to the GitHub release
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ github.event.release.tag_name }}
+      run: |
+        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar --clobber
+        gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

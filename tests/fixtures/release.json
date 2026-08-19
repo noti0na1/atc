@@ -1,0 +1,45 @@
+{
+  "url": "https://api.github.com/repos/noti0na1/atc/releases/12345678",
+  "assets_url": "https://api.github.com/repos/noti0na1/atc/releases/12345678/assets",
+  "html_url": "https://github.com/noti0na1/atc/releases/tag/v0.2.0",
+  "id": 12345678,
+  "author": {
+    "login": "noti0na1",
+    "id": 99999
+  },
+  "node_id": "RE_kwDOAbCdEf4A",
+  "tag_name": "v0.2.0",
+  "name": "v0.2.0",
+  "draft": false,
+  "prerelease": false,
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/noti0na1/atc/releases/assets/111",
+      "id": 111,
+      "name": "atc.jar",
+      "content_type": "application/java-archive",
+      "size": 140000000,
+      "digest": "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "browser_download_url": "https://github.com/noti0na1/atc/releases/download/v0.2.0/atc.jar"
+    },
+    {
+      "url": "https://api.github.com/repos/noti0na1/atc/releases/assets/222",
+      "id": 222,
+      "name": "atc-lib.jar",
+      "content_type": "application/java-archive",
+      "size": 10000000,
+      "digest": "sha256:fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321",
+      "browser_download_url": "https://github.com/noti0na1/atc/releases/download/v0.2.0/atc-lib.jar"
+    },
+    {
+      "url": "https://api.github.com/repos/noti0na1/atc/releases/assets/333",
+      "id": 333,
+      "name": "checksums.txt",
+      "content_type": "text/plain",
+      "size": 256,
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "browser_download_url": "https://github.com/noti0na1/atc/releases/download/v0.2.0/checksums.txt"
+    }
+  ],
+  "body": "Release notes"
+}
