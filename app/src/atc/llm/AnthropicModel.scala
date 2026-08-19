@@ -22,6 +22,7 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
   val providerKey: String = "anthropic"
   private val cfg = spec.settings
   val webSearch: Boolean = cfg.webSearch
+  override val contextWindow: Option[Int] = cfg.contextWindow.map(_.toInt)
 
   private lazy val client: AnthropicClient =
     val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
@@ -146,9 +147,14 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
       b.outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase)).build())
     )
 
+  /** `input` is the whole prompt (Anthropic reports the uncached part, the
+    * cache reads and the cache writes separately; OpenAI's `prompt_tokens`
+    * already includes cached tokens), so the two providers read alike. */
   private def usageOf(m: Message): TokenUsage =
     val u = m.usage()
-    TokenUsage(u.inputTokens(), u.outputTokens(), u.cacheReadInputTokens().toScala.map(_.longValue).getOrElse(0L))
+    val cacheRead = u.cacheReadInputTokens().toScala.map(_.longValue).getOrElse(0L)
+    val cacheWrite = u.cacheCreationInputTokens().toScala.map(_.longValue).getOrElse(0L)
+    TokenUsage(u.inputTokens() + cacheRead + cacheWrite, u.outputTokens(), cacheRead)
 
   def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
     val b = MessageCreateParams.builder().model(

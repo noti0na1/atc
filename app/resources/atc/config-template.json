@@ -4,16 +4,16 @@
       "api": "anthropic",
       "key": "${ANTHROPIC_API_KEY}",
       "models": {
-        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
-        "sonnet": { "name": "claude-sonnet-5", "webSearch": true, "reasoning": "high"  }
+        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high", "contextWindow": "200k" },
+        "sonnet": { "name": "claude-sonnet-5", "webSearch": true, "reasoning": "high", "contextWindow": "200k" }
       }
     },
     "openai": {
       "api": "openai-responses",
       "key": "${OPENAI_API_KEY}",
       "models": {
-        "gpt":  { "name": "gpt-5", "webSearch": true },
-        "chat": { "name": "gpt-4.1" }
+        "gpt":  { "name": "gpt-5",   "webSearch": true, "contextWindow": "400k" },
+        "chat": { "name": "gpt-4.1", "contextWindow": "1m" }
       }
     },
     "deepseek": {
@@ -21,8 +21,8 @@
       "url": "https://api.deepseek.com",
       "key": "${DEEPSEEK_API_KEY}",
       "models": {
-        "deepseek-flash": { "name": "deepseek-v4-flash", "reasoning": "max",  "webSearch": true },
-        "deepseek-pro":   { "name": "deepseek-v4-pro",   "reasoning": "high", "webSearch": true }
+        "deepseek-flash": { "name": "deepseek-v4-flash", "reasoning": "max",  "webSearch": true, "contextWindow": "1m" },
+        "deepseek-pro":   { "name": "deepseek-v4-pro",   "reasoning": "high", "webSearch": true, "contextWindow": "1m" }
       }
     },
     "openrouter": {
@@ -35,7 +35,7 @@
       "api": "openai",
       "url": "http://localhost:11434/v1",
       "key": "ollama",
-      "models": { "local": { "name": "llama3.1" } }
+      "models": { "local": { "name": "llama3.1", "contextWindow": "128k" } }
     }
   },
 

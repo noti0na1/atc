@@ -305,6 +305,31 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(summary.linesIterator.count(_.contains("classified patterns")), 1, summary)
     assert(summary.contains("classified patterns: secrets"), summary)
 
+  test("contextWindow takes a number, a numeric string, or k/m suffixes; anything else is a clear error"):
+    def parsed(json: String): Option[Int] =
+      upickle.default.read[ModelConfig](ujson.read(json)).contextWindow.map(_.toInt)
+    assertEquals(parsed("""{ "contextWindow": 200000 }"""), Some(200000))
+    assertEquals(parsed("""{ "contextWindow": "200000" }"""), Some(200000))
+    assertEquals(parsed("""{ "contextWindow": "256k" }"""), Some(256000))
+    assertEquals(parsed("""{ "contextWindow": "1m" }"""), Some(1000000))
+    assertEquals(parsed("""{ "contextWindow": "1M" }"""), Some(1000000))
+    assertEquals(parsed("""{ "contextWindow": "1.5m" }"""), Some(1500000))
+    assertEquals(parsed("""{ "contextWindow": " 128 K " }"""), Some(128000))
+    assertEquals(parsed("""{}"""), None)
+    for bad <- List("\"abc\"", "\"-5k\"", "\"\"", "0", "\"0k\"", "1.5", "true", "\"1g\"") do
+      intercept[Exception](parsed(s"""{ "contextWindow": $bad }"""))
+    // Tokens.parse is the same reader, for anything that wants to accept the notation
+    assertEquals(Tokens.parse("64k").toInt, 64000)
+    intercept[IllegalArgumentException](Tokens.parse("lots"))
+    // and it survives a full config load
+    val dir = Files.createTempDirectory("atc-cfg-ctx").nn
+    val cfg = writeCfg(
+      dir,
+      "c.json",
+      """{ "providers": { "p": { "api": "echo", "models": { "m": { "contextWindow": "32k" } } } } }"""
+    )
+    assertEquals(load(dir, Some(cfg)).settings.providers("p").models("m").contextWindow.map(_.toInt), Some(32000))
+
   test("predictInput is on by default and a later layer can turn it off"):
     assertEquals(upickle.default.read[Config](ujson.read("{}")).predictInput, true)
     val merged =

@@ -5,6 +5,44 @@ import upickle.default.*
 import java.nio.file.{Files, Path, Paths}
 import scala.util.Properties
 
+/** A token count in a config, written as a number or as a string with a
+  * suffix: `200000`, `"200000"`, `"256k"`, `"1m"`, `"1.5m"` (`k` = 1000,
+  * `m` = 1000000, either case). Decimal on purpose: a window given as `"128k"`
+  * then never overshoots the model's real one, whichever convention the
+  * vendor's figure follows. */
+opaque type Tokens = Int
+object Tokens:
+  def apply(n: Int): Tokens = n
+  extension (t: Tokens) def toInt: Int = t
+
+  private val Form = raw"(?i)\s*(\d+(?:\.\d+)?)\s*([km]?)\s*".r
+
+  /** Parse `text`; throws `IllegalArgumentException` for anything else. */
+  def parse(text: String): Tokens =
+    text match
+      case Form(number, unit) =>
+        val scale = unit.nn.toLowerCase match
+          case "k" => 1e3
+          case "m" => 1e6
+          case _ => 1.0
+        val n = number.nn.toDouble * scale
+        if n < 1 || n > Int.MaxValue then throw IllegalArgumentException(s"Token count out of range: '$text'")
+        n.round.toInt
+      case _ =>
+        throw IllegalArgumentException(
+          s"Not a token count: '$text' (write a number, or one with k/m: \"256k\", \"1m\")"
+        )
+
+  given ReadWriter[Tokens] = readwriter[ujson.Value].bimap[Tokens](
+    n => ujson.Num(n.toInt),
+    {
+      case ujson.Num(n) if n.isWhole && n >= 1 && n <= Int.MaxValue => n.toInt
+      case ujson.Num(n) => throw IllegalArgumentException(s"Token count out of range: $n")
+      case ujson.Str(s) => parse(s)
+      case other => throw IllegalArgumentException(s"Not a token count: $other")
+    }
+  )
+
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
   * the request (API shape, URL, key) belongs to its [[ProviderConfig]]. */
@@ -28,6 +66,10 @@ case class ModelConfig(
     * OpenAI only sends them when asked. */
   reasoningSummary: Option[String] = None,
   maxTokens: Option[Int] = None,
+  /** The model's context window, in tokens (`200000`, `"256k"`, `"1m"`; see
+    * [[Tokens]]). When a conversation would exceed it, the oldest exchanges
+    * are dropped from what the model sees. Unset: never cut. */
+  contextWindow: Option[Tokens] = None,
   temperature: Option[Double] = None,
   /** Anthropic web-search tool version: `20260209` (default) or `20250305`. */
   webSearchVersion: Option[String] = None,
@@ -325,6 +367,7 @@ object Config:
         if model.name.exists(_.trim.isEmpty) then
           throw IllegalArgumentException(s"Invalid config: $where.name must not be blank")
         model.maxTokens.foreach(positive(s"$where.maxTokens", _))
+        model.contextWindow.foreach(t => positive(s"$where.contextWindow", t.toInt))
         model.temperature.foreach { value =>
           if !value.isFinite then throw IllegalArgumentException(s"Invalid config: $where.temperature must be finite")
         }

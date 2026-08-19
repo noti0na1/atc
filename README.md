@@ -417,13 +417,13 @@ hide more the deeper you go, which mirrors the layering.
     "anthropic": {
       "api": "anthropic",
       "models": {
-        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high" },
-        "sonnet": { "name": "claude-sonnet-5", "webSearch": true }
+        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high", "contextWindow": "200k" },
+        "sonnet": { "name": "claude-sonnet-5", "webSearch": true, "contextWindow": "200k" }
       }
     },
     "openai": {
       "api": "openai-responses",
-      "models": { "gpt": { "name": "gpt-5", "webSearch": true } }
+      "models": { "gpt": { "name": "gpt-5", "webSearch": true, "contextWindow": "400k" } }
     },
     "ollama": {
       "api": "openai",
@@ -458,7 +458,17 @@ A **provider** is one endpoint: an `api` (the wire protocol), an optional `url` 
 the `models` reachable through it. A **model** is an alias under that provider, whose `name`
 is the id the provider knows it by (`name` defaults to the alias, so `"models": { "gpt-5":
 {} }` is enough) plus the settings that apply to that model alone: `webSearch`, `reasoning`,
-`thinking`, `reasoningSummary`, `maxTokens`, `temperature`, `webSearchVersion`.
+`thinking`, `reasoningSummary`, `maxTokens`, `contextWindow`, `temperature`, `webSearchVersion`.
+
+`contextWindow` is the model's limit in tokens, as a number or with a suffix (`200000`,
+`"256k"`, `"1m"`, `"1.5m"`; `k` = 1000, `m` = 1000000). When the conversation would no longer fit,
+the oldest exchanges are dropped from the history before the next request (a cut always
+starts at a user message, so no tool result loses its call; the current request is always
+kept), the model gets a `[context notice]` saying how much is gone, and the terminal warns
+you; what was shown stays in your scrollback. Sizes are estimated from characters and
+calibrated against the token counts the provider reports, so leave the limit at the model's
+real window rather than padding it. Unset means never cut. (Compaction, summarising the
+dropped part instead of dropping it, is on the list.)
 
 A provider may list no models at all: an endpoint written down ready to use, which you or a
 later layer fills in. A model's `name` may contain a slash (`"name":

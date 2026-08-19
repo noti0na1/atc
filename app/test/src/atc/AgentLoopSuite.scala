@@ -9,7 +9,11 @@ import scala.collection.mutable.ListBuffer
 
 /** A programmable model: returns a scripted sequence of completions, records
   * the history it is asked to complete, and can throw on demand. */
-final class ScriptedModel(val alias: String, steps: Seq[ScriptedModel.Step]) extends ChatModel:
+final class ScriptedModel(
+  val alias: String,
+  steps: Seq[ScriptedModel.Step],
+  override val contextWindow: Option[Int] = None
+) extends ChatModel:
   val modelId = "scripted"; val providerKey = "scripted"; val webSearch = false
   val seenHistories: ListBuffer[List[Msg]] = ListBuffer()
   var i = 0
@@ -310,6 +314,47 @@ class AgentLoopSuite extends munit.FunSuite:
     agent.turn(s, "go", never)
     assertEquals(agent.history.last, Msg.Assistant("[interrupted by user]", Nil, None))
     assert(ui.warnings.exists(_.contains("interrupted")), ui.warnings.toString)
+
+  test("fitToContext drops whole exchanges from the front and always keeps the last user message"):
+    def u(t: String) = Msg.User(t)
+    def a(t: String) = Msg.Assistant(t, Nil, None)
+    def tr(t: String) = Msg.ToolResults(List(ToolResult("c", t, false)))
+    val big = "x" * 4000 // ~1000 tokens
+    val history = List(u("q1"), a(big), tr(big), a("a1"), u("q2"), a(big), a("a2"), u("q3"), a("a3"))
+    val total = history.map(Agent.estimateTokens).sum
+    assertEquals(Agent.fitToContext(history, total), (history, 0)) // fits: untouched
+    // dropping the first exchange (q1 .. a1) is enough
+    val (kept1, d1) = Agent.fitToContext(history, total - 100)
+    assertEquals(d1, 4)
+    assertEquals(kept1.head, u("q2"))
+    // the cut never separates a tool result from its call: it starts at a user message
+    assert(kept1.head.isInstanceOf[Msg.User])
+    // far too small: only the last user message and what follows survive
+    val (kept2, d2) = Agent.fitToContext(history, 1)
+    assertEquals(kept2, List(u("q3"), a("a3")))
+    assertEquals(d2, 7)
+    assertEquals(Agent.fitToContext(Nil, 1), (Nil, 0))
+
+  test("a model with a context window sees the oldest exchanges dropped, and is told"):
+    val big = "y" * 8000 // ~2000 tokens
+    val model = ScriptedModel(
+      "m",
+      Seq(ScriptedModel.Reply(big), ScriptedModel.Reply(big), ScriptedModel.Reply("third")),
+      contextWindow = Some(6000)
+    )
+    val (_, s, ui, agent) = setup(model)
+    agent.turn(s, "first question", never)
+    agent.turn(s, "second question", never)
+    // by now: user, big, user, big (~4000 tokens of history) + system prompt; the third turn must cut
+    agent.turn(s, "third question", never)
+    val seen = model.seenHistories.last
+    assert(seen.size < 5, seen.map(_.toString.take(40)).toString)
+    assert(seen.head.isInstanceOf[Msg.User])
+    assert(seen.head.asInstanceOf[Msg.User].text.startsWith("[context notice]"), seen.head.toString.take(120))
+    assert(ui.warnings.exists(_.contains("context window")), ui.warnings.toString)
+    // the history itself is cut (what was shown stays in the terminal), and starts with the notice
+    assertEquals(agent.history.count(_.isInstanceOf[Msg.User]), 1)
+    assert(agent.history.head.asInstanceOf[Msg.User].text.contains("oldest messages"), agent.history.head.toString)
 
   test("usage is accumulated across the turn and reset by clear()"):
     val (_, s, _, agent) = setup(ScriptedModel(

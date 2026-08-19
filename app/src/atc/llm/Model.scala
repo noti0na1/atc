@@ -79,6 +79,8 @@ trait ChatModel:
   /** The wire protocol, matched against [[NativeTurn]] when replaying a turn. */
   def providerKey: String
   def webSearch: Boolean
+  /** The context window in tokens, when the config states it (`contextWindow`). */
+  def contextWindow: Option[Int] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;
     * `cancelled` is polled between events. */

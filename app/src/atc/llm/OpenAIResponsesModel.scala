@@ -23,6 +23,7 @@ final class OpenAIResponsesModel(val spec: ModelSpec) extends ChatModel:
   val providerKey: String = "openai-responses"
   private val cfg = spec.settings
   val webSearch: Boolean = cfg.webSearch
+  override val contextWindow: Option[Int] = cfg.contextWindow.map(_.toInt)
 
   private lazy val client: OpenAIClient = Providers.openAiClient(spec)
   /** Set once the model rejected `reasoning`: it takes no such parameter. */

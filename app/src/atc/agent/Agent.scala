@@ -56,6 +56,12 @@ final class Agent(
   private var usageBy: Map[String, TokenUsage] = Map.empty
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
+  /** Observed prompt tokens per estimated one, from the last completion: the
+    * chars-per-token guess is off for code and for CJK text, and the provider's
+    * own count for the request we just sent puts it right. */
+  private var tokenCalibration: Double = 1.0
+  /** Messages cut from the front of the history so far (the notice tells the model the total). */
+  private var contextDropped: Int = 0
 
   /** Everything spent on the model(s) since the last `clear()`. */
   def usage: TokenUsage = synchronized(usageBy.values.foldLeft(TokenUsage())(_ + _))
@@ -90,6 +96,8 @@ final class Agent(
     history = Nil
     synchronized { usageBy = Map.empty }
     toolCalls = 0
+    tokenCalibration = 1.0
+    contextDropped = 0
     pendingNote = None
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
@@ -117,6 +125,8 @@ final class Agent(
 
     /** Ask the model once, record its answer, then act on it. */
     private def round(): Outcome =
+      fitHistoryToContext()
+      val estimated = fixedTokens + history.map(Agent.estimateTokens).sum
       ui.status(s"${model.alias} is thinking")
       val completion =
         try model.complete(systemPrompt, history, tools, sink, cancelled)
@@ -126,6 +136,9 @@ final class Agent(
             return interrupted()
       ui.assistantEnd()
       recordUsage(Agent.Turns, completion.usage)
+      // The provider counted the request we just sent: correct the estimator with it.
+      if completion.usage.input >= Agent.CalibrationMinTokens && estimated > 0 then
+        tokenCalibration = (completion.usage.input.toDouble / estimated).max(0.25).min(8.0)
       history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
       if completion.stopReason == "refusal" then
         ui.warn("The model refused this request (stop_reason=refusal).")
@@ -135,6 +148,31 @@ final class Agent(
       else if completion.unfinished && resumes < Agent.MaxResumes then resume()
       else if Agent.looksUnfinished(completion.text) && nudges < Agent.MaxNudges then nudge()
       else Done
+
+    /** Tokens of every request besides the history: the system prompt and the tool schema. */
+    private def fixedTokens: Long =
+      Agent.estimateTokens(systemPrompt) + tools.map(t => Agent.estimateTokens(t.description + t.parametersJson)).sum
+
+    /** When the model has a `contextWindow`, drop the oldest exchanges from the
+      * history until the next request should fit it, leaving room for the
+      * answer. What was dropped stays in the terminal's scrollback, and the
+      * model is told what happened. TODO: compact instead of cut (summarise the
+      * dropped exchanges into one message) once the estimator has been proven
+      * in use. */
+    private def fitHistoryToContext(): Unit =
+      model.contextWindow.foreach { window =>
+        val reserve = window / 8 // for the model's own answer and estimation slack
+        val room = ((window - reserve) / tokenCalibration).toLong - fixedTokens
+        val (kept, dropped) = Agent.fitToContext(history, room)
+        if dropped > 0 then
+          contextDropped += dropped
+          history = kept match
+            case Msg.User(t) :: rest => Msg.User(s"${Agent.contextCutNotice(contextDropped)}\n\n$t") :: rest
+            case other => other
+          ui.warn(
+            s"context window of ${model.alias} (${window} tokens): the oldest $dropped messages were dropped from what the model sees"
+          )
+      }
 
     /** Run the requested tools in order, honouring cancellation and the per-turn budget. */
     private def runTools(calls: List[ToolCall]): Outcome =
@@ -208,6 +246,41 @@ object Agent:
   val Chat = "chat()"
   val ClassifiedChat = "chat(Classified)"
   val Prediction = "next-input prediction"
+
+  /** Below this many prompt tokens a completion is not used to calibrate the estimator. */
+  val CalibrationMinTokens = 200L
+
+  /** A rough token count: about four characters per token, corrected at run
+    * time by [[Agent]]'s calibration against the provider's own numbers. */
+  def estimateTokens(text: String): Long = (text.length + 3) / 4
+
+  /** A message's share of a request, with a little per-message framing. */
+  def estimateTokens(msg: Msg): Long = msg match
+    case Msg.User(t) => estimateTokens(t) + 4
+    case Msg.Assistant(t, calls, _) => estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum + 4
+    case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
+
+  /** `history` cut to an estimated `budget` tokens by dropping whole exchanges
+    * from the front: a cut always starts at a user message, so no tool result
+    * is left without the call it answers, and the last user message and what
+    * follows it are always kept (even when they alone exceed the budget: there
+    * is nothing better to send). Returns the kept history and how many
+    * messages were dropped. */
+  def fitToContext(history: List[Msg], budget: Long): (List[Msg], Int) =
+    val lastUser = history.lastIndexWhere(_.isInstanceOf[Msg.User])
+    var start = 0
+    var total = history.map(estimateTokens).sum
+    while total > budget && start < lastUser do
+      // drop up to (excluding) the next user message
+      val next = history.indexWhere(_.isInstanceOf[Msg.User], start + 1)
+      val cut = if next < 0 || next > lastUser then lastUser else next
+      total -= history.slice(start, cut).map(estimateTokens).sum
+      start = cut
+    (history.drop(start), start)
+
+  def contextCutNotice(dropped: Int): String =
+    s"[context notice] The $dropped oldest messages of this conversation were dropped to fit your context window; " +
+      "if you need something from them, ask the user or read it again."
 
   val MaxNudges = 2
   val MaxResumes = 6
