@@ -49,11 +49,17 @@ final class TestEnv(
 
   @volatile var session: Option[ReplSession] = None
 
+  /** Commands that ran long enough to be shown live, and what they wrote while live. */
+  val liveCommands: ListBuffer[String] = ListBuffer()
+  val liveCommandOut: StringBuilder = StringBuilder()
+
   val output: HostOutput = new HostOutput:
     def print(agentText: String, userText: String): Unit =
       agentOut.append(agentText)
       session.foreach(_.printStream.print(agentText))
       userOut.append(if agentText == userText then userText else s"<$userText>")
+    override def commandRunning(commandLine: String): Unit = liveCommands += commandLine
+    override def commandOutput(text: String): Unit = liveCommandOut.synchronized(liveCommandOut.append(text))
 
   val llm: HostLlm = new HostLlm:
     def chat(m: String): String = { chats += m; s"normal:$m" }

@@ -687,6 +687,8 @@ Every kind of content has its own shape, so a glance tells them apart:
   │ code the agent runs
   ├ output                              the program's own println output, live
   │ hello
+  │ $ ./mill test                       a command (exec) that keeps running: its
+  │ compiling ...                         output as it comes (not in the tool result)
   ├ result   (or  ├ error)              what the REPL added: echoed values, diagnostics
   │ val x: Int = 1
   └ ok 34 ms (or └ failed 34 ms)
@@ -695,11 +697,18 @@ Every kind of content has its own shape, so a glance tells them apart:
   ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
 ```
 
+A command the agent runs with `exec` that keeps running for a moment is shown in the output
+section as `$ command` followed by its stdout and stderr as they are produced (what it
+printed before that moment first), so a long build or test run is visible while it runs; a
+quick command shows nothing, since the agent gets and usually prints its result anyway. This is display only: the tool result carries the command's `ProcessResult`, not a
+second copy.
+
 Long things are kept short on purpose: streamed reasoning shows its last few lines under
 `● thinking…` and collapses to `● thought for 4.2 s · 12 lines`; live program output folds
-once it fills 15 terminal rows, leaving a live tail (`⋯ N more lines` + the last 5); echoed
-values are cut after 2000 characters, and a long result panel is cut in the middle with each
-line trimmed to one row. **Ctrl-O** during a turn switches to the expanded view for the rest
+once it fills a number of terminal rows, leaving a live tail (`⋯ N more lines` + the last
+few); echoed values are cut after a number of characters, and a long result panel is cut in
+the middle with each line trimmed to one row (the limits are the constants in `Tui`'s
+companion and `SandboxConfig.maxEchoChars`). **Ctrl-O** during a turn switches to the expanded view for the rest
 of the session (reasoning in full, nothing folded). Keys typed during a turn are kept as
 type-ahead for the next prompt.
 

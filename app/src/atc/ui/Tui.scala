@@ -46,7 +46,7 @@ import Ansi.{Blue, Bold, ClearLine, Cyan, Dim, Green, Magenta, Red, Reset, Yello
   * ● run_scala                           tool block, magenta
   *   │ code                              magenta gutter, syntax-coloured
   *   ├ output                            live program output, dim gutter
-  *   │ hello                             (folded after 15 rows: "⋯ N more lines" + the last 5, live)
+  *   │ hello                             (folded after some rows: "⋯ N more lines" + the last few lines, live)
   *   ├ result  /  ├ error                what the REPL added: echoes, diagnostics
   *   │ val x: Int = 1
   *   └ ok 34 ms  /  └ failed 34 ms
@@ -457,14 +457,28 @@ final class Tui(historyFile: Path) extends AgentUI:
     * content — where the two texts differ — is marked so the user knows the
     * model cannot see it. */
   def agentPrint(agentText: String, userText: String): Unit = synchronized:
-    stopSpinner()
     printed.append(agentText)
+    openOutputSection()
+    if agentText == userText then liveOutput.emit(userText)
+    else liveOutput.emit(styled("[classified] ", Yellow, Bold) + styled(userText, Yellow))
+
+  /** A command the agent runs (`exec`) is taking a while: name it, then show
+    * what it writes as it comes (`commandOutput`), in the same output section
+    * as the prints. Not part of the tool result, so not remembered in `printed`. */
+  def commandRunning(commandLine: String): Unit = synchronized:
+    openOutputSection()
+    liveOutput.emit(styled(s"$$ $commandLine", Cyan) + "\n")
+  def commandOutput(text: String): Unit = synchronized:
+    openOutputSection()
+    liveOutput.emit(text)
+
+  /** The first program output of a tool block opens its `├ output` section. */
+  private def openOutputSection(): Unit =
+    stopSpinner()
     if toolOpen && !outputStarted then
       ensureNewline()
       write(section("output", Dim))
       outputStarted = true
-    if agentText == userText then liveOutput.emit(userText)
-    else liveOutput.emit(styled("[classified] ", Yellow, Bold) + styled(userText, Yellow))
 
   /** Program output inside a tool block. It goes straight to the screen while
     * the section fits in `Tui.FoldAfterRows` terminal *rows*; everything after
@@ -895,11 +909,11 @@ final class Tui(historyFile: Path) extends AgentUI:
 
 object Tui:
   /** Lines of a tool-result section before it is cut in the middle. */
-  val MaxPanelLines = 40
+  val MaxPanelLines = 30
   /** Terminal rows of live output shown before the rest is folded, and the
     * number of lines in the live tail that replaces it. */
-  val FoldAfterRows = 15
-  val FoldTail = 5
+  val FoldAfterRows = 10
+  val FoldTail = 10
   /** Lines of reasoning shown live in the thinking window. */
   val ThinkingWindow = 5
   /** What a turn cost, for the summary line `endTurn` prints. */

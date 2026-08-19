@@ -78,6 +78,8 @@ final class App(args: Main.Args):
     def print(agentText: String, userText: String): Unit =
       session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
+    override def commandRunning(commandLine: String): Unit = tui.commandRunning(commandLine)
+    override def commandOutput(text: String): Unit = tui.commandOutput(text)
   val llm = new HostLlm:
     def chat(message: String): String =
       val reply = agent.model.simple(None, message)

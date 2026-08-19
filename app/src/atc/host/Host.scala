@@ -260,7 +260,12 @@ final class Host(
     val pm = requireRead(scopeOf(fs), dir, "running a command in")
     requireNotClassified(pm, dir, "running a command there", "a working directory outside it")
     val pb = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
-    Processes.run(pb, command, timeoutMs)
+    // A command that takes a while shows its output to the user as it runs.
+    val port = output
+    val live = new Processes.LiveOutput:
+      def begin(): Unit = port.commandRunning(line)
+      def output(text: String): Unit = port.commandOutput(text)
+    Processes.run(pb, command, timeoutMs, Some(live))
 
   def execOutput(command: String)(using Exec, FileSystem): String = exec(command).stdout
   def execOutput(command: String, args: List[String])(using Exec, FileSystem): String = exec(command, args).stdout

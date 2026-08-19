@@ -12,6 +12,13 @@ trait HostOutput:
     * the current tool result); `userText` is what the human sees. They differ
     * only for classified values (`Classified(***)` vs. the content). */
   def print(agentText: String, userText: String): Unit
+  /** A command the agent runs (`exec`) has been running for a while
+    * ([[Processes.LiveAfterMs]]): from now on what it writes is shown to the
+    * human as it happens, through [[commandOutput]]. Shown only: the tool
+    * result does not carry it (the command's `ProcessResult` does), so a
+    * double that ignores both is right. */
+  def commandRunning(commandLine: String): Unit = ()
+  def commandOutput(text: String): Unit = ()
 
 /** One-shot LLM completions used by the library's `chat`. */
 trait HostLlm:

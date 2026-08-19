@@ -165,6 +165,38 @@ class HostSuite extends munit.FunSuite:
     assertEquals(requestExec(Set("ls*"), "list") { exec("ls", List(root.toString)).exitCode }, 0)
     assertEquals(exec("ls", Nil, Some(root.toString)).exitCode, 0) // session grant persists
 
+  test("a command that runs long is shown live after Processes.LiveAfterMs, a quick one is not"):
+    import scala.collection.mutable.ListBuffer
+    val begun = ListBuffer[Long]()
+    val seen = StringBuilder()
+    val live = new Processes.LiveOutput:
+      def begin(): Unit = begun += System.nanoTime()
+      def output(text: String): Unit = seen.synchronized(seen.append(text))
+    def sh(script: String) =
+      Processes.run(ProcessBuilder("sh", "-c", script), "sh", 10_000L, Some(live))
+    val quick = sh("echo quick")
+    assertEquals(quick.stdout, "quick\n")
+    assertEquals(begun.size, 0) // done before the live threshold: nothing shown
+    assertEquals(seen.toString, "")
+    val start = System.nanoTime()
+    val slow = sh("echo early; echo err >&2; sleep 1.6; echo late")
+    assertEquals(slow.stdout, "early\nlate\n")
+    assertEquals(slow.stderr, "err\n")
+    assertEquals(begun.size, 1, "went live once")
+    val liveAfterMs = (begun.head - start) / 1_000_000L
+    assert(liveAfterMs >= Processes.LiveAfterMs - 50 && liveAfterMs < 1500, s"went live after $liveAfterMs ms")
+    // The early output (both streams) is delivered when it goes live, the rest as it comes.
+    val text = seen.toString
+    assert(text.contains("early\n") && text.contains("err\n") && text.endsWith("late\n"), text)
+    // Through the host, the port hears the command line and its output.
+    val env = TestEnv(commands = List("sh *"))
+    import env.{host as h, given}
+    h.exec("sh", List("-c", "echo a; sleep 1.3; echo b"))
+    assertEquals(env.liveCommands.toList, List("sh -c echo a; sleep 1.3; echo b"))
+    assertEquals(env.liveCommandOut.toString, "a\nb\n")
+    h.exec("sh", List("-c", "echo nope"))
+    assertEquals(env.liveCommands.size, 1)
+
   test("deny lists refuse commands and hosts, and cannot be granted"):
     val denyPolicy = Policy(
       List(rule(".", Some(Access.Write))),
