@@ -1,10 +1,9 @@
-# ATC — A Minimal Agent With Tracked Capabilities
+# ATC: A Minimal Agent With Tracked Capabilities
 
 [![Scala CI](https://github.com/noti0na1/atc/actions/workflows/scala.yml/badge.svg)](https://github.com/noti0na1/atc/actions/workflows/scala.yml)
 
-ATC is a small terminal coding agent (in the spirit of Claude Code) whose **only tool is a
-Scala 3 REPL** protected by [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
-and Scala's experimental *safe mode*. Every action the model wants to take (read a file,
+ATC (Agent with Tracked Capabilities) is a minimal terminal coding agent whose **only tool is a
+Scala 3 REPL** protected by [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html) and [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html). Every action the model wants to take (read a file,
 run a command, fetch a URL) has to be written as Scala against a small, capability-typed
 library, and that code is compiled before it is allowed to run.
 
@@ -17,7 +16,7 @@ interactive permission requests.
 
 ## What a turn looks like
 
-```
+```scala
 > which methods in the library can mutate a file?
 
 ● run_scala
@@ -56,7 +55,7 @@ chmod +x atc
 ./atc setup      # installs ~/.local/bin/atc, puts it on PATH, downloads the latest release
 ```
 
-From then on `atc` runs ATC (`atc -C ~/my-project`), `atc update` fetches a newer release,
+From then on `atc` runs ATC in the current directory, `atc update` fetches a newer release,
 `atc self update` refreshes the wrapper, `atc self uninstall` removes both, and `atc help`
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config
 (`ATC_CACHE_DIR` to move them; `GITHUB_TOKEN` raises the API rate limit; `ATC_JAVA_OPTS`
@@ -67,13 +66,11 @@ nothing else to install: `./start.sh` builds the distribution when sources chang
 runs it (see [Working on ATC itself](#working-on-atc-itself)). The examples below use
 `atc`; with a checkout, `./start.sh` takes the same flags.
 
-**1. Start it.** Go to the project you want to work on and run `atc` (or pass the folder
-with `-C`):
+**1. Start it.** Change to the project you want to work on, then run `atc`:
 
 ```bash
-cd ~/my-project 
-atc      
-# or: atc -C ~/my-project
+cd ~/my-project
+atc
 ```
 
 The first run finds no `~/.atc/config.json` and offers to write the starting one
@@ -90,12 +87,12 @@ repository, `cp .env.example .env`, without overriding what is already exported)
 local model that needs no key. Answer no and nothing is written: the built-in starting
 config is used for that run (`atc --init-global` writes it later, on demand).
 
-**2. Start it again.** With the keys in place, run the same command. Started in a
-directory no config grants, atc offers to write a starting `.atc/config.json` there and
-uses it at once, so you land in the prompt with the project open:
+**2. Start it again.** With the keys in place, run `atc` again. Started in a directory no
+config grants, atc offers to write a starting `.atc/config.json` there and uses it at
+once, so you land in the prompt with the project open:
 
 ```bash
-cd ~/my-project && atc      # offers ~/my-project/.atc/config.json, then starts
+atc
 ```
 
 That file opens the project to the agent: without it (or a rule in `~/.atc/config.json`)
