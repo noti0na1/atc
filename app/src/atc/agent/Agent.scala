@@ -78,6 +78,20 @@ final class Agent(
   def systemPrompt: SystemPrompt =
     Prompts.system(cwd, policy, classifiedModel.map(_.ref), config.respectGitignore, extraInstructions)
 
+  /** Tokens of every request besides the history: the system prompt and the tool schema. */
+  private def fixedTokens: Long =
+    Agent.estimateTokens(systemPrompt.text) + tools.map(t =>
+      Agent.estimateTokens(t.description + t.parametersJson)
+    ).sum
+
+  /** How full the model's context is: the estimated tokens of the next request
+    * (system prompt, tool schema and history, corrected by the calibration
+    * against the provider's count for the last one) and the model's window,
+    * when the config states it. What the TUI shows after each turn. */
+  def contextUsage: (tokens: Long, window: Option[Int]) =
+    val estimate = fixedTokens + history.map(Agent.estimateTokens).sum
+    (tokens = (estimate * tokenCalibration).round, window = model.contextWindow)
+
   /** Notes prepended to the next user message, in order: that the sandbox was
     * restarted, code the user ran themselves. They are carried this way rather
     * than appended to the history on their own so the transcript never holds
@@ -156,12 +170,6 @@ final class Agent(
       else if completion.unfinished && resumes < Agent.MaxResumes then resume()
       else if Agent.looksUnfinished(completion.text) && nudges < Agent.MaxNudges then nudge()
       else Done
-
-    /** Tokens of every request besides the history: the system prompt and the tool schema. */
-    private def fixedTokens: Long =
-      Agent.estimateTokens(systemPrompt.text) + tools.map(t =>
-        Agent.estimateTokens(t.description + t.parametersJson)
-      ).sum
 
     /** When the model has a `contextWindow`, drop the oldest exchanges from the
       * history until the next request should fit it, leaving room for the

@@ -372,6 +372,28 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.history.count(_.isInstanceOf[Msg.User]), 1)
     assert(agent.history.head.asInstanceOf[Msg.User].text.contains("oldest messages"), agent.history.head.toString)
 
+  test("contextUsage estimates the next request, grows with the history, and follows the provider's count"):
+    // TokenUsage(1, 1) per completion is below CalibrationMinTokens, so the estimate stays chars/4.
+    val model = ScriptedModel("m", Seq(ScriptedModel.Reply("a" * 4000), ScriptedModel.Reply("b")), Some(100_000))
+    val (_, s, _, agent) = setup(model)
+    val before = agent.contextUsage
+    assertEquals(before.window, Some(100_000))
+    assert(before.tokens > 0, before.toString) // the system prompt and tool schema alone count
+    agent.turn(s, "hello", never)
+    val after = agent.contextUsage
+    assert(after.tokens >= before.tokens + 1000, s"$before -> $after") // ~1000 tokens of reply appended
+    // A real provider count calibrates the estimate: a completion reporting a
+    // prompt twice the estimate doubles what is shown.
+    val big = ScriptedModel.Comp(Completion("c", Nil, None, TokenUsage(after.tokens * 2, 1), "end_turn"))
+    val (_, s2, _, agent2) = setup(ScriptedModel("m", Seq(big), Some(100_000)))
+    agent2.turn(s2, "hello", never)
+    val estimate = agent2.contextUsage.tokens
+    val raw = Agent.estimateTokens(agent2.systemPrompt.text) + agent2.history.map(Agent.estimateTokens).sum
+    assert(estimate > raw * 3 / 2, s"estimate $estimate raw $raw")
+    agent2.clear()
+    assertEquals(agent2.contextUsage.window, Some(100_000))
+    assert(agent2.contextUsage.tokens < after.tokens, "clear() leaves only the fixed part")
+
   test("usage is accumulated across the turn and reset by clear()"):
     val (_, s, _, agent) = setup(ScriptedModel(
       "m",

@@ -659,7 +659,11 @@ bracket, string or comment is still open, indented like a REPL; and a bare `/run
 whole block. In every case Enter on an empty line submits and Ctrl-C clears. `/cost` counts every
 model call since the start (or the last `/clear`/`/new`): the agent's turns, `chat()` and
 `chat(Classified)` from the sandbox, and the next-input predictions, each shown separately
-when more than one kind occurred.
+when more than one kind occurred. The summary line after each turn (`● worked for 3 s · 2
+tool calls · 1.2k tokens · context 45.2k/200k (23%)`) and `/cost` also show how full the
+model's context is: the estimated size of the next request (system prompt, tool schema and
+conversation, calibrated against the provider's token count for the last one) against the
+model's `contextWindow` when the config states it (`context ~45.2k` otherwise).
 
 After each turn the agent model is asked to guess your next request, and the guess appears
 as faint ghost text at the prompt: Tab or → accepts it (also once you have typed the start

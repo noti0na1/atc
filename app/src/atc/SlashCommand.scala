@@ -32,7 +32,7 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Reset extends SlashCommand("/reset", "restart the sandbox REPL (keeps the conversation)")
   case Clear extends SlashCommand("/clear", "forget the conversation (keeps the REPL)")
   case Todos extends SlashCommand("/todos", "show the agent's TODO list", "/todo")
-  case Cost extends SlashCommand("/cost", "show token usage", "/usage")
+  case Cost extends SlashCommand("/cost", "show token usage and how full the context is", "/usage", "/context")
   case Quit extends SlashCommand("/quit", "exit", "/exit", "/q")
 
   /** The name as typed, e.g. `/help`. */

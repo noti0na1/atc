@@ -116,7 +116,7 @@ object ChatModel:
       case "anthropic" | "claude" => AnthropicModel(spec)
       case "openai-responses" | "responses" => OpenAIResponsesModel(spec)
       case "openai" | "openai-chat" | "chat" => OpenAIChatModel(spec)
-      case "echo" => EchoModel(spec.alias, spec.ref)
+      case "echo" => EchoModel(spec.alias, spec.ref, spec.settings.contextWindow.map(_.toInt))
       case other => throw IllegalArgumentException(
           s"Unknown api '$other' for provider '${spec.provider}' (expected anthropic | openai | openai-responses | echo)"
         )

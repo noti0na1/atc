@@ -39,6 +39,18 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Tui.place(70, "z" * 90, 80, 4), (rows = 1, column = 80))
     assertEquals(Tui.place(76, "abcd", 80, 4), (rows = 0, column = 80)) // exactly fills the row
 
+  test("count: short forms, without a pointless .0"):
+    assertEquals(Tui.count(999), "999")
+    assertEquals(Tui.count(1234), "1.2k")
+    assertEquals(Tui.count(200_000), "200k")
+    assertEquals(Tui.count(1_000_000), "1M")
+    assertEquals(Tui.count(1_234_567), "1.2M")
+
+  test("contextUsage: against the window when known, an estimate otherwise"):
+    assertEquals(Tui.contextUsage(45_200, Some(200_000)), "context 45.2k/200k (23%)")
+    assertEquals(Tui.contextUsage(199_000, Some(200_000)), "context 199k/200k (100%)")
+    assertEquals(Tui.contextUsage(45_200, None), "context ~45.2k")
+
   test("uniqueIds keeps labels and disambiguates duplicates"):
     assertEquals(Tui.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)

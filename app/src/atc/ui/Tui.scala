@@ -254,8 +254,9 @@ final class Tui(historyFile: Path) extends AgentUI:
       stats.foreach { s =>
         ensureNewline()
         val calls = Tui.plural(s.toolCalls, "tool call")
+        val context = Tui.contextUsage(s.context, s.window)
         write(styled(
-          s"${g.bullet} worked for ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens",
+          s"${g.bullet} worked for ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens ${g.dot} $context",
           Dim
         ) + "\n")
       }
@@ -902,7 +903,12 @@ object Tui:
   /** Lines of reasoning shown live in the thinking window. */
   val ThinkingWindow = 5
   /** What a turn cost, for the summary line `endTurn` prints. */
-  final case class TurnStats(seconds: Double, toolCalls: Int, tokens: Long)
+  final case class TurnStats(seconds: Double, toolCalls: Int, tokens: Long, context: Long, window: Option[Int])
+
+  /** `context 45.2k/200k (23%)`, or `context ~45.2k` when the model's window is unknown. */
+  def contextUsage(tokens: Long, window: Option[Int]): String = window match
+    case Some(w) if w > 0 => s"context ${count(tokens)}/${count(w)} (${(tokens * 100 + w / 2) / w}%)"
+    case _ => s"context ~${count(tokens)}"
 
   /** Where a chunk of text lands on screen: the number of terminal rows it
     * adds to a section whose last row already holds `column` characters, and
@@ -926,11 +932,12 @@ object Tui:
     else if secs < 60 then s"${secs.round} s"
     else s"${(secs / 60).toInt} min ${(secs % 60).round} s"
 
-  /** `1234` → `1.2k`, `1234567` → `1.2M`. */
+  /** `1234` → `1.2k`, `200000` → `200k`, `1234567` → `1.2M`. */
   def count(n: Long): String =
+    def short(x: Double, unit: String) = (if x == x.floor then f"$x%.0f" else f"$x%.1f") + unit
     if n < 1000 then n.toString
-    else if n < 1_000_000 then f"${n / 1e3}%.1fk"
-    else f"${n / 1e6}%.1fM"
+    else if n < 1_000_000 then short(n / 1e3, "k")
+    else short(n / 1e6, "M")
 
   val AllowOnce = "Yes, this time"
   val AllowSession = "Yes, for the rest of this session"

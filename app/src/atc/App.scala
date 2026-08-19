@@ -221,7 +221,14 @@ final class App(args: Main.Args):
         Debug.trace(e)
     finally
       val tokens = (agent.usage.input + agent.usage.output) - (usageBefore.input + usageBefore.output)
-      tui.endTurn(Some(Tui.TurnStats((System.nanoTime() - started) / 1e9, agent.toolCalls - callsBefore, tokens)))
+      val context = agent.contextUsage
+      tui.endTurn(Some(Tui.TurnStats(
+        (System.nanoTime() - started) / 1e9,
+        agent.toolCalls - callsBefore,
+        tokens,
+        context.tokens,
+        context.window,
+      )))
       if predicting then predictor.start()
 
   private def interactive(): Unit =
@@ -334,6 +341,9 @@ final class App(args: Main.Args):
     tui.println(s"tokens: ${show(agent.usage)}; tool calls: ${agent.toolCalls}")
     val by = agent.usageByPurpose
     if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
+    val context = agent.contextUsage
+    val window = context.window.fold(" (no contextWindow configured for this model)")(_ => "")
+    tui.println(s"${Tui.contextUsage(context.tokens, context.window)} estimated for the next request$window")
 
   /** One line per configured model: its name, `provider/model-id`, and the
     * role it currently plays. */
