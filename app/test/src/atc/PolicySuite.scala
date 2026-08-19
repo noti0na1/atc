@@ -127,6 +127,32 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(prompter.asked.size, 2)
     p.closeScope(e2)
 
+  test("resetSession forgets session grants and open scopes but keeps the rules and the mode"):
+    val prompter = ScriptedPrompter(List.fill(4)(Decision.AllowSession))
+    val p = Policy(rules((".", Some(Access.Read), None, false)), List("ls"), Nil, prompter)
+    val s = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "")
+    p.requestExec(ScopeId.Base, List("npm *"), "")
+    p.requestNet(ScopeId.Base, List("example.com"), "")
+    assertEquals(p.effective(ScopeId.Base, root.resolve("src/main/A.scala")).access, Access.Write) // session grant
+    assert(p.commandAllowed(ScopeId.Base, "npm install"))
+    assert(p.hostAllowed(ScopeId.Base, "example.com"))
+    assertEquals(p.openScopeCount, 3)
+
+    p.mode = Mode.Local
+    p.resetSession()
+    assertEquals(p.openScopeCount, 0)
+    assertEquals(p.effective(ScopeId.Base, root.resolve("src/main/A.scala")).access, Access.Read) // rule only
+    assert(!p.commandAllowed(ScopeId.Base, "npm install"))
+    assert(p.commandAllowed(ScopeId.Base, "ls -la")) // configured, not a session grant
+    assertEquals(p.mode, Mode.Local)
+    p.mode = Mode.Full
+    assert(!p.hostAllowed(ScopeId.Base, "example.com"))
+    // a capability that escaped the old session no longer resolves
+    intercept[SecurityException](p.effective(s, root.resolve("src/main/A.scala")))
+    // and the next request prompts again rather than reusing the old answer
+    p.requestExec(ScopeId.Base, List("npm *"), "")
+    assertEquals(prompter.asked.size, 4)
+
   test("deny patterns refuse commands and hosts whatever the allow list says"):
     val prompter = ScriptedPrompter(Nil)
     val p = Policy(

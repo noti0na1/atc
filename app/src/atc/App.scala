@@ -98,7 +98,7 @@ final class App(args: Main.Args):
 
   // ── running ───────────────────────────────────────────────────────
 
-  private def newSession(): ReplSession =
+  private def newReplSession(): ReplSession =
     tui.status(s"starting sandbox (${policy.mode.label} mode)")
     try ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
     finally tui.endTurn()
@@ -109,12 +109,34 @@ final class App(args: Main.Args):
     session.foreach(_.close())
     session = None
     try
-      session = Some(newSession())
+      session = Some(newReplSession())
       agent.noteSandboxRestarted(reason)
       true
     catch
       case e: Exception =>
         tui.error(s"could not restart the sandbox: ${e.getMessage}")
+        Debug.trace(e)
+        false
+
+  /** `/new`: start over as if atc had just been launched, keeping only what
+    * the user configured (mode, models). The sandbox is closed, the
+    * conversation, TODO list and every session-scoped permission grant are
+    * forgotten, and a fresh REPL is started. Nothing refers to the old session
+    * afterwards, so its compiler and class loader can be collected; the GC is
+    * asked for explicitly since that is most of the process's memory. */
+  private def newSession(): Boolean =
+    session.foreach(_.close())
+    session = None
+    agent.clear()
+    host.clearTodos()
+    policy.resetSession()
+    System.gc()
+    try
+      session = Some(newReplSession())
+      true
+    catch
+      case e: Exception =>
+        tui.error(s"could not start the sandbox: ${e.getMessage}")
         Debug.trace(e)
         false
 
@@ -129,11 +151,11 @@ final class App(args: Main.Args):
         )
       args.prompt match
         case Some(p) =>
-          session = Some(newSession())
+          session = Some(newReplSession())
           runTurn(p)
         case None =>
           banner()
-          session = Some(newSession())
+          session = Some(newReplSession())
           interactive()
       0
     finally
@@ -188,6 +210,8 @@ final class App(args: Main.Args):
           Debug.log("input closed, exiting")
           running = false
         case Some(line) if line.trim.isEmpty => ()
+        // What people type out of habit; not listed in /help.
+        case Some(line) if App.QuitWords.contains(line.trim.toLowerCase) => running = false
         case Some(line) if line.trim.startsWith("/") => running = command(line.trim)
         case Some(line) => runTurn(line)
 
@@ -208,6 +232,7 @@ final class App(args: Main.Args):
       |  /perms                  show the effective permission policy
       |  /config                 show config files and settings
       |  /interface              show the sandbox API reference
+      |  /new                    start over: fresh REPL, conversation, TODOs and session grants forgotten
       |  /reset                  restart the sandbox REPL (keeps the conversation)
       |  /clear                  forget the conversation (keeps the REPL)
       |  /todos                  show the agent's TODO list
@@ -227,7 +252,7 @@ final class App(args: Main.Args):
   /** Run one (non-quitting) slash command. */
   private def dispatch(cmd: String, arg: String): Unit =
     cmd match
-      case "/help" | "/?" => tui.println(helpText)
+      case "/help" | "/h" | "/?" => tui.println(helpText)
       case "/models" => showModels()
       case "/model" => switchModel(arg)
       case "/classifiedmodel" | "/classified" => switchClassifiedModel(arg)
@@ -245,6 +270,9 @@ final class App(args: Main.Args):
         )
         tui.println(s"open permission scopes: ${policy.openScopeCount}")
       case "/interface" | "/api" => tui.println(Prompts.interfaceSource)
+      case "/new" =>
+        if newSession() then
+          tui.success("new session: conversation, TODO list and session grants forgotten; sandbox restarted")
       case "/reset" =>
         if restartSession("you asked for /reset") then tui.success("sandbox restarted")
       case "/clear" =>
@@ -424,6 +452,9 @@ object App:
       tui.close()
       throw Exit(0)
     configuration
+
+  /** Bare lines that quit like `/quit`: shell and editor habits. */
+  val QuitWords: Set[String] = Set(":q", "exit", "quit")
 
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =

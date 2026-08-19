@@ -255,6 +255,16 @@ final class Policy(
 
   def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
 
+  /** Forget everything decided during the session: the "allow for the session"
+    * grants and every scope still open (a `request*` block whose capability
+    * outlived it). The configured rules, the deny lists and the mode stay. */
+  def resetSession(): Unit =
+    scopes.clear()
+    scopes.put(ScopeId.Base, base)
+    base.fileGrants = Nil
+    base.commands = Nil
+    base.hosts = Nil
+
   def openScopeCount: Int = scopes.size - 1
 
   /** Human-readable summary for the UI and the system prompt. */

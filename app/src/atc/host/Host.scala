@@ -405,6 +405,9 @@ final class Host(
   /** For the `/todos` command. */
   private[atc] def currentTodos: List[Todo] = todoList
 
+  /** For `/new`: drop the list without announcing it. */
+  private[atc] def clearTodos(): Unit = todoList = Nil
+
   // ── Interface: classified & LLM ───────────────────────────────────
 
   def classify[T](value: T): Classified[T] = ClassifiedImpl.wrap(value)

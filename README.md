@@ -599,8 +599,10 @@ never drop from it. They are listed in `/perms` and in the agent's system prompt
 ## The terminal
 
 `/help`, `/model [ref]`, `/classifiedmodel [ref]`, `/models`, `/mode [name]`, `/perms`, `/todos`, `/config`,
-`/interface` (print the API the model sees), `/reset` (fresh REPL, conversation kept),
-`/clear` (forget the conversation, REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
+`/interface` (print the API the model sees), `/new` (start over: fresh REPL, and the
+conversation, TODO list and every "allow for this session" grant are forgotten; mode and
+models stay), `/reset` (fresh REPL, conversation kept), `/clear` (forget the conversation,
+REPL kept), `/cost`, `/quit`. Ctrl-C interrupts the
 current turn including the running snippet, Shift-Tab cycles the mode on an empty prompt,
 Ctrl-O toggles the expanded view, Ctrl-D exits.
 
