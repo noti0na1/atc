@@ -700,52 +700,35 @@ full, and pop-ups fall back to a plain `answer>` line. `ATC_ASCII=1` uses ASCII 
 | `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking, every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current` and the root capabilities) sits in its own file, outside the API the model reads. |
 | `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions, TODO list, LLM calls), and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
 
-Built with [Mill](https://mill-build.org) (`./mill`, pinned to 1.1.8) on the same Scala 3
-nightly TACIT uses (`3.10.0-RC1-bin-20260816-3adfcbd-NIGHTLY`).
+Built with [Mill](https://mill-build.org) on the Scala 3
+nightly version.
 
 ```
-lib/src/atc/lib/Interface.scala      the agent-facing API (capabilities, data types, Interface)
-                Runtime.scala        the sandbox's injection point (@rejectSafe, not part of the API)
+lib/src/atc/lib/   Interface.scala: the agent-facing API (capabilities, data types, Interface)
+                   Runtime.scala: the sandbox's injection point (@rejectSafe, not part of the API)
 app/src/atc/
-  Main.scala                         command line → App
-  App.scala                          wiring (config, models, policy, host, sandbox, agent, TUI), slash commands
-  Resources.scala, Debug.scala       bundled text resources (version, API source, template); ATC_DEBUG tracing
-  agent/   Agent.scala, Prompts.scala          the loop (model ⇄ run_scala), system prompt & tool spec
-  config/  Config.scala                        JSON config model, layering, validation, templates
-           Layers.scala, Keys.scala            layer/origin types; the keys.properties bindings
-           ModelCatalog.scala                  providers × models → resolved ModelSpecs
-  host/    Host.scala                          Interface implementation: policy checks + real effects
-           Capabilities.scala                  FileSystem/FileEntry/Exec/Network impls (carry a scope id)
-           HostPorts.scala                     what the host needs from the app (output, user, LLM)
-           Processes.scala, ClassifiedImpl.scala
-  llm/     Model.scala                         provider-neutral messages, ChatModel, factory
-           AnthropicModel / OpenAIResponsesModel / OpenAIChatModel / EchoModel
-           Providers.scala, Json.scala         shared client construction; ujson ↔ SDK values
-  perms/   Policy.scala                        rules, scopes (ScopeId), grants, prompts, summary
-           PathPattern.scala, Access.scala (Access/Perm/Mode), GlobMatcher.scala
-  sandbox/ ReplSession.scala                   the in-process REPL: preamble, compile, run, timeout, interrupt
-           Sandbox.scala                       class-loader isolation
-           Execution.scala                     ExecutionResult / ExecutionClock / SandboxConfig
-           CodeValidator.scala                 regex pre-check of agent code
-           CappedRendering.scala               (package dotty.tools.repl) caps echoed values
-  ui/      Tui.scala                           JLine terminal: streaming, panels, pop-ups, input
-           Markdown.scala                      streaming Markdown → ANSI for the assistant's prose
-           Highlight.scala                     Scala colouring via the compiler's SyntaxHighlighting
-app/test/src/atc/                    munit suites (TestEnv.scala + ReplAssertions.scala are the shared fixtures)
-  CapabilitySuite   the capability type system: read-only vs full, UserIO, escapes, Classified.map
-  ModeSuite         the read-only / local / full matrix, and how a mode reaches the sandbox
-  SandboxSuite      the sandbox: session, isolation, validator and fatal-throwable safety nets
-atc                                  the wrapper: installs, updates and runs the release jars (tests/atc_test.sh)
-start.sh                             builds a checkout and runs it
+  (root)           Main → App: command line, wiring, the interactive loop and its slash commands
+  agent/           the loop (model ⇄ run_scala), the system prompt and tool spec, next-input prediction
+  config/          the JSON config model: layers, merging, validation, keys, model catalog, templates
+  host/            the Interface implementation: policy checks, file/process/network effects, Classified
+  llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
+  perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
+  sandbox/         the in-process REPL: preamble, validator, class-loader isolation, timeouts, interrupts
+  ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
+app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
+atc                the wrapper: installs, updates and runs the release jars (tests/atc_test.sh)
+start.sh           builds a checkout and runs it
 ```
 
 A few behaviours that are easy to miss when reading the code: there is one REPL session per
 conversation (definitions persist across turns until `/reset` or a mode switch); a runtime
-error in agent code does not fail the REPL, so the session detects uncaught exceptions in
-the captured output and reports them to the model as errors, with host stack frames trimmed
-and hints appended for common capture-checking stumbles; and the agent loop resumes by
+error in agent code does not fail the REPL (it prints the trace), so the session learns
+from the REPL's renderer that the code threw and reports it to the model as an error, with
+host stack frames trimmed and hints appended for common capture-checking stumbles; and the agent loop resumes by
 itself when a provider cuts a response after a server-side tool call (web search, Anthropic
 `pause_turn`), nudging the model at most twice per turn when it ends a turn on "Let me …"
 without acting.
 
-License: Apache-2.0.
+## License
+
+Apache-2.0.

@@ -18,7 +18,7 @@ final class ScriptedModel(
   val seenHistories: ListBuffer[List[Msg]] = ListBuffer()
   var i = 0
   def complete(
-    system: String,
+    system: SystemPrompt,
     history: List[Msg],
     tools: List[ToolSpec],
     sink: StreamSink,
@@ -407,8 +407,8 @@ class AgentLoopSuite extends munit.FunSuite:
 
   test("the system prompt reflects the configured classified model"):
     val (_, _, _, without) = setup(ScriptedModel("m", Nil))
-    assert(without.systemPrompt.contains("classified model"), "the line is there either way")
-    assert(without.systemPrompt.contains("(none configured)"), without.systemPrompt)
+    assert(without.systemPrompt.text.contains("classified model"), "the line is there either way")
+    assert(without.systemPrompt.text.contains("(none configured)"), without.systemPrompt.text)
     val (_, _, _, withClassified) =
       setup(ScriptedModel("m", Nil), classified = Some(ScriptedModel("private-llm", Nil)))
-    assert(withClassified.systemPrompt.contains("private-llm"), "the prompt should name the classified model")
+    assert(withClassified.systemPrompt.text.contains("private-llm"), "the prompt should name the classified model")

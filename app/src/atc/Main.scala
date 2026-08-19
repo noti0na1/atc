@@ -41,7 +41,7 @@ object Main:
     s"""atc $Version — a minimal coding agent with tracked capabilities
        |
        |Usage: atc [options]
-       |  -c, --config <file>   extra config file (merged over ~/.config/atc/config.json and ./.atc/config.json)
+       |  -c, --config <file>   extra config file (merged over ~/.atc/config.json and the project's .atc/config.json)
        |  -C, --cwd <dir>       working directory (default: current)
        |  -m, --model <ref>     model to use: an alias from the config, or provider/alias
        |  -p, --prompt <text>   run one turn non-interactively and exit

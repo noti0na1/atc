@@ -17,6 +17,7 @@ package atc.ui
   */
 class MarkdownStream(glyphs: MarkdownStream.Glyphs, highlight: String => List[String]):
   import MarkdownStream.*
+  import Ansi.{sgr, Bold, Dim, Reset}
 
   private val pending = StringBuilder()
   private var decided = false
@@ -269,12 +270,8 @@ object MarkdownStream:
   private enum Align:
     case Left, Right, Center
 
-  val Bold = 1
-  val Dim = 2
-  val CodeColor = 36 // cyan
-  private val Esc = "\u001b"
-  private val Reset = Esc + "[0m"
-  private def sgr(codes: Int*): String = s"$Esc[${codes.mkString(";")}m"
+  /** Inline `` `code` ``. */
+  private val CodeColor = Ansi.Cyan
 
   private val FenceRe = """^ {0,3}```+\s*([A-Za-z0-9_+-]*).*$""".r
   private val RuleRe = """^ {0,3}(?:-{3,}|\*{3,}|_{3,}) *$""".r

@@ -58,12 +58,21 @@ final class Host(
     case s: Scoped => s.scope
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
+  /** Run a `request*` block: `op` gets a capability for the freshly opened
+    * scope `id`, which is closed again however the block ends. */
+  private def inScope[T](id: ScopeId)(op: ScopeId => T): T =
+    try op(id)
+    finally policy.closeScope(id)
+
   // ── file effects shared by FileEntryImpl and the path helpers ─────
+
+  /** Writes create the missing parent directories of their target. */
+  private def ensureParent(p: Path): Unit = Option(p.getParent).foreach(Files.createDirectories(_))
 
   private[atc] def writeFile(scope: ScopeId, p: Path, content: String, append: Boolean): Unit =
     val pm = requireWrite(scope, p, if append then "append" else "write")
     requireNotClassified(pm, p, "write", "writeClassified(path, classify(content))")
-    Option(p.getParent).foreach(Files.createDirectories(_))
+    ensureParent(p)
     if append then
       Files.writeString(p, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
     else Files.writeString(p, content, StandardCharsets.UTF_8)
@@ -71,7 +80,7 @@ final class Host(
   private[atc] def writeFileBytes(scope: ScopeId, p: Path, content: Array[Byte]): Unit =
     val pm = requireWrite(scope, p, "writeBytes")
     requireNotClassified(pm, p, "writeBytes", "writeClassified(path, classify(content))")
-    Option(p.getParent).foreach(Files.createDirectories(_))
+    ensureParent(p)
     Files.write(p, content)
     ()
 
@@ -81,28 +90,40 @@ final class Host(
       throw SecurityException(
         s"Access denied: '$p' is not a classified path; writing classified content there would declassify it."
       )
-    Option(p.getParent).foreach(Files.createDirectories(_))
+    ensureParent(p)
     Files.writeString(p, content, StandardCharsets.UTF_8)
 
-  /** Children the scope may see (entries with no read access, and — when
-    * `respectGitignore` is on — the ones git ignores, are omitted). */
-  private[atc] def visibleChildren(scope: ScopeId, dir: Path): List[Path] =
+  /** The entries of `dir` (itself canonical) the scope may see, each as the
+    * canonical path the policy judges it by, flagged when the entry is a
+    * symlink. Every path the host hands out is canonical, so an entry from a
+    * listing is checked exactly like the same path given by name: a link is
+    * listed as, and judged by, its target (so one to a classified or
+    * unreadable file cannot be read through its link). Only links pay for a
+    * `toRealPath`; a plain child of a canonical directory is canonical already.
+    * Omitted: entries the scope may not read and, with `respectGitignore`, the
+    * ones git ignores (judged by the link's own location, as git does). */
+  private def visibleEntries(scope: ScopeId, dir: Path): List[(Path, Boolean)] =
     Using.resource(Files.list(dir).nn) { s =>
-      s.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).filter { c =>
-        try !gitIgnore.ignores(c) && policy.effective(scope, PathPattern.canonical(c)).canRead
-        catch case _: Exception => false
+      s.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).flatMap { raw =>
+        try
+          val isLink = Files.isSymbolicLink(raw)
+          val path = if isLink then PathPattern.canonical(raw) else raw
+          Option.when(!gitIgnore.ignores(raw) && policy.effective(scope, path).canRead)((path, isLink))
+        catch case _: Exception => None
       }
     }
 
+  /** Children the scope may see, canonical (see [[visibleEntries]]). */
+  private[atc] def visibleChildren(scope: ScopeId, dir: Path): List[Path] = visibleEntries(scope, dir).map(_._1)
+
   /** Every visible descendant of `dir`, in pre-order. Classified sub-trees are
     * listed but not entered unless `intoClassified`; symlinked directories are
-    * never followed. */
+    * listed (as their target) but never followed. */
   private[atc] def walkPaths(scope: ScopeId, dir: Path, intoClassified: Boolean): List[Path] =
-    def descendInto(c: Path): Boolean =
-      Files.isDirectory(c) && !Files.isSymbolicLink(c) &&
-        (intoClassified || !policy.effective(scope, PathPattern.canonical(c)).classified)
+    def descendInto(c: Path, isLink: Boolean): Boolean =
+      !isLink && Files.isDirectory(c) && (intoClassified || !policy.effective(scope, c).classified)
     def go(d: Path): List[Path] =
-      visibleChildren(scope, d).flatMap(c => c :: (if descendInto(c) then go(c) else Nil))
+      visibleEntries(scope, d).flatMap((c, isLink) => c :: (if descendInto(c, isLink) then go(c) else Nil))
     go(dir)
 
   // ── Interface: deriving capabilities ──────────────────────────────
@@ -132,9 +153,9 @@ final class Host(
     val level = access match
       case Access.Read => atc.perms.Access.Read
       case Access.Write => atc.perms.Access.Write
-    val id = policy.requestFile(scopeOf(parent), canonical(path), level, reason)
-    try op(using FileSystemImpl(id, this))
-    finally policy.closeScope(id)
+    inScope(policy.requestFile(scopeOf(parent), canonical(path), level, reason)) { id =>
+      op(using FileSystemImpl(id, this))
+    }
 
   def access(path: String)(using fs: FileSystem): FileEntry = fs.access(path)
   def read(path: String)(using fs: FileSystem): String = fs.access(path).read()
@@ -185,21 +206,15 @@ final class Host(
   def grepRecursive(dir: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
     grepRecursive(dir, pattern, "*")
   def grepRecursive(dir: String, pattern: String, glob: String)(using fs: FileSystem): List[GrepMatch] =
-    val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
     val regex = pattern.r
-    fs.access(dir).walk().flatMap { entry =>
-      if entry.isDirectory || entry.isClassified then Nil
-      else if matcher.matches(Paths.get(entry.path).nn.getFileName) then grepEntry(entry, regex)
-      else Nil
-    }
+    filesNamed(dir, glob).filterNot(_.isClassified).flatMap(grepEntry(_, regex))
 
-  def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
+  def find(dir: String, glob: String)(using fs: FileSystem): List[String] = filesNamed(dir, glob).map(_.path)
+
+  /** The files (not directories) under `dir` whose *name* matches `glob`. */
+  private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntry] =
     val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
-    fs.access(dir).walk().flatMap { entry =>
-      if entry.isDirectory then Nil
-      else if matcher.matches(Paths.get(entry.path).nn.getFileName) then List(entry.path)
-      else Nil
-    }
+    fs.access(dir).walk().filter(e => !e.isDirectory && matcher.matches(Paths.get(e.path).nn.getFileName))
 
   def readClassified(path: String)(using fs: FileSystem): Classified[String] = fs.access(path).readClassified()
   def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
@@ -211,9 +226,7 @@ final class Host(
     requestExec(commands, "")(op)
   def requestExec[T](commands: Set[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
     val patterns = commands.toList.map(_.trim).filter(_.nonEmpty)
-    val id = policy.requestExec(scopeOf(parent), patterns, reason)
-    try op(using ExecImpl(id))
-    finally policy.closeScope(id)
+    inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id)))
 
   def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, None, Host.ExecTimeoutMs)
   def exec(command: String, args: List[String])(using Exec, FileSystem): ProcessResult =
@@ -258,9 +271,7 @@ final class Host(
     requestNetwork(hosts, "")(op)
   def requestNetwork[T](hosts: Set[String], reason: String)(op: Network ?=> T)(using user: UserIO, parent: Network): T =
     val patterns = hosts.toList.map(_.trim.toLowerCase).filter(_.nonEmpty)
-    val id = policy.requestNet(scopeOf(parent), patterns, reason)
-    try op(using NetworkImpl(id))
-    finally policy.closeScope(id)
+    inScope(policy.requestNet(scopeOf(parent), patterns, reason))(id => op(using NetworkImpl(id)))
 
   private val http = HttpClient.newBuilder().nn
     .followRedirects(HttpClient.Redirect.NEVER).nn

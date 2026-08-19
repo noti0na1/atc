@@ -45,7 +45,7 @@ final class Agent(
   policy: Policy,
   ui: AgentUI,
   var model: ChatModel,
-  /** The model that may see classified data; switchable with `/safemodel`. */
+  /** The model that may see classified data; switchable with `/classifiedmodel`. */
   var classifiedModel: Option[ChatModel],
   extraInstructions: Option[String],
 ):
@@ -75,7 +75,7 @@ final class Agent(
   private val tools = List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
-  def systemPrompt: String =
+  def systemPrompt: SystemPrompt =
     Prompts.system(cwd, policy, classifiedModel.map(_.ref), config.respectGitignore, extraInstructions)
 
   /** A note prepended to the next user message, e.g. that the sandbox was
@@ -151,7 +151,9 @@ final class Agent(
 
     /** Tokens of every request besides the history: the system prompt and the tool schema. */
     private def fixedTokens: Long =
-      Agent.estimateTokens(systemPrompt) + tools.map(t => Agent.estimateTokens(t.description + t.parametersJson)).sum
+      Agent.estimateTokens(systemPrompt.text) + tools.map(t =>
+        Agent.estimateTokens(t.description + t.parametersJson)
+      ).sum
 
     /** When the model has a `contextWindow`, drop the oldest exchanges from the
       * history until the next request should fit it, leaving room for the
@@ -306,7 +308,7 @@ object Agent:
     ),
     Hint(
       out => out.contains("Cannot refer to") && out.contains("from safe code"),
-      "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, and an immutable `List`/`Vector` with `mkString` instead of `ListBuffer`/`StringBuilder`."
+      "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, and a local `var` over an immutable `List`/`Vector`/`Map` instead of `ListBuffer`/`mutable.Map`."
     ),
     Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),

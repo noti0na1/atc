@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Classified, Exec, FileSystem, IOCap, Network, UserIO}
+import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
 import java.nio.file.{Files, Path}
 
@@ -199,6 +199,27 @@ class HostSuite extends munit.FunSuite:
     println("same")
     assertEquals(agentOut.toString, "Classified(***)\nsame\n")
     assertEquals(userOut.toString, "<real\n>same\n")
+
+  test("entries listed through children/walk are judged by their target, like paths given by name"):
+    // A link in a readable directory to a classified file: `read` by name is
+    // refused, and an entry obtained from a listing must be refused the same
+    // way (it used to carry the link's path and be judged at the link's location).
+    val env = TestEnv(TestEnv.withSecrets)
+    import env.given
+    given fs: FileSystem = env.host.fileSystem
+    env.file("secrets/key.txt", "THE-SECRET")
+    env.dir("pub")
+    Files.createSymbolicLink(env.root.resolve("pub/link.txt"), env.root.resolve("secrets/key.txt"))
+    val target = env.root.resolve("secrets/key.txt").toString
+    intercept[SecurityException](env.host.read("pub/link.txt"))
+    val listed = env.host.access("pub").children
+    assertEquals(listed.map(_.path), List(target), "a link is listed as its target")
+    assert(listed.head.isClassified)
+    intercept[SecurityException](listed.head.read())
+    intercept[SecurityException](env.host.access("pub").walk().head.read())
+    // `ls` shows the same canonical path, and `readClassified` stays the way in.
+    assertEquals(env.host.ls("pub"), List(target))
+    env.host.readClassified(listed.head.path)
 
   test("symlink escaping cwd is judged by its target"):
     val outside = Files.createTempDirectory("atc-link-target").nn.toRealPath().nn

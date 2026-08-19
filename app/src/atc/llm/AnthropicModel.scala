@@ -15,14 +15,8 @@ import scala.util.Using
 
 /** Anthropic Messages API (official Java SDK), streaming, with the
   * server-side web-search tool when enabled. */
-final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
-  val alias: String = spec.alias
-  override val ref: String = spec.ref
-  val modelId: String = spec.modelId
+final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   val providerKey: String = "anthropic"
-  private val cfg = spec.settings
-  val webSearch: Boolean = cfg.webSearch
-  override val contextWindow: Option[Int] = cfg.contextWindow.map(_.toInt)
 
   private lazy val client: AnthropicClient =
     val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
@@ -42,14 +36,15 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
     schema.obj.get("required").foreach(r => is.required(r.arr.map(_.str).toList.asJava))
     Tool.builder().name(t.name).description(t.description).inputSchema(is.build()).build()
 
-  private def params(system: String, history: List[Msg], tools: List[ToolSpec]): MessageCreateParams =
+  private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): MessageCreateParams =
+    // The stable part (rules + API reference) is large and cached; the dynamic
+    // part (permissions) follows it outside the cache breakpoint.
+    val stable = TextBlockParam.builder().text(system.stable).cacheControl(CacheControlEphemeral.builder().build())
+    val dynamic = Option.when(system.dynamic.nonEmpty)(TextBlockParam.builder().text(system.dynamic).build())
     val b = MessageCreateParams.builder()
       .model(modelId)
       .maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(32000L))
-      // The system prompt (API reference + policy) is large and stable: cache it.
-      .systemOfTextBlockParams(List(
-        TextBlockParam.builder().text(system).cacheControl(CacheControlEphemeral.builder().build()).build()
-      ).asJava)
+      .systemOfTextBlockParams((stable.build() :: dynamic.toList).asJava)
     configuredThinking(b)
     // `temperature` is not applied: current Anthropic models reject sampling parameters.
     tools.foreach(t => b.addTool(toolUnion(t)))
@@ -112,7 +107,7 @@ final class AnthropicModel(val spec: ModelSpec) extends ChatModel:
     Completion(text.toString, calls.result(), Some(NativeTurn(providerKey, m.toParam())), usage, stop, unfinished)
 
   def complete(
-    system: String,
+    system: SystemPrompt,
     history: List[Msg],
     tools: List[ToolSpec],
     sink: StreamSink,

@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{FileSystem, IOCap, UserIO}
+import atc.lib.{FileSystem, IOCap}
 import atc.perms.*
 
 import java.nio.file.{Files, Path}

@@ -1,5 +1,6 @@
 package atc
 
+import atc.SlashCommand as Cmd
 import atc.agent.{Agent, InputPredictor, Prompts}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
@@ -112,20 +113,27 @@ final class App(args: Main.Args):
     try ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
     finally tui.endTurn()
 
-  /** Replace the sandbox session (after `/reset` or a mode switch); the conversation is kept.
-    * `reason` is passed to the agent so it knows its REPL definitions are gone. */
-  private def restartSession(reason: String): Boolean =
+  /** Close the sandbox session, if any, and start a fresh one. False (after
+    * reporting `failure`) when the new one could not start; the app then runs
+    * without a session until the next attempt. */
+  private def replaceSession(failure: String): Boolean =
     session.foreach(_.close())
     session = None
     try
       session = Some(newReplSession())
-      agent.noteSandboxRestarted(reason)
       true
     catch
       case e: Exception =>
-        tui.error(s"could not restart the sandbox: ${e.getMessage}")
+        tui.error(s"$failure: ${e.getMessage}")
         Debug.trace(e)
         false
+
+  /** Replace the sandbox session (after `/reset` or a mode switch); the conversation is kept.
+    * `reason` is passed to the agent so it knows its REPL definitions are gone. */
+  private def restartSession(reason: String): Boolean =
+    val ok = replaceSession("could not restart the sandbox")
+    if ok then agent.noteSandboxRestarted(reason)
+    ok
 
   /** `/new`: start over as if atc had just been launched, keeping only what
     * the user configured (mode, models). The sandbox is closed, the
@@ -140,14 +148,7 @@ final class App(args: Main.Args):
     host.clearTodos()
     policy.resetSession()
     System.gc()
-    try
-      session = Some(newReplSession())
-      true
-    catch
-      case e: Exception =>
-        tui.error(s"could not start the sandbox: ${e.getMessage}")
-        Debug.trace(e)
-        false
+    replaceSession("could not start the sandbox")
 
   def run(): Int =
     try
@@ -241,98 +242,63 @@ final class App(args: Main.Args):
     case Mode.Full => "> "
     case m => s"${m.label} > "
 
-  // ── slash commands ────────────────────────────────────────────────
+  // ── slash commands (the table is `SlashCommand`; this is what each one does) ──
 
-  /** The commands `/help` lists, for Tab completion (aliases are accepted but not offered). */
-  private val commandNames = List(
-    "/help",
-    "/model",
-    "/classifiedmodel",
-    "/models",
-    "/mode",
-    "/perms",
-    "/config",
-    "/interface",
-    "/new",
-    "/reset",
-    "/clear",
-    "/todos",
-    "/cost",
-    "/quit",
-  )
   tui.completions = {
-    case _ :: Nil => commandNames
+    case _ :: Nil => SlashCommand.names
     case "/model" :: _ :: Nil => catalog.labels
     case "/classifiedmodel" :: _ :: Nil => catalog.labels :+ "off"
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
     case _ => Nil
   }
 
-  private val helpText =
-    """Commands:
-      |  /help                   this help
-      |  /model [ref]            switch the agent model (no argument: pick from a list)
-      |  /classifiedmodel [ref]  switch the model that may see classified data ("off" to unset)
-      |  /models                 list configured models
-      |  /mode [name]            cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL
-      |  /perms                  show the effective permission policy
-      |  /config                 show config files and settings
-      |  /interface              show the sandbox API reference
-      |  /new                    start over: fresh REPL, conversation, TODOs and session grants forgotten
-      |  /reset                  restart the sandbox REPL (keeps the conversation)
-      |  /clear                  forget the conversation (keeps the REPL)
-      |  /todos                  show the agent's TODO list
-      |  /cost                   show token usage
-      |  /quit                   exit""".stripMargin
-
-  /** Handle a slash command; returns false to quit. */
+  /** Handle a slash command line; returns false to quit. */
   private def command(line: String): Boolean =
-    val parts = line.split("\\s+", 2)
-    val cmd = parts(0).toLowerCase
-    val arg = if parts.length > 1 then parts(1).trim else ""
-    if cmd == "/quit" || cmd == "/exit" || cmd == "/q" then false
-    else
-      dispatch(cmd, arg)
-      true
+    SlashCommand.parse(line) match
+      case Left(typed) => tui.error(s"unknown command $typed (try /help)"); true
+      case Right((Cmd.Quit, _)) => false
+      case Right((cmd, arg)) => dispatch(cmd, arg); true
 
-  /** Run one (non-quitting) slash command. */
-  private def dispatch(cmd: String, arg: String): Unit =
-    cmd match
-      case "/help" | "/h" | "/?" => tui.println(helpText)
-      case "/models" => showModels()
-      case "/model" => switchModel(arg)
-      case "/classifiedmodel" | "/classified" => switchClassifiedModel(arg)
-      case "/perms" | "/permissions" => tui.println(policy.summary)
-      case "/mode" => switchMode(arg)
-      case "/config" =>
-        tui.println("config layers, in order:")
-        configuration.layers.foreach(l => tui.println(l.describe))
-        // Which providers have a key, never the keys themselves.
-        val keys = configuration.keys
-        if keys.sources.nonEmpty then
-          tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
-        tui.println(
-          s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput}"
-        )
-        tui.println(s"open permission scopes: ${policy.openScopeCount}")
-      case "/interface" | "/api" => tui.println(Prompts.interfaceSource)
-      case "/new" =>
-        predictor.invalidate()
-        if newSession() then
-          tui.success("new session: conversation, TODO list and session grants forgotten; sandbox restarted")
-      case "/reset" =>
-        if restartSession("you asked for /reset") then tui.success("sandbox restarted")
-      case "/clear" =>
-        agent.clear()
-        predictor.invalidate()
-        tui.success("conversation cleared")
-      case "/todos" | "/todo" => tui.showTodosNow(host.currentTodos)
-      case "/cost" | "/usage" =>
-        def show(u: TokenUsage) = s"input=${u.input} (cached ${u.cacheRead}) output=${u.output}"
-        tui.println(s"tokens: ${show(agent.usage)}; tool calls: ${agent.toolCalls}")
-        val by = agent.usageByPurpose
-        if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
-      case other => tui.error(s"unknown command $other (try /help)")
+  private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
+    case Cmd.Help => tui.println(SlashCommand.helpText)
+    case Cmd.Model => switchModel(arg)
+    case Cmd.ClassifiedModel => switchClassifiedModel(arg)
+    case Cmd.Models => showModels()
+    case Cmd.Mode => switchMode(arg)
+    case Cmd.Perms => tui.println(policy.summary)
+    case Cmd.Config => showConfig()
+    case Cmd.Interface => tui.println(Prompts.interfaceSource)
+    case Cmd.New =>
+      predictor.invalidate()
+      if newSession() then
+        tui.success("new session: conversation, TODO list and session grants forgotten; sandbox restarted")
+    case Cmd.Reset => if restartSession("you asked for /reset") then tui.success("sandbox restarted")
+    case Cmd.Clear =>
+      agent.clear()
+      predictor.invalidate()
+      tui.success("conversation cleared")
+    case Cmd.Todos => tui.showTodosNow(host.currentTodos)
+    case Cmd.Cost => showCost()
+    case Cmd.Quit => () // `command` ends the loop instead
+
+  /** `/config`: the layers, which key names are bound (never the values), and the scalar settings. */
+  private def showConfig(): Unit =
+    tui.println("config layers, in order:")
+    configuration.layers.foreach(l => tui.println(l.describe))
+    val keys = configuration.keys
+    if keys.sources.nonEmpty then
+      tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
+    tui.println(
+      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput}"
+    )
+    tui.println(s"open permission scopes: ${policy.openScopeCount}")
+
+  /** `/cost`: token usage in total and, when there is more than one purpose, by purpose. */
+  private def showCost(): Unit =
+    def show(u: TokenUsage) = s"input=${u.input} (cached ${u.cacheRead}) output=${u.output}"
+    tui.println(s"tokens: ${show(agent.usage)}; tool calls: ${agent.toolCalls}")
+    val by = agent.usageByPurpose
+    if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
 
   /** One line per configured model: its name, `provider/model-id`, and the
     * role it currently plays. */

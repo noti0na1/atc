@@ -120,9 +120,10 @@ abstract class FileEntry private[atc] () extends Cap:
   /** Create this directory, including missing parents. */
   update def mkdir(): Unit
   /** Immediate children of a (non-classified) directory; entries you cannot
-   *  access are omitted. */
+   *  access are omitted, and a symlink is listed as its target. */
   def children: List[FileEntry^{this}]
-  /** All descendants; classified sub-directories are listed but not entered. */
+  /** All descendants; classified sub-directories and symlinked directories are
+   *  listed but not entered. */
   def walk(): List[FileEntry^{this}]
   /** Read any readable file as `Classified`. */
   def readClassified(): Classified[String]

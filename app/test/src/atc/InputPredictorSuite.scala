@@ -14,7 +14,7 @@ class InputPredictorSuite extends munit.FunSuite:
     val alias = "one"; val modelId = "one"; val providerKey = "one"; val webSearch = false
     val prompts: ListBuffer[String] = ListBuffer()
     val entered = CountDownLatch(1)
-    def complete(s: String, h: List[Msg], t: List[ToolSpec], sink: StreamSink, c: () => Boolean): Completion =
+    def complete(s: SystemPrompt, h: List[Msg], t: List[ToolSpec], sink: StreamSink, c: () => Boolean): Completion =
       Completion("", Nil, None, TokenUsage(), "end_turn")
     val thinkingAsked: ListBuffer[Boolean] = ListBuffer()
     def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =

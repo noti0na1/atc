@@ -311,15 +311,17 @@ class ReplSessionSuite extends munit.FunSuite:
       ExecutionResult.trimStackFrames(trace),
       "java.lang.RuntimeException: boom\n  at rs$line$3$.f(rs$line$3:1)"
     )
-  test("looksLikeUncaughtException"):
-    import ReplSession.looksLikeUncaughtException
-    assert(looksLikeUncaughtException("java.lang.RuntimeException: boom\n  ... 33 elided"))
-    assert(looksLikeUncaughtException("java.lang.RuntimeException: boom\n  at rs$line$1$.x(rs$line$1:1)"))
-    assert(looksLikeUncaughtException("val x: Int = 1\nmy.pkg.CustomError\n  at a.b(c:1)"))
-    assert(!looksLikeUncaughtException("java.lang.RuntimeException: boom"))
-    assert(!looksLikeUncaughtException("val s: String = \"java.lang.RuntimeException: boom\""))
-    assert(!looksLikeUncaughtException("Exception in text\n  at home"))
-    assert(!looksLikeUncaughtException(""))
+  test("an exception thrown while binding a val, or by a later statement, fails the run"):
+    assertFails(run("""val v: Int = throw new IllegalStateException("in val")"""), "in val")
+    assertFails(run("def f(): Int = throw new IllegalStateException(\"in def\")\nval ok = 1\nf()"), "in def")
+  test("output that merely looks like a stack trace does not fail the run"):
+    assertOk(run("""println("java.lang.RuntimeException: boom\n  ... 33 elided")"""))
+    assertOk(run("""println("java.lang.RuntimeException: boom\n  at rs$line$1$.x(rs$line$1:1)")"""))
+  test("a closed session refuses to run"):
+    val env = TestEnv(prefix = "atc-repl-closed")
+    val s = env.newSession()
+    s.close()
+    assertFails(s.run("1 + 1"), "closed")
   test("BoundedOutputStream truncates and resets"):
     val b = ReplSession.BoundedOutputStream(10)
     b.write("hello".getBytes)

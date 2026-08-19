@@ -28,6 +28,8 @@ import java.nio.file.{Files, Path}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.jdk.CollectionConverters.*
 
+import Ansi.{Blue, Bold, ClearLine, Cyan, Dim, Green, Magenta, Red, Reset, Yellow}
+
 /** Terminal front-end. Every kind of content has one shape so a glance tells
   * them apart:
   *
@@ -143,32 +145,17 @@ final class Tui(historyFile: Path) extends AgentUI:
       val rights = (Option(KeyMap.key(terminal, InfoCmp.Capability.key_right)).toList ++ List("\u001b[C", "\u001bOC"))
         .distinct.filter(_.nonEmpty)
       keyMap.bind(Reference("atc-accept-suggestion-right"), rights*)
-  private val g: Tui.Glyphs =
-    if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then
-      Tui.Glyphs.unicode
-    else Tui.Glyphs.ascii
+  private val g: Glyphs =
+    if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then Glyphs.unicode
+    else Glyphs.ascii
 
-  // ── styles (by role) ──────────────────────────────────────────────
-
-  /** SGR codes. Rendered by hand rather than through JLine's `toAnsi`, which
-    * rewrites box-drawing glyphs (into the DEC charset or plain ASCII). */
-  private val Bold = 1
-  private val Dim = 2
-  private val Red = 31
-  private val Green = 32
-  private val Yellow = 33 // warnings, permissions, classified
-  private val Blue = 34 // TODO panel, fenced code in prose
-  private val Magenta = 35 // tool calls
-  private val Cyan = 36 // the user, questions
+  // ── styles (by role, see `Ansi`) ──────────────────────────────────
 
   /** Colours the terminal supports; 0 (no styling at all) when there is no real terminal. */
   private val colors: Int =
     if plain then 0
     else Option(terminal.getNumericCapability(InfoCmp.Capability.max_colors)).map(_.intValue).getOrElse(0)
-  private def styled(s: String, codes: Int*): String =
-    if colors <= 0 || s.isEmpty then s else s"\u001b[${codes.mkString(";")}m$s\u001b[0m"
-  private val Reset = "\u001b[0m"
-  private val ClearLine = "\r\u001b[2K"
+  private def styled(s: String, codes: Int*): String = if colors <= 0 then s else Ansi.styled(s, codes*)
   private val Indent = "  "
   private def width: Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
 
@@ -271,7 +258,7 @@ final class Tui(historyFile: Path) extends AgentUI:
     private var tailBefore = tail
     def active: Boolean = drawn > 0
     def redraw(lines: List[String]): Unit =
-      if drawn > 0 then { out.print(s"\r\u001b[${drawn}A\u001b[J"); out.flush(); tail = tailBefore }
+      if drawn > 0 then { out.print(s"\r${Ansi.Esc}[${drawn}A${Ansi.Esc}[J"); out.flush(); tail = tailBefore }
       else { ensureNewline(); tailBefore = tail }
       lines.foreach(l => write(l + "\n"))
       drawn = lines.length
@@ -324,7 +311,7 @@ final class Tui(historyFile: Path) extends AgentUI:
         clearRegion()
         beginBlock()
         write(styled(g.bullet, Dim) + " " + styled("thinking", Dim) + "\n")
-        if colors > 0 then out.print(s"\u001b[${Dim}m")
+        if colors > 0 then out.print(Ansi.sgr(Dim))
         streaming = true
         writeGuttered(buf.toString.dropWhile(_ == '\n'), Indent)
       else
@@ -688,19 +675,20 @@ final class Tui(historyFile: Path) extends AgentUI:
   /** Whether pop-up menus can be drawn (a real terminal). */
   def menusAvailable: Boolean = !plain
 
+  /** A pop-up is a block of its own: a pending TODO panel is drawn first, then
+    * `body` (which reads the terminal), then the blank line that ends the block. */
+  private def popupBlock[T](body: => T): T =
+    synchronized { flushTodos(); beginBlock() }
+    try body
+    finally blankLine()
+
   /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
     * `None` when there is no terminal for menus, no options, or the user
     * cancelled with Ctrl-C/Ctrl-D. */
   def choose(title: String, options: List[String]): Option[String] =
-    if plain || options.isEmpty then None
-    else
-      synchronized { flushTodos(); beginBlock() }
-      val chosen = menu(title, options)
-      blankLine()
-      chosen
+    if plain || options.isEmpty then None else popupBlock(menu(title, options))
 
-  def askPermission(req: PermissionRequest): Decision =
-    synchronized { flushTodos(); beginBlock() }
+  def askPermission(req: PermissionRequest): Decision = popupBlock:
     write(Indent + styled(s"${g.warn} Permission request: ${req.title}", Yellow, Bold) + "\n")
     req.details.foreach(d => write(Indent + Indent + styled(d, Yellow) + "\n"))
     val decision =
@@ -722,27 +710,23 @@ final class Tui(historyFile: Path) extends AgentUI:
         case Decision.AllowSession => styled(s"${g.arrow} allowed for this session", Green)
         case Decision.Deny => styled(s"${g.arrow} denied", Red)
       write(Indent + label + "\n")
-    blankLine()
     decision
 
   /** A yes/no question from the app itself (setup, not the agent): a menu
     * when there is a terminal, a `[y/N]` line otherwise. Cancelling means no. */
-  def confirm(question: String): Boolean =
-    synchronized { flushTodos(); beginBlock() }
+  def confirm(question: String): Boolean = popupBlock:
     write(Indent + styled("? " + question, Cyan, Bold) + "\n")
     val yes =
       if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase.startsWith("y"))
       else menu("Choose", List(Tui.YesLabel, Tui.NoLabel)).contains(Tui.YesLabel)
     if plain then
       write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
-    blankLine()
     yes
 
   /** Ask the user a question on behalf of the agent. Options render as a
     * menu (or checkboxes when `multiple`), always with an "Other" free-text
     * entry; no options → a free-text line. `None` on Ctrl-C/Ctrl-D. */
-  def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
-    synchronized { flushTodos(); beginBlock() }
+  def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = popupBlock:
     write(Indent + styled("? " + question, Cyan, Bold) + "\n")
     val answerPrompt = styled("answer> ", Cyan)
     val answer: Option[String] =
@@ -767,7 +751,6 @@ final class Tui(historyFile: Path) extends AgentUI:
         write(Indent + styled(s"${g.arrow} $a", Green) + "\n")
       case Some(_) => ()
       case None => write(Indent + styled(s"${g.arrow} (no answer)", Red) + "\n")
-    blankLine()
     answer
 
   private def freeText(prompt: String): Option[String] = keys.withPaused:
@@ -891,80 +874,6 @@ object Tui:
   val OtherLabel = "Other (type an answer)"
   val YesLabel = "Yes"
   val NoLabel = "No"
-
-  /** The characters that draw the layout; ASCII when the terminal is not UTF-8
-    * (or `ATC_ASCII` is set). Always constructed with named arguments — a bare
-    * list of eighteen one-character strings says nothing. */
-  final case class Glyphs(
-    /** Opens a block: prose, tool call, thinking. */
-    bullet: String,
-    /** The gutter of a block's body. */
-    bar: String,
-    /** Opens a section inside a block ("output", "result"). */
-    tee: String,
-    /** Closes a tool block (the verdict line). */
-    end: String,
-    arrow: String,
-    warn: String,
-    cross: String,
-    todo: String,
-    done: String,
-    inProgress: String,
-    pending: String,
-    /** Markdown list bullet (prose, not blocks). */
-    bullet2: String,
-    /** Markdown block quote bar. */
-    quote: String,
-    /** Horizontal rule, also table rules. */
-    rule: String,
-    ellipsis: String,
-    /** Separator in summary lines ("worked for 3 s · 2 tool calls"). */
-    dot: String,
-    /** Table header/rule crossing. */
-    junction: String,
-    spinner: IndexedSeq[String]
-  )
-  object Glyphs:
-    val unicode: Glyphs = Glyphs(
-      bullet = "●",
-      bar = "│",
-      tee = "├",
-      end = "└",
-      arrow = "→",
-      warn = "⚠",
-      cross = "✗",
-      todo = "▸",
-      done = "✓",
-      inProgress = "▶",
-      pending = "○",
-      bullet2 = "•",
-      quote = "▎",
-      rule = "─",
-      ellipsis = "…",
-      dot = "·",
-      junction = "┼",
-      spinner = IndexedSeq("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
-    )
-    val ascii: Glyphs = Glyphs(
-      bullet = "*",
-      bar = "|",
-      tee = "+",
-      end = "`",
-      arrow = "->",
-      warn = "!",
-      cross = "x",
-      todo = ">",
-      done = "[x]",
-      inProgress = "[>]",
-      pending = "[ ]",
-      bullet2 = "-",
-      quote = ">",
-      rule = "-",
-      ellipsis = "...",
-      dot = "-",
-      junction = "+",
-      spinner = IndexedSeq("|", "/", "-", "\\"),
-    )
 
   /** Menu ids are the labels; duplicates get a numeric suffix so they stay unique. */
   def uniqueIds(labels: List[String]): List[String] =

@@ -40,7 +40,7 @@ final class ExecutionClock:
 
 case class SandboxConfig(
   safeMode: Boolean = true,
-  /** Which capabilities the preamble hands to the agent (see `ReplSession.preamble`). */
+  /** Which capabilities the preamble hands to the agent (see `ReplSession.preambleChunks`). */
   mode: Mode = Mode.Full,
   executionTimeoutMs: Option[Long] = Some(180000L),
   /** Longest rendering of a top-level definition's value the REPL echoes

@@ -202,7 +202,6 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("echo"))
     import env.given
     given ex: Exec = env.host.processes
-    given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.Deny)
     var ran = false
     intercept[SecurityException](env.host.requestExec(Set("rm")) { ran = true })

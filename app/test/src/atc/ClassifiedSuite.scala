@@ -5,7 +5,6 @@ import atc.lib.{Classified, FileEntry, FileSystem}
 import atc.perms.*
 
 import java.nio.file.{Files, Path}
-import scala.util.Success
 
 /** `Classified` semantics: the host implementation as a value, and the file
   * system / output / LLM sinks that enforce the classified boundary

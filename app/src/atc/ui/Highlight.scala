@@ -10,13 +10,11 @@ import scala.util.control.NonFatal
   * lines that each carry their own colour state, so a gutter can be put in
   * front of every line without breaking a multi-line string or comment. */
 object Highlight:
+  import Ansi.{Esc, Reset, Sgr}
+
   private lazy val ctx: Context =
     val base = new ContextBase
     base.initialCtx.fresh.setSetting(base.initialCtx.settings.color, "always")
-
-  private val Esc = "\u001b"
-  private val Reset = Esc + "[0m"
-  private val Sgr = """\u001b\[[0-9;]*m""".r
 
   /** ANSI-coloured lines of `code`; the plain lines if highlighting fails. */
   def scala(code: String): List[String] =

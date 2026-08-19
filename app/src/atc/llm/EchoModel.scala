@@ -15,7 +15,7 @@ final class EchoModel(val alias: String, override val ref: String) extends ChatM
   private var counter = 0
 
   def complete(
-    system: String,
+    system: SystemPrompt,
     history: List[Msg],
     tools: List[ToolSpec],
     sink: StreamSink,

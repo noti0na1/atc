@@ -36,6 +36,16 @@ case class Completion(
   unfinished: Boolean = false
 )
 
+/** The system prompt of an agent request, in two parts: `stable` changes only
+  * with the configuration and the sandbox mode (rules, API reference), `dynamic`
+  * with the session (the permission summary, which every "allow for the
+  * session" extends). Providers send the stable part first, with the cache
+  * marker where the API has one, so a grant in the middle of a turn does not
+  * evict the cached prefix that is the bulk of every request. */
+final case class SystemPrompt(stable: String, dynamic: String = ""):
+  /** Both parts as one text. */
+  def text: String = if dynamic.isEmpty then stable else s"$stable\n\n$dynamic"
+
 /** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
 case class Reply(text: String, usage: TokenUsage)
 
@@ -85,7 +95,7 @@ trait ChatModel:
   /** One agent step. Streams text, notes and reasoning to `sink`;
     * `cancelled` is polled between events. */
   def complete(
-    system: String,
+    system: SystemPrompt,
     history: List[Msg],
     tools: List[ToolSpec],
     sink: StreamSink,

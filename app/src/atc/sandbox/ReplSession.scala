@@ -32,8 +32,12 @@ object ReplSession:
   private class OpenReplDriver(settings: Array[String], out: PrintStream, cl: Option[ClassLoader], maxEchoChars: Int)
       extends ReplDriver(settings, out, cl):
     // Replace the stock renderer before the first evaluation (it creates the REPL class loader lazily).
-    rendering = CappedRendering(cl, maxEchoChars)
+    private val capped = CappedRendering(cl, maxEchoChars)
+    rendering = capped
     def runParseResult(res: ParseResult)(using State): State = runBody(interpret(res))
+    /** Whether an evaluation threw an uncaught exception since the last reset. */
+    def evaluationThrew: Boolean = capped.threw
+    def resetEvaluationThrew(): Unit = capped.resetThrew()
     /** The loader of the REPL-defined classes (null before the first evaluation). */
     def replClassLoader: ClassLoader | Null = rendering.myClassLoader
     /** Raise/clear the stop flag checked by the instrumented REPL classes
@@ -118,21 +122,7 @@ object ReplSession:
         )
     base :: givens
 
-  /** The full preamble as one string (for display, e.g. `:imports`). */
-  def preamble(mode: Mode): String = preambleChunks(mode).mkString("\n")
-
   val safeModeImport: String = "import language.experimental.safe"
-
-  private val exceptionHead = """^[\w.$]+(Exception|Error)(:.*)?$""".r
-  private val traceLine = """^\s+(at |\.\.\. \d+ (more|elided)).*$""".r
-
-  /** The REPL prints uncaught exceptions (with an elided stack trace) instead
-    * of failing the evaluation; detect that so the agent gets `isError`. */
-  def looksLikeUncaughtException(output: String): Boolean =
-    val lines = output.linesIterator.toVector
-    lines.indices.exists { i =>
-      exceptionHead.matches(lines(i)) && i + 1 < lines.length && traceLine.matches(lines(i + 1))
-    }
 
   /** System.out/err are swapped around each evaluation to capture compiler
     * diagnostics that bypass the driver's stream; that is process-global, so
@@ -149,8 +139,10 @@ object ReplSession:
     "A previous evaluation is still running (it could not be stopped) and holds the output stream, " +
       "so nothing can be evaluated until atc is restarted; tell the user."
 
-  /** What one evaluation produced, before it is adopted into the session. */
-  private case class Evaluated(state: State, output: String, thrown: Option[Throwable])
+  /** What one evaluation produced, before it is adopted into the session:
+    * the new state, the captured output, what escaped the driver (`thrown`),
+    * and whether agent code threw an exception the REPL rendered (`failed`). */
+  private case class Evaluated(state: State, output: String, thrown: Option[Throwable], failed: Boolean)
 
 /** One persistent REPL with its own sandbox class loader and host. */
 final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride: Option[String] = None):
@@ -169,6 +161,7 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
   @volatile private var evalThread: Thread | Null = null
   /** Set while a stop (interrupt or timeout) is in flight for the current run. */
   @volatile private var stopRequested: Boolean = false
+  @volatile private var closed: Boolean = false
 
   /** Load the preamble; errors here are programmer bugs and are thrown. Each
     * chunk is a separate REPL round so that every given lands in its own
@@ -186,7 +179,13 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
     thrown.foreach(throw _)
     if out.toLowerCase.contains("error") then throw IllegalStateException(s"$what failed to compile:\n$out")
 
-  def close(): Unit = ()
+  /** End the session: stop a running evaluation (best effort) and refuse
+    * further runs. The compiler and its class loader are not released here:
+    * they are collected once nothing refers to the session any more, which is
+    * why `/new` asks for a GC after dropping it. */
+  def close(): Unit =
+    closed = true
+    interrupt()
 
   /** Interrupt a running evaluation (best effort): raise the REPL stop flag
     * for loops in agent code and interrupt the thread for blocking calls. */
@@ -200,7 +199,8 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
   def run(code: String): ExecutionResult =
     clock.reset() // per run, whichever way it ends (callers read `clock.paused` afterwards)
     val violations = CodeValidator.validate(code)
-    if violations.nonEmpty then ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
+    if closed then ExecutionResult(false, "", Some("The sandbox session is closed; start a new one."))
+    else if violations.nonEmpty then ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
     else
       stopRequested = false
       ParseResult(code.stripTrailing() + "\n")(using state) match
@@ -222,13 +222,14 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
     var newState = state
     val (output, thrown) = withOutputCapture(onEnter = started.countDown()) {
       driver.setStopFlag(false) // a previous evaluation may have been stopped
+      driver.resetEvaluationThrew()
       newState = driver.runParseResult(res)(using state)
     }
-    Evaluated(newState, output, thrown)
+    Evaluated(newState, output, thrown, driver.evaluationThrew)
 
   /** Take over the new state and turn the evaluation into the agent-visible result. */
   private def adopt(res: ParseResult, evaluated: Evaluated): ExecutionResult =
-    val Evaluated(newState, output, thrown) = evaluated
+    val Evaluated(newState, output, thrown, failed) = evaluated
     state = newState
     if stopRequested then
       // The evaluation was interrupted: its wrapper class may be half-initialized
@@ -244,7 +245,7 @@ final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride
           val compileFailed = res match
             case p: Parsed => p.reporter.hasErrors
             case _ => false
-          ExecutionResult(!compileFailed && !looksLikeUncaughtException(output), output)
+          ExecutionResult(!compileFailed && !failed, output)
 
   /** After a stopped evaluation, advance past the (possibly poisoned) wrapper
     * index and mark it invalid, so a later line does not reuse the class name. */

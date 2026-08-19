@@ -1,5 +1,6 @@
 package atc.agent
 
+import atc.llm.SystemPrompt
 import atc.perms.{Mode, Policy}
 
 import java.nio.file.Path
@@ -41,13 +42,16 @@ object Prompts:
          |Do not try to work around this: explain what you would change and let the user switch to local or
          |full mode (`/mode local`, `/mode full`) if they want you to edit files.""".stripMargin
 
+  /** The system prompt: everything that depends on the configuration, the
+    * working directory and the mode in the stable part; the permission summary,
+    * which session grants extend, in the dynamic one (see [[SystemPrompt]]). */
   def system(
     cwd: Path,
     policy: Policy,
     classifiedModelName: Option[String],
     respectGitignore: Boolean,
     extra: Option[String],
-  ): String =
+  ): SystemPrompt =
     val os = s"${System.getProperty("os.name")} ${System.getProperty("os.arch")}"
     // Injected as one extra line of the Environment block, so it must not start
     // with a margin bar (`stripMargin` runs after the interpolation).
@@ -56,7 +60,7 @@ object Prompts:
         "\n- listings (`ls`, `walk`, `find`, `grepRecursive`) leave out `.git` and everything `.gitignore`" +
           " ignores; an ignored file can still be read by its path"
       else ""
-    s"""You are a helpful coding agent with tracked capabilities (ATC), working in the user's terminal.
+    val stable = s"""You are a helpful coding agent with tracked capabilities (ATC), working in the user's terminal.
        |You act only by writing Scala 3 code and running it with the `$ToolName` tool in a sandboxed REPL.
        |The sandbox is capability-safe: every effect requires a capability, capture checking guarantees
        |capabilities cannot escape their scope, and the host enforces the user's permission policy at runtime.
@@ -140,11 +144,10 @@ object Prompts:
        |  the content, you see `Classified(***)`), `writeClassified` it, or `chat(classified)` with the
        |  classified model. You cannot read it yourself.
        |
-       |Current permissions
-       |${policy.summary.linesIterator.map("  " + _).mkString("\n")}
-       |
        |API reference (all members are in scope, together with the givens of the current mode, see above)
        |```scala
        |$interfaceSource
        |```
        |${extra.map(e => s"\nProject instructions\n$e\n").getOrElse("")}""".stripMargin
+    val permissions = s"Current permissions\n${policy.summary.linesIterator.map("  " + _).mkString("\n")}"
+    SystemPrompt(stable, permissions)

@@ -2,46 +2,10 @@ package atc.config
 
 import upickle.default.*
 
+import atc.perms.{Access, Mode, PathPattern}
+
 import java.nio.file.{Files, Path, Paths}
 import scala.util.Properties
-
-/** A token count in a config, written as a number or as a string with a
-  * suffix: `200000`, `"200000"`, `"256k"`, `"1m"`, `"1.5m"` (`k` = 1000,
-  * `m` = 1000000, either case). Decimal on purpose: a window given as `"128k"`
-  * then never overshoots the model's real one, whichever convention the
-  * vendor's figure follows. */
-opaque type Tokens = Int
-object Tokens:
-  def apply(n: Int): Tokens = n
-  extension (t: Tokens) def toInt: Int = t
-
-  private val Form = raw"(?i)\s*(\d+(?:\.\d+)?)\s*([km]?)\s*".r
-
-  /** Parse `text`; throws `IllegalArgumentException` for anything else. */
-  def parse(text: String): Tokens =
-    text match
-      case Form(number, unit) =>
-        val scale = unit.nn.toLowerCase match
-          case "k" => 1e3
-          case "m" => 1e6
-          case _ => 1.0
-        val n = number.nn.toDouble * scale
-        if n < 1 || n > Int.MaxValue then throw IllegalArgumentException(s"Token count out of range: '$text'")
-        n.round.toInt
-      case _ =>
-        throw IllegalArgumentException(
-          s"Not a token count: '$text' (write a number, or one with k/m: \"256k\", \"1m\")"
-        )
-
-  given ReadWriter[Tokens] = readwriter[ujson.Value].bimap[Tokens](
-    n => ujson.Num(n.toInt),
-    {
-      case ujson.Num(n) if n.isWhole && n >= 1 && n <= Int.MaxValue => n.toInt
-      case ujson.Num(n) => throw IllegalArgumentException(s"Token count out of range: $n")
-      case ujson.Str(s) => parse(s)
-      case other => throw IllegalArgumentException(s"Not a token count: $other")
-    }
-  )
 
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
@@ -300,6 +264,7 @@ object Config:
     val base = parse(ujson.write(effective), "the merged configuration")
     val settings = narrowing.foldLeft(base)(tighten)
     val rules = layers.flatMap(l => l.config.files.map(LayeredRule(_, base = l.base)))
+    rules.foreach(validateRule)
     Configuration(layers, validate(settings), rules, keys)
 
   /** Apply one narrowing layer to the settings it defines. Every field moves
@@ -330,8 +295,23 @@ object Config:
   /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an
     * unset mode means the most permissive one. */
   private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
-    def parsed(o: Option[String]) = o.map(atc.perms.Mode.parse).getOrElse(atc.perms.Mode.Full)
-    Some(atc.perms.Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
+    def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
+    Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
+
+  /** A `files` entry of any layer (the project layer's included, which
+    * `settings.files` leaves out): the path must be a usable pattern and the
+    * access level one the policy knows, so a typo is reported as a config
+    * error here rather than when the policy is built. */
+  private def validateRule(r: LayeredRule): Unit =
+    val path = r.rule.path
+    def invalid(what: String) = IllegalArgumentException(s"Invalid config: files entry '$path': $what")
+    if path.trim.isEmpty then throw invalid("the path must not be blank")
+    try PathPattern(path, r.base.getOrElse(Paths.get("").toAbsolutePath))
+    catch case e: Exception => throw invalid(s"not a valid pattern (${e.getMessage})")
+    r.rule.access.foreach { a =>
+      try Access.parse(a)
+      catch case e: IllegalArgumentException => throw invalid(e.getMessage.nn)
+    }
 
   /** Reject limits that would otherwise fail much later in output slicing,
     * timeout accounting, or provider request construction. */
@@ -344,7 +324,7 @@ object Config:
       throw IllegalArgumentException(s"Invalid config: maxToolCalls must be non-negative (was ${config.maxToolCalls})")
     config.executionTimeoutMs.foreach(positive("executionTimeoutMs", _))
     config.mode.foreach { m =>
-      try atc.perms.Mode.parse(m)
+      try Mode.parse(m)
       catch case e: IllegalArgumentException => throw IllegalArgumentException(s"Invalid config: ${e.getMessage}")
     }
     config.providers.foreach { (name, provider) =>
@@ -440,7 +420,8 @@ object Config:
 
   /** Set one top-level key of a config file, keeping the rest of the text as
     * it is (a config is hand-formatted: blank lines, several patterns per
-    * line, and re-serialising it would lose that). See [[withTopLevel]]. */
+    * line, and re-serialising it would lose that). See [[withTopLevel]]; the
+    * positions come from the [[ObjectText]] scanner. */
   def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
     val text =
       try Files.readString(path).nn
@@ -472,65 +453,6 @@ object Config:
             text.substring(0, obj.open + 1) + s"\n  $entry\n" + text.substring(obj.close)
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
-
-  /** The top-level members of a JSON object's text, with their positions. */
-  private[config] case class ObjectText(text: String, open: Int, close: Int, members: List[ObjectText.Member]):
-    /** What goes between two members: the newline and indent before the first
-      * one, or a single space in a one-line object. */
-    def separator: String =
-      members.headOption match
-        case Some(first) =>
-          val nl = text.lastIndexOf('\n', first.keyStart)
-          if nl > open then text.substring(nl, first.keyStart) else " "
-        case None => "\n  "
-
-  private[config] object ObjectText:
-    /** A member: `keyStart` is its opening quote, `valueStart`/`valueEnd` bound
-      * the value (no surrounding whitespace, no trailing comma). */
-    case class Member(key: String, keyStart: Int, valueStart: Int, valueEnd: Int)
-
-    /** Positions of the top-level members of `text`, which must already be
-      * known to be a well-formed JSON object. */
-    def scan(text: String): ObjectText =
-      var i = 0
-      def skipSpace(): Unit = while i < text.length && text(i).isWhitespace do i += 1
-      /** From an opening quote at `i` to just past the closing one. */
-      def skipString(): Unit =
-        i += 1
-        while text(i) != '"' do i += (if text(i) == '\\' then 2 else 1)
-        i += 1
-      skipSpace()
-      val open = i
-      i += 1
-      val members = List.newBuilder[Member]
-      var close = -1
-      while close < 0 do
-        skipSpace()
-        text(i) match
-          case '}' => close = i
-          case ',' => i += 1
-          case _ =>
-            val keyStart = i
-            skipString()
-            val key = ujson.read(text.substring(keyStart, i)).str
-            skipSpace()
-            i += 1 // the colon
-            skipSpace()
-            val valueStart = i
-            var depth = 0
-            var done = false
-            while !done do
-              text(i) match
-                case '"' => skipString()
-                case '{' | '[' => depth += 1; i += 1
-                case '}' | ']' if depth == 0 => done = true
-                case '}' | ']' => depth -= 1; i += 1
-                case ',' if depth == 0 => done = true
-                case _ => i += 1
-            var valueEnd = i
-            while text(valueEnd - 1).isWhitespace do valueEnd -= 1
-            members += Member(key, keyStart, valueStart, valueEnd)
-      ObjectText(text, open, close, members.result())
 
   /** The starter global config written by `--init-global`. */
   def globalTemplate: String = resource("/atc/config-template.json")

@@ -1,7 +1,7 @@
 package atc
 
 import atc.config.*
-import atc.perms.{Access, Decision, PathPattern, Policy}
+import atc.perms.{Access, Decision, Policy}
 
 import java.nio.file.{Files, Path}
 
@@ -150,6 +150,17 @@ class ConfigSuite extends munit.FunSuite:
     val bad = writeCfg(dir, "config.json", """{ "maxToolOutputChars": 0 }""")
     val e = intercept[IllegalArgumentException](load(dir, Some(bad)))
     assert(e.getMessage.nn.contains("maxToolOutputChars"), e.getMessage)
+
+  test("a files entry with an unknown access level or an unusable pattern is rejected while loading"):
+    val dir = Files.createTempDirectory("atc-cfg-rules").nn
+    val badAccess = writeCfg(dir, "access.json", """{ "files": [ { "path": ".", "access": "rw2" } ] }""")
+    val e = intercept[IllegalArgumentException](load(dir, Some(badAccess)))
+    assert(e.getMessage.nn.contains("Invalid config") && e.getMessage.nn.contains("rw2"), e.getMessage)
+    val badGlob = writeCfg(dir, "glob.json", """{ "files": [ { "path": "src/[a", "access": "read" } ] }""")
+    val g = intercept[IllegalArgumentException](load(dir, Some(badGlob)))
+    assert(g.getMessage.nn.contains("Invalid config") && g.getMessage.nn.contains("src/[a"), g.getMessage)
+    val blank = writeCfg(dir, "blank.json", """{ "files": [ { "path": "  " } ] }""")
+    intercept[IllegalArgumentException](load(dir, Some(blank)))
 
   test("with no config file at all, nothing is configured and nothing is permitted"):
     val dir = Files.createTempDirectory("atc-cfg-none").nn

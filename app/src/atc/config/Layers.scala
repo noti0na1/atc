@@ -1,8 +1,6 @@
 package atc.config
 
-import upickle.default.*
-
-import java.nio.file.{Files, Path}
+import java.nio.file.Path
 
 /** Where a configuration layer comes from, and what it is allowed to do.
   *
@@ -24,9 +22,9 @@ enum Origin(val label: String):
     * grant only within its own project, and its scalar settings only narrow). */
   def grants: Boolean = this != Origin.Project
 
-/** One configuration file, as read. `keys` are the settings it actually
-  * defines, so a narrowing layer only narrows what it mentions (a setting it
-  * leaves out is not the same as one it sets to its default). */
+/** One configuration file, as read. `json` says which settings it actually
+  * [[defines]], so a narrowing layer only narrows what it mentions (a setting
+  * it leaves out is not the same as one it sets to its default). */
 case class ConfigLayer(
   origin: Origin,
   path: Option[Path],
@@ -37,7 +35,6 @@ case class ConfigLayer(
     * however deep atc runs inside it), the working directory otherwise. */
   base: Option[Path] = None
 ):
-  def keys: Set[String] = json.value.keySet.toSet
   def defines(key: String): Boolean = json.value.contains(key)
   def describe: String =
     val role = if origin.grants then "grants anywhere" else "grants its own project, otherwise narrows"
