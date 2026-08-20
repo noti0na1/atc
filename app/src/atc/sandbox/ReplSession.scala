@@ -1,6 +1,6 @@
 package atc.sandbox
 
-import atc.lib.Interface
+import atc.lib.{Derivations, Interface}
 import atc.perms.Mode
 
 import dotty.tools.repl.*
@@ -103,22 +103,22 @@ object ReplSession:
         List(
           "@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
-          "@assumeSafe given fs: (FileSystem^{io}) = fileSystem",
-          "@assumeSafe given ex: (Exec^{io}) = processes",
-          "@assumeSafe given net: (Network^{io}) = network",
+          "@assumeSafe given fs: (FileSystem^{io}) = atc.lib.Runtime.fileSystem",
+          "@assumeSafe given ex: (Exec^{io}) = atc.lib.Runtime.processes",
+          "@assumeSafe given net: (Network^{io}) = atc.lib.Runtime.network",
         )
       case Mode.Local =>
         List(
           "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
-          "@assumeSafe given fs: (FileSystem^) = fileSystem(using atc.lib.Runtime.rootIO)",
-          "@assumeSafe given ex: (Exec^) = processes(using atc.lib.Runtime.rootIO)",
+          "@assumeSafe given fs: (FileSystem^) = atc.lib.Runtime.fileSystem(using atc.lib.Runtime.rootIO)",
+          "@assumeSafe given ex: (Exec^) = atc.lib.Runtime.processes(using atc.lib.Runtime.rootIO)",
         )
       case Mode.ReadOnly =>
         List(
           "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
-          "@assumeSafe given fs: (FileSystem^{io.rd}) = readOnlyFileSystem",
+          "@assumeSafe given fs: (FileSystem^{io.rd}) = atc.lib.Runtime.readOnlyFileSystem",
         )
     base :: givens
 
@@ -145,7 +145,7 @@ object ReplSession:
   private case class Evaluated(state: State, output: String, thrown: Option[Throwable], failed: Boolean)
 
 /** One persistent REPL with its own sandbox class loader and host. */
-final class ReplSession(config: SandboxConfig, host: Interface, preambleOverride: Option[String] = None):
+final class ReplSession(config: SandboxConfig, host: Interface & Derivations, preambleOverride: Option[String] = None):
   import ReplSession.*
 
   private val outputCapture = BoundedOutputStream(MaxOutputBytes)

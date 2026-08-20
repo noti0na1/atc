@@ -89,6 +89,10 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertRejected("Runtime.current", "atc-runtime")
     assertRejected("atc.lib.Runtime.rootIO", "atc-runtime")
     assertRejected("Runtime.install(null)", "atc-runtime")
+    assertRejected("atc.lib.Runtime.fileSystem(using io)", "atc-runtime")
+    assertRejected("Runtime.processes", "atc-runtime")
+    assertRejected("Runtime.readOnlyFileSystem", "atc-runtime")
+    assertRejected("Runtime.network", "atc-runtime")
   test("allow the Interface type name itself"):
     assertAllowed("val i: Interface = ???")
 

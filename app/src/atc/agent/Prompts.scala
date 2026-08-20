@@ -85,18 +85,29 @@ object Prompts:
        |   `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, ...) they tell you
        |   the language, layout, build tool, test command and conventions of the project: follow the
        |   conventions, and verify with the commands they name (step 4) instead of guessing them.
-       |2. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
-       |   that need no capability handles.
-       |3. Make changes with `replace(path, target, replacement)` for a targeted edit: it returns how
-       |   many occurrences it changed and throws if `target` does not occur, so a mistyped pattern
-       |   cannot look like a successful edit. Use `write(path, content)` when you are creating a file
-       |   or rewriting most of it (read it first, then write the full new content). Either way, keep
-       |   unrelated code untouched.
+       |2. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, and `cat(path)` /
+       |   `cat(path, from, to)` to look at a file with line numbers (like `cat -n` / `sed -n 'a,bp'`;
+       |   the numbers are not in the file, so never copy them into a `sed` pattern); `read`/`readLines`
+       |   give the raw text to code with. Plain-data helpers, no capability handles needed.
+       |3. Make changes with `sed(path, regex, replacement)`, the targeted edit (like
+       |   `sed -E -i 's/../../g'`: `^`/`$$` per line, `$$1`/`\\1` groups): it returns how many matches
+       |   it changed and throws if nothing matches, so a mistyped pattern cannot look like a
+       |   successful edit; compare the count with what you expected. For literal code (with `(`,
+       |   `.`, `[`, `$$`, `*`, ...) quote both sides: `sed(p, quote(old), quoteReplacement(new))`. Use
+       |   `write(path, content)` when you are creating a file or rewriting most of it (read it first,
+       |   then write the full new content). Either way, keep unrelated code untouched.
        |4. Verify with the project's own commands via `exec` (tests, build) when the user allows them.
-       |   `exec` returns `ProcessResult(exitCode, stdout, stderr)`: print the exit code and *both* streams
-       |   (build tools and test runners write most of their output to stderr), or end the snippet with the
-       |   result so it is echoed whole. A command runs with the user's own privileges and network; the
-       |   `commands` patterns decide whether it may run, the `hosts` list only governs your `http*` calls.
+       |   `exec("npm test")` is parsed like a shell line (quotes, `|`, `< f`, `> f`, `>> f`, `2>&1` work; every
+       |   command of a pipeline is checked on its own), but there is no shell beyond that: no `&&`, `;`,
+       |   globs or `$$VAR` (run steps one by one; feed input with `ExecOptions(stdin = ...)`; raise
+       |   `ExecOptions(timeoutMs = ...)` for very long builds, the default is 10 minutes). `exec` returns `ProcessResult(exitCode, stdout, stderr)` and never throws on a failing
+       |   command: print the exit code and *both* streams (build tools and test runners write most of
+       |   their output to stderr), or end the snippet with the result so it is echoed whole;
+       |   `execOutput` gives only stdout and throws when the command fails. `spawn(line)` starts a
+       |   process you talk to (`send`/`sendLine`, `readUntil(regex, ms)`, `read`, `kill`) for REPLs, dev
+       |   servers and watchers; it lives until you `kill()` it or the session ends. A command runs with the
+       |   user's own privileges and network; the `commands` patterns decide whether it may run, the
+       |   `hosts` list only governs your `http*` calls.
        |5. Report results by `println`ing them; the value of the last expression is echoed too.
        |6. If an operation throws `SecurityException: Access denied ...`, the message tells you which
        |   `request*` block to use. Wrap only the operations that need it, give a short `reason`, and
@@ -132,8 +143,9 @@ object Prompts:
        |- Capabilities have a read/write *mode* in their type: a bare `FileSystem` / `IOCap` is the read-only
        |  view, `FileSystem^` / `IOCap^` (or `^{io}` derived from a full `io`) is the full one. Reading works
        |  with either; `write`, `append`, `mkdir`, `delete`, `writeClassified`, `access(...)` and deriving
-       |  `Exec`/`Network` need the full one, so a helper that writes must say `(using fs: FileSystem^)`,
-       |  and `readOnlyFileSystem` gives a `FileSystem^{io.rd}` for code that must not write.
+       |  `Exec`/`Network` need the full one, so a helper that writes must say `(using fs: FileSystem^)`;
+       |  `val ro: FileSystem^{fs.rd} = fs` is a read-only view for code that must not write (it can also
+       |  read files inside `Classified.map`, where the full `fs` may not be captured).
        |- Prefer the path-based helpers (`read`, `write`, `ls`, `walk`, `exists`, ...) over
        |  `access(...)` handles: a top-level `val` holding a `FileEntry` needs an explicit type
        |  (`val e: FileEntry^{fs} = access("x")`). `def`s and inline expressions are always fine.

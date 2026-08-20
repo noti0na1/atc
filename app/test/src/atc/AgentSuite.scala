@@ -186,11 +186,3 @@ class AgentSuite extends munit.FunSuite:
     agent.turn(session, "run: 1 + 1", () => { val c = cancelled; cancelled = true; c })
     // history must end with an assistant message (no dangling tool results)
     assert(agent.history.last.isInstanceOf[Msg.Assistant])
-
-class NudgeSuite extends munit.FunSuite:
-  test("intent detection"):
-    assert(Agent.looksUnfinished("The docs are YAML-focused. Let me check the classic DSL section."))
-    assert(Agent.looksUnfinished("Confirmed. Now let me pin down the Mill version"))
-    assert(Agent.looksUnfinished("I'll create the build file next:"))
-    assert(!Agent.looksUnfinished("Done. The project compiles and the tests pass."))
-    assert(!Agent.looksUnfinished("Let me know if you want anything else."))

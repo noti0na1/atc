@@ -99,9 +99,12 @@ case class Config(
   /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
     * files, run commands) or `full` (also network). `/mode` switches at run time. */
   mode: Option[String] = None,
-  executionTimeoutMs: Option[Long] = Some(180000L),
-  /** Max tool calls per user turn before the agent is stopped. */
-  maxToolCalls: Int = 60,
+  /** Wall-clock limit for one snippet, excluding time spent waiting for the user
+    * or for a command (`exec` has its own `ExecOptions.timeoutMs`). */
+  executionTimeoutMs: Option[Long] = Some(300000L),
+  /** Tool calls per user turn before the agent checks in: an interactive session
+    * asks the user whether to continue for another `maxToolCalls`, a `-p` run stops. */
+  maxToolCalls: Int = 200,
   /** Max characters of tool output returned to the model. */
   maxToolOutputChars: Int = 40000,
   /** Extra text appended to the system prompt (project conventions etc.). */

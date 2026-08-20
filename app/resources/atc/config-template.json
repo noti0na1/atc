@@ -64,7 +64,7 @@
   "mode": "full",
   "safeMode": true,
   "respectGitignore": true,
-  "executionTimeoutMs": 180000,
-  "maxToolCalls": 60,
+  "executionTimeoutMs": 300000,
+  "maxToolCalls": 200,
   "maxToolOutputChars": 40000
 }

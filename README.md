@@ -164,7 +164,7 @@ away. Every effectful method demands the capability it needs as a `using` parame
 ```scala
 def read(path: String)(using FileSystem): String
 def write(path: String, content: String)(using FileSystem^): Unit
-def exec(command: String, args: List[String])(using Exec, FileSystem): ProcessResult
+def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult
 def httpGet(url: String)(using Network): String
 def println(x: Any)(using UserIO^): Unit
 ```
@@ -190,10 +190,10 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 | Capability | What it authorises | Where one comes from |
 |---|---|---|
 | `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
-| `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | `fileSystem(using io: IOCap^)`, or the preamble's `fs` |
-| `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `fs.access(path)` |
-| `Exec` | running commands | `processes(using io: IOCap^)` |
-| `Network` | HTTP requests | `network(using io: IOCap^)` |
+| `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | the preamble's `fs` (derived from `io` by the sandbox; `val ro: FileSystem^{fs.rd} = fs` is a read-only view) |
+| `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
+| `Exec` | running commands | the preamble's `ex` (local and full mode) |
+| `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, `chat` with the normal model | the preamble (`given user`), always full |
 
 `UserIO` is deliberately *not* derived from `IOCap`: reporting to the human is an effect on
@@ -435,8 +435,8 @@ narrowed by any layer: the human is the authority. The exact rules are in
   "safeMode": true,
   "respectGitignore": true,
   "mode": "full",
-  "executionTimeoutMs": 180000,
-  "maxToolCalls": 60,
+  "executionTimeoutMs": 300000,
+  "maxToolCalls": 200,
   "predictInput": true,
   "instructions": "Use 2-space indentation."
 }
@@ -498,7 +498,8 @@ grant, over an open `request*` scope and over `--approve-all`.
 `/help` lists the slash commands: `/model`, `/classifiedmodel`, `/models`, `/mode`, `/perms`,
 `/config`, `/todos`, `/cost` (tokens, and how full the context is), `/interface` (the API the
 model sees), `/run <code>` (run Scala in the sandbox yourself, with the agent's API and
-permissions; the agent is told what you ran), `/reset` (fresh REPL), `/clear` (forget the
+permissions; the agent is told what you ran), `/ps` and `/kill [id|all]` (the processes the agent
+started with `spawn`), `/reset` (fresh REPL, kills them too), `/clear` (forget the
 conversation), `/new` (both, plus the session's grants), `/quit`. Ctrl-C interrupts the
 turn, Ctrl-O shows folded output and reasoning in full, Shift-Tab cycles the mode, Ctrl-D
 quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a

@@ -67,6 +67,12 @@ object ScriptedModel:
 
 /** A recording AgentUI. */
 final class RecordingUI extends AgentUI:
+  /** What the double answers when the tool budget is used up, and how often it was asked. */
+  var allowMoreToolCalls: Boolean = false
+  var budgetAsks: Int = 0
+  override def confirmMoreToolCalls(used: Int, budget: Int): Boolean =
+    budgetAsks += 1
+    allowMoreToolCalls
   val deltas, notes, statuses, warnings, toolStarts = ListBuffer[String]()
   val toolEnds = ListBuffer[Boolean]()
   var ends = 0
@@ -79,7 +85,7 @@ final class RecordingUI extends AgentUI:
   def warn(text: String): Unit = warnings += text
   def thinkingDelta(text: String): Unit = ()
 
-/** The agent loop mechanics driven by a scripted model (nudge, resume, tool
+/** The agent loop mechanics driven by a scripted model (resume, tool
   * budget, multi-tool, cancellation, refusal, usage accounting). */
 class AgentLoopSuite extends munit.FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
@@ -256,6 +262,27 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(allResults(1).output.contains("budget"), allResults(1).output)
     assertEquals(agent.toolCalls, 1) // only the first actually ran
 
+  test("the tool budget is a checkpoint: when the UI agrees, the turn continues for another budget"):
+    val steps = Seq(
+      ScriptedModel.tool("1 + 1"),
+      ScriptedModel.tool("2 + 2"),
+      ScriptedModel.tool("3 + 3"),
+      ScriptedModel.Reply("done"),
+    )
+    val (_, s, ui, agent) = setup(ScriptedModel("m", steps), cfg = Config(maxToolCalls = 1))
+    ui.allowMoreToolCalls = true
+    agent.turn(s, "go", never)
+    assertEquals(agent.toolCalls, 3) // every call ran
+    assertEquals(ui.budgetAsks, 2) // asked before the 2nd and the 3rd
+    assert(toolResults(agent).flatMap(_.results).forall(!_.isError))
+    // a budget of 0 means "no tools" and is never extended
+    val (_, s2, ui2, agent2) =
+      setup(ScriptedModel("m", Seq(ScriptedModel.tool("1"), ScriptedModel.Reply("x"))), cfg = Config(maxToolCalls = 0))
+    ui2.allowMoreToolCalls = true
+    agent2.turn(s2, "go", never)
+    assertEquals(agent2.toolCalls, 0)
+    assertEquals(ui2.budgetAsks, 0)
+
   test("a model cannot loop forever after exhausting the tool budget"):
     val steps = Seq.fill(10)(ScriptedModel.tool("1 + 1"))
     val (_, s, ui, agent) = setup(ScriptedModel("m", steps), cfg = Config(maxToolCalls = 0))
@@ -264,29 +291,7 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.toolCalls, 0)
     assert(ui.warnings.exists(_.contains("tool budget")))
 
-  test("the model is nudged when it ends on a plan, at most twice"):
-    val (_, s, ui, agent) = setup(ScriptedModel(
-      "m",
-      Seq(
-        ScriptedModel.Reply("The build looks off. Let me check the mill file."),
-        ScriptedModel.Reply("Confirmed. Now let me pin the version."),
-        ScriptedModel.Reply("Done. Everything compiles."),
-      )
-    ))
-    agent.turn(s, "fix it", never)
-    // two nudges were injected as user messages
-    val nudges = agent.history.collect { case Msg.User(t) if t == Agent.ContinueNudge => t }
-    assertEquals(nudges.size, 2)
-    assertEquals(agent.history.last, Msg.Assistant("Done. Everything compiles.", Nil, None))
-    assert(ui.warnings.exists(_.contains("plan")))
-
-  test("nudging gives up after MaxNudges even if the model keeps planning"):
-    val steps = Seq.fill(5)(ScriptedModel.Reply("Let me keep going."))
-    val (_, s, _, agent) = setup(ScriptedModel("m", steps))
-    agent.turn(s, "go", never)
-    assertEquals(agent.history.count { case Msg.User(t) => t == Agent.ContinueNudge; case _ => false }, Agent.MaxNudges)
-
-  test("an unfinished completion is resumed without a nudge"):
+  test("an unfinished completion is resumed"):
     val (_, s, ui, agent) = setup(ScriptedModel(
       "m",
       Seq(
@@ -295,7 +300,9 @@ class AgentLoopSuite extends munit.FunSuite:
       )
     ))
     agent.turn(s, "look it up", never)
-    assert(!agent.history.exists { case Msg.User(t) => t == Agent.ContinueNudge; case _ => false })
+    assert(!agent.history.exists {
+      case Msg.User(t) => t != "look it up"; case _ => false
+    }) // no injected user messages
     assertEquals(assistants(agent).map(_.text), List("searching the web…", "Here is what I found."))
     assert(ui.statuses.exists(_.contains("resuming")))
 

@@ -56,6 +56,12 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
 
   test("reading files works in every mode"):
     onlyIn(allModes.toSet, """read("a.txt")""")
+    onlyIn(allModes.toSet, """cat("a.txt")""")
+    onlyIn(allModes.toSet, """cat("a.txt", 1, 1)""")
+    onlyIn(allModes.toSet, """access("a.txt").read()""") // a bare fs is enough for a handle
+    onlyIn(allModes.toSet, """Json.parse("{\"a\": [1, 2.5, \"x\"]}")("a")(1).num""")
+    onlyIn(allModes.toSet, """Json.obj("k" -> Json.Str("v"), "n" -> Json.Num(1)).render.length""")
+    onlyIn(allModes.toSet, """Json.parse("[1]")(5).isNull""")
     onlyIn(allModes.toSet, """ls(".").size + walk(".").size + grepRecursive(".", "hello").size""")
 
   test("talking to the user works in every mode"):
@@ -75,6 +81,9 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     val rw = Set(Mode.Local, Mode.Full)
     onlyIn(rw, """write("w.txt", "x")""")
     onlyIn(rw, """append("a.txt", "!")""")
+    onlyIn(rw, """sed("a.txt", "^(h)ello", "$1i")""")
+    // the quoting pair the prompt recommends for literal text (safe mode refuses Regex.quote)
+    onlyIn(rw, """sed("a.txt", quote("i!"), quoteReplacement("$!"))""")
     onlyIn(rw, """mkdir("sub")""")
     onlyIn(rw, """access("a.txt").write("x")""")
 
@@ -92,10 +101,16 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     val canExec = Set(Mode.Local, Mode.Full)
     onlyIn(canExec, """exec("echo", List("hi")).exitCode""")
     onlyIn(canExec, """execOutput("echo").length""")
+    onlyIn(canExec, """exec("echo hi there").stdout""") // split like a shell line
+    onlyIn(canExec, """val p: Process^{ex} = spawn("echo spawned"); p.readUntil("spawned", 5000).length""")
+    onlyIn(canExec, """runningProcesses.size""")
+    onlyIn(canExec, """exec("echo", Seq("a"), ExecOptions(stdin = "")).exitCode""")
+    onlyIn(canExec, """requestExec(List("echo")) { exec("echo", Vector("x")).exitCode }""") // Iterable / Seq
     onlyIn(canExec, """requestExec(Set("echo")) { exec("echo", List("x")).exitCode }""")
 
-  test("read-only mode: there is no Exec capability to derive"):
-    assertFails(readOnly.run("""val x: Exec^ = processes; 1"""))
+  test("read-only mode: there is no Exec capability, and the derivation is out of reach"):
+    assertFails(readOnly.run("""val x: Exec^ = ex; 1"""))
+    assertFails(readOnly.run("""val x: Exec^ = atc.lib.Runtime.processes; 1"""))
 
   // ── Network: full only ──────────────────────────────────────────
 
@@ -106,13 +121,13 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     onlyIn(canNet, """def get(): String = httpGet("http://example.com"); 1""")
     onlyIn(canNet, """def post(): String = httpPost("http://example.com", "b"); 1""")
     onlyIn(canNet, """def req(): HttpResponse = httpRequest("GET", "http://example.com"); 1""")
-    onlyIn(canNet, """val n: Network^{io} = network; 1""")
+    onlyIn(canNet, """val n: Network^{io} = net; 1""")
     onlyIn(canNet, """requestNetwork(Set("example.com")) { 1 }""")
 
-  test("local mode: there is no Network capability, and no full io to derive one"):
-    assertFails(local.run("""val n: Network^ = network; 1"""))
+  test("local mode: there is no Network capability, and the derivation is out of reach"):
+    assertFails(local.run("""val n: Network^ = net; 1"""))
     assertFails(local.run("""def get(): String = httpGet("http://example.com"); 1"""))
-    assertFails(local.run("""network(using io)"""))
+    assertFails(local.run("""atc.lib.Runtime.network(using io)"""))
 
   // ── requestFiles adapts to the mode ─────────────────────────────
 

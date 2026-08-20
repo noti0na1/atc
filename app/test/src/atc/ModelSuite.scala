@@ -6,7 +6,7 @@ import atc.llm.*
 import atc.sandbox.ExecutionResult
 
 /** The model layer: the echo model, provider dispatch, and the pure `Agent`
-  * helpers (`looksUnfinished`, `renderForModel`). */
+  * helpers (`renderForModel`). */
 class ModelSuite extends munit.FunSuite:
 
   private def collect(m: ChatModel, history: List[Msg]): (Completion, String) =
@@ -115,24 +115,6 @@ class ModelSuite extends munit.FunSuite:
     val e = intercept[IllegalArgumentException](catalog(("p", "openai", List("a", "b"))).find("nope"))
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
-
-  // ── Agent.looksUnfinished ───────────────────────────────────────
-
-  test("looksUnfinished detects an announced next step"):
-    assert(Agent.looksUnfinished("The docs are YAML-focused. Let me check the classic DSL section."))
-    assert(Agent.looksUnfinished("Confirmed. Now let me pin down the Mill version"))
-    assert(Agent.looksUnfinished("I'll create the build file next:"))
-    assert(Agent.looksUnfinished("I will now run the tests"))
-    assert(Agent.looksUnfinished("Next, I check the imports"))
-    assert(Agent.looksUnfinished("Let's verify the output"))
-
-  test("looksUnfinished ignores finished or polite closings"):
-    assert(!Agent.looksUnfinished("Done. The project compiles and the tests pass."))
-    assert(!Agent.looksUnfinished("Let me know if you want anything else."))
-    assert(!Agent.looksUnfinished(""))
-    assert(!Agent.looksUnfinished("   "))
-    // an announcement followed by a question mark / exclamation is not a dangling plan
-    assert(!Agent.looksUnfinished("Should I let me check?"))
 
   // ── Agent.renderForModel ────────────────────────────────────────
 

@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Classified, Exec, FileSystem, Network}
+import atc.lib.{Classified, Exec, ExecOptions, FileSystem, Network}
 import atc.perms.*
 import atc.sandbox.ReplSession
 
@@ -61,6 +61,7 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(r.stdout.trim, "hello world")
     assertEquals(r.stderr, "")
     assertEquals(env.host.execOutput("echo", List("out")).trim, "out")
+    assertEquals(env.commandsWrapped, 2) // both ran inside the clock-pausing hook
 
   test("exec rejects a disallowed command with a request hint"):
     val env = TestEnv(commands = List("echo"))
@@ -86,7 +87,7 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val r = env.host.exec("pwd", Nil, Some(env.root.resolve("sub").toString))
+    val r = env.host.exec("pwd", Nil, env.root.resolve("sub").toString)
     assert(r.stdout.trim.endsWith("/sub"), r.stdout)
 
   test("exec rejects a working directory the agent cannot read"):
@@ -95,7 +96,7 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val e = intercept[SecurityException](env.host.exec("pwd", Nil, Some(outside.toString)))
+    val e = intercept[SecurityException](env.host.exec("pwd", Nil, outside.toString))
     assert(e.getMessage.nn.contains("Access denied"), e.getMessage)
 
   test("exec rejects a working directory inside a classified area"):
@@ -112,7 +113,7 @@ class PermissionSuite extends munit.FunSuite:
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     val secrets = env.root.resolve("secrets").toString
-    val e = intercept[SecurityException](env.host.exec("pwd", Nil, Some(secrets)))
+    val e = intercept[SecurityException](env.host.exec("pwd", Nil, secrets))
     assert(e.getMessage.nn.contains("classified"), e.getMessage)
     assert(e.getMessage.nn.contains(secrets), e.getMessage) // the path, not a literal "$dir"
 
@@ -124,12 +125,12 @@ class PermissionSuite extends munit.FunSuite:
     given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.AllowOnce)
     val out = env.host.requestFiles(outside.toString, atc.lib.Access.Read, "run there") {
-      env.host.exec("pwd", Nil, Some(outside.toString)).stdout.trim
+      env.host.exec("pwd", Nil, outside.toString).stdout.trim
     }
     assertEquals(out, outside.toString)
     assertEquals(env.requests.size, 1)
     // the grant was for the block only
-    intercept[SecurityException](env.host.exec("pwd", Nil, Some(outside.toString)))
+    intercept[SecurityException](env.host.exec("pwd", Nil, outside.toString))
 
   test("exec's default working directory is allowed even when cwd is reached through a symlink"):
     val env = TestEnv(commands = List("pwd"))
@@ -149,7 +150,7 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val e = intercept[RuntimeException](env.host.exec("sleep", List("30"), None, 150L))
+    val e = intercept[RuntimeException](env.host.exec("sleep", List("30"), ExecOptions(timeoutMs = 150L)))
     assert(e.getMessage.nn.contains("timed out"), e.getMessage)
 
   test("command matching is arg-aware: a glob pattern still filters arguments"):
@@ -215,12 +216,176 @@ class PermissionSuite extends munit.FunSuite:
     given net: Network = env.host.network
     assertEquals(env.host.httpGet(url("/ok")), "hello")
 
-  test("httpGet returns the error body on 404 and 500 without throwing"):
+  test("httpGet/httpPost throw on an HTTP error with the status and the body; httpRequest reports it raw"):
     val env = TestEnv(hosts = List(host))
     import env.given
     given net: Network = env.host.network
-    assert(env.host.httpGet(url("/not-found")).contains("not found"))
-    assert(env.host.httpGet(url("/boom")).contains("broke"))
+    val e = intercept[RuntimeException](env.host.httpGet(url("/not-found")))
+    assert(e.getMessage.nn.contains("HTTP 404") && e.getMessage.nn.contains("not found"), e.getMessage)
+    val e2 = intercept[RuntimeException](env.host.httpPost(url("/boom"), "x"))
+    assert(e2.getMessage.nn.contains("HTTP 500") && e2.getMessage.nn.contains("broke"), e2.getMessage)
+    val raw = env.host.httpRequest("GET", url("/not-found"))
+    assertEquals(raw.status, 404)
+    assert(raw.body.contains("not found"))
+    // the new overloads without secretHeaders
+    assertEquals(env.host.httpPost(url("/echo"), "ping", "text/plain", Map("X-A" -> "1")), "ping")
+    assertEquals(env.host.httpRequest("POST", url("/echo"), "pong", Map("X-A" -> "1")).body, "pong")
+    // the classified POST stays status-blind: no throw, the body stays classified
+    val c = env.host.httpPostClassified(url("/not-found"), env.host.classify("secret"))
+    assertEquals(c.toString, "Classified(***)")
+
+  test("exec splits a command line like a shell, honouring quotes, but runs no shell"):
+    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    assertEquals(env.host.exec("echo hello   world").stdout.trim, "hello world")
+    assertEquals(env.host.exec("""echo 'a b' "c \"d\" e" f\ g""").stdout.trim, "a b c \"d\" e f g")
+    assertEquals(env.host.exec("echo", List("x", "y z")).stdout.trim, "x y z") // args stay verbatim
+    assertEquals(env.host.exec("echo a | cat").stdout.trim, "a") // a pipe is part of the grammar
+    val e = intercept[IllegalArgumentException](env.host.exec("echo a && echo b"))
+    assert(e.getMessage.nn.contains("no shell"), e.getMessage)
+    intercept[IllegalArgumentException](env.host.exec("echo $(whoami)"))
+    assertEquals(env.host.exec("echo 'a | b'").stdout.trim, "a | b") // quoted: literal
+    intercept[IllegalArgumentException](env.host.exec("   "))
+
+  test("pipelines: stages are connected, checked one by one, exit code pipefail-style, stderr labelled"):
+    val env = TestEnv(commands = List("echo", "cat", "sort", "tr", "false", "ls"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    assertEquals(env.host.exec("echo hello | tr a-z A-Z").stdout.trim, "HELLO")
+    assertEquals(env.host.exec("echo 'c\nb\na' | sort | cat").stdout, "a\nb\nc\n")
+    assertEquals(env.host.exec("false | cat").exitCode, 1) // pipefail: the failing stage wins
+    val err = env.host.exec("ls /definitely/not/here | cat")
+    assert(err.exitCode != 0)
+    assert(err.stderr.startsWith("[stage 1: ls /definitely/not/here]\n"), err.stderr)
+    val e = intercept[SecurityException](env.host.exec("echo hi | sort | head"))
+    assert(
+      e.getMessage.nn.contains("'head'") && e.getMessage.nn.contains("""requestExec(Set("head *")"""),
+      e.getMessage
+    )
+    assertEquals(env.commandsWrapped, 4) // each pipeline ran inside the clock-pausing hook once
+    val denying = TestEnv(commands = List("echo", "cat"), denyCommands = List("cat"))
+    val d = intercept[SecurityException] {
+      given Exec = denying.host.processes
+      given FileSystem = denying.host.fileSystem
+      denying.host.exec("echo hi | cat")
+    }
+    assert(d.getMessage.nn.contains("denyCommands"), d.getMessage)
+
+  test("redirections are file operations: checked like read/write, streamed, classified refused"):
+    val env = TestEnv(TestEnv.withSecrets, commands = List("echo", "cat", "ls"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    env.file("in.txt", "from a file\n")
+    assertEquals(env.host.exec("cat < in.txt").stdout, "from a file\n")
+    env.host.exec("echo first > out/o.txt") // parent directories are created, like write
+    env.host.exec("echo second >> out/o.txt")
+    assertEquals(env.contents("out/o.txt"), "first\nsecond\n")
+    assertEquals(env.host.exec("cat < in.txt > out/copy.txt").stdout, "") // streamed to the file, not captured
+    assertEquals(env.contents("out/copy.txt"), "from a file\n")
+    env.file("secrets/key.txt", "s3cret")
+    val e = intercept[SecurityException](env.host.exec("cat < secrets/key.txt"))
+    assert(e.getMessage.nn.contains("classified"), e.getMessage)
+    intercept[SecurityException](env.host.exec("echo leak > secrets/out.txt"))
+    assert(!Files.exists(env.root.resolve("secrets/out.txt")))
+    val merged = env.host.exec("ls /definitely/not/here 2>&1 | cat") // 2>&1 sends that stage's stderr down the pipe
+    assert(merged.stdout.nonEmpty && merged.stderr.isEmpty, merged.toString)
+    intercept[IllegalArgumentException](env.host.exec("cat < in.txt", Nil, ExecOptions(stdin = "x"))) // two inputs
+    intercept[IllegalArgumentException](env.host.exec("echo a | cat", List("x"))) // args need one program
+
+  test("spawn: talk to a process while it runs, read what it says, and it is reported to the user"):
+    val env = TestEnv(commands = List("cat", "sort", "sleep", "echo"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    val cat = env.host.spawn("cat")
+    assert(cat.isAlive && cat.exitCode.isEmpty)
+    assertEquals(cat.read(), "") // nothing yet, and read never blocks
+    cat.sendLine("hello")
+    assertEquals(cat.readUntil("hello\n", 5000), "hello\n")
+    cat.send("a b ")
+    cat.send("c\n")
+    assertEquals(cat.readUntil("c\n", 5000), "a b c\n")
+    assertEquals(env.host.runningProcesses.map(_.id), List(cat.id))
+    cat.closeStdin() // EOF: cat exits
+    val r = cat.waitFor(5000)
+    assertEquals(r.map(_.exitCode), Some(0))
+    assert(!cat.isAlive && cat.exitCode.contains(0))
+    assertEquals(env.host.runningProcesses, Nil)
+    Thread.sleep(100) // the exit watcher reports asynchronously
+    assertEquals(
+      env.processEvents.toList,
+      List(
+        s"p${cat.id} started: cat",
+        s"p${cat.id} < hello\n",
+        s"p${cat.id} < a b ",
+        s"p${cat.id} < c\n",
+        s"p${cat.id} exited 0"
+      ),
+    )
+    // a process that only answers at EOF (sort), and a pipeline as a process
+    val sorter = env.host.spawn("sort | cat")
+    sorter.send("b\na\n")
+    sorter.closeStdin()
+    assertEquals(sorter.readUntil("(?s)a\nb\n", 5000), "a\nb\n")
+    assertEquals(sorter.waitFor(5000).map(_.exitCode), Some(0))
+    assertEquals(cat.toString, s"Process(p${cat.id}, \"cat\", exited 0)")
+
+  test("spawn: waits time out with the output so far, kill works, the count is bounded, the session end kills all"):
+    val env = TestEnv(commands = List("cat", "sleep", "echo"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    val sleeper = env.host.spawn("sleep 30")
+    val e = intercept[RuntimeException](sleeper.readUntil("never", 300))
+    assert(e.getMessage.nn.contains("timed out"), e.getMessage)
+    assertEquals(sleeper.waitFor(100), None)
+    sleeper.kill()
+    assert(sleeper.waitFor(5000).isDefined && !sleeper.isAlive)
+    val cat = env.host.spawn("cat")
+    cat.send("partial")
+    cat.closeStdin()
+    Thread.sleep(200)
+    val e2 = intercept[RuntimeException](cat.readUntil("never", 2000)) // exited before the match
+    assert(e2.getMessage.nn.contains("exited") && e2.getMessage.nn.contains("partial"), e2.getMessage)
+    assertEquals(cat.read(), "partial") // the unread output is still there
+    val many = (1 to Host.MaxProcesses).map(_ => env.host.spawn("sleep 30"))
+    val e3 = intercept[IllegalStateException](env.host.spawn("sleep 30"))
+    assert(e3.getMessage.nn.contains("kill()"), e3.getMessage)
+    assertEquals(env.host.runningProcesses.size, Host.MaxProcesses)
+    assertEquals(env.host.killProcess("p1"), "no running process 'p1' (see /ps)") // p1 (the sleeper) is gone
+    assert(env.host.killProcess(s"p${many.head.id}").startsWith("killed p"))
+    assert(env.host.processSummary.linesIterator.size == Host.MaxProcesses - 1)
+    env.host.killProcesses() // what the app does when the session ends
+    assert(many.forall(p => p.waitFor(5000).isDefined))
+    assertEquals(env.host.runningProcesses, Nil)
+    assertEquals(env.host.processSummary, "no process is running")
+    intercept[SecurityException](env.host.spawn("python3 -i")) // same checks as exec
+
+  test("execOutput throws on a non-zero exit; exec reports it"):
+    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    assertEquals(env.host.exec("false").exitCode, 1)
+    val e = intercept[RuntimeException](env.host.execOutput("false"))
+    assert(e.getMessage.nn.contains("exited with 1"), e.getMessage)
+    assertEquals(env.host.execOutput("echo ok").trim, "ok")
+
+  test("ExecOptions: stdin is fed to the command and closed, a timeout quotes the output so far"):
+    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    assertEquals(env.host.exec("cat", Nil, ExecOptions(stdin = "fed\nin")).stdout, "fed\nin")
+    assertEquals(env.host.exec("cat").stdout, "") // stdin closed: EOF at once, no hang
+    val e = intercept[RuntimeException](env.host.exec("sleep", List("5"), ExecOptions(timeoutMs = 300)))
+    assert(e.getMessage.nn.contains("timed out") && e.getMessage.nn.contains("ExecOptions"), e.getMessage)
+    val r = env.host.exec("echo", List("hi"), ExecOptions(workingDir = env.root.toString, timeoutMs = 10_000))
+    assertEquals(r.stdout.trim, "hi")
 
   test("httpPost sends the body and httpRequest reports status"):
     val env = TestEnv(hosts = List(host))

@@ -32,6 +32,21 @@ class ReplSessionSuite extends munit.FunSuite:
 
   // ── Basic execution ─────────────────────────────────────────────
 
+  test("ExecutionClock pauses nest: the clock runs again only when the outermost pause ends"):
+    val clock = atc.sandbox.ExecutionClock()
+    clock.pause()
+    clock.pause()
+    clock.resume()
+    val open = clock.paused
+    Thread.sleep(5)
+    assert(clock.paused > open, "still paused after the inner resume")
+    clock.resume()
+    val closed = clock.paused
+    Thread.sleep(5)
+    assertEquals(clock.paused, closed) // running again: no more paused time accrues
+    clock.reset()
+    assertEquals(clock.paused, 0L)
+
   test("simple expression") { assert(assertOk(run("1 + 1")).output.contains("2")) }
   test("println goes through the host and into the tool output"):
     envSafe.clearOutput()

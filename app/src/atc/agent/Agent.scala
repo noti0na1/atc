@@ -20,6 +20,10 @@ trait AgentUI:
   def toolEnd(result: ExecutionResult, millis: Long): Unit
   def status(text: String): Unit
   def warn(text: String): Unit
+  /** The turn has used its tool budget (`used` calls; `budget` = `config.maxToolCalls`):
+    * may it go on for another `budget`? An interactive UI asks the human; the
+    * default (test doubles, non-interactive runs) declines, and the turn is stopped. */
+  def confirmMoreToolCalls(used: Int, budget: Int): Boolean = false
 
 /** The agent loop: user message → (model → tool calls)* → final answer.
   *
@@ -30,12 +34,13 @@ trait AgentUI:
   *    and ask again;
   *  - `unfinished` (the provider paused after a server-side tool such as web
   *    search) → ask again so the model resumes;
-  *  - a reply that merely announces a next step ("Let me check…") → nudge the
-  *    model to act;
-  *  - anything else is the final answer: the turn is over.
+  *  - anything else is the final answer: the turn is over (the system prompt
+  *    tells the model that ending without a tool call means "finished"; the loop
+  *    does not second-guess its prose).
   *
-  * Bounds keep a confused model from looping: `config.maxToolCalls` per turn,
-  * [[Agent.MaxResumes]], [[Agent.MaxNudges]] and [[Agent.MaxBudgetRejections]].
+  * Bounds keep a confused model from looping: `config.maxToolCalls` per turn (a
+  * checkpoint: the UI may grant another budget, see [[AgentUI.confirmMoreToolCalls]]),
+  * [[Agent.MaxResumes]] and [[Agent.MaxBudgetRejections]].
   * `cancelled` is polled while streaming and before every tool call; an
   * interrupted turn ends with an `[interrupted by user]` assistant message so
   * the history stays well-formed. */
@@ -137,8 +142,8 @@ final class Agent(
   private final class Turn(session: ReplSession, cancelled: () => Boolean):
     import Outcome.*
     private var used = 0 // tool calls run this turn
+    private var budget = config.maxToolCalls // grows by `maxToolCalls` each time the user says "continue"
     private var resumes = 0
-    private var nudges = 0
     private var budgetRejections = 0
 
     def run(): Unit =
@@ -168,7 +173,6 @@ final class Agent(
       if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
       else if cancelled() then Done
       else if completion.unfinished && resumes < Agent.MaxResumes then resume()
-      else if Agent.looksUnfinished(completion.text) && nudges < Agent.MaxNudges then nudge()
       else Done
 
     /** When the model has a `contextWindow`, drop the oldest exchanges from the
@@ -197,7 +201,7 @@ final class Agent(
       var overBudget = false
       val results = calls.map { call =>
         if cancelled() then ToolResult(call.id, "Cancelled by the user before execution.", isError = true)
-        else if used >= config.maxToolCalls then
+        else if used >= budget && !extendBudget() then
           overBudget = true
           ToolResult(
             call.id,
@@ -220,17 +224,18 @@ final class Agent(
           ui.warn("model kept requesting tools after exhausting the tool budget; stopping this turn")
           Done
 
+    /** The budget is a checkpoint, not a wall: ask the UI (the human, when there is
+      * one) for another `maxToolCalls`. A budget of 0 means "no tools" and is never extended. */
+    private def extendBudget(): Boolean =
+      config.maxToolCalls > 0 && ui.confirmMoreToolCalls(used, config.maxToolCalls) && {
+        budget += config.maxToolCalls
+        true
+      }
+
     /** The provider cut the response after a server-side tool call: re-send the history. */
     private def resume(): Outcome =
       resumes += 1
       ui.status("resuming")
-      Continue
-
-    /** The model narrated its next step and stopped without acting. */
-    private def nudge(): Outcome =
-      nudges += 1
-      ui.warn("model ended its turn on a plan; asking it to continue")
-      history :+= Msg.User(Agent.ContinueNudge)
       Continue
 
     private def interrupted(): Outcome =
@@ -302,21 +307,10 @@ object Agent:
     s"[context notice] The $dropped oldest messages of this conversation were dropped to fit your context window; " +
       "if you need something from them, ask the user or read it again."
 
-  val MaxNudges = 2
-  val MaxResumes = 6
+  /** Server-side tool pauses (web search) per turn; a research turn can take many. */
+  val MaxResumes = 20
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */
   val MaxBudgetRejections = 2
-  val ContinueNudge =
-    "You ended your turn with a plan but without acting. If work remains, do it now by calling run_scala; " +
-      "if you are actually finished, reply with your final summary."
-
-  private val intentTail =
-    """(?is).*\b(let me(?! know)|let's|i'll|i will|i am going to|i'm going to|now i|next,? i)\b[^!?]{0,200}$""".r
-  /** Heuristic: the last sentence announces further work. */
-  def looksUnfinished(text: String): Boolean =
-    val t = text.trim
-    t.nonEmpty && intentTail.matches(t.takeRight(240))
-
   /** A hint appended to tool output for a common capture-checking / safe-mode stumble. */
   private case class Hint(applies: String => Boolean, text: String)
   private val hints = List(
@@ -327,6 +321,10 @@ object Agent:
     Hint(
       out => out.contains("Cannot refer to") && out.contains("from safe code"),
       "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, and a local `var` over an immutable `List`/`Vector`/`Map` instead of `ListBuffer`/`mutable.Map`."
+    ),
+    Hint(
+      _.contains("Cannot run program"),
+      "that program is not on the PATH (or is misspelt). Note that exec runs no shell: `exec(\"git status\")` is split into words for you, pipes and `<`/`>`/`>>`/`2>&1` work, but `&&`, `;`, globs and `$VAR` do not; run steps one by one and combine in Scala.",
     ),
     Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),

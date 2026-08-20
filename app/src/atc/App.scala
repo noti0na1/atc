@@ -51,9 +51,12 @@ final class App(args: Main.Args):
   tui.onInterrupt = () => session.foreach(_.interrupt())
 
   /** Show a pop-up: the time the human takes to answer does not count against the execution timeout. */
-  private def whileUserDecides[T](popup: => T): T =
+  private def whileUserDecides[T](popup: => T): T = withClockPaused(popup)
+
+  /** Nor does the time a command runs (it has its own timeout, see `ExecOptions`). */
+  private def withClockPaused[T](body: => T): T =
     session.foreach(_.clock.pause())
-    try popup
+    try body
     finally session.foreach(_.clock.resume())
 
   // ── permission policy ─────────────────────────────────────────────
@@ -80,6 +83,11 @@ final class App(args: Main.Args):
       tui.agentPrint(agentText, userText)
     override def commandRunning(commandLine: String): Unit = tui.commandRunning(commandLine)
     override def commandOutput(text: String): Unit = tui.commandOutput(text)
+    override def whileCommandRuns[T](body: => T): T = withClockPaused(body)
+    override def processStarted(id: Int, commandLine: String): Unit =
+      tui.processEvent(s"$$ $commandLine  [p$id started]")
+    override def processInput(id: Int, text: String): Unit = tui.processEvent(s"p$id > ${text.stripSuffix("\n")}")
+    override def processExited(id: Int, exitCode: Int): Unit = tui.processEvent(s"[p$id exited $exitCode]")
   val llm = new HostLlm:
     def chat(message: String): String =
       val reply = agent.model.simple(None, message)
@@ -119,6 +127,7 @@ final class App(args: Main.Args):
     * reporting `failure`) when the new one could not start; the app then runs
     * without a session until the next attempt. */
   private def replaceSession(failure: String): Boolean =
+    host.killProcesses() // spawned processes belong to the session
     session.foreach(_.close())
     session = None
     try
@@ -144,6 +153,7 @@ final class App(args: Main.Args):
     * afterwards, so its compiler and class loader can be collected; the GC is
     * asked for explicitly since that is most of the process's memory. */
   private def newSession(): Boolean =
+    host.killProcesses()
     session.foreach(_.close())
     session = None
     agent.clear()
@@ -163,6 +173,7 @@ final class App(args: Main.Args):
         )
       args.prompt match
         case Some(p) =>
+          tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
           session = Some(newReplSession())
           runTurn(p)
         case None =>
@@ -171,6 +182,7 @@ final class App(args: Main.Args):
           interactive()
       0
     finally
+      host.killProcesses()
       session.foreach(_.close())
       tui.close()
 
@@ -288,6 +300,8 @@ final class App(args: Main.Args):
       predictor.invalidate()
       tui.success("conversation cleared")
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
+    case Cmd.Ps => tui.println(host.processSummary)
+    case Cmd.Kill => tui.println(host.killProcess(arg))
     case Cmd.Cost => showCost()
     case Cmd.Quit => () // `command` ends the loop instead
 

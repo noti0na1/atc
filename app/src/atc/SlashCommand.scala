@@ -32,6 +32,8 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Reset extends SlashCommand("/reset", "restart the sandbox REPL (keeps the conversation)")
   case Clear extends SlashCommand("/clear", "forget the conversation (keeps the REPL)")
   case Todos extends SlashCommand("/todos", "show the agent's TODO list", "/todo")
+  case Ps extends SlashCommand("/ps", "list the processes the agent started with spawn", "/processes")
+  case Kill extends SlashCommand("/kill [id|all]", "kill a process the agent started (p2, 2, or all)")
   case Cost extends SlashCommand("/cost", "show token usage and how full the context is", "/usage", "/context")
   case Quit extends SlashCommand("/quit", "exit", "/exit", "/q")
 

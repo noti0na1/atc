@@ -45,8 +45,8 @@ object CodeValidator:
     ),
     Forbidden(
       "atc-runtime",
-      raw"\bRuntime\.(current|rootIO|rootUser|install)\b".r,
-      "Runtime.current/rootIO/rootUser/install are internal to the sandbox"
+      raw"\bRuntime\.(current|rootIO|rootUser|install|fileSystem|readOnlyFileSystem|processes|network)\b".r,
+      "Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network are internal to the sandbox"
     ),
     // Reflection
     Forbidden("reflect-method", raw"getDeclaredMethod".r, "Reflective access is forbidden"),

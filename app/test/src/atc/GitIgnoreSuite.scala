@@ -113,12 +113,12 @@ class GitIgnoreSuite extends munit.FunSuite:
     given IOCap = atc.lib.Runtime.rootIO
     given fs: FileSystem = host.fileSystem
     import host.*
-    def names(ps: List[String]) = ps.map(p => root.relativize(Path.of(p)).toString).sorted
+    def names(ps: List[String]) = ps.sorted // listings inside the working directory come relative
     assertEquals(names(ls(root.toString)), List(".gitignore", "src"))
     assertEquals(names(walk(root.toString)), List(".gitignore", "src", "src/A.scala"))
     assertEquals(names(find(root.toString, "*")), List(".gitignore", "src/A.scala"))
     assertEquals(
-      grepRecursive(root.toString, "needle").map(m => root.relativize(Path.of(m.file)).toString),
+      grepRecursive(root.toString, "needle").map(_.file),
       List("src/A.scala")
     )
     // Visibility only: an ignored file is still readable and writable by name.
@@ -133,7 +133,7 @@ class GitIgnoreSuite extends munit.FunSuite:
     given fs: FileSystem = host.fileSystem
     import host.*
     assertEquals(
-      ls(root.toString).map(p => root.relativize(Path.of(p)).toString).sorted,
+      ls(root.toString).sorted,
       List(".git", ".gitignore", "out", "src")
     )
 

@@ -58,7 +58,9 @@ class HostSuite extends munit.FunSuite:
   given net: Network = host.network
   import host.*
 
-  private def rel(p: String) = root.relativize(Path.of(p)).toString
+  private def rel(p: String) =
+    val path = Path.of(p)
+    if path.isAbsolute then root.relativize(path).toString else p
 
   test("plain read/write within cwd, relative paths"):
     assertEquals(read("src/A.scala"), "object A")
@@ -69,18 +71,203 @@ class HostSuite extends munit.FunSuite:
     assert(exists("README.md"))
     assertEquals(access("/a/b/c.txt").name, "c.txt")
 
-  test("replace makes a targeted edit and reports how many occurrences it changed"):
-    Files.writeString(root.resolve("edit.txt"), "alpha\nbeta\nalpha\n")
-    assertEquals(replace("edit.txt", "alpha", "ALPHA"), 2)
-    assertEquals(Files.readString(root.resolve("edit.txt")), "ALPHA\nbeta\nALPHA\n")
+  test("sed with quote/quoteReplacement makes a literal edit, metacharacters and all"):
+    Files.writeString(root.resolve("edit.txt"), "f(a.b) = $x\nf(a-b) = $x\nf(a.b) = $x\n")
+    assertEquals(sed("edit.txt", quote("f(a.b) = $x"), quoteReplacement("g[a.b] = \\1 $y")), 2)
+    assertEquals(
+      Files.readString(root.resolve("edit.txt")),
+      "g[a.b] = \\1 $y\nf(a-b) = $x\ng[a.b] = \\1 $y\n",
+    )
 
-  test("replace refuses a no-op instead of rewriting the file unchanged"):
-    // `write(p, read(p).replace(...))` would succeed silently and look like an edit.
-    Files.writeString(root.resolve("edit2.txt"), "content")
-    val e = intercept[IllegalArgumentException](replace("edit2.txt", "absent", "x"))
-    assert(e.getMessage.nn.contains("does not occur"), e.getMessage)
-    assertEquals(Files.readString(root.resolve("edit2.txt")), "content")
-    intercept[IllegalArgumentException](replace("edit2.txt", "", "x"))
+  test("sed makes a regex edit with per-line anchors and reports how many matches it changed"):
+    Files.writeString(root.resolve("sed.txt"), "x = 1\ny = 2\nz = 3\n")
+    assertEquals(sed("sed.txt", """^(\w) = (\d)$""", "$1 := $2"), 3)
+    assertEquals(Files.readString(root.resolve("sed.txt")), "x := 1\ny := 2\nz := 3\n")
+    // a pattern with an explicit newline may span lines; `.` never does
+    assertEquals(sed("sed.txt", ":= 1\ny", ":= 10\ny"), 1)
+    assertEquals(Files.readString(root.resolve("sed.txt")), "x := 10\ny := 2\nz := 3\n")
+    intercept[IllegalArgumentException](sed("sed.txt", "1.y", "1y"))
+
+  test("sed accepts sed-style \\1, \\n, \\t and \\$ in the replacement"):
+    Files.writeString(root.resolve("sed2.txt"), "a=1\nb=2\n")
+    assertEquals(sed("sed2.txt", """(\w)=(\d)""", """\2:\1\t\$\n"""), 2)
+    assertEquals(Files.readString(root.resolve("sed2.txt")), "1:a\t$\n\n2:b\t$\n\n")
+    // a backslash before anything else escapes it (Java), and a trailing one is literal
+    Files.writeString(root.resolve("sed2.txt"), "a=1\n")
+    assertEquals(sed("sed2.txt", "=", """\=\"""), 1)
+    assertEquals(Files.readString(root.resolve("sed2.txt")), "a=\\1\n")
+
+  test("sed refuses a no-op, an empty pattern and a malformed regex, leaving the file alone"):
+    Files.writeString(root.resolve("sed3.txt"), "content")
+    val e = intercept[IllegalArgumentException](sed("sed3.txt", "absent.*", "x"))
+    assert(e.getMessage.nn.contains("matches nothing"), e.getMessage)
+    intercept[IllegalArgumentException](sed("sed3.txt", "", "x"))
+    intercept[IllegalArgumentException](sed("sed3.txt", "(unclosed", "x"))
+    assertEquals(Files.readString(root.resolve("sed3.txt")), "content")
+
+  test("cat prints cat -n numbered lines, capped with a note on how to see the rest"):
+    agentOut.clear(); userOut.clear()
+    Files.writeString(root.resolve("cat.txt"), "one\ntwo\nthree\n")
+    cat("cat.txt")
+    assertEquals(agentOut.toString, "     1\tone\n     2\ttwo\n     3\tthree\n")
+    assertEquals(userOut.toString, agentOut.toString) // the user sees the same text
+    agentOut.clear()
+    Files.writeString(root.resolve("big.txt"), (1 to 1000).map(i => s"line $i").mkString("\n"))
+    cat("big.txt")
+    val out = agentOut.toString
+    assert(out.startsWith("     1\tline 1\n"), out.take(40))
+    assert(out.contains(f"${Host.CatMaxLines}%6d\tline ${Host.CatMaxLines}\n"), out.takeRight(200))
+    assert(!out.contains(s"line ${Host.CatMaxLines + 1}\n"), out.takeRight(200))
+    assert(
+      out.endsWith(
+        s"""... [600 more lines (1000 in all): cat("big.txt", ${Host.CatMaxLines + 1}, ${2 * Host.CatMaxLines}) shows the next]\n"""
+      ),
+      out.takeRight(200),
+    )
+    agentOut.clear()
+    Files.writeString(root.resolve("empty.txt"), "")
+    cat("empty.txt")
+    assertEquals(agentOut.toString, "[empty file]\n")
+    agentOut.clear(); userOut.clear()
+
+  test("cat(path, from, to) prints a 1-based inclusive window and marks the end of the file"):
+    agentOut.clear(); userOut.clear()
+    Files.writeString(root.resolve("win.txt"), (1 to 12).map(i => s"l$i").mkString("\n"))
+    cat("win.txt", 10, 11)
+    assertEquals(agentOut.toString, "    10\tl10\n    11\tl11\n")
+    agentOut.clear()
+    cat("win.txt", 12, 20) // runs past the end: what exists, then the marker
+    assertEquals(agentOut.toString, "    12\tl12\n[end of file: 12 lines]\n")
+    agentOut.clear()
+    cat("win.txt", 13, 20)
+    assertEquals(agentOut.toString, "[nothing to show: win.txt has 12 lines]\n")
+    agentOut.clear()
+    intercept[IllegalArgumentException](cat("win.txt", 0, 3))
+    intercept[IllegalArgumentException](cat("win.txt", 5, 4))
+    assertEquals(agentOut.toString, "")
+    // very long lines (minified files) are cut with a marker instead of flooding the result
+    Files.writeString(root.resolve("long.txt"), "x" * (Host.CatMaxLineChars + 7) + "\nshort\n")
+    cat("long.txt", 1, 2)
+    assertEquals(agentOut.toString, "     1\t" + "x" * Host.CatMaxLineChars + " ... [+7 chars]\n     2\tshort\n")
+    agentOut.clear(); userOut.clear()
+
+  test("listings and grep hits are relative to the working directory, absolute outside it"):
+    assert(ls(".").contains("src"), ls(".").toString)
+    assert(walk(".").contains("src/A.scala"), walk(".").toString)
+    assert(find(".", "*.scala").contains("src/A.scala"))
+    assertEquals(grepRecursive("src", "object A").map(_.file), List("src/A.scala"))
+    val outside = Files.createTempDirectory("atc-outside").nn.toRealPath().nn
+    Files.writeString(outside.resolve("o.txt"), "x")
+    decisions = List(Decision.AllowSession)
+    requestFiles(outside.toString, atc.lib.Access.Read, "look outside") {
+      assertEquals(ls(outside.toString), List(outside.resolve("o.txt").toString)) // absolute: not under cwd
+    }
+
+  test("find matches the name for a plain glob and the relative path for one with / or **"):
+    Files.createDirectories(root.resolve("g/deep/er"))
+    Files.writeString(root.resolve("g/top.scala"), "")
+    Files.writeString(root.resolve("g/deep/mid.scala"), "")
+    Files.writeString(root.resolve("g/deep/er/low.scala"), "")
+    Files.writeString(root.resolve("g/deep/er/note.txt"), "note")
+    assertEquals(find("g", "*.scala").sorted, List("g/deep/er/low.scala", "g/deep/mid.scala", "g/top.scala"))
+    assertEquals(find("g", "**/*.scala").sorted, List("g/deep/er/low.scala", "g/deep/mid.scala", "g/top.scala"))
+    assertEquals(find("g", "deep/**/*.scala").sorted, List("g/deep/er/low.scala", "g/deep/mid.scala"))
+    assertEquals(find("g", "deep/*.scala"), List("g/deep/mid.scala"))
+    assertEquals(find("g", "**/er/*.{scala,txt}").sorted, List("g/deep/er/low.scala", "g/deep/er/note.txt"))
+    assertEquals(find(".", "g/**").sorted, walk("g").filter(p => p.endsWith(".scala") || p.endsWith(".txt")).sorted)
+    assertEquals(grepRecursive("g", "note", "**/er/*.txt").map(_.file), List("g/deep/er/note.txt"))
+
+  test("move and copy files; classified and directory sources are refused"):
+    Files.writeString(root.resolve("mv.txt"), "payload")
+    move("mv.txt", "moved/mv2.txt")
+    assert(!Files.exists(root.resolve("mv.txt")))
+    assertEquals(Files.readString(root.resolve("moved/mv2.txt")), "payload")
+    copy("moved/mv2.txt", "copy.txt")
+    assertEquals(Files.readString(root.resolve("copy.txt")), "payload")
+    assert(Files.exists(root.resolve("moved/mv2.txt")))
+    intercept[IllegalArgumentException](move("moved", "elsewhere"))
+    val e = intercept[SecurityException](move("secrets/key.txt", "leaked.txt")) // the read refuses classified
+    assert(e.getMessage.nn.contains("readClassified"), e.getMessage)
+    assert(Files.exists(root.resolve("secrets/key.txt")) && !Files.exists(root.resolve("leaked.txt")))
+    intercept[SecurityException](copy("README.md", "secrets/copy.txt")) // the write refuses a classified target
+
+  test("replaceLines/insertLines edit by cat's line numbers, return the old text, keep the newline style"):
+    Files.writeString(root.resolve("lines.txt"), "one\ntwo\nthree\nfour\n")
+    assertEquals(replaceLines("lines.txt", 2, 3, "TWO\nTHREE\nextra"), "two\nthree")
+    assertEquals(Files.readString(root.resolve("lines.txt")), "one\nTWO\nTHREE\nextra\nfour\n")
+    assertEquals(replaceLines("lines.txt", 4, 4, ""), "extra") // empty text deletes
+    assertEquals(Files.readString(root.resolve("lines.txt")), "one\nTWO\nTHREE\nfour\n")
+    insertLines("lines.txt", 1, "zero")
+    insertLines("lines.txt", 6, "five\n") // lineCount + 1 appends; one trailing newline is not an extra line
+    assertEquals(Files.readString(root.resolve("lines.txt")), "zero\none\nTWO\nTHREE\nfour\nfive\n")
+    val e = intercept[IllegalArgumentException](replaceLines("lines.txt", 5, 9, "x"))
+    assert(e.getMessage.nn.contains("has 6 lines"), e.getMessage)
+    intercept[IllegalArgumentException](insertLines("lines.txt", 8, "x"))
+    intercept[IllegalArgumentException](replaceLines("lines.txt", 0, 1, "x"))
+    Files.writeString(root.resolve("crlf.txt"), "a\r\nb\r\n")
+    assertEquals(replaceLines("crlf.txt", 2, 2, "B"), "b")
+    assertEquals(Files.readString(root.resolve("crlf.txt")), "a\r\nB\r\n")
+    Files.writeString(root.resolve("nonl.txt"), "a\nb")
+    replaceLines("nonl.txt", 1, 1, "A")
+    assertEquals(Files.readString(root.resolve("nonl.txt")), "A\nb") // no trailing newline stays that way
+    Files.writeString(root.resolve("empty2.txt"), "")
+    insertLines("empty2.txt", 1, "first")
+    assertEquals(Files.readString(root.resolve("empty2.txt")), "first\n")
+
+  test("parseCommandLine, globRegex and splitLines (pure helpers)"):
+    assertEquals(
+      Processes.parseCommandLine("""git commit -m 'a b' --x="c d" e\ f"""),
+      List("git", "commit", "-m", "a b", "--x=c d", "e f")
+    )
+    intercept[IllegalArgumentException](Processes.parseCommandLine("a > b")) // one program only
+    intercept[IllegalArgumentException](Processes.parseCommandLine("a | b"))
+    val p = Processes.parsePipeline("cat < in.txt | sort -u 2>&1 | head -3 >> out.txt")
+    assertEquals(p.stages.map(_.argv), List(List("cat"), List("sort", "-u"), List("head", "-3")))
+    assertEquals(p.stages.map(_.mergeErr), List(false, true, false))
+    assertEquals((p.stdinFile, p.stdoutFile, p.append), (Some("in.txt"), Some("out.txt"), true))
+    assertEquals(p.line, "cat | sort -u 2>&1 | head -3 < in.txt >> out.txt")
+    val q = Processes.parsePipeline("echo 'a | b' >out.txt")
+    assertEquals((q.stages.head.argv, q.stdoutFile, q.append), (List("echo", "a | b"), Some("out.txt"), false))
+    assertEquals(
+      Processes.parsePipeline("printf 2 > two.txt").stages.head.argv,
+      List("printf", "2")
+    ) // a bare 2 before > is a word...
+    for bad <- List(
+        "a && b",
+        "a; b",
+        "a || b",
+        "a &",
+        "a 2> err",
+        "a &> all",
+        "a > ",
+        "a | ",
+        "| a",
+        "$(x)",
+        "a `b`",
+        "a << EOF",
+        "",
+        "a < x < y",
+        "a > x > y"
+      )
+    do
+      intercept[IllegalArgumentException](Processes.parsePipeline(bad))
+    intercept[IllegalArgumentException](Processes.parseCommandLine("a 'unterminated"))
+    assertEquals(Processes.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
+    val r = Host.globRegex("src/**/*.scala")
+    assert(
+      r.matches("src/X.scala") && r.matches("src/a/b/X.scala") && !r.matches("lib/X.scala") && !r.matches("src/X.java")
+    )
+    assert(
+      Host.globRegex("**/test/*.py").matches("test/a.py") && Host.globRegex("**/test/*.py").matches("x/y/test/a.py")
+    )
+    assert(
+      Host.globRegex("a/[!x]*.{md,txt}").matches("a/b.md") && !Host.globRegex("a/[!x]*.{md,txt}").matches("a/x.md")
+    )
+    assert(!Host.globRegex("a/*.md").matches("a/b/c.md"))
+    assertEquals(Host.splitLines("a\nb\n"), (List("a", "b"), "\n", true))
+    assertEquals(Host.splitLines("a\r\nb"), (List("a", "b"), "\r\n", false))
+    assertEquals(Host.splitLines(""), (Nil, "\n", true))
+    assertEquals(Host.splitLines("\n"), (List(""), "\n", true))
 
   test("readBytes/writeBytes round-trip a binary file byte for byte"):
     val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
@@ -163,7 +350,7 @@ class HostSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("requestExec"))
     decisions = List(Decision.AllowSession)
     assertEquals(requestExec(Set("ls*"), "list") { exec("ls", List(root.toString)).exitCode }, 0)
-    assertEquals(exec("ls", Nil, Some(root.toString)).exitCode, 0) // session grant persists
+    assertEquals(exec("ls", Nil, root.toString).exitCode, 0) // session grant persists
 
   test("a command that runs long is shown live after Processes.LiveAfterMs, a quick one is not"):
     import scala.collection.mutable.ListBuffer
@@ -249,8 +436,9 @@ class HostSuite extends munit.FunSuite:
     assert(listed.head.isClassified)
     intercept[SecurityException](listed.head.read())
     intercept[SecurityException](env.host.access("pub").walk().head.read())
-    // `ls` shows the same canonical path, and `readClassified` stays the way in.
-    assertEquals(env.host.ls("pub"), List(target))
+    // `ls` shows the same canonical path (relative to the root, as listings are), and
+    // `readClassified` stays the way in.
+    assertEquals(env.host.ls("pub"), List("secrets/key.txt"))
     env.host.readClassified(listed.head.path)
 
   test("symlink escaping cwd is judged by its target"):

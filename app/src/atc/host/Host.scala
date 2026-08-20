@@ -21,7 +21,7 @@ final class Host(
   ui: HostUi,
   /** Paths git ignores are left out of listings (config `respectGitignore`). */
   gitIgnore: GitIgnore = GitIgnore.Disabled,
-) extends Interface:
+) extends Interface, Derivations:
 
   @volatile private var todoList: List[Todo] = Nil
 
@@ -160,44 +160,156 @@ final class Host(
   def access(path: String)(using fs: FileSystem): FileEntry = fs.access(path)
   def read(path: String)(using fs: FileSystem): String = fs.access(path).read()
   def readLines(path: String)(using fs: FileSystem): List[String] = fs.access(path).readLines()
+
+  /** `cat -n` view of a file, capped at [[Host.CatMaxLines]] with a note naming
+    * the `cat(path, from, to)` call that shows the next window. */
+  def cat(path: String)(using fs: FileSystem, user: UserIO): Unit =
+    val lines = fs.access(path).readLines()
+    val n = lines.length
+    val text =
+      if n == 0 then "[empty file]\n"
+      else
+        val body = numbered(lines.take(Host.CatMaxLines), 1)
+        if n <= Host.CatMaxLines then body
+        else
+          val next = math.min(n, 2 * Host.CatMaxLines)
+          body + s"... [${n - Host.CatMaxLines} more lines ($n in all): cat(\"$path\", ${Host.CatMaxLines + 1}, $next) shows the next]\n"
+    output.print(text, text)
+
+  /** `sed -n 'from,top'` view: lines `from` to `to` (1-based, inclusive) with numbers. */
+  def cat(path: String, from: Int, to: Int)(using fs: FileSystem, user: UserIO): Unit =
+    if from < 1 || to < from then
+      throw IllegalArgumentException(s"cat: the range must satisfy 1 <= from <= to (got $from, $to)")
+    val lines = fs.access(path).readLines()
+    val n = lines.length
+    val text =
+      if from > n then s"[nothing to show: $path has $n lines]\n"
+      else
+        val body = numbered(lines.slice(from - 1, math.min(to, n)), from)
+        if to > n then body + s"[end of file: $n lines]\n" else body
+    output.print(text, text)
+
+  /** `cat -n` formatting: a 6-wide right-aligned number, a tab, the line (cut at
+    * [[Host.CatMaxLineChars]] with a marker), a newline; numbering starts at `first`. */
+  private def numbered(lines: List[String], first: Int): String =
+    val sb = StringBuilder()
+    var i = first
+    for line <- lines do
+      val shown =
+        if line.length <= Host.CatMaxLineChars then line
+        else line.take(Host.CatMaxLineChars) + s" ... [+${line.length - Host.CatMaxLineChars} chars]"
+      sb.append(f"$i%6d\t").append(shown).append('\n')
+      i += 1
+    sb.toString
   def readBytes(path: String)(using fs: FileSystem): Array[Byte] = fs.access(path).readBytes()
   def write(path: String, content: String)(using fs: FileSystem): Unit = fs.access(path).write(content)
   def writeBytes(path: String, content: Array[Byte])(using fs: FileSystem): Unit =
     fs.access(path).writeBytes(content)
 
-  /** Targeted edit: rewrite the file with every occurrence of `target` replaced.
-    * Refuses a no-op so a mistaken pattern cannot look like a successful edit. */
-  def replace(path: String, target: String, replacement: String)(using fs: FileSystem): Int =
-    if target.isEmpty then throw IllegalArgumentException("replace: the target string must not be empty")
+  /** Composed of the checked primitives (read `from`, write `to`, delete `from`),
+    * so it grants nothing they would not: a classified source is refused by the
+    * read, a classified target by the write. */
+  def move(from: String, to: String)(using fs: FileSystem): Unit =
+    val src = fs.access(from)
+    if src.isDirectory then
+      throw IllegalArgumentException(s"move: '$from' is a directory; move its files and mkdir/delete the directories")
+    val bytes = src.readBytes()
+    fs.access(to).writeBytes(bytes)
+    src.delete()
+
+  def copy(from: String, to: String)(using fs: FileSystem): Unit =
+    val src = fs.access(from)
+    if src.isDirectory then throw IllegalArgumentException(s"copy: '$from' is a directory; copy its files one by one")
+    fs.access(to).writeBytes(src.readBytes())
+
+  /** In-place edit: rewrite the file with every match of `pattern` replaced (`(?m)`, so
+    * `^`/`$` see line boundaries as in sed). Refuses a no-op so a mistaken pattern
+    * cannot look like a successful edit. */
+  def sed(path: String, pattern: String, replacement: String)(using fs: FileSystem): Int =
+    if pattern.isEmpty then throw IllegalArgumentException("sed: the pattern must not be empty")
+    val regex = ("(?m)" + pattern).r // a malformed regex throws PatternSyntaxException (an IllegalArgumentException)
     val entry = fs.access(path)
     val before = entry.read()
-    val n = countOccurrences(before, target)
+    val n = regex.findAllMatchIn(before).length
     if n == 0 then
       throw IllegalArgumentException(
-        s"replace: '$target' does not occur in '${entry.path}', so nothing was changed; read the file and check the exact text (whitespace and indentation included)."
+        s"sed: the regex '$pattern' matches nothing in '${entry.path}', so nothing was changed; check it with grep(path, pattern), and quote literal text with quote(text) (the pattern) and quoteReplacement(text) (the replacement)."
       )
-    entry.write(before.replace(target, replacement))
+    entry.write(regex.replaceAllIn(before, sedReplacement(replacement)))
     n
 
-  private def countOccurrences(haystack: String, needle: String): Int =
-    var i = haystack.indexOf(needle)
-    var n = 0
-    while i >= 0 do
-      n += 1
-      i = haystack.indexOf(needle, i + needle.length)
-    n
+  /** `sed`'s replacement syntax: Java's (`$1`, `${name}`, `\` escapes the next
+    * character) plus sed's `\1` for a group and `\n`/`\t` for a newline/tab; a
+    * trailing lone backslash is literal instead of an error. */
+  private def sedReplacement(r: String): String =
+    val sb = StringBuilder()
+    var i = 0
+    while i < r.length do
+      val c = r.charAt(i)
+      if c == '\\' && i + 1 < r.length then
+        r.charAt(i + 1) match
+          case d if d.isDigit => sb.append('$').append(d)
+          case 'n' => sb.append('\n')
+          case 't' => sb.append('\t')
+          case other => sb.append('\\').append(other)
+        i += 2
+      else
+        if c == '\\' then sb.append("\\\\") else sb.append(c)
+        i += 1
+    sb.toString
+
+  // TODO(safe-mode): drop with the Interface declarations once safe mode admits Regex.quote/quoteReplacement.
+  def quote(text: String): String = java.util.regex.Pattern.quote(text).nn
+  def quoteReplacement(text: String): String = java.util.regex.Matcher.quoteReplacement(text).nn
+
+  def replaceLines(path: String, from: Int, to: Int, text: String)(using fs: FileSystem): String =
+    val entry = fs.access(path)
+    val (lines, sep, trailing) = Host.splitLines(entry.read())
+    val n = lines.length
+    if from < 1 || to < from || to > n then
+      throw IllegalArgumentException(
+        s"replaceLines: the range must satisfy 1 <= from <= to <= $n (the file has $n lines), got $from..$to; cat the file again, line numbers shift after an edit"
+      )
+    val old = lines.slice(from - 1, to)
+    val updated = lines.take(from - 1) ++ Host.textLines(text) ++ lines.drop(to)
+    entry.write(Host.joinLines(updated, sep, trailing))
+    old.mkString(sep)
+
+  def insertLines(path: String, before: Int, text: String)(using fs: FileSystem): Unit =
+    val entry = fs.access(path)
+    val (lines, sep, trailing) = Host.splitLines(entry.read())
+    val n = lines.length
+    if before < 1 || before > n + 1 then
+      throw IllegalArgumentException(
+        s"insertLines: `before` must be between 1 and ${n + 1} (the file has $n lines), got $before"
+      )
+    val updated = lines.take(before - 1) ++ Host.textLines(text) ++ lines.drop(before - 1)
+    entry.write(Host.joinLines(updated, sep, trailing))
 
   def append(path: String, content: String)(using fs: FileSystem): Unit = fs.access(path).append(content)
   def exists(path: String)(using fs: FileSystem): Boolean = fs.access(path).exists
   def isDirectory(path: String)(using fs: FileSystem): Boolean = fs.access(path).isDirectory
   def mkdir(path: String)(using fs: FileSystem): Unit = fs.access(path).mkdir()
   def delete(path: String)(using fs: FileSystem): Unit = fs.access(path).delete()
-  def ls(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).children.map(_.path)
-  def walk(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).walk().map(_.path)
+  def ls(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).children.map(e => display(e.path))
+  def walk(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).walk().map(e => display(e.path))
+
+  /** How the listing helpers and `GrepMatch` show a (canonical, absolute) path:
+    * relative to the working directory when inside it, so listings cost the model
+    * a few tokens per entry instead of a long common prefix; absolute otherwise.
+    * Every helper resolves relative paths against the working directory, so the
+    * shown form can be passed straight back. */
+  private lazy val cwdCanonical: Path = canonical(".")
+  private def display(absolute: String): String =
+    val p = Paths.get(absolute).nn
+    if p == cwdCanonical then "."
+    else if p.startsWith(cwdCanonical) then cwdCanonical.relativize(p).nn.toString
+    else absolute
 
   private def grepEntry(entry: FileEntry, regex: scala.util.matching.Regex): List[GrepMatch] =
     val buf = collection.mutable.ListBuffer[GrepMatch]()
-    entry.forEachLine((line, n) => if regex.findFirstIn(line).isDefined then buf += GrepMatch(entry.path, n, line))
+    val shown = display(entry.path)
+    entry.forEachLine((line, n) => if regex.findFirstIn(line).isDefined then buf += GrepMatch(shown, n, line))
     buf.toList
 
   def grep(path: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
@@ -209,12 +321,22 @@ final class Host(
     val regex = pattern.r
     filesNamed(dir, glob).filterNot(_.isClassified).flatMap(grepEntry(_, regex))
 
-  def find(dir: String, glob: String)(using fs: FileSystem): List[String] = filesNamed(dir, glob).map(_.path)
+  def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
+    filesNamed(dir, glob).map(e => display(e.path))
 
-  /** The files (not directories) under `dir` whose *name* matches `glob`. */
+  /** The files (not directories) under `dir` selected by `glob`: a plain glob is
+    * matched against the file *name*; one containing `/` or `**` against the path
+    * relative to `dir` ([[Host.globRegex]]), so `src`, `**` and `*.scala` joined by
+    * slashes finds Scala files at any depth under `src`, including directly in it. */
   private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntry] =
-    val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
-    fs.access(dir).walk().filter(e => !e.isDirectory && matcher.matches(Paths.get(e.path).nn.getFileName))
+    val files = fs.access(dir).walk().filter(!_.isDirectory)
+    if glob.contains('/') || glob.contains("**") then
+      val base = canonical(dir)
+      val regex = Host.globRegex(glob)
+      files.filter(e => regex.matches(base.relativize(Paths.get(e.path)).nn.toString))
+    else
+      val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
+      files.filter(e => matcher.matches(Paths.get(e.path).nn.getFileName))
 
   def readClassified(path: String)(using fs: FileSystem): Classified[String] = fs.access(path).readClassified()
   def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
@@ -222,59 +344,191 @@ final class Host(
 
   // ── Interface: processes ──────────────────────────────────────────
 
-  def requestExec[T](commands: Set[String])(op: Exec ?=> T)(using UserIO, Exec): T =
+  def requestExec[T](commands: Iterable[String])(op: Exec ?=> T)(using UserIO, Exec): T =
     requestExec(commands, "")(op)
-  def requestExec[T](commands: Set[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
+  def requestExec[T](commands: Iterable[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
     val patterns = commands.toList.map(_.trim).filter(_.nonEmpty)
     inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id)))
 
-  def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, None, Host.ExecTimeoutMs)
-  def exec(command: String, args: List[String])(using Exec, FileSystem): ProcessResult =
-    exec(command, args, None, Host.ExecTimeoutMs)
-  def exec(command: String, args: List[String], workingDir: Option[String])(using Exec, FileSystem): ProcessResult =
-    exec(command, args, workingDir, Host.ExecTimeoutMs)
-  def exec(command: String, args: List[String], workingDir: Option[String], timeoutMs: Long)(using
+  def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, ExecOptions())
+  def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
+    exec(command, args, ExecOptions())
+  def exec(command: String, args: Seq[String], workingDir: String)(using Exec, FileSystem): ProcessResult =
+    exec(command, args, ExecOptions(workingDir = workingDir))
+  /** A command line ready to start: parsed, every stage and redirection checked,
+    * the `ProcessBuilder`s built. Shared by `exec` and `spawn`. */
+  private final case class Prepared(pbs: List[ProcessBuilder], stageLines: List[String], line: String)
+
+  private def prepare(command: String, args: Seq[String], options: ExecOptions)(using
     ex: Exec,
     fs: FileSystem
-  ): ProcessResult =
-    val argv = command :: args
-    val line = argv.mkString(" ")
-    policy.commandDenied(line) match
-      case Some(pattern) =>
-        // Refused by the configuration: asking the user is not an option, so the
-        // message must not point at `requestExec` (which would fail too).
-        throw SecurityException(
-          s"Access denied: command '$line' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
+  ): Prepared =
+    // `command` is parsed with the small grammar (`|`, `<`, `>`, `>>`, `2>&1`; quotes,
+    // no shell); with `args` it must be one program, and the args are appended verbatim.
+    val parsed = Processes.parsePipeline(command)
+    val pipeline =
+      if args.isEmpty then parsed
+      else if parsed.isSimple then
+        parsed.copy(stages = List(parsed.stages.head.copy(argv = parsed.stages.head.argv ++ args)))
+      else
+        throw IllegalArgumentException(
+          "exec(command, args, ...): `command` must be one program when args are given; write a pipeline or redirection in the one-line form exec(\"...\")"
         )
-      case None =>
-        if !policy.commandAllowed(scopeOf(ex), line) then
-          throw SecurityException(
-            s"""Access denied: command '$line' matches no permitted pattern. Use requestExec(Set("$command *"), reason) { ... } to ask the user."""
-          )
+    if options.stdin.nonEmpty && pipeline.stdinFile.isDefined then
+      throw IllegalArgumentException(
+        "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
+      )
+    // Every stage is a command of its own for the policy: the deny list first
+    // (final, so the message must not point at `requestExec`), then the patterns.
+    for st <- pipeline.stages do
+      policy.commandDenied(st.line).foreach { pattern =>
+        throw SecurityException(
+          s"Access denied: command '${st.line}' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
+        )
+      }
+    val missing = pipeline.stages.filterNot(st => policy.commandAllowed(scopeOf(ex), st.line))
+    if missing.nonEmpty then
+      val what =
+        if pipeline.stages.lengthIs == 1 then s"command '${missing.head.line}'"
+        else
+          s"stage${if missing.lengthIs > 1 then "s" else ""} ${missing.map(st => s"'${st.line}'").mkString(", ")} of the pipeline"
+      val patterns = missing.map(st => s"\"${st.argv.head} *\"").mkString(", ")
+      throw SecurityException(
+        s"Access denied: $what matches no permitted pattern. Use requestExec(Set($patterns), reason) { ... } to ask the user."
+      )
     // A command observes the directory it runs in (`git status` lists file names),
     // so the working directory must be readable and unclassified for the FileSystem
     // capability in scope. (What the command itself reads is up to the OS: the
     // command pattern is the user's decision.) `cwd` is canonicalized like any
     // other path so a symlinked project directory matches the rules.
-    val dir = workingDir.fold(canonical("."))(canonical)
+    val dir = canonical(options.workingDir)
     val pm = requireRead(scopeOf(fs), dir, "running a command in")
     requireNotClassified(pm, dir, "running a command there", "a working directory outside it")
-    val pb = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
+    // Redirections are file operations, checked like `read` and `write`: a classified
+    // file may neither feed a command nor receive its output.
+    val stdinFile = pipeline.stdinFile.map { f =>
+      val p = canonical(f)
+      val pm = requireRead(scopeOf(fs), p, "feeding a command from")
+      requireNotClassified(pm, p, "feeding a command from", "an unclassified file")
+      p
+    }
+    val stdoutFile = pipeline.stdoutFile.map { f =>
+      val p = canonical(f)
+      val pm = requireWrite(scopeOf(fs), p, "redirecting a command's output to")
+      requireNotClassified(pm, p, "redirecting a command's output to", "an unclassified file")
+      ensureParent(p)
+      p
+    }
+    val pbs = pipeline.stages.map { st =>
+      val pb = ProcessBuilder(st.argv.asJava).directory(dir.toFile).nn
+      if st.mergeErr then pb.redirectErrorStream(true)
+      pb
+    }
+    stdinFile.foreach(p => pbs.head.redirectInput(p.toFile))
+    stdoutFile.foreach { p =>
+      val file = p.toFile
+      pbs.last.redirectOutput(if pipeline.append then ProcessBuilder.Redirect.appendTo(file)
+      else ProcessBuilder.Redirect.to(file))
+    }
+    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line)
+
+  def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
+    val p = prepare(command, args, options)
     // A command that takes a while shows its output to the user as it runs.
     val port = output
     val live = new Processes.LiveOutput:
-      def begin(): Unit = port.commandRunning(line)
+      def begin(): Unit = port.commandRunning(p.line)
       def output(text: String): Unit = port.commandOutput(text)
-    Processes.run(pb, command, timeoutMs, Some(live))
+    output.whileCommandRuns(Processes.run(p.pbs, p.stageLines, p.line, options.timeoutMs, Some(live), options.stdin))
 
-  def execOutput(command: String)(using Exec, FileSystem): String = exec(command).stdout
-  def execOutput(command: String, args: List[String])(using Exec, FileSystem): String = exec(command, args).stdout
+  // ── processes started with `spawn` ───────────────────────────────
+  // The registry is per host (one per atc process); ids are never reused in a
+  // session. `killProcesses` is what the app calls when the REPL session ends.
+
+  private val spawned = scala.collection.mutable.LinkedHashMap[Int, ProcessImpl]()
+  private var nextProcessId = 0
+
+  def spawn(command: String)(using Exec, FileSystem): Process = spawn(command, ExecOptions())
+  def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
+    val p = prepare(command, Nil, options)
+    spawned.synchronized:
+      reapProcesses()
+      if spawned.size >= Host.MaxProcesses then
+        throw IllegalStateException(
+          s"spawn: ${Host.MaxProcesses} processes are already running (${spawned.keys.map(i => s"p$i").mkString(", ")}); kill() one first"
+        )
+      nextProcessId += 1
+      val id = nextProcessId
+      val port = output
+      val managed = Processes.ManagedProcess.start(
+        p.pbs,
+        p.stageLines,
+        p.line,
+        options.stdin,
+        closeStdinAfter = false,
+        live = None,
+        keepHead = false,
+        onExit = code => port.processExited(id, code),
+      )
+      val handle = ProcessImpl(id, managed, output)
+      spawned(id) = handle
+      output.processStarted(id, p.line)
+      handle
+
+  def runningProcesses(using Exec): List[Process] = spawned.synchronized:
+    reapProcesses()
+    spawned.values.toList
+
+  private def reapProcesses(): Unit = spawned.filterInPlace((_, p) => p.isAlive)
+
+  /** Kill every spawned process (session end, `/kill all`). */
+  private[atc] def killProcesses(): Unit = spawned.synchronized:
+    spawned.values.foreach(_.kill())
+    spawned.clear()
+
+  /** `/kill`: `p3`, `3` or `all`; a message for the user either way. */
+  private[atc] def killProcess(ref: String): String = spawned.synchronized:
+    reapProcesses()
+    ref.trim.toLowerCase match
+      case "" | "all" =>
+        val n = spawned.size
+        killProcesses()
+        if n == 0 then "no process is running" else s"killed $n process${if n == 1 then "" else "es"}"
+      case r =>
+        r.stripPrefix("p").toIntOption.flatMap(spawned.get) match
+          case Some(p) =>
+            p.kill()
+            spawned.remove(p.id)
+            s"killed p${p.id} (${p.commandLine})"
+          case None => s"no running process '$ref' (see /ps)"
+
+  /** `/ps`: one line per live process. */
+  private[atc] def processSummary: String = spawned.synchronized:
+    reapProcesses()
+    if spawned.isEmpty then "no process is running"
+    else spawned.values.map(p => s"p${p.id}  ${p.commandLine}").mkString("\n")
+
+  def execOutput(command: String)(using Exec, FileSystem): String = execOutput(command, Nil, ExecOptions())
+  def execOutput(command: String, args: Seq[String])(using Exec, FileSystem): String =
+    execOutput(command, args, ExecOptions())
+  def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec, FileSystem): String =
+    val r = exec(command, args, options)
+    if r.exitCode != 0 then
+      val err = r.stderr.trim
+      val tail = if err.isEmpty then "" else s"; stderr: ${err.takeRight(Host.ExecErrorTailChars)}"
+      throw RuntimeException(
+        s"'${(Processes.parseCommandLine(command) ++ args).mkString(" ")}' exited with ${r.exitCode}$tail (use exec(...) to inspect a failure)"
+      )
+    r.stdout
 
   // ── Interface: network ────────────────────────────────────────────
 
-  def requestNetwork[T](hosts: Set[String])(op: Network ?=> T)(using UserIO, Network): T =
+  def requestNetwork[T](hosts: Iterable[String])(op: Network ?=> T)(using UserIO, Network): T =
     requestNetwork(hosts, "")(op)
-  def requestNetwork[T](hosts: Set[String], reason: String)(op: Network ?=> T)(using user: UserIO, parent: Network): T =
+  def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network ?=> T)(using
+    user: UserIO,
+    parent: Network
+  ): T =
     val patterns = hosts.toList.map(_.trim.toLowerCase).filter(_.nonEmpty)
     inScope(policy.requestNet(scopeOf(parent), patterns, reason))(id => op(using NetworkImpl(id)))
 
@@ -327,17 +581,30 @@ final class Host(
   /** Default `Content-Type` when the caller does not set one. */
   private val JsonContentType = "application/json"
 
+  /** `httpGet`/`httpPost` throw on an HTTP error so a 404 page cannot pass for data;
+    * `httpRequest` and the classified POST never do (the latter must stay
+    * status-blind: its body is classified, so nothing about the response may
+    * reach the agent except through the classified value). */
+  private def checked(method: String, url: String, r: HttpResponse): String =
+    if r.status >= 400 then
+      throw RuntimeException(
+        s"$method $url returned HTTP ${r.status}: ${r.body.take(Host.HttpErrorBodyChars)} (use httpRequest(...) to inspect a failure)"
+      )
+    r.body
+
   def httpGet(url: String)(using Network): String = httpGet(url, noHeaders, noSecrets)
   def httpGet(url: String, headers: Map[String, String])(using Network): String = httpGet(url, headers, noSecrets)
   def httpGet(url: String, headers: Map[String, String], secretHeaders: Map[String, Classified[String]])(using
     net: Network
   ): String =
-    request(net, "GET", url, None, JsonContentType, headers, secretHeaders).body
+    checked("GET", url, request(net, "GET", url, None, JsonContentType, headers, secretHeaders))
 
   def httpPost(url: String, body: String)(using Network): String =
     httpPost(url, body, JsonContentType, noHeaders, noSecrets)
   def httpPost(url: String, body: String, contentType: String)(using Network): String =
     httpPost(url, body, contentType, noHeaders, noSecrets)
+  def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network): String =
+    httpPost(url, body, contentType, headers, noSecrets)
   def httpPost(
     url: String,
     body: String,
@@ -345,12 +612,16 @@ final class Host(
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): String =
-    request(net, "POST", url, Some(body), contentType, headers, secretHeaders).body
+    checked("POST", url, request(net, "POST", url, Some(body), contentType, headers, secretHeaders))
 
   def httpRequest(method: String, url: String)(using Network): HttpResponse =
     httpRequest(method, url, "", noHeaders, noSecrets)
   def httpRequest(method: String, url: String, body: String)(using Network): HttpResponse =
     httpRequest(method, url, body, noHeaders, noSecrets)
+  def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using
+    Network
+  ): HttpResponse =
+    httpRequest(method, url, body, headers, noSecrets)
   def httpRequest(
     method: String,
     url: String,
@@ -374,7 +645,9 @@ final class Host(
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): Classified[String] =
     ClassifiedImpl.unwrap(body) match
-      case Success(b) => ClassifiedImpl.fromTry(Try(httpPost(url, b, contentType, headers, secretHeaders)))
+      case Success(b) =>
+        // The raw request, not `httpPost`: its error would carry the response body.
+        ClassifiedImpl.fromTry(Try(request(net, "POST", url, Some(b), contentType, headers, secretHeaders).body))
       case Failure(_) => body
 
   // ── Interface: output ─────────────────────────────────────────────
@@ -435,5 +708,69 @@ final class Host(
       case Failure(_) => message
 
 object Host:
-  /** Default wall-clock limit for one `exec`; overridable per call. */
-  val ExecTimeoutMs: Long = 120_000L
+  /** `cat(path)` shows at most this many lines, then says how to see the rest. */
+  val CatMaxLines: Int = 400
+  /** `cat` cuts a line beyond this many characters (minified files) with a marker. */
+  val CatMaxLineChars: Int = 2000
+  /** How much stderr `execOutput` quotes when a command fails. */
+  val ExecErrorTailChars: Int = 2000
+  /** Live `spawn`ed processes per session; beyond it `spawn` asks to `kill()` one. */
+  val MaxProcesses: Int = 8
+  /** How much of an error body `httpGet`/`httpPost` quote. */
+  val HttpErrorBodyChars: Int = 500
+
+  /** gitignore-flavoured glob over a `/`-separated relative path: `**` spans
+    * directories (a leading `**` + `/` also matches none), `*` and `?` stay within
+    * a segment, `[...]` is a class (`[!...]` negated), `{a,b}` alternatives. */
+  def globRegex(glob: String): scala.util.matching.Regex =
+    val sb = StringBuilder("^")
+    var i = 0
+    var inClass = false
+    var inBraces = false
+    while i < glob.length do
+      val c = glob.charAt(i)
+      if inClass then
+        if c == ']' then inClass = false
+        sb.append(c)
+        i += 1
+      else if glob.startsWith("**/", i) then
+        sb.append("(?:.*/)?")
+        i += 3
+      else if glob.startsWith("**", i) then
+        sb.append(".*")
+        i += 2
+      else
+        c match
+          case '*' => sb.append("[^/]*")
+          case '?' => sb.append("[^/]")
+          case '[' =>
+            inClass = true
+            sb.append('[')
+            if glob.startsWith("[!", i) then
+              sb.append('^')
+              i += 1
+          case '{' => inBraces = true; sb.append("(?:")
+          case '}' if inBraces => inBraces = false; sb.append(')')
+          case ',' if inBraces => sb.append('|')
+          case other => sb.append(java.util.regex.Pattern.quote(other.toString))
+        i += 1
+    sb.append('$')
+    sb.toString.r
+
+  /** Lines of a file plus what is needed to write it back unchanged: its
+    * separator (`\r\n` if it uses that, else `\n`) and whether it ended with one
+    * (an empty file counts as ending with one, so an insertion gets a newline). */
+  def splitLines(content: String): (List[String], String, Boolean) =
+    val sep = if content.contains("\r\n") then "\r\n" else "\n"
+    if content.isEmpty then (Nil, sep, true)
+    else
+      val trailing = content.endsWith(sep) || content.endsWith("\n")
+      val body = if content.endsWith(sep) then content.dropRight(sep.length) else content.stripSuffix("\n")
+      (body.split(java.util.regex.Pattern.quote(sep), -1).toList, sep, trailing)
+
+  /** The lines of an edit's `text`: empty text is no line, one trailing newline is not an extra empty line. */
+  def textLines(text: String): List[String] =
+    if text.isEmpty then Nil else text.stripSuffix("\n").split("\n", -1).toList
+
+  def joinLines(lines: List[String], sep: String, trailing: Boolean): String =
+    if lines.isEmpty then "" else lines.mkString(sep) + (if trailing then sep else "")

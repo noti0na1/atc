@@ -233,6 +233,13 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   /** Extra action on Ctrl-C during a turn (e.g. interrupt the REPL evaluation). */
   @volatile var onInterrupt: () => Unit = () => ()
+  /** Whether an exhausted tool budget asks the human to continue (off for `-p` runs). */
+  @volatile var askToContinue: Boolean = true
+
+  override def confirmMoreToolCalls(used: Int, budget: Int): Boolean =
+    askToContinue && confirm(
+      s"The agent has made $used tool calls this turn (the budget is $budget). Let it continue with another $budget?"
+    )
 
   terminal.handle(Terminal.Signal.INT, _ => if busy then { interrupted.set(true); onInterrupt() })
 
@@ -471,6 +478,13 @@ final class Tui(historyFile: Path) extends AgentUI:
   def commandOutput(text: String): Unit = synchronized:
     openOutputSection()
     liveOutput.emit(text)
+  /** A spawned process started / was sent input / exited. Shown inside the tool
+    * block it happens in; an exit between turns is not printed (it would land in
+    * the prompt line), `/ps` shows the state. */
+  def processEvent(text: String): Unit = synchronized:
+    if toolOpen then
+      openOutputSection()
+      liveOutput.emit(styled(text, Cyan) + "\n")
 
   /** The first program output of a tool block opens its `├ output` section. */
   private def openOutputSection(): Unit =

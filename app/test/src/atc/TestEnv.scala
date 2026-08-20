@@ -20,6 +20,7 @@ final class TestEnv(
   commands: List[String] = List("echo"),
   hosts: List[String] = Nil,
   prefix: String = "atc-test",
+  denyCommands: List[String] = Nil,
 ):
   val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
 
@@ -35,7 +36,7 @@ final class TestEnv(
       case d :: rest => decisions = rest; d
       case Nil => Decision.Deny
 
-  val policy: Policy = Policy(mkRules(root), commands, hosts, prompter)
+  val policy: Policy = Policy(mkRules(root), commands, hosts, prompter, denyCommands)
 
   // ── recorded host interactions ──
   val agentOut: StringBuilder = StringBuilder()
@@ -52,6 +53,10 @@ final class TestEnv(
   /** Commands that ran long enough to be shown live, and what they wrote while live. */
   val liveCommands: ListBuffer[String] = ListBuffer()
   val liveCommandOut: StringBuilder = StringBuilder()
+  /** How many commands ran inside `whileCommandRuns` (the clock-pausing hook). */
+  var commandsWrapped: Int = 0
+  /** What the user was shown about spawned processes (started / input / exited). */
+  val processEvents: ListBuffer[String] = ListBuffer()
 
   val output: HostOutput = new HostOutput:
     def print(agentText: String, userText: String): Unit =
@@ -59,6 +64,15 @@ final class TestEnv(
       session.foreach(_.printStream.print(agentText))
       userOut.append(if agentText == userText then userText else s"<$userText>")
     override def commandRunning(commandLine: String): Unit = liveCommands += commandLine
+    override def whileCommandRuns[T](body: => T): T =
+      commandsWrapped += 1
+      body
+    override def processStarted(id: Int, commandLine: String): Unit =
+      processEvents.synchronized(processEvents += s"p$id started: $commandLine")
+    override def processInput(id: Int, text: String): Unit =
+      processEvents.synchronized(processEvents += s"p$id < $text")
+    override def processExited(id: Int, exitCode: Int): Unit =
+      processEvents.synchronized(processEvents += s"p$id exited $exitCode")
     override def commandOutput(text: String): Unit = liveCommandOut.synchronized(liveCommandOut.append(text))
 
   val llm: HostLlm = new HostLlm:
@@ -88,7 +102,10 @@ final class TestEnv(
   def dir(rel: String): Path = Files.createDirectories(root.resolve(rel)).nn
   def contents(rel: String): String = Files.readString(root.resolve(rel)).nn
   def existsOnDisk(rel: String): Boolean = Files.exists(root.resolve(rel))
-  def rel(abs: String): String = root.relativize(Path.of(abs)).toString
+  /** Relative to the root; listings already come relative when inside the root. */
+  def rel(p: String): String =
+    val path = Path.of(p)
+    if path.isAbsolute then root.relativize(path).toString else p
 
   def clearOutput(): Unit =
     agentOut.clear(); userOut.clear()

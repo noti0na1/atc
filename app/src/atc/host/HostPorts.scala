@@ -19,6 +19,14 @@ trait HostOutput:
     * double that ignores both is right. */
   def commandRunning(commandLine: String): Unit = ()
   def commandOutput(text: String): Unit = ()
+  /** Runs `body`, a command the agent executes, so the host can keep the time
+    * it takes out of the snippet's execution timeout (a command has its own). */
+  def whileCommandRuns[T](body: => T): T = body
+  /** A process the agent started with `spawn` (`id` is the `pN` the user sees):
+    * it started, the agent wrote `text` to its stdin, it exited. Shown only. */
+  def processStarted(id: Int, commandLine: String): Unit = ()
+  def processInput(id: Int, text: String): Unit = ()
+  def processExited(id: Int, exitCode: Int): Unit = ()
 
 /** One-shot LLM completions used by the library's `chat`. */
 trait HostLlm:

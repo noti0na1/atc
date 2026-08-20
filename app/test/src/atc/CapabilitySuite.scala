@@ -37,48 +37,59 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
   // ── Read-only vs full views ─────────────────────────────────────
 
   test("a full capability widens to its read-only view"):
-    assertOk(run("""val ro: IOCap^{io.rd} = io; val rofs: FileSystem^{io.rd} = readOnlyFileSystem; 1"""))
+    assertOk(run("""val ro: IOCap^{io.rd} = io; val rofs: FileSystem^{fs.rd} = fs; 1"""))
 
   test("reading works through either view"):
-    assertOk(run("""read("a.txt").length + readOnlyFileSystem.access("a.txt").read().length"""))
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; read("a.txt").length + rofs.access("a.txt").read().length"""))
 
   test("a read-only FileEntry cannot be mutated"):
     // Every `update def` of FileEntry is unreachable through a read-only file system.
     for op <- List("""write("x")""", """append("x")""", "delete()", "mkdir()") do
-      assertFails(run(s"""readOnlyFileSystem.access("a.txt").$op"""), "read-only")
+      assertFails(run(s"""val rofs: FileSystem^{fs.rd} = fs; rofs.access("a.txt").$op"""), "read-only")
 
   test("a read-only FileSystem cannot be used for the writing path helpers"):
     for call <- List(
         """write("a.txt", "x")""",
         """writeBytes("a.txt", Array[Byte](1))""",
-        """replace("a.txt", "content", "x")""",
+        """sed("a.txt", "content", "x")""",
+        """move("a.txt", "b.txt")""",
+        """copy("a.txt", "b.txt")""",
+        """replaceLines("a.txt", 1, 1, "x")""",
+        """insertLines("a.txt", 1, "x")""",
         """append("a.txt", "x")""",
         """mkdir("d")""",
         """delete("a.txt")""",
         """writeClassified("a.txt", classify("x"))""",
       )
-    do assertFails(run(s"""$call(using readOnlyFileSystem)"""))
+    do assertFails(run(s"""val rofs: FileSystem^{fs.rd} = fs; $call(using rofs)"""))
 
   test("a bare FileSystem parameter is read-only; FileSystem^ can write"):
     assertFails(run("""def h(using fs: FileSystem) = write("a.txt", "x"); h(using fs)"""))
     assertOk(run("""def h2(using fs: FileSystem^) = write("a.txt", "x"); h2(using fs)"""))
 
-  test("access(...) needs a full file system, fs.access(...) mirrors the view"):
+  test("access(...) mirrors the view of the file system it is given"):
     assertOk(run("""access("a.txt").read().length"""))
-    assertFails(run("""access("a.txt")(using readOnlyFileSystem)"""))
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).read().length"""))
+    assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).write("x")"""), "read-only")
 
   // ── Deriving capabilities from `io` ─────────────────────────────
 
-  test("a read-only io cannot derive a writing file system, Exec or Network"):
-    assertFails(run("""val ro: IOCap^{io.rd} = io; processes(using ro)"""), "read-only")
-    assertFails(run("""val ro: IOCap^{io.rd} = io; network(using ro)"""), "read-only")
-    assertFails(run("""val ro: IOCap^{io.rd} = io; fileSystem(using ro)"""), "read-only")
+  test("the derivations are the sandbox's, not the agent's: unreachable from agent code"):
+    // The preamble builds `fs`/`ex`/`net` from `io` through `Runtime`; agent code
+    // cannot name them (validator + @rejectSafe), so nothing it can call turns a
+    // read-only `io` into a full capability.
+    assertFails(run("""atc.lib.Runtime.fileSystem(using io)"""), "atc-runtime")
+    assertFails(run("""atc.lib.Runtime.processes(using io)"""), "atc-runtime")
+    assertFails(run("""atc.lib.Runtime.network(using io)"""), "atc-runtime")
+    assertFails(run("""atc.lib.Runtime.readOnlyFileSystem(using io)"""), "atc-runtime")
+    assertFails(run("""val ro: IOCap^{io.rd} = io; fileSystem(using ro)""")) // no such API method
+    assertFails(run("""readOnlyFileSystem""")) // nor this one: `val ro: FileSystem^{fs.rd} = fs` is the idiom
 
-  test("a read-only io can still derive the read-only file system"):
-    assertOk(run("""val ro: IOCap^{io.rd} = io; readOnlyFileSystem(using ro).access("a.txt").read().length"""))
-
-  test("a file system derived from a read-only io cannot write"):
-    assertFails(run("""val ro: IOCap^{io.rd} = io; write("a.txt", "x")(using readOnlyFileSystem(using ro))"""))
+  test("a read-only view of fs can read and never write, even inside Classified.map"):
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; rofs.access("a.txt").read().length"""))
+    assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; write("a.txt", "x")(using rofs)"""), "read-only")
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; classify("a.txt").map(p => read(p)(using rofs)).toString"""))
+    assertFails(run("""classify("a.txt").map(p => read(p)).toString""")) // the full fs may not be captured
 
   test("Exec and Network have no read-only view: a bare Exec is already full"):
     // They are plain exclusive capabilities (not `Stateful`), because there is no
@@ -106,9 +117,8 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
 
   test("IOCap does not substitute for UserIO, and UserIO does not substitute for IOCap"):
     assertFails(run("""println("x")(using io)"""))
-    assertFails(run("""fileSystem(using user)"""))
-    assertFails(run("""processes(using user)"""))
-    assertFails(run("""network(using user)"""))
+    assertFails(run("""read("a.txt")(using user)"""))
+    assertFails(run("""requestExec(Set("x")) { 1 }(using io, ex)"""))
 
   test("the user capability is what request* blocks consume, not io"):
     // `request*` prompt the user, so they take UserIO^. That is also what keeps
@@ -158,27 +168,39 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
 
   test("map admits pure computation and local mutable state"):
     assertOk(run("""classify("x").map(s => s.length * 2)"""))
+    assertOk(run("""classify("a(b)").map(s => quote(s) + quoteReplacement(s))""")) // pure API helpers are fine
+    assertOk(run("""classify("{\"a\":1}").map(s => Json.parse(s)("a").int)""")) // JSON is pure too
     assertOk(run("""classify("x").map(s => { var n = 0; n += s.length; n })"""))
     assertOk(run("""classify("x").map(s => { val a = Array(1, 2); a(0) + s.length })"""))
 
   test("map rejects every outward channel"):
     // The security property: nothing that leaves the process (or reaches the
     // user, or the normal model) can run on confidential data.
+    assertOk(
+      run("""val spawned: Process^{ex} = spawn("echo"); spawned.waitFor(5000).isDefined""")
+    ) // a handle to try to smuggle
     val channels = List(
       "print to the user" -> """classify("s").map(s => { println(s); s })""",
+      "cat a file" -> """classify("s").map(s => { cat(s); s })""",
       "printf" -> """classify("s").map(s => { printf("%s", s); s })""",
       "ask the user" -> """classify("s").map(s => ask(s))""",
       "set todos" -> """classify("s").map(s => { setTodos(List(Todo(s))); s })""",
       "mark todo" -> """classify("s").map(s => { markTodo(s, TodoStatus.Done); s })""",
       "normal model" -> """classify("s").map(s => chat(s))""",
       "write a file" -> """classify("s").map(s => { write("leak.txt", s); s })""",
-      "targeted replace" -> """classify("s").map(s => { replace("a.txt", "content", s); s })""",
+      "regex sed" -> """classify("s").map(s => { sed("a.txt", "content", s); s })""",
+      "move a file" -> """classify("s").map(s => { move("a.txt", s); s })""",
+      "copy a file" -> """classify("s").map(s => { copy("a.txt", s); s })""",
+      "replace lines" -> """classify("s").map(s => { replaceLines("a.txt", 1, 1, s); s })""",
+      "insert lines" -> """classify("s").map(s => { insertLines("a.txt", 1, s); s })""",
       "write bytes" -> """classify("s").map(s => { writeBytes("leak.bin", s.getBytes); s })""",
       "append to a file" -> """classify("s").map(s => { append("leak.txt", s); s })""",
       "delete a file" -> """classify("s").map(s => { delete(s); s })""",
       "write classified" -> """classify("s").map(s => { writeClassified(s, classify(s)); s })""",
       "run a command" -> """classify("s").map(s => exec("echo", List(s)).stdout)""",
       "run a command (execOutput)" -> """classify("s").map(s => execOutput(s))""",
+      "spawn a process" -> """classify("s").map(s => spawn(s).id)""",
+      "talk to a spawned process" -> """classify("s").map(s => { spawned.sendLine(s); s })""",
       "http GET" -> """classify("s").map(s => httpGet(s))""",
       "http POST" -> """classify("s").map(s => httpPost("http://example.com", s))""",
       "ask for permissions" -> """classify("s").map(s => requestFiles(s) { read(s) })""",

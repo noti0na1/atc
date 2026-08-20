@@ -63,7 +63,7 @@ Two Mill modules:
 
 | Module | What it is |
 |--------|------------|
-| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking (`-language:experimental.captureChecking`, `-Wsafe-init`), every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current` and the root capabilities, all `@rejectSafe`) sits in its own file, outside the API source the model is shown. |
+| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking (`-language:experimental.captureChecking`, `-Wsafe-init`), every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current`, the root capabilities and the derivations `fileSystem`/`readOnlyFileSystem`/`processes`/`network` the preamble builds the givens from, declared by the `Derivations` trait; all `@rejectSafe`) sits in its own file, outside the API source the model is shown. |
 | `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions, TODO list, LLM calls), and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
 
 ```
@@ -123,10 +123,36 @@ in its own line-wrapper object, so a `Classified.map` that reads a file captures
 capability, and the `@untrackedCaptures` workaround stops uses being charged, which reopens
 the default-argument leak described below.
 
-Editing helpers in the API: `replace(path, target, replacement)` is the targeted edit (it
-returns the occurrence count and throws when the target is absent, so a mistyped pattern
-cannot look like a successful edit), `write`/`writeBytes` rewrite a whole file,
-`readBytes`/`writeBytes` are the binary pair.
+Editing helpers in the API: `sed(path, regex, replacement)` is the targeted edit (Java regex
+compiled with `(?m)` so `^`/`$` are per line; the replacement takes Java's `$1`/`${name}`
+plus sed's `\1`/`\n`/`\t`, translated by `Host.sedReplacement`; it returns the match count
+and throws when nothing matches, so a mistyped pattern cannot look like a successful edit;
+literal text goes through the pure helpers `quote`/`quoteReplacement`
+(`Pattern.quote`/`Matcher.quoteReplacement` underneath; temporary stand-ins, marked
+`TODO(safe-mode)`, for `scala.util.matching.Regex.quote`/`quoteReplacement`, which safe mode
+refuses until the stdlib is tagged)); `replaceLines(path, from, to, text)` /
+`insertLines(path, before, text)` edit by the line numbers `cat` shows (`replaceLines`
+returns the old text so a stale range is visible; `Host.splitLines`/`joinLines` keep the
+file's newline style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
+are the binary pair, and `move`/`copy` are composed of the checked read/write/delete
+primitives (so a classified file cannot be moved or copied out). Viewing: `cat(path)` /
+`cat(path, from, to)` print `cat -n`-numbered lines through the `println` path (capped at
+`Host.CatMaxLines` with a note naming the next window; lines cut at `Host.CatMaxLineChars`),
+and are what the prompt tells the agent to look at files with, so that it reads windows of
+big files and can quote line numbers; `read` stays raw for code. Listings
+(`ls`/`walk`/`find`/`GrepMatch.file`) show paths relative to the working directory when
+inside it (`Host.display`), absolute outside; `find`/`grepRecursive` globs match the file
+name, or the path relative to `dir` when the glob contains `/` or `**` (`Host.globRegex`,
+gitignore-flavoured: `**` spans directories, a leading `**` + `/` also matches none).
+Commands: `exec(command)` parses `command` with a tiny grammar (`Processes.parsePipeline`: quoted words, `|` between stages, `< f`, `> f`, `>> f`, `2>&1`; `&&`, `;`, `||`, `&`, `2>`, backticks, `$(` throw, there is no shell); `ProcessBuilder.startPipeline` runs the stages with real pipes, every stage is checked against the patterns and the deny list on its own (the `requestExec` hint lists the missing ones), `<`/`>` go through the read/write checks and refuse classified files, the exit code is pipefail-style and stderr is labelled per stage; `args: Seq[String]` are appended
+verbatim, `ExecOptions(workingDir, timeoutMs, stdin)` carries the rest; `exec` never throws on a non-zero exit, `execOutput` does; a timeout quotes the output so far. Both `exec` and `spawn` go through `Host.prepare` (parse, per-stage checks, `ProcessBuilder`s) and `Processes.ManagedProcess` (the stages, bounded consumable `OutputBuffer`s fed by drain threads, an optional live view, an exit watcher; every live one is in a JVM-wide set killed by a shutdown hook): `exec` = start, wait with the timeout, `result()`; `spawn` returns a `ProcessImpl` (`atc.lib.Process`, an `ExclusiveCapability` capturing `ex`, so it cannot enter `Classified.map`) whose stdin stays open for `send`, with `read`/`readErr` (consume), `readUntil(regex, ms)` (polls the buffer, throws on timeout or exit with the unread text left in place), `waitFor`, `kill`; the host keeps a registry (`Host.MaxProcesses` = 8 live, ids `p1, p2, …` never reused, `runningProcesses` reaps the dead), `App` calls `host.killProcesses()` whenever the REPL session ends, the user sees `HostOutput.processStarted/processInput/processExited` as `[p1 started]` / `p1 > …` / `[p1 exited 0]` lines inside the tool block (`Tui.processEvent`; nothing is printed between turns) and has `/ps` and `/kill [id|all]`; spawned output is not streamed live, the agent reads it and the result panel shows what it read; `Agent.hints` maps `Cannot run program` to PATH/no-shell
+advice. HTTP: `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
+(`Host.checked`), `httpRequest` is raw, and `httpPostClassified` goes through the raw
+request, never `httpPost`, so nothing about its response reaches the agent outside the
+classified value. JSON: `atc.lib.Json` (the enum and its companion live in `Interface.scala`
+so the agent sees the API; parser/renderer in `lib/.../JsonCodec.scala`, not bundled).
+`ExecOptions` and `Todo` are plain data types, so their default arguments are fine: the no-
+defaults rule is about capability-taking methods.
 
 ## The capability design
 
@@ -135,7 +161,7 @@ with what the implementation relies on.
 
 **Capabilities cannot be forged.** The capability classes have `private[atc]` constructors
 (agent code is compiled into the empty package), the only instances are the ones the REPL
-preamble binds, and `atc.lib.Runtime` (`current`/`rootIO`/`rootUser`/`install`) is
+preamble binds, and `atc.lib.Runtime` (`current`/`rootIO`/`rootUser`/`install`, and the `fileSystem`/`readOnlyFileSystem`/`processes`/`network` derivations) is
 `@rejectSafe`: under safe mode agent code cannot even name it. The regex validator refuses
 the names anyway, as a second line.
 
@@ -144,8 +170,10 @@ capabilities (`IOCap`, `UserIO`, `FileSystem`, `FileEntry`) extend
 `atc.lib.Cap = caps.Stateful, caps.ExclusiveCapability`. A bare type is the read-only view
 (`^{any.rd}`); `^`/`^{io}` is full. The write side (`FileEntry.write/append/delete/mkdir/
 writeClassified`) are `update def`s, callable only through a full capture set. `x.rd` names
-the read-only view of `x` (`val ro: IOCap^{io.rd} = io`), and `readOnlyFileSystem` hands
-out a `FileSystem^{io.rd}` for helpers that should be provably unable to write.
+the read-only view of `x`: `val ro: FileSystem^{fs.rd} = fs` is a file system that provably
+cannot write, for helpers, or for reading files inside `Classified.map` where the full `fs`
+may not be captured (what the API's `readOnlyFileSystem` used to hand out; it now lives in
+`Derivations`, for the read-only mode's preamble only).
 
 **Two roots.** `IOCap` derives `fs`/`ex`/`net` and is read-only in local and read-only mode
 (so no writable `fs`, `Exec` or `Network` can be derived from it); `UserIO` is *always* full
@@ -202,7 +230,7 @@ Types decide what compiles; four more layers sit underneath, each independent of
 2. **The validator** (`sandbox/CodeValidator.scala`), a regex pre-check before compilation:
    it blocks `atc.(host|agent|sandbox|perms|config|llm|ui)`, reflection, `java.io/nio/net`,
    `System.out/err/in`, `System.exit/setProperty/getenv/getProperty/load*`, `caps.unsafe`,
-   `Runtime.current/rootIO/rootUser/install`, and catching fatal throwables (`catch case _:
+   `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`, and catching fatal throwables (`catch case _:
    Throwable/Error/…`, a bare `catch case _ =>` via a cross-line rule, and any
    `InterruptedException`/`ThreadDeath`). Fatal throwables (a real SOE/OOM, or the
    `ThreadDeath` stop signal) deliberately propagate out of `Classified.map` and abort the
@@ -236,7 +264,7 @@ grants and open scopes; rules, deny lists and mode stay), calls `System.gc()` (t
 compiler and class loader are most of the process's memory) and starts a fresh REPL.
 
 **Evaluation, timeouts, interrupts** (`sandbox/ReplSession.scala`): evaluation runs on a
-worker thread; `ExecutionClock.paused` excludes time waiting for the user (permission
+worker thread; `ExecutionClock.paused` excludes time waiting for the user and the time a command runs (`HostOutput.whileCommandRuns`, which `App` maps to the same clock pause; pauses nest) (permission
 prompts, questions), so a slow human does not trip the timeout; interrupt/timeout raise the
 REPL stop flag through `OpenReplDriver` (a subclass of the compiler's `ReplDriver`; it also
 installs `CappedRendering`, which lives in **package `dotty.tools.repl`** because
@@ -266,7 +294,9 @@ bounded only by the capture.
 top-level `val`s of capturing types need explicit types; `Option.foreach/map` need pure
 functions; no top-level `var` and no `scala.collection.mutable` (a *local* `var` accumulating
 into an immutable collection is fine, and `StringBuilder` works); `Thread.sleep`/
-`System.nanoTime` are unavailable (use `java.time`). Writing helpers need
+`System.nanoTime` are unavailable (use `java.time`); stdlib objects not tagged `@assumedSafe`
+are refused (`scala.util.matching.Regex.quote`/`quoteReplacement`: the API's pure `quote`/
+`quoteReplacement` stand in until then, marked `TODO(safe-mode)`). Writing helpers need
 `(using fs: FileSystem^)` (the bare `FileSystem` is read-only). `Prompts.modeSection(mode)`
 adds a mode paragraph.
 
@@ -482,7 +512,7 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 │   model is configured (never which), the gitignore note                    │
 │ How to work: orient first (find and read AGENTS.md/CLAUDE.md/README/…,     │
 │   learn the build and test commands from them and the build files),        │
-│   explore → replace/write → verify with exec → println, request* on        │
+│   explore → sed/write → verify with exec → println, request* on            │
 │   "Access denied", session grants are reported in results, do not          │
 │   retry capability compile errors, small snippets, todos/ask, never        │
 │   end on a plan                                                            │
@@ -559,8 +589,7 @@ said and done, never the terminal's rendering:
   (the REPL was restarted by `/reset` or a mode switch: definitions are gone),
   `[user ran code]` (what the user ran with `/run`, as a fenced block, and its rendered
   result), and, on the first kept message after a context cut, `[context notice] The N
-  oldest messages … were dropped`. The loop's own `ContinueNudge` ("you ended your turn
-  with a plan …") is also a user message. Notes are *prepended* to the next user message
+  oldest messages … were dropped`. Notes are *prepended* to the next user message
   rather than inserted as messages of their own, again so that nothing already sent changes.
 * `Msg.Assistant(text, toolCalls, native)`: the model's prose and its `run_scala` calls
   (`ToolCall(id, name, arguments)`, the code as JSON), plus the provider's `NativeTurn` for
@@ -610,17 +639,18 @@ classified model. All of them are recorded under their own purpose in `/cost`.
 
 ## The agent loop
 
-`Agent.turn` is a loop of *rounds* (`Turn.round`: ask the model, then run tools / resume /
-nudge / stop) with per-turn counters against `Agent.Max*` and `config.maxToolCalls`:
+`Agent.turn` is a loop of *rounds* (`Turn.round`: ask the model, then run tools / resume / stop) with per-turn counters against `Agent.Max*` and `config.maxToolCalls`:
 
 * tool calls → run them (`run_scala`, one at a time), append the results and ask again;
 * `unfinished` (the provider paused after a server-side tool such as web search, Anthropic
   `pause_turn`) → ask again so the model resumes, at most `MaxResumes` times;
-* a reply that merely announces a next step ("Let me check…", `Agent.looksUnfinished`) →
-  nudge the model to act, at most `MaxNudges` times;
-* the exhausted tool budget is reported to the model as an error result, and the turn is
-  stopped after `MaxBudgetRejections` rounds of it insisting;
-* anything else is the final answer.
+* the tool budget (`maxToolCalls`, 200 by default) is a checkpoint: when it is used up the
+  UI is asked (`AgentUI.confirmMoreToolCalls`; the TUI shows a yes/no pop-up, `-p` runs and
+  test doubles decline) whether the turn may go on for another budget; if not, the model gets
+  an error result and the turn is stopped after `MaxBudgetRejections` rounds of it insisting;
+* anything else is the final answer. (There is no "nudge" any more: a heuristic over the
+  reply's prose misread too many closings; the system prompt says that ending without a tool
+  call means finished, and the user can always say "go on".)
 
 `cancelled` is polled while streaming and before every tool call; an interrupted turn ends
 with an `[interrupted by user]` assistant message so the history stays well-formed. A
