@@ -480,10 +480,12 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 │   writing Scala and running it with run_scala"                             │  mode (→ REPL restart)
 │ Environment: working directory, OS, REPL flags, whether a classified       │
 │   model is configured (never which), the gitignore note                    │
-│ How to work: explore → replace/write → verify with exec → println,         │
-│   request* on "Access denied", session grants are reported in results,     │
-│   do not retry capability compile errors, small snippets, todos/ask,       │
-│   never end on a plan                                                      │
+│ How to work: orient first (find and read AGENTS.md/CLAUDE.md/README/…,     │
+│   learn the build and test commands from them and the build files),        │
+│   explore → replace/write → verify with exec → println, request* on        │
+│   "Access denied", session grants are reported in results, do not          │
+│   retry capability compile errors, small snippets, todos/ask, never        │
+│   end on a plan                                                            │
 │ Sandbox mode paragraph (Prompts.modeSection): the givens of the mode       │
 │   and what does not compile in it                                          │
 │ Rules of the sandbox: what is forbidden, read-only vs full views,          │

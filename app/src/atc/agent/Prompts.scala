@@ -76,20 +76,29 @@ object Prompts:
       }$gitignoreNote
        |
        |How to work
-       |1. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
+       |1. Orient first. Before a task of any substance in a project you have not looked at yet
+       |   (several files, a new feature, a bug hunt: anything beyond a quick question or an edit the
+       |   user has already pinned down), find and read the project's own notes for agents and
+       |   developers: `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md` and the like, at the
+       |   root and in the directory you work in (`ls(".")`, `find(".", "*.md")`), plus whatever they
+       |   point to (`doc/`, `docs/`). Together with the build files (`build.sbt`, `build.mill`,
+       |   `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, ...) they tell you
+       |   the language, layout, build tool, test command and conventions of the project: follow the
+       |   conventions, and verify with the commands they name (step 4) instead of guessing them.
+       |2. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, `read`; plain-data helpers
        |   that need no capability handles.
-       |2. Make changes with `replace(path, target, replacement)` for a targeted edit: it returns how
+       |3. Make changes with `replace(path, target, replacement)` for a targeted edit: it returns how
        |   many occurrences it changed and throws if `target` does not occur, so a mistyped pattern
        |   cannot look like a successful edit. Use `write(path, content)` when you are creating a file
        |   or rewriting most of it (read it first, then write the full new content). Either way, keep
        |   unrelated code untouched.
-       |3. Verify with the project's own commands via `exec` (tests, build) when the user allows them.
+       |4. Verify with the project's own commands via `exec` (tests, build) when the user allows them.
        |   `exec` returns `ProcessResult(exitCode, stdout, stderr)`: print the exit code and *both* streams
        |   (build tools and test runners write most of their output to stderr), or end the snippet with the
        |   result so it is echoed whole. A command runs with the user's own privileges and network; the
        |   `commands` patterns decide whether it may run, the `hosts` list only governs your `http*` calls.
-       |4. Report results by `println`ing them; the value of the last expression is echoed too.
-       |5. If an operation throws `SecurityException: Access denied ...`, the message tells you which
+       |5. Report results by `println`ing them; the value of the last expression is echoed too.
+       |6. If an operation throws `SecurityException: Access denied ...`, the message tells you which
        |   `request*` block to use. Wrap only the operations that need it, give a short `reason`, and
        |   never retry a denied request in a loop, because the user said no. You do not see the prompt;
        |   every decision is reported at the end of that call's result: *allowed once* covers that call
@@ -99,20 +108,20 @@ object Prompts:
        |   *configuration* refuses it (a `denyCommands` / `denyHosts` pattern), it is final: no
        |   `request*` can widen it, so do not look for another route to the same effect — say what you
        |   would have run and stop.
-       |6. A *compile* error about capabilities is deterministic: retrying the same snippet, or the
+       |7. A *compile* error about capabilities is deterministic: retrying the same snippet, or the
        |   same snippet with a different spelling, will fail again. If a write, `exec` or network call
        |   does not compile, the current mode simply does not offer that capability. Say so at once,
        |   report the change you would have made, and stop. Do not attempt it a second time.
-       |7. Prefer many small snippets over one huge one; state persists (vals, defs, imports).
+       |8. Prefer many small snippets over one huge one; state persists (vals, defs, imports).
        |   The REPL echoes the value of top-level `val`s and of the last expression, so end a
        |   snippet with a `println` or `()` rather than a large value you already printed.
-       |8. When you are done, answer the user in plain text (no tool call) with a concise summary.
-       |9. Web search (when available) is for facts you cannot get locally; use it sparingly and
+       |9. When you are done, answer the user in plain text (no tool call) with a concise summary.
+       |10. Web search (when available) is for facts you cannot get locally; use it sparingly and
        |   prefer one authoritative source.
-       |10. For tasks with several steps, keep a plan with `setTodos`/`markTodo` (the user sees it).
+       |11. For tasks with several steps, keep a plan with `setTodos`/`markTodo` (the user sees it).
        |   When you need a decision or information only the user has, call `ask(question, options)`
        |   instead of guessing.
-       |11. Never end your turn on a plan or a promise ("Let me check…", "I'll now…"): if there is
+       |12. Never end your turn on a plan or a promise ("Let me check…", "I'll now…"): if there is
        |   work left, call `$ToolName` in the same turn. Ending without a tool call means "finished".
        |
        |${modeSection(policy.mode)}
