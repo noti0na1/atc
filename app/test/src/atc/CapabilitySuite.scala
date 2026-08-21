@@ -85,6 +85,27 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertFails(run("""val ro: IOCap^{io.rd} = io; fileSystem(using ro)""")) // no such API method
     assertFails(run("""readOnlyFileSystem""")) // nor this one: `val ro: FileSystem^{fs.rd} = fs` is the idiom
 
+  test("Exec and Network have no read-only view at all, so commands and requests stay out of Classified.map"):
+    // Unlike the file-system capabilities (Stateful), Exec/Network are exclusive-only:
+    // the compiler refuses to form `ex.rd` / `net.rd`, and a bare `Exec`/`Network`
+    // cannot alias a capability either. Every API method demands `Exec^` / `Network^`.
+    assertFails(run("""val rex: Exec^{ex.rd} = ex; 1"""), "cannot flow into capture set")
+    assertFails(run("""val rn: Network^{net.rd} = net; 1"""), "cannot flow into capture set")
+    assertOk(run("""val e: Exec = ex; 1""")) // a bare `Exec` type is `Exec^` (full), not a read-only view...
+    assertFails(run(
+      """val e2: Exec = ex; val rofs2: FileSystem^{fs.rd} = fs; classify("s").map(s => exec("echo", List(s))(using e2, rofs2).stdout)"""
+    )) // ...so it is just as unusable in map
+    assertFails(
+      run("""val rofs: FileSystem^{fs.rd} = fs; classify("s").map(s => exec("echo", List(s))(using ex, rofs).stdout)""")
+    )
+    assertFails(
+      run("""classify("s").map(s => { val r: Exec^{ex.rd} = ex; exec("echo", List(s))(using r, fs).stdout })""")
+    )
+    assertFails(run("""classify("u").map(u => httpGet(u)(using net))"""))
+    assertFails(run(
+      """def viaDef(s: String)(using e: Exec^, f: FileSystem) = exec("echo", List(s))(using e, f).stdout; classify("s").map(viaDef)"""
+    ))
+
   test("a read-only view of fs can read and never write, even inside Classified.map"):
     assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; rofs.access("a.txt").read().length"""))
     assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; write("a.txt", "x")(using rofs)"""), "read-only")

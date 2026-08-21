@@ -139,12 +139,15 @@ abstract class FileEntry private[atc] () extends Cap:
   def walkClassified(): Classified[List[String]]
 
 /** Permission to run commands (`given ex`). Derived by the sandbox only from a
- *  full `IOCap^`, so it does not exist in read-only mode. */
+ *  full `IOCap^`, so it does not exist in read-only mode. Unlike the file-system
+ *  capabilities it has no read-only view: it is all or nothing (`Exec^`), which
+ *  is what keeps commands out of `Classified.map`. */
 @assumeSafe
 abstract class Exec private[atc] () extends caps.ExclusiveCapability
 
 /** Permission to reach network hosts (`given net`). Derived by the sandbox only
- *  from a full `IOCap^`, so it exists only in full mode. */
+ *  from a full `IOCap^`, so it exists only in full mode. No read-only view either:
+ *  `Network^` or nothing, so no request can be made from `Classified.map`. */
 @assumeSafe
 abstract class Network private[atc] () extends caps.ExclusiveCapability
 
@@ -494,8 +497,8 @@ trait Interface:
 
   /** Ask the user for permission to run commands matching `commands` (patterns
    *  over the full command line, `*` a wildcard: `"git status"`, `"npm *"`). */
-  def requestExec[T](commands: Iterable[String])(op: Exec^ ?=> T)(using UserIO^, Exec): T
-  def requestExec[T](commands: Iterable[String], reason: String)(op: Exec^ ?=> T)(using UserIO^, Exec): T
+  def requestExec[T](commands: Iterable[String])(op: Exec^ ?=> T)(using UserIO^, Exec^): T
+  def requestExec[T](commands: Iterable[String], reason: String)(op: Exec^ ?=> T)(using UserIO^, Exec^): T
 
   /** Run a command, without a shell. `command` is split like a simple shell line
    *  (quotes honoured), so `exec("git status --short")` equals
@@ -516,16 +519,16 @@ trait Interface:
    *  through `FileSystem`, so a `requestFiles` block covers it), and
    *  `RuntimeException` after `timeoutMs` (default 10 minutes) with the output so far;
    *  the time a command runs does not count against the snippet's own timeout. */
-  def exec(command: String)(using Exec, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String], options: ExecOptions)(using Exec, FileSystem): ProcessResult
+  def exec(command: String)(using Exec^, FileSystem): ProcessResult
+  def exec(command: String, args: Seq[String])(using Exec^, FileSystem): ProcessResult
+  def exec(command: String, args: Seq[String], workingDir: String)(using Exec^, FileSystem): ProcessResult
+  def exec(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): ProcessResult
 
   /** The stdout of a command that succeeded; throws `RuntimeException` with the exit
    *  code and stderr when it did not (use `exec` to inspect a failure). */
-  def execOutput(command: String)(using Exec, FileSystem): String
-  def execOutput(command: String, args: Seq[String])(using Exec, FileSystem): String
-  def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec, FileSystem): String
+  def execOutput(command: String)(using Exec^, FileSystem): String
+  def execOutput(command: String, args: Seq[String])(using Exec^, FileSystem): String
+  def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): String
 
   /** Start a command (the same line grammar and the same checks as `exec`) and
    *  return at once with a `Process` to talk to: for REPLs, servers and watchers.
@@ -533,51 +536,51 @@ trait Interface:
    *  `workingDir` applies, `timeoutMs` does not: it runs until it exits, you `kill()`
    *  it, or the session ends. At most 8 live at a time; `kill()` what you are done
    *  with. The user sees it start, what you send it, and it exit. */
-  def spawn(command: String)(using ex: Exec, fs: FileSystem): Process^{ex}
-  def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process^{ex}
+  def spawn(command: String)(using ex: Exec^, fs: FileSystem): Process^{ex}
+  def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem): Process^{ex}
   /** The processes you started that are still running (to find a handle again). */
-  def runningProcesses(using ex: Exec): List[Process^{ex}]
+  def runningProcesses(using ex: Exec^): List[Process^{ex}]
 
   // ── Network ─────────────────────────────────────────────────────
 
   /** Ask the user for permission to reach `hosts` (`*` a wildcard, e.g. `"*.github.com"`). */
-  def requestNetwork[T](hosts: Iterable[String])(op: Network^ ?=> T)(using UserIO^, Network): T
-  def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network^ ?=> T)(using UserIO^, Network): T
+  def requestNetwork[T](hosts: Iterable[String])(op: Network^ ?=> T)(using UserIO^, Network^): T
+  def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network^ ?=> T)(using UserIO^, Network^): T
 
   /** HTTP GET: the body of a 2xx/3xx response; a status of 400 or more throws
    *  `RuntimeException` with the status and the start of the body (use `httpRequest`
    *  to inspect a failure). Redirects are not followed (each URL is checked against
    *  the allowed hosts). A `secretHeaders` value (e.g. a token read with
    *  `readClassified`) is sent but never shown to you. Only `http`/`https` URLs. */
-  def httpGet(url: String)(using Network): String
-  def httpGet(url: String, headers: Map[String, String])(using Network): String
+  def httpGet(url: String)(using Network^): String
+  def httpGet(url: String, headers: Map[String, String])(using Network^): String
   def httpGet(url: String, headers: Map[String, String],
-              secretHeaders: Map[String, Classified[String]])(using Network): String
+              secretHeaders: Map[String, Classified[String]])(using Network^): String
 
   /** HTTP POST, same contract as `httpGet`. `contentType` (default
    *  `application/json`) becomes the `Content-Type` header unless `headers` or
    *  `secretHeaders` already set it. */
-  def httpPost(url: String, body: String)(using Network): String
-  def httpPost(url: String, body: String, contentType: String)(using Network): String
-  def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network): String
+  def httpPost(url: String, body: String)(using Network^): String
+  def httpPost(url: String, body: String, contentType: String)(using Network^): String
+  def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network^): String
   def httpPost(url: String, body: String, contentType: String,
                headers: Map[String, String],
-               secretHeaders: Map[String, Classified[String]])(using Network): String
+               secretHeaders: Map[String, Classified[String]])(using Network^): String
 
   /** Any method; the raw status and body, never throws on an HTTP error. */
-  def httpRequest(method: String, url: String)(using Network): HttpResponse
-  def httpRequest(method: String, url: String, body: String)(using Network): HttpResponse
-  def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using Network): HttpResponse
+  def httpRequest(method: String, url: String)(using Network^): HttpResponse
+  def httpRequest(method: String, url: String, body: String)(using Network^): HttpResponse
+  def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String,
                   headers: Map[String, String],
-                  secretHeaders: Map[String, Classified[String]])(using Network): HttpResponse
+                  secretHeaders: Map[String, Classified[String]])(using Network^): HttpResponse
 
   /** POST a classified body; the response stays classified. */
-  def httpPostClassified(url: String, body: Classified[String])(using Network): Classified[String]
-  def httpPostClassified(url: String, body: Classified[String], contentType: String)(using Network): Classified[String]
+  def httpPostClassified(url: String, body: Classified[String])(using Network^): Classified[String]
+  def httpPostClassified(url: String, body: Classified[String], contentType: String)(using Network^): Classified[String]
   def httpPostClassified(url: String, body: Classified[String], contentType: String,
                          headers: Map[String, String],
-                         secretHeaders: Map[String, Classified[String]])(using Network): Classified[String]
+                         secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
   // ── Output ──────────────────────────────────────────────────────
 

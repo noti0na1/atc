@@ -561,8 +561,10 @@ permissions" block kept up to date in the prompt, would invalidate the cached hi
 every grant (or, with a single breakpoint on the system prompt, never cache the history at
 all), which is what an earlier design did. The prompt embeds the *whole* source of
 `Interface.scala` (the same text `/interface` prints), which is why wording in that file is
-prompt wording, and a mode paragraph, which is why a mode switch restarts the REPL and
-re-renders the prompt. It says *whether* a classified model is configured (so the model
+prompt wording and the *only* place a method's semantics are described (the prompt's own
+prose carries workflow, the permission conversation and REPL/safe-mode quirks, and points at
+the docstrings for everything else, so an API change never needs a prompt change), and a mode
+paragraph, which is why a mode switch restarts the REPL and re-renders the prompt. It says *whether* a classified model is configured (so the model
 knows if `chat(Classified)` works), never which one. `Agent.systemPrompt` is recomputed
 before every round from the live `Policy`, so nothing is cached on the ATC side; it just
 comes out the same.

@@ -9,11 +9,10 @@ object Prompts:
   val ToolName = "run_scala"
 
   val toolDescription: String =
-    """Run a Scala 3 snippet in the persistent, capability-checked REPL. This is the ONLY way to
-      |act (read/write files, run commands, fetch URLs). The snippet is compiled first (with capture
-      |checking and safe mode) and only executed if it compiles; you get compiler errors, the printed
-      |output and the values of top-level expressions back. Definitions persist between calls.
-      |Keep snippets small and focused; print what you need to see.""".stripMargin
+    """Run a Scala 3 snippet in the persistent, capability-checked sandbox REPL: the only way to act.
+      |The snippet is compiled first and only executed if it compiles; you get compiler errors, the
+      |printed output and the values of top-level expressions back. Definitions persist between
+      |calls.""".stripMargin
 
   val toolParameters: String =
     """{"type":"object","properties":{"code":{"type":"string","description":"Scala 3 code to compile and run in the sandbox REPL."}},"required":["code"],"additionalProperties":false}"""
@@ -76,38 +75,28 @@ object Prompts:
       }$gitignoreNote
        |
        |How to work
-       |1. Orient first. Before a task of any substance in a project you have not looked at yet
-       |   (several files, a new feature, a bug hunt: anything beyond a quick question or an edit the
-       |   user has already pinned down), find and read the project's own notes for agents and
-       |   developers: `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md` and the like, at the
-       |   root and in the directory you work in (`ls(".")`, `find(".", "*.md")`), plus whatever they
-       |   point to (`doc/`, `docs/`). Together with the build files (`build.sbt`, `build.mill`,
-       |   `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, ...) they tell you
-       |   the language, layout, build tool, test command and conventions of the project: follow the
-       |   conventions, and verify with the commands they name (step 4) instead of guessing them.
+       |1. Orient first. Before any task of substance in a project you have not looked at yet
+       |   (anything beyond a quick question or an edit the user has already pinned down), find and
+       |   read the project's notes for agents and developers (`AGENTS.md`, `CLAUDE.md`, `README.md`,
+       |   `CONTRIBUTING.md`, what they point to under `doc/`) and its build files (`build.sbt`,
+       |   `build.mill`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, ...):
+       |   they tell you the language, layout, build tool, test command and conventions. Follow the
+       |   conventions and verify with the commands they name (step 4) instead of guessing.
        |2. Explore before editing: `ls`, `walk`, `find`, `grepRecursive`, and `cat(path)` /
-       |   `cat(path, from, to)` to look at a file with line numbers (like `cat -n` / `sed -n 'a,bp'`;
-       |   the numbers are not in the file, so never copy them into a `sed` pattern); `read`/`readLines`
-       |   give the raw text to code with. Plain-data helpers, no capability handles needed.
-       |3. Make changes with `sed(path, regex, replacement)`, the targeted edit (like
-       |   `sed -E -i 's/../../g'`: `^`/`$$` per line, `$$1`/`\\1` groups): it returns how many matches
-       |   it changed and throws if nothing matches, so a mistyped pattern cannot look like a
-       |   successful edit; compare the count with what you expected. For literal code (with `(`,
-       |   `.`, `[`, `$$`, `*`, ...) quote both sides: `sed(p, quote(old), quoteReplacement(new))`. Use
-       |   `write(path, content)` when you are creating a file or rewriting most of it (read it first,
-       |   then write the full new content). Either way, keep unrelated code untouched.
-       |4. Verify with the project's own commands via `exec` (tests, build) when the user allows them.
-       |   `exec("npm test")` is parsed like a shell line (quotes, `|`, `< f`, `> f`, `>> f`, `2>&1` work; every
-       |   command of a pipeline is checked on its own), but there is no shell beyond that: no `&&`, `;`,
-       |   globs or `$$VAR` (run steps one by one; feed input with `ExecOptions(stdin = ...)`; raise
-       |   `ExecOptions(timeoutMs = ...)` for very long builds, the default is 10 minutes). `exec` returns `ProcessResult(exitCode, stdout, stderr)` and never throws on a failing
-       |   command: print the exit code and *both* streams (build tools and test runners write most of
-       |   their output to stderr), or end the snippet with the result so it is echoed whole;
-       |   `execOutput` gives only stdout and throws when the command fails. `spawn(line)` starts a
-       |   process you talk to (`send`/`sendLine`, `readUntil(regex, ms)`, `read`, `kill`) for REPLs, dev
-       |   servers and watchers; it lives until you `kill()` it or the session ends. A command runs with the
-       |   user's own privileges and network; the `commands` patterns decide whether it may run, the
-       |   `hosts` list only governs your `http*` calls.
+       |   `cat(path, from, to)` to look at a file with line numbers (`read`/`readLines` give the raw
+       |   text to code with).
+       |3. Edit with `sed(path, regex, replacement)` (for literal text: `quote`/`quoteReplacement`), or
+       |   `write(path, content)` for a new file or a rewrite (read it first). `sed` returns how many
+       |   matches it changed and throws when nothing matches: compare the count with what you
+       |   expected. Keep unrelated code untouched.
+       |4. Verify with the project's own commands via `exec` (and `spawn` for servers and REPLs) when
+       |   the user allows them. `exec` never throws on a failing command: print the exit code and
+       |   *both* streams (build tools and test runners write most of their output to stderr), or end
+       |   the snippet with the result so it is echoed whole. A command runs with the user's own
+       |   privileges and network; the `commands` patterns decide whether it may run, the `hosts` list
+       |   only governs your `http*` calls.
+       |   Every helper named here is documented in the API reference below, grammar and failure modes
+       |   included: read its docstring before the first use rather than guessing.
        |5. Report results by `println`ing them; the value of the last expression is echoed too.
        |6. If an operation throws `SecurityException: Access denied ...`, the message tells you which
        |   `request*` block to use. Wrap only the operations that need it, give a short `reason`, and
@@ -140,16 +129,15 @@ object Prompts:
        |Rules of the sandbox (compile errors will tell you when you slip)
        |- Only the API below plus the safe Scala standard library / JDK utilities are available.
        |  java.io, java.nio, java.net, ProcessBuilder, reflection, System.*, threads are forbidden.
-       |- Capabilities have a read/write *mode* in their type: a bare `FileSystem` / `IOCap` is the read-only
-       |  view, `FileSystem^` / `IOCap^` (or `^{io}` derived from a full `io`) is the full one. Reading works
-       |  with either; `write`, `append`, `mkdir`, `delete`, `writeClassified`, `access(...)` and deriving
-       |  `Exec`/`Network` need the full one, so a helper that writes must say `(using fs: FileSystem^)`;
-       |  `val ro: FileSystem^{fs.rd} = fs` is a read-only view for code that must not write (it can also
-       |  read files inside `Classified.map`, where the full `fs` may not be captured).
+       |- Capability types carry a read/write mode (the API header explains `^`, `update def` and
+       |  `.rd`): a helper that writes must say `(using fs: FileSystem^)`, and
+       |  `val ro: FileSystem^{fs.rd} = fs` is a read-only view for code that must not write (it can
+       |  also read files inside `Classified.map`, where the full `fs` may not be captured).
        |- Prefer the path-based helpers (`read`, `write`, `ls`, `walk`, `exists`, ...) over
-       |  `access(...)` handles: a top-level `val` holding a `FileEntry` needs an explicit type
-       |  (`val e: FileEntry^{fs} = access("x")`). `def`s and inline expressions are always fine.
-       |  Top-level `var`s and top-level lambdas capturing `println` are rejected; use `def`.
+       |  `access(...)` handles. A top-level `val` holding a capturing value (`FileEntry`, `Process`)
+       |  needs an explicit type (`val e: FileEntry^{fs} = access("x")`, `val p: Process^{ex} = spawn("...")`);
+       |  `def`s and inline expressions are always fine. Top-level `var`s and top-level lambdas
+       |  capturing `println` are rejected; use `def`.
        |- Effects inside higher-order functions of `Option` are rejected (`opt.foreach(println)` —
        |  use `match` instead); `List`/`Map` iteration with effects is fine.
        |- Mutable state: a `var` is allowed, but it must sit **inside a `def`, a block or a lambda,
@@ -170,10 +158,10 @@ object Prompts:
        |  a bare `catch case _ =>`, and any use of `InterruptedException`/`ThreadDeath` are rejected.
        |  Catch a specific type instead, e.g. `catch case _: Exception` (or a `RuntimeException` subtype);
        |  a fatal error aborts the run by design. (`NonFatal(e)` is unavailable in safe mode.)
-       |- Classified data: `readClassified` gives `Classified[String]`; you can only `map` it with
-       |  pure functions (no `io`/`fs`/... captured, not even read-only), `println` it (the user sees
-       |  the content, you see `Classified(***)`), `writeClassified` it, or `chat(classified)` with the
-       |  classified model. You cannot read it yourself.
+       |- Classified data (`readClassified`, `Classified[T]`): you never see the content; only `map`
+       |  with a pure function compiles (no effect, no capability, a read-only `fs` being the one
+       |  exception); the ways out are in the `Classified` doc below (`println` shows it to the user
+       |  only, `writeClassified`, `chat` with the classified model).
        |
        |API reference (all members are in scope, together with the givens of the current mode, see above)
        |```scala
