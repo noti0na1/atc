@@ -49,9 +49,13 @@ private[config] object ObjectText:
           while !done do
             text(i) match
               case '"' => skipString()
-              case '{' | '[' => depth += 1; i += 1
+              case '{' | '[' =>
+                depth += 1
+                i += 1
               case '}' | ']' if depth == 0 => done = true
-              case '}' | ']' => depth -= 1; i += 1
+              case '}' | ']' =>
+                depth -= 1
+                i += 1
               case ',' if depth == 0 => done = true
               case _ => i += 1
           var valueEnd = i

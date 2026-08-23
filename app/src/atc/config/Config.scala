@@ -147,19 +147,21 @@ object Config:
     * paths created. */
   def ensureGlobal(path: Path = globalPath): List[Path] =
     val keys = path.getParent.nn.resolve(KeysFile).nn
-    List(path -> globalTemplate, keys -> keysTemplate).flatMap { (target, content) =>
-      Option.when(!Files.exists(target)) {
-        Option(target.getParent).foreach(Files.createDirectories(_))
-        if target.getFileName.toString == KeysFile then writeOwnerOnly(target, content)
-        else Files.writeString(target, content)
-        target
-      }
+    List(
+      writeIfMissing(path, globalTemplate, ownerOnly = false),
+      writeIfMissing(keys, keysTemplate, ownerOnly = true),
+    ).flatten
+
+  private def writeIfMissing(target: Path, content: String, ownerOnly: Boolean): Option[Path] =
+    Option.when(!Files.exists(target)) {
+      Option(target.getParent).foreach(Files.createDirectories(_))
+      if ownerOnly then writeOwnerOnly(target, content) else Files.writeString(target, content)
+      target
     }
 
   /** Write `content` to `target` with owner-only access on POSIX file systems,
     * falling back to a regular write when POSIX permissions are unavailable. */
   private def writeOwnerOnly(target: Path, content: String): Unit =
-    import java.nio.file.StandardOpenOption.{CREATE, WRITE}
     import java.nio.file.attribute.PosixFilePermissions
     val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
     try
@@ -178,13 +180,16 @@ object Config:
       Files.createDirectories(config.getParent)
       Files.writeString(config, projectTemplate)
       val ignore = config.getParent.nn.resolve(".gitignore").nn
-      val ignoreChanged =
-        if !Files.exists(ignore) then { Files.writeString(ignore, KeysFile + "\n"); true }
-        else
-          val text = Files.readString(ignore).nn
-          if text.linesIterator.exists(_.trim == KeysFile) then false
-          else { Files.writeString(ignore, text.stripSuffix("\n") + "\n" + KeysFile + "\n"); true }
+      val ignoreChanged = ensureIgnored(ignore, KeysFile)
       config :: Option.when(ignoreChanged)(ignore).toList
+
+  private def ensureIgnored(path: Path, entry: String): Boolean =
+    val current = Option.when(Files.exists(path))(Files.readString(path).nn)
+    if current.exists(_.linesIterator.exists(_.trim == entry)) then false
+    else
+      val prefix = current.fold("")(_.stripSuffix("\n") + "\n")
+      Files.writeString(path, s"$prefix$entry\n")
+      true
 
   // ── layers ────────────────────────────────────────────────────────
 
@@ -357,58 +362,50 @@ object Config:
   private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
 
-  def validate(config: Config): Config =
-    def positive(name: String, value: Long): Unit =
-      if value <= 0 then throw IllegalArgumentException(s"Invalid config: $name must be greater than zero (was $value)")
+  private def invalid(message: String): Nothing = throw IllegalArgumentException(s"Invalid config: $message")
 
-    positive("maxToolOutputChars", config.maxToolOutputChars)
-    if config.maxToolCalls < 0 then
-      throw IllegalArgumentException(s"Invalid config: maxToolCalls must be non-negative (was ${config.maxToolCalls})")
-    config.executionTimeoutMs.foreach(positive("executionTimeoutMs", _))
+  private def requireValid(condition: Boolean, message: => String): Unit =
+    if !condition then invalid(message)
+
+  private def requirePositive(name: String, value: Long): Unit =
+    requireValid(value > 0, s"$name must be greater than zero (was $value)")
+
+  private def validateChoice(where: String, value: String, allowed: Set[String]): Unit =
+    requireValid(
+      allowed.contains(value.trim.toLowerCase),
+      s"$where must be one of ${allowed.mkString("|")} (was '$value')"
+    )
+
+  private def validateModel(provider: String, alias: String, model: ModelConfig): Unit =
+    val where = s"providers.$provider.models.$alias"
+    requireValid(alias.trim.nonEmpty, s"model aliases of provider '$provider' must not be blank")
+    requireValid(!alias.contains('/'), s"model alias '$alias' must not contain '/'")
+    requireValid(!model.name.exists(_.trim.isEmpty), s"$where.name must not be blank")
+    model.maxTokens.foreach(requirePositive(s"$where.maxTokens", _))
+    model.contextWindow.foreach(tokens => requirePositive(s"$where.contextWindow", tokens.toInt))
+    model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))
+    model.reasoning.foreach(validateChoice(s"$where.reasoning", _, ReasoningEfforts))
+    model.reasoningSummary.foreach(validateChoice(s"$where.reasoningSummary", _, ReasoningSummaries))
+
+  private def validateProvider(name: String, provider: ProviderConfig): Unit =
+    requireValid(name.trim.nonEmpty, "provider names must not be blank")
+    // `api` may be absent from a layer that only extends an earlier provider, but
+    // the fully merged provider must define it.
+    requireValid(
+      provider.api.exists(_.trim.nonEmpty),
+      s"provider '$name' has no api (expected anthropic | openai | openai-responses | echo)"
+    )
+    provider.models.foreach((alias, model) => validateModel(name, alias, model))
+
+  def validate(config: Config): Config =
+    requirePositive("maxToolOutputChars", config.maxToolOutputChars)
+    requireValid(config.maxToolCalls >= 0, s"maxToolCalls must be non-negative (was ${config.maxToolCalls})")
+    config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
     config.mode.foreach { m =>
       try Mode.parse(m)
-      catch case e: IllegalArgumentException => throw IllegalArgumentException(s"Invalid config: ${e.getMessage}")
+      catch case e: IllegalArgumentException => invalid(e.getMessage.nn)
     }
-    config.providers.foreach { (name, provider) =>
-      if name.trim.isEmpty then throw IllegalArgumentException("Invalid config: provider names must not be blank")
-      // `api` may be left out by a layer that only adds models to a provider an
-      // earlier layer defined; the combined provider must have one.
-      if !provider.api.exists(_.trim.nonEmpty) then
-        throw IllegalArgumentException(
-          s"Invalid config: provider '$name' has no api (expected anthropic | openai | openai-responses | echo)"
-        )
-      // A provider with no models is fine: an endpoint written down ready to
-      // use, or one a later layer fills in.
-      provider.models.foreach { (alias, model) =>
-        val where = s"providers.$name.models.$alias"
-        if alias.trim.isEmpty then
-          throw IllegalArgumentException(s"Invalid config: model aliases of provider '$name' must not be blank")
-        // `/` separates provider from alias in a model reference.
-        if alias.contains('/') then
-          throw IllegalArgumentException(s"Invalid config: model alias '$alias' must not contain '/'")
-        if model.name.exists(_.trim.isEmpty) then
-          throw IllegalArgumentException(s"Invalid config: $where.name must not be blank")
-        model.maxTokens.foreach(positive(s"$where.maxTokens", _))
-        model.contextWindow.foreach(t => positive(s"$where.contextWindow", t.toInt))
-        model.temperature.foreach { value =>
-          if !value.isFinite then throw IllegalArgumentException(s"Invalid config: $where.temperature must be finite")
-        }
-        // Enum-valued settings: a typo here would otherwise throw deep inside
-        // every request, on every turn.
-        model.reasoning.foreach { r =>
-          if !ReasoningEfforts.contains(r.trim.toLowerCase) then
-            throw IllegalArgumentException(
-              s"Invalid config: $where.reasoning must be one of ${ReasoningEfforts.mkString("|")} (was '$r')"
-            )
-        }
-        model.reasoningSummary.foreach { s =>
-          if !ReasoningSummaries.contains(s.trim.toLowerCase) then
-            throw IllegalArgumentException(
-              s"Invalid config: $where.reasoningSummary must be one of ${ReasoningSummaries.mkString("|")} (was '$s')"
-            )
-        }
-      }
-    }
+    config.providers.foreach(validateProvider)
     // Fail here rather than at the first request: a typo in `model` is a
     // config error, and the catalog message lists what is configured.
     val catalog = ModelCatalog.from(config)

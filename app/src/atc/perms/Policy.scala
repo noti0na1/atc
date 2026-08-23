@@ -129,7 +129,9 @@ final class Policy(
 
   /** Refuse an operation on a handle, such as a spawned `Process`, after its
     * scope closes. This is the same check applied to an escaped capability. */
-  def requireScopeOpen(id: ScopeId): Unit = { scope(id); () }
+  def requireScopeOpen(id: ScopeId): Unit =
+    scope(id)
+    ()
 
   /** Whether a capability in `caller` may reach a handle created in `owned`.
     * Both scopes must remain open and belong to the same chain, meaning one is
@@ -138,8 +140,7 @@ final class Policy(
   def scopeVisibleFrom(caller: ScopeId, owned: ScopeId): Boolean =
     (scopes.get(caller), scopes.get(owned)) match
       case (Some(c), Some(o)) =>
-        val callerChain = c.chain.map(_.id).toSet
-        callerChain.contains(owned) || o.chain.map(_.id).toSet.contains(caller)
+        c.chain.exists(_.id == owned) || o.chain.exists(_.id == caller)
       case _ => false
 
   // ── files ─────────────────────────────────────────────────────────
@@ -236,7 +237,12 @@ final class Policy(
     denied: List[String],
     matches: (String, String) => Boolean
   ): Unit =
-    val hits = for r <- requested; d <- denied if matches(r, d) || matches(d, r) yield s"'$r' (deny pattern '$d')"
+    val hits =
+      for
+        requestedPattern <- requested
+        deniedPattern <- denied
+        if matches(requestedPattern, deniedPattern) || matches(deniedPattern, requestedPattern)
+      yield s"'$requestedPattern' (deny pattern '$deniedPattern')"
     if hits.nonEmpty then
       throw SecurityException(
         s"Access denied by the configuration: the $what ${if hits.size == 1 then "pattern" else "patterns"} " +
@@ -251,7 +257,8 @@ final class Policy(
     * the base scope. Returns normally when the caller may open its scope. */
   private def decide(request: PermissionRequest, what: String)(remember: => Unit): Unit =
     val decision = prompter.ask(request)
-    decisionLog.synchronized(decisionLog += (decision -> what))
+    decisionLog.synchronized:
+      decisionLog += (decision -> what)
     decision match
       case Decision.Deny => throw SecurityException(s"Access denied by the user: $what")
       case Decision.AllowOnce => ()
@@ -265,8 +272,11 @@ final class Policy(
     * revocation. The prompt itself never changes with a decision, so every
     * request keeps its prefix. */
   private val decisionLog = scala.collection.mutable.ListBuffer[(Decision, String)]()
-  def decisionCount: Int = decisionLog.synchronized(decisionLog.length)
-  def decisionsSince(count: Int): List[(Decision, String)] = decisionLog.synchronized(decisionLog.drop(count).toList)
+  def decisionCount: Int = decisionLog.synchronized:
+    decisionLog.length
+
+  def decisionsSince(count: Int): List[(Decision, String)] = decisionLog.synchronized:
+    decisionLog.drop(count).toList
 
   private def openScope(
     parent: Scope,
@@ -292,7 +302,8 @@ final class Policy(
     base.fileGrants = Nil
     base.commands = Nil
     base.hosts = Nil
-    decisionLog.synchronized(decisionLog.clear())
+    decisionLog.synchronized:
+      decisionLog.clear()
 
   def openScopeCount: Int = scopes.size - 1
 

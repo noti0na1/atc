@@ -159,39 +159,49 @@ final class Agent(
         //  - Otherwise, the history already ends with an assistant message or tool
         //    result and needs no repair; another assistant marker would be invalid.
         case e if scala.util.control.NonFatal(e) =>
-          val marker = s"[turn failed: ${Option(e.getMessage).getOrElse(e.toString)}]"
-          history.lastOption match
-            case Some(Msg.Assistant(_, calls, _)) if calls.nonEmpty =>
-              history :+= Msg.ToolResults(calls.map(c => ToolResult(c.id, marker, isError = true)))
-            case Some(Msg.User(_)) =>
-              history :+= Msg.Assistant(marker, Nil, None)
-            case _ => ()
+          repairHistoryAfter(e)
           throw e
+
+    private def repairHistoryAfter(error: Throwable): Unit =
+      val detail = Option(error.getMessage).getOrElse(error.toString)
+      val marker = s"[turn failed: $detail]"
+      history.lastOption match
+        case Some(Msg.Assistant(_, calls, _)) if calls.nonEmpty =>
+          history :+= Msg.ToolResults(calls.map(c => ToolResult(c.id, marker, isError = true)))
+        case Some(Msg.User(_)) =>
+          history :+= Msg.Assistant(marker, Nil, None)
+        case _ => ()
 
     /** Ask the model once, record its answer, then act on it. */
     private def round(): Outcome =
       fitHistoryToContext()
       val estimated = fixedTokens + history.map(Agent.estimateTokens).sum
       ui.status(s"${model.alias} is thinking")
-      val completion =
-        try model.complete(systemPrompt, history, tools, sink, cancelled)
-        catch
-          case _: CancelledException =>
-            ui.assistantEnd()
-            return interrupted()
-      ui.assistantEnd()
-      recordUsage(Agent.Turns, completion.usage)
-      // The provider counted the request we just sent: correct the estimator with it.
+      completeRound() match
+        case None => interrupted()
+        case Some(completion) =>
+          ui.assistantEnd()
+          recordUsage(Agent.Turns, completion.usage)
+          calibrateTokenEstimate(completion, estimated)
+          history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
+          if completion.stopReason == "refusal" then
+            ui.warn("The model refused this request (stop_reason=refusal).")
+
+          if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
+          else if cancelled() then Done
+          else if completion.unfinished && resumes < Agent.MaxResumes then resume()
+          else Done
+
+    private def completeRound(): Option[Completion] =
+      try Some(model.complete(systemPrompt, history, tools, sink, cancelled))
+      catch
+        case _: CancelledException =>
+          ui.assistantEnd()
+          None
+
+    private def calibrateTokenEstimate(completion: Completion, estimated: Long): Unit =
       if completion.usage.input >= Agent.CalibrationMinTokens && estimated > 0 then
         tokenCalibration = (completion.usage.input.toDouble / estimated).max(0.25).min(8.0)
-      history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
-      if completion.stopReason == "refusal" then
-        ui.warn("The model refused this request (stop_reason=refusal).")
-
-      if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
-      else if cancelled() then Done
-      else if completion.unfinished && resumes < Agent.MaxResumes then resume()
-      else Done
 
     /** When the model has a `contextWindow`, drop the oldest exchanges from the
       * history until the next request should fit it, leaving room for the
@@ -278,16 +288,17 @@ final class Agent(
 
     private def runScala(call: ToolCall): ToolResult =
       val code = Json.parseObject(call.arguments).value.get("code").flatMap(_.strOpt).getOrElse("")
-      if code.trim.isEmpty then return ToolResult(call.id, "Missing 'code' argument.", isError = true)
-      ui.toolStart(code)
-      val start = System.nanoTime()
-      val decisionsBefore = policy.decisionCount
-      val result = session.run(code)
-      // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
-      val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
-      ui.toolEnd(result, millis)
-      val rendered = Agent.renderForModel(result, config.maxToolOutputChars, policy.decisionsSince(decisionsBefore))
-      ToolResult(call.id, rendered, isError = !result.success)
+      if code.trim.isEmpty then ToolResult(call.id, "Missing 'code' argument.", isError = true)
+      else
+        ui.toolStart(code)
+        val start = System.nanoTime()
+        val decisionsBefore = policy.decisionCount
+        val result = session.run(code)
+        // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
+        val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
+        ui.toolEnd(result, millis)
+        val rendered = Agent.renderForModel(result, config.maxToolOutputChars, policy.decisionsSince(decisionsBefore))
+        ToolResult(call.id, rendered, isError = !result.success)
 
 object Agent:
   /** Purposes a model call is recorded under (`/cost`). */

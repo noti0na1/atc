@@ -24,6 +24,7 @@ final class FileSystemImpl(val scope: ScopeId, val host: Host) extends FileSyste
   def access(path: String): FileEntry = FileEntryImpl(this, host.canonical(path))
 
 final class ExecImpl(val scope: ScopeId) extends Exec, Scoped
+
 final class NetworkImpl(val scope: ScopeId) extends Network, Scoped
 
 final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
@@ -38,16 +39,35 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   /** Run `op` (a read of classified content) as a `Classified` result: the
     * permission check and any failure stay inside the classified value. */
   private def asClassified[T](what: String)(op: => T): Classified[T] =
-    ClassifiedImpl.fromTry(Try { host.requireRead(scope, p, what); op })
+    ClassifiedImpl.fromTry(Try {
+      host.requireRead(scope, p, what)
+      op
+    })
 
   def path: String = p.toString
+
   def name: String = Option(p.getFileName).map(_.toString).getOrElse(p.toString)
-  def exists: Boolean = { host.requireRead(scope, p, "exists"); Files.exists(p) }
-  def isDirectory: Boolean = { host.requireRead(scope, p, "isDirectory"); Files.isDirectory(p) }
+
+  def exists: Boolean =
+    host.requireRead(scope, p, "exists")
+    Files.exists(p)
+
+  def isDirectory: Boolean =
+    host.requireRead(scope, p, "isDirectory")
+    Files.isDirectory(p)
+
   def isClassified: Boolean = host.requireRead(scope, p, "isClassified").classified
-  def size: Long = { requireReadable("size", "readClassified()"); Files.size(p) }
+
+  def size: Long =
+    requireReadable("size", "readClassified()")
+    Files.size(p)
+
   def read(): String = String(readBytes(), UTF_8)
-  def readBytes(): Array[Byte] = { requireReadable("read", "readClassified()"); Files.readAllBytes(p).nn }
+
+  def readBytes(): Array[Byte] =
+    requireReadable("read", "readClassified()")
+    Files.readAllBytes(p).nn
+
   def readLines(): List[String] = read().linesIterator.toList
 
   /** Stream the file line by line (never loaded whole); `op` receives each
@@ -67,11 +87,23 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
         line = r.readLine()
     }
 
-  def write(content: String): Unit = host.writeFile(scope, p, content, append = false)
-  def writeBytes(content: Array[Byte]): Unit = host.writeFileBytes(scope, p, content)
-  def append(content: String): Unit = host.writeFile(scope, p, content, append = true)
-  def delete(): Unit = { host.requireWrite(scope, p, "delete"); Files.delete(p) }
-  def mkdir(): Unit = { host.requireWrite(scope, p, "mkdir"); Files.createDirectories(p); () }
+  def write(content: String): Unit =
+    host.writeFile(scope, p, content, append = false)
+
+  def writeBytes(content: Array[Byte]): Unit =
+    host.writeFileBytes(scope, p, content)
+
+  def append(content: String): Unit =
+    host.writeFile(scope, p, content, append = true)
+
+  def delete(): Unit =
+    host.requireWrite(scope, p, "delete")
+    Files.delete(p)
+
+  def mkdir(): Unit =
+    host.requireWrite(scope, p, "mkdir")
+    Files.createDirectories(p)
+    ()
 
   def children: List[FileEntry] =
     requireReadable("children", "childrenClassified")
@@ -83,8 +115,10 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
 
   def readClassified(): Classified[String] =
     asClassified("readClassified")(Files.readString(p, UTF_8).nn)
+
   def childrenClassified: Classified[List[String]] =
     asClassified("childrenClassified")(host.visibleChildren(scope, p).map(_.toString))
+
   def walkClassified(): Classified[List[String]] =
     asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(_.toString))
 

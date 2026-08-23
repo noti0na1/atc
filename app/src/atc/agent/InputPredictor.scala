@@ -33,17 +33,16 @@ final class InputPredictor(
     val gen = generation.incrementAndGet()
     show(None)
     val (m, h) = (model(), history())
-    val worker = Thread(
-      () =>
-        val guess =
-          try InputPredictor.predict(m, h, spent)
-          catch
-            case e: Exception =>
-              Debug.log(s"input prediction failed: $e"); Debug.trace(e); None
-        if generation.get == gen then show(guess)
-      ,
-      "atc-predict"
-    )
+    val task: Runnable = () =>
+      val guess =
+        try InputPredictor.predict(m, h, spent)
+        catch
+          case e: Exception =>
+            Debug.log(s"input prediction failed: $e")
+            Debug.trace(e)
+            None
+      if generation.get == gen then show(guess)
+    val worker = Thread(task, "atc-predict")
     worker.setDaemon(true)
     worker.start()
 

@@ -60,21 +60,28 @@ object Main:
         case e: IllegalArgumentException =>
           System.err.println(e.getMessage)
           sys.exit(2)
-    if args.help then { println(usage); return }
-    if args.version then { println(s"atc $Version"); return }
-    if args.initGlobal then
-      sys.exit(report(Config.globalPath, Config.ensureGlobal(), "fill in the API keys and edit the permissions"))
-    if args.init then
-      sys.exit(report(Config.projectPath(args.cwd), Config.initProject(args.cwd), "edit the project's permissions"))
-    val exit: Int =
-      try App(args).run()
-      catch
-        case App.Exit(code) => code
-        case e: Throwable =>
-          System.err.println(s"atc: ${e.getMessage}")
-          Debug.trace(e)
-          1
-    sys.exit(exit)
+    val exitCode =
+      if args.help then
+        println(usage)
+        0
+      else if args.version then
+        println(s"atc $Version")
+        0
+      else if args.initGlobal then
+        report(Config.globalPath, Config.ensureGlobal(), "fill in the API keys and edit the permissions")
+      else if args.init then
+        report(Config.projectPath(args.cwd), Config.initProject(args.cwd), "edit the project's permissions")
+      else run(args)
+    sys.exit(exitCode)
+
+  private def run(args: Args): Int =
+    try App(args).run()
+    catch
+      case App.Exit(code) => code
+      case e: Throwable =>
+        System.err.println(s"atc: ${e.getMessage}")
+        Debug.trace(e)
+        1
 
   /** `--init` / `--init-global`: say what was written, or refuse to overwrite. */
   private def report(target: Path, created: List[Path], todo: String): Int =

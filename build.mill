@@ -5,12 +5,12 @@ import mill.*, scalalib.*
 import mill.scalalib.scalafmt.ScalafmtModule
 
 object Versions:
-  val atc = "0.1.1"
-  val scala = "3.10.0-RC1-bin-20260816-3adfcbd-NIGHTLY"
+  val atc = "0.1.2"
+  val scala = "3.10.0-RC1-bin-20260823-e47290a-NIGHTLY"
   val jline = "4.3.1"
   val upickle = "4.4.3"
   val openai = "4.52.0"
-  val anthropic = "2.54.0"
+  val anthropic = "2.57.0"
   val munit = "1.3.5"
 
 val scalaNightlies = "https://repo.scala-lang.org/artifactory/maven-nightlies/"

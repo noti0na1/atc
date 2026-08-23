@@ -228,16 +228,19 @@ final class App(args: Main.Args):
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
-    var ok = true
     try
       session match
-        case Some(s) => agent.turn(s, input, () => tui.isInterrupted)
-        case None => tui.error("the sandbox is not running (a restart failed); try /reset"); ok = false
+        case Some(s) =>
+          agent.turn(s, input, () => tui.isInterrupted)
+          true
+        case None =>
+          tui.error(App.SandboxUnavailable)
+          false
     catch
       case e: Exception =>
-        ok = false
         tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
         Debug.trace(e)
+        false
     finally
       val tokens = (agent.usage.input + agent.usage.output) - (usageBefore.input + usageBefore.output)
       val context = agent.contextUsage
@@ -249,7 +252,6 @@ final class App(args: Main.Args):
         context.window,
       )))
       if predicting then predictor.start()
-    ok
 
   private def interactive(): Unit =
     var running = true
@@ -282,9 +284,13 @@ final class App(args: Main.Args):
   /** Handle a slash command line; returns false to quit. */
   private def command(line: String): Boolean =
     SlashCommand.parse(line) match
-      case Left(typed) => tui.error(s"unknown command $typed (try /help)"); true
+      case Left(typed) =>
+        tui.error(s"unknown command $typed (try /help)")
+        true
       case Right((Cmd.Quit, _)) => false
-      case Right((cmd, arg)) => dispatch(cmd, arg); true
+      case Right((cmd, arg)) =>
+        dispatch(cmd, arg)
+        true
 
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
     case Cmd.Help => tui.println(SlashCommand.helpText)
@@ -324,7 +330,7 @@ final class App(args: Main.Args):
     val code = if arg.nonEmpty then arg else readCode()
     if code.trim.isEmpty then return
     session match
-      case None => tui.error("the sandbox is not running (a restart failed); try /reset")
+      case None => tui.error(App.SandboxUnavailable)
       case Some(s) =>
         tui.beginTurn()
         try
@@ -466,7 +472,10 @@ final class App(args: Main.Args):
       if arg.isEmpty then Some(policy.mode.next)
       else
         try Some(Mode.parse(arg))
-        catch case e: IllegalArgumentException => { tui.error(e.getMessage); None }
+        catch
+          case e: IllegalArgumentException =>
+            tui.error(e.getMessage)
+            None
     target.foreach { m =>
       if m == policy.mode then tui.info(s"mode: ${m.describe}")
       else
@@ -478,6 +487,8 @@ final class App(args: Main.Args):
     }
 
 object App:
+  private val SandboxUnavailable = "the sandbox is not running (a restart failed); try /reset"
+
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
 
@@ -498,34 +509,41 @@ object App:
     val interactive = args.prompt.isEmpty
     val global = Config.globalPath
     val globalMissing = !Files.isRegularFile(global)
-    val writeGlobal = globalMissing && interactive && {
-      tui.println(s"No configuration at ${pretty(global)}.")
-      tui.confirm("Write the starting config and key bindings there? (No: use the built-in ones for now)")
-    }
+    val writeGlobal =
+      globalMissing && interactive && {
+        tui.println(s"No configuration at ${pretty(global)}.")
+        tui.confirm("Write the starting config and key bindings there? (No: use the built-in ones for now)")
+      }
     if writeGlobal then tui.println(s"Wrote ${Config.ensureGlobal().map(pretty).mkString(" and ")}.")
     else if globalMissing then
       tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
     val bundledGlobal = globalMissing && !writeGlobal
-    var configuration = Config.load(args.cwd, args.config, bundledGlobal)
 
     def cwdReadable(c: Configuration): Boolean =
       Policy(fileRules(c, args.cwd), Nil, Nil, _ => Decision.Deny)
         .effective(ScopeId.Base, PathPattern.canonical(args.cwd)).canRead
+
+    def offerProjectConfig(current: Configuration): Configuration =
+      val project = Config.projectPath(args.cwd)
+      val shouldOffer = interactive && !cwdReadable(current) && !Files.exists(project)
+      if !shouldOffer then current
+      else
+        tui.println(
+          s"No configuration grants access to ${pretty(args.cwd)}, so the agent would have to ask for every file."
+        )
+        val accepted =
+          tui.confirm(s"Write a starting project config to ${pretty(project)}? (It opens this directory to the agent)")
+        if !accepted then current
+        else
+          val created = Config.initProject(args.cwd).map(pretty).mkString(" and ")
+          tui.println(s"Wrote $created; edit it to change what the agent may touch here.")
+          Config.load(args.cwd, args.config, bundledGlobal)
+
     // Offered whenever cwd has no `.atc/config.json` of its own and nothing
     // grants it, whatever an ancestor's project config (or the home `.atc`,
     // which the walk-up also finds) says: the new file becomes the nearest
     // project config and takes over from there.
-    if interactive && !cwdReadable(configuration) && !Files.exists(Config.projectPath(args.cwd)) then
-      tui.println(
-        s"No configuration grants access to ${pretty(args.cwd)}, so the agent would have to ask for every file."
-      )
-      val project = Config.projectPath(args.cwd)
-      if tui.confirm(s"Write a starting project config to ${pretty(project)}? (It opens this directory to the agent)")
-      then
-        tui.println(
-          s"Wrote ${Config.initProject(args.cwd).map(pretty).mkString(" and ")}; edit it to change what the agent may touch here."
-        )
-        configuration = Config.load(args.cwd, args.config, bundledGlobal)
+    val configuration = offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
 
     if writeGlobal then
       tui.println(

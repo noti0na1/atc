@@ -76,14 +76,19 @@ object Processes:
     while i < line.length do
       val c = line.charAt(i)
       c match
-        case ' ' | '\t' | '\n' | '\r' => flush(); i += 1
+        case ' ' | '\t' | '\n' | '\r' =>
+          flush()
+          i += 1
         case '\'' =>
           val end = line.indexOf('\'', i + 1)
           if end < 0 then throw IllegalArgumentException(s"unterminated single quote in command line: $line")
-          cur.append(line.slice(i + 1, end)); inWord = true; quoted = true
+          cur.append(line.slice(i + 1, end))
+          inWord = true
+          quoted = true
           i = end + 1
         case '"' =>
-          inWord = true; quoted = true
+          inWord = true
+          quoted = true
           i += 1
           var closed = false
           while !closed do
@@ -99,7 +104,9 @@ object Processes:
               cur.append(d)
               i += 1
         case '\\' if i + 1 < line.length =>
-          cur.append(line.charAt(i + 1)); inWord = true; quoted = true
+          cur.append(line.charAt(i + 1))
+          inWord = true
+          quoted = true
           i += 2
         case '|' =>
           if line.startsWith("||", i) then noShell(line, "||", "run the commands separately and branch in Scala")
@@ -128,7 +135,8 @@ object Processes:
         case '$' if line.startsWith("$(", i) =>
           noShell(line, "$(", "run the inner command first and use its output in Scala")
         case other =>
-          cur.append(other); inWord = true
+          cur.append(other)
+          inWord = true
           i += 1
     flush()
     toks.result()
@@ -149,23 +157,35 @@ object Processes:
     def endStage(why: String): Unit =
       if words == 0 then throw IllegalArgumentException(s"exec: empty command $why in: $line")
       stages += Stage(argv.result(), mergeErr)
-      argv = List.newBuilder[String]; words = 0; mergeErr = false
+      argv = List.newBuilder[String]
+      words = 0
+      mergeErr = false
     def fileAfter(op: String, rest: List[Tok]): (String, List[Tok]) = rest match
       case Tok.Word(f) :: more => (f, more)
       case _ => throw IllegalArgumentException(s"exec: '$op' needs a file name in: $line")
     def go(ts: List[Tok]): Unit = ts match
       case Nil => ()
-      case Tok.Word(w) :: rest => argv += w; words += 1; go(rest)
-      case Tok.Pipe :: rest => endStage("before '|'"); go(rest)
-      case Tok.MergeErr :: rest => mergeErr = true; go(rest)
+      case Tok.Word(w) :: rest =>
+        argv += w
+        words += 1
+        go(rest)
+      case Tok.Pipe :: rest =>
+        endStage("before '|'")
+        go(rest)
+      case Tok.MergeErr :: rest =>
+        mergeErr = true
+        go(rest)
       case Tok.In :: rest =>
         val (f, more) = fileAfter("<", rest)
         if stdinFile.isDefined then throw IllegalArgumentException(s"exec: more than one '<' in: $line")
-        stdinFile = Some(f); go(more)
+        stdinFile = Some(f)
+        go(more)
       case (t @ (Tok.Out | Tok.Append)) :: rest =>
         val (f, more) = fileAfter(if t == Tok.Append then ">>" else ">", rest)
         if stdoutFile.isDefined then throw IllegalArgumentException(s"exec: more than one '>' / '>>' in: $line")
-        stdoutFile = Some(f); append = t == Tok.Append; go(more)
+        stdoutFile = Some(f)
+        append = t == Tok.Append
+        go(more)
     go(toks)
     if words == 0 && stages.result().isEmpty then throw IllegalArgumentException("exec: empty command line")
     endStage("after '|'")
