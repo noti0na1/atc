@@ -92,6 +92,11 @@ class GitIgnoreSuite extends munit.FunSuite:
     assert(!gi.ignores(root.resolve("a.log")))
     assert(gi.ignores(root.resolve(".git")))
 
+  test("one malformed pattern disables only its own line, not the whole file"):
+    // `a[]b` produces an invalid regex; git skips just that line.
+    val root = repo("a[]b\n*.log\n", "x.log" -> "", "keep.txt" -> "")
+    assertEquals(ignoredIn(root, "x.log", "keep.txt", "a[]b"), List(true, false, false))
+
   // ── the host's listings ──
 
   private def hostOn(root: Path, gitIgnore: GitIgnore): Host =

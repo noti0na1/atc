@@ -1,6 +1,6 @@
 package atc
 
-import atc.ui.Tui
+import atc.ui.{Ansi, Tui}
 
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
@@ -54,6 +54,49 @@ class TuiSuite extends munit.FunSuite:
   test("uniqueIds keeps labels and disambiguates duplicates"):
     assertEquals(Tui.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)
+
+  // ── sanitization, widths, durations, the tail buffer ─────────────
+
+  test("sanitize strips terminal control, keeps text, newlines and tabs"):
+    val esc = 27.toChar.toString
+    assertEquals(Ansi.sanitize("plain text\nmore"), "plain text\nmore")
+    assertEquals(Ansi.sanitize("a" + 13.toChar + "b"), "ab") // a bare CR cannot reset the column
+    assertEquals(Ansi.sanitize("a\tb\nc"), "a\tb\nc")
+    assertEquals(Ansi.sanitize("unicode: héllo 中文"), "unicode: héllo 中文")
+    // an injected clear-screen / OSC-52 clipboard write loses its ESC byte and goes inert
+    assertEquals(Ansi.sanitize("before" + esc + "[2Jafter"), "before[2Jafter")
+    assertEquals(Ansi.sanitize("x" + esc + "]52;c;eGk=" + 7.toChar + "y"), "x]52;c;eGk=y")
+    assertEquals(Ansi.sanitize("c1: " + 0x85.toChar), "c1: ")
+    assertEquals(Ansi.sanitize("del: " + 0x7f.toChar), "del: ")
+    assertEquals(Ansi.sanitize(""), "")
+
+  test("duration never prints 60 seconds"):
+    assertEquals(Tui.duration(119.6), "2 min 0 s") // was "1 min 60 s"
+    assertEquals(Tui.duration(65.4), "1 min 5 s")
+    assertEquals(Tui.duration(60.0), "1 min 0 s")
+
+  test("place counts wide (CJK) characters as two columns"):
+    assertEquals(Tui.displayWidth("abc"), 3)
+    assertEquals(Tui.displayWidth("中文"), 4)
+    assertEquals(Tui.place(0, "中" * 40 + "\n", 80, 4).rows, 2) // 4 + 80 columns: wraps
+
+  test("TailBuffer: the tail is the last n lines; a trailing newline is not a line"):
+    val b = Tui.TailBuffer(1000)
+    b.append("a\nb\nc")
+    assertEquals(b.tail(2), List("b", "c")) // the unfinished last line counts
+    assertEquals(b.lineCount, 3L)
+    b.append("d\ne\n")
+    assertEquals(b.tail(2), List("cd", "e"))
+    assertEquals(b.lineCount, 4L)
+    b.append("f\n")
+    assertEquals(b.tail(10), List("a", "b", "cd", "e", "f"))
+
+  test("TailBuffer: past the cap the front goes, the counts stay exact"):
+    val b = Tui.TailBuffer(10)
+    b.append("01234\n67890\n")
+    assertEquals(b.text, "67890\n")
+    assertEquals(b.lineCount, 2L) // the dropped line still counts
+    assertEquals(b.tail(5), List("67890"))
 
   // ── multi-line input (Continuation) ───────────────────────────────
 

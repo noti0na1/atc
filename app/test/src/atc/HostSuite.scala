@@ -409,6 +409,33 @@ class HostSuite extends munit.FunSuite:
     assert(e4.getMessage.nn.contains("may not be granted"), e4.getMessage)
     assertEquals(denyPolicy.openScopeCount, 0)
 
+  test("normalizeHost canonicalises equivalent spellings so a deny rule cannot be dodged"):
+    // IPv4 in non-canonical decimal forms, and a trailing dot.
+    assertEquals(Host.normalizeHost("2852039166"), "169.254.169.254")
+    assertEquals(Host.normalizeHost("169.254.169.254."), "169.254.169.254")
+    // IPv4-mapped IPv6, bracketed as URI.getHost returns it: both spellings of the
+    // metadata address collapse to the IPv4 literal an IPv4 deny rule matches.
+    assertEquals(Host.normalizeHost("[::ffff:169.254.169.254]"), "169.254.169.254")
+    assertEquals(Host.normalizeHost("[::ffff:a9fe:a9fe]"), "169.254.169.254")
+    // A pure IPv6 literal is canonicalised (expanded); a real hostname is returned
+    // as-is (lower-cased), never resolved.
+    assertEquals(Host.normalizeHost("[::1]"), "0:0:0:0:0:0:0:1")
+    assertEquals(Host.normalizeHost("Example.COM"), "example.com")
+
+  test("an IPv6-mapped spelling of a denied IPv4 host is refused, not just the IPv4 form"):
+    val denyPolicy = Policy(
+      List(rule(".", Some(Access.Read))),
+      Nil,
+      List("*"), // every host allowed ...
+      _ => Decision.AllowSession,
+      Nil,
+      List("169.254.169.254") // ... except this one, however it is spelled
+    )
+    val denyHost = Host(denyPolicy, root, output, llm, hostUi)
+    given net: Network = denyHost.network
+    val e = intercept[SecurityException](denyHost.httpGet("http://[::ffff:169.254.169.254]/latest/meta-data/"))
+    assert(e.getMessage.nn.contains("denyHosts pattern"), e.getMessage)
+
   test("network host policy"):
     val e = intercept[SecurityException](httpGet("http://nope.invalid/x"))
     assert(e.getMessage.nn.contains("requestNetwork"))
@@ -448,3 +475,53 @@ class HostSuite extends munit.FunSuite:
     intercept[SecurityException](read("link/t.txt"))
     val top = ls(".").map(p => Path.of(p).getFileName.toString)
     assert(!top.contains("link"), top.toString)
+
+  test("a dangling symlink is judged by its (non-existent) target"):
+    // A write through a dangling link CREATES the target, so the policy must judge
+    // the target even though nothing exists there yet — otherwise `write` inside an
+    // allowed tree could create a file anywhere the link points.
+    val outside = Files.createTempDirectory("atc-dangling").nn.toRealPath().nn
+    val target = outside.resolve("created.txt") // does not exist
+    Files.createSymbolicLink(root.resolve("dangling.txt"), target)
+    intercept[SecurityException](write("dangling.txt", "PWNED"))
+    intercept[SecurityException](append("dangling.txt", "PWNED"))
+    assert(!Files.exists(target))
+    // a dangling symlink pointing inside the writable tree still allows the write
+    val inner = root.resolve("inner-created.txt")
+    Files.createSymbolicLink(root.resolve("dangling-ok.txt"), inner)
+    write("dangling-ok.txt", "fine")
+    assertEquals(Files.readString(inner), "fine")
+
+  test("a readable symlinked directory is listed as its target but never entered"):
+    Files.createDirectories(root.resolve("real/sub"))
+    Files.writeString(root.resolve("real/sub/f.txt"), "f")
+    Files.createSymbolicLink(root.resolve("dirlink"), root.resolve("real"))
+    // listed as, and judged by, its target
+    val top = ls(".")
+    assert(top.contains("real"), top.toString)
+    assert(!top.exists(_.contains("dirlink")), top.toString)
+    // walk enters the real directory once, never the link
+    val walked = walk(".").map(rel)
+    assert(walked.contains("real/sub/f.txt"), walked.toString)
+    assert(!walked.exists(_.contains("dirlink")), walked.toString)
+    assertEquals(walked.count(_ == "real/sub/f.txt"), 1, walked.toString)
+    // access through the link is judged at the target
+    assertEquals(read("dirlink/sub/f.txt"), "f")
+    assertEquals(access("dirlink/sub/f.txt").path, root.resolve("real/sub/f.txt").toString)
+
+  test("move of a file onto itself is a no-op"):
+    write("self.txt", "data")
+    move("self.txt", "./self.txt")
+    assertEquals(read("self.txt"), "data")
+
+  test("TextSink decodes multi-byte characters split across writes, and never throws on bad bytes"):
+    val sb = StringBuilder()
+    val sink = TextSink(s => sb.append(s))
+    for b <- "héllo 🙂 x".getBytes("UTF-8") do sink.write(Array(b)) // one byte at a time
+    sink.finish()
+    assertEquals(sb.toString, "héllo 🙂 x")
+    val sb2 = StringBuilder()
+    val sink2 = TextSink(s => sb2.append(s))
+    sink2.write(Array(0xff.toByte, 0xfe.toByte, 'a'.toByte))
+    sink2.finish()
+    assert(sb2.toString.contains("a") && sb2.toString.contains("\uFFFD"), sb2.toString)

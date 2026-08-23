@@ -19,6 +19,7 @@ class PermissionSuite extends munit.FunSuite:
   var server: HttpServer = scala.compiletime.uninitialized
   var port: Int = 0
   var host: String = ""
+  val echoRequests = java.util.concurrent.atomic.AtomicInteger(0)
 
   override def beforeAll(): Unit =
     server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn
@@ -31,7 +32,16 @@ class PermissionSuite extends munit.FunSuite:
         val os = ex.getResponseBody.nn
         os.write(b); os.close()
     server.createContext("/ok", handler(200, _ => "hello"))
-    server.createContext("/echo", handler(200, ex => String(ex.getRequestBody.nn.readAllBytes(), "UTF-8")))
+    server.createContext(
+      "/echo",
+      handler(
+        200,
+        ex => {
+          echoRequests.incrementAndGet()
+          String(ex.getRequestBody.nn.readAllBytes(), "UTF-8")
+        }
+      )
+    )
     server.createContext(
       "/header",
       handler(200, ex => Option(ex.getRequestHeaders.nn.getFirst("X-Token")).getOrElse("(none)"))
@@ -208,6 +218,39 @@ class PermissionSuite extends munit.FunSuite:
     intercept[SecurityException](env.host.requestExec(Set("rm")) { ran = true })
     assert(!ran)
 
+  test("a process spawned in a requestExec block cannot be driven after the block closes"):
+    // A one-time grant must not leave a drivable process handle behind: the handle
+    // carries its spawning scope and is refused once the block has closed, and the
+    // base capability does not list it.
+    val env = TestEnv(commands = List("cat"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    env.decisions = List(Decision.AllowOnce)
+    val (handle, visibleInside) = env.host.requestExec(Set("cat"), "interactive") {
+      val p = env.host.spawn("cat")
+      (p, env.host.runningProcesses.exists(_.id == p.id)) // the block's own scope sees it
+    }
+    assert(visibleInside)
+    assertEquals(env.policy.openScopeCount, 0)
+    assert(!env.host.runningProcesses.exists(_.id == handle.id)) // the base scope does not
+    intercept[SecurityException](handle.sendLine("x"))
+    intercept[SecurityException](handle.read())
+    intercept[SecurityException](handle.waitFor(10))
+    intercept[SecurityException](handle.kill())
+    env.host.killProcesses() // host-internal cleanup still works
+
+  test("a process spawned on the base scope stays usable for the session"):
+    val env = TestEnv(commands = List("cat"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    val cat = env.host.spawn("cat")
+    cat.sendLine("hi")
+    assertEquals(cat.readUntil("hi\n", 5000), "hi\n")
+    assert(env.host.runningProcesses.exists(_.id == cat.id))
+    env.host.killProcesses()
+
   // ── Network, at the host level ──────────────────────────────────
 
   test("httpGet returns the body when the host is allowed"):
@@ -273,6 +316,17 @@ class PermissionSuite extends munit.FunSuite:
       denying.host.exec("echo hi | cat")
     }
     assert(d.getMessage.nn.contains("denyCommands"), d.getMessage)
+
+  test("an allowed command can read a classified file (the command grant is the user's decision)"):
+    // The classified boundary holds for the file API; a granted command is
+    // trusted with whatever it can read — that is what granting it means.
+    val env = TestEnv(TestEnv.withSecrets, commands = List("cat"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    env.file("secrets/key.txt", "s3cret")
+    intercept[SecurityException](env.host.read("secrets/key.txt"))
+    assertEquals(env.host.exec("cat", List("secrets/key.txt")).stdout, "s3cret")
 
   test("redirections are file operations: checked like read/write, streamed, classified refused"):
     val env = TestEnv(TestEnv.withSecrets, commands = List("echo", "cat", "ls"))
@@ -405,6 +459,34 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(echoed, "s3cr3t") // the server saw it...
     // ...but nothing classified was handed back to the agent as a plain value here.
 
+  test("a failed classified secret header aborts the request without leaking the failure bit"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    env.clearOutput()
+    val before = echoRequests.get()
+    val failed = env.host.classify("s3cr3t").map(s => throw RuntimeException(s"boom $s"))
+    // The request is NOT sent with the header dropped: a request missing its auth
+    // header returns a different response (a 401 vs a 200), itself signalling the
+    // failure. The agent gets a generic error (no secret, no which-header); the
+    // user a sanitized note; the server sees nothing.
+    val e = intercept[SecurityException](env.host.httpGet(url("/header"), Map.empty, Map("X-Token" -> failed)))
+    assert(e.getMessage.nn.contains("could not be computed"), e.getMessage)
+    assert(!e.getMessage.nn.contains("s3cr3t"), e.getMessage)
+    assertEquals(echoRequests.get(), before) // no request went out
+    assert(env.userOut.toString.contains("failed computation"), env.userOut.toString)
+    assert(!env.agentOut.toString.contains("failed computation"), env.agentOut.toString)
+
+  test("httpPostClassified with a failed body makes no request and returns the failure unchanged"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    val before = echoRequests.get()
+    val failed = env.host.classify("secret").map(s => throw RuntimeException(s"boom $s"))
+    val r = env.host.httpPostClassified(url("/echo"), failed)
+    assert(ClassifiedImpl.unwrap(r).isFailure)
+    assertEquals(echoRequests.get(), before) // no request was sent
+
   test("httpGet rejects a host that matches no pattern"):
     val env = TestEnv(hosts = List("example.com"))
     import env.given
@@ -441,6 +523,27 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given net: Network = env.host.network
     assertEquals(env.host.httpGet(url("/ok")), "hello")
+
+  test("denyHosts cannot be dodged by an equivalent host spelling"):
+    val env = TestEnv(hosts = List("*"), denyHosts = List("169.254.169.254", "evil.com"))
+    import env.given
+    given net: Network = env.host.network
+    // a trailing dot names the same host but is not the same string
+    val e1 = intercept[SecurityException](env.host.httpGet("http://EVIL.COM./x"))
+    assert(e1.getMessage.nn.contains("denyHosts"), e1.getMessage)
+    // a single decimal number is an IPv4 literal the JDK resolves — 2852039166 = 169.254.169.254
+    val e2 = intercept[SecurityException](env.host.httpGet("http://2852039166/latest/meta-data"))
+    assert(e2.getMessage.nn.contains("denyHosts"), e2.getMessage)
+
+  test("normalizeHost: case, trailing dot, numeric IP literals; hostnames untouched"):
+    assertEquals(Host.normalizeHost("Example.COM"), "example.com")
+    assertEquals(Host.normalizeHost("evil.com."), "evil.com")
+    assertEquals(Host.normalizeHost("2852039166"), "169.254.169.254")
+    assertEquals(Host.normalizeHost("127.1"), "127.0.0.1")
+    assertEquals(Host.normalizeHost("127.0.0.1"), "127.0.0.1")
+    assertEquals(Host.normalizeHost("example.com"), "example.com")
+    assertEquals(Host.normalizeHost("999.1.2.3"), "999.1.2.3") // out of range: not a literal
+    assertEquals(Host.normalizeHost(""), "")
 
   test("requestNetwork widens the host set for its block only"):
     val env = TestEnv(hosts = Nil)

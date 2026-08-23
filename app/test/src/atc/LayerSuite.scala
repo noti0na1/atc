@@ -494,6 +494,28 @@ class LayerSuite extends munit.FunSuite:
     assertEquals(w.access("a/b/c/x.txt"), Access.Read)
     assertEquals(w.access("x.txt"), Access.Read)
 
+  test("a project reached through a symlink still grants its own tree"):
+    // The policy judges canonical paths; the project layer's base must be
+    // canonical too, or a project under a symlinked path (macOS /tmp, /var)
+    // silently never grants.
+    val real = Files.createTempDirectory("atc-symlink-real").nn.toRealPath().nn
+    val linkParent = Files.createTempDirectory("atc-symlink-base").nn.toRealPath().nn
+    val link = linkParent.resolve("proj").nn
+    Files.createSymbolicLink(link, real)
+    Files.createDirectories(real.resolve(".atc"))
+    Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
+    // load with the project named THROUGH the link (nothing canonicalized)
+    val configuration = Config.load(link, None, linkParent.resolve("no-global.json").nn)
+    val policy = Policy(App.fileRules(configuration, link), Nil, Nil, _ => Decision.Deny)
+    assertEquals(
+      policy.effective(ScopeId.Base, PathPattern.canonical(real.resolve("src/x.txt").nn)).access,
+      Access.Write
+    )
+    assertEquals(
+      policy.effective(ScopeId.Base, PathPattern.canonical(linkParent.resolve("other.txt").nn)).access,
+      Access.None
+    )
+
   test("with no .atc anywhere above, there is no project layer"):
     val w = World(runIn = "sub")
     assertEquals(w.configuration.layers.map(_.origin), List(Origin.Global))
@@ -555,4 +577,10 @@ class LayerSuite extends munit.FunSuite:
   test("a broken layer names the file it came from"):
     val e = intercept[IllegalArgumentException](World(project = "{ not json ]"))
     assert(e.getMessage.nn.contains("Cannot parse config"), e.getMessage)
+    assert(e.getMessage.nn.contains(".atc"), e.getMessage)
+
+  test("an invalid mode in a project layer is a config error naming the file"):
+    val e = intercept[IllegalArgumentException](World(project = """{ "mode": "bogus" }"""))
+    assert(e.getMessage.nn.contains("Invalid config"), e.getMessage)
+    assert(e.getMessage.nn.contains("Unknown mode"), e.getMessage)
     assert(e.getMessage.nn.contains(".atc"), e.getMessage)

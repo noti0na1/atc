@@ -8,7 +8,7 @@ import atc.lib.Todo
 import atc.llm.{ChatModel, TokenUsage}
 import atc.perms.*
 import atc.sandbox.{ReplSession, SandboxConfig}
-import atc.ui.Tui
+import atc.ui.{Ansi, Tui}
 
 import java.nio.file.{Files, Path, Paths}
 import scala.collection.mutable
@@ -175,12 +175,13 @@ final class App(args: Main.Args):
         case Some(p) =>
           tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
           session = Some(newReplSession())
-          runTurn(p)
+          // A failed turn is a failed run: scripts key off the exit code.
+          if runTurn(p) then 0 else 1
         case None =>
           banner()
           session = Some(newReplSession())
           interactive()
-      0
+          0
     finally
       host.killProcesses()
       session.foreach(_.close())
@@ -220,17 +221,21 @@ final class App(args: Main.Args):
     InputPredictor(() => agent.model, () => agent.history, tui.suggest, agent.recordUsage(Agent.Prediction, _))
   private val predicting: Boolean = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty
 
-  private def runTurn(input: String): Unit =
+  /** Run one turn; `false` when it failed (no sandbox, or the turn threw), so a
+    * `-p` run can exit non-zero. */
+  private def runTurn(input: String): Boolean =
     predictor.invalidate()
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
+    var ok = true
     try
       session match
         case Some(s) => agent.turn(s, input, () => tui.isInterrupted)
-        case None => tui.error("the sandbox is not running (a restart failed); try /reset")
+        case None => tui.error("the sandbox is not running (a restart failed); try /reset"); ok = false
     catch
       case e: Exception =>
+        ok = false
         tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
         Debug.trace(e)
     finally
@@ -244,6 +249,7 @@ final class App(args: Main.Args):
         context.window,
       )))
       if predicting then predictor.start()
+    ok
 
   private def interactive(): Unit =
     var running = true
@@ -300,8 +306,9 @@ final class App(args: Main.Args):
       predictor.invalidate()
       tui.success("conversation cleared")
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
-    case Cmd.Ps => tui.println(host.processSummary)
-    case Cmd.Kill => tui.println(host.killProcess(arg))
+    // Both quote the model-chosen spawn command line: sanitize terminal control.
+    case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
+    case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
     case Cmd.Cost => showCost()
     case Cmd.Quit => () // `command` ends the loop instead
 

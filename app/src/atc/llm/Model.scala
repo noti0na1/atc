@@ -13,7 +13,12 @@ case class ToolResult(callId: String, output: String, isError: Boolean)
   * blocks including server web-search results, OpenAI Responses output
   * items). Reused when the same provider continues the conversation; other
   * providers rebuild the turn from the neutral fields. */
-case class NativeTurn(providerKey: String, payload: Any)
+case class NativeTurn(providerKey: String, payload: Any):
+  /** The rendered size of `payload`, computed once. The context-window estimator
+    * re-counts every kept message before every request, and a Responses reasoning
+    * blob can be tens of KB, so rendering it each round is quadratic over a
+    * session; this turn is immutable and reused, so caching the length is exact. */
+  lazy val payloadChars: Int = String.valueOf(payload).length
 
 /** Provider-neutral conversation history. */
 enum Msg:

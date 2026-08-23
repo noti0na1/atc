@@ -188,13 +188,14 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     interrupt()
 
   /** Interrupt a running evaluation (best effort): raise the REPL stop flag
-    * for loops in agent code and interrupt the thread for blocking calls. */
+    * for loops in agent code and interrupt the thread for blocking calls. The
+    * request is recorded even when no evaluation thread is visible yet (an
+    * interrupt landing just before `evalThread` is set must not be lost). */
   def interrupt(): Unit =
+    stopRequested = true
+    driver.setStopFlag(true)
     val t = evalThread
-    if t != null then
-      stopRequested = true
-      driver.setStopFlag(true)
-      t.interrupt()
+    if t != null then t.interrupt()
 
   def run(code: String): ExecutionResult =
     clock.reset() // per run, whichever way it ends (callers read `clock.paused` afterwards)
@@ -214,16 +215,28 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   private def dispatch(res: ParseResult): ExecutionResult =
     config.executionTimeoutMs match
-      case None => adopt(res, evaluate(res))
+      case None =>
+        // No worker thread here: a fatal error in agent code must be reported like
+        // the worker path's "no result" case, not crash the whole process. The stop
+        // signal itself (ThreadDeath) still propagates.
+        try adopt(res, evaluate(res))
+        catch
+          case t: ThreadDeath => throw t
+          case _: Throwable => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
       case Some(limit) => dispatchWithTimeout(res, limit)
 
   /** `started` is released once the output stream is ours (or we gave up waiting for it). */
   private def evaluate(res: ParseResult, started: CountDownLatch = CountDownLatch(0)): Evaluated =
     var newState = state
     val (output, thrown) = withOutputCapture(onEnter = started.countDown()) {
-      driver.setStopFlag(false) // a previous evaluation may have been stopped
-      driver.resetEvaluationThrew()
-      newState = driver.runParseResult(res)(using state)
+      // An interrupt may have landed while we waited for the output lock (`run`
+      // cleared `stopRequested` at the top, so it is true only if `interrupt()`
+      // fired during THIS run). If so, do not execute the cancelled code — and do
+      // not clear the stop flag it raised. `adopt` then honestly reports the abort.
+      if !stopRequested then
+        driver.setStopFlag(false) // a previous evaluation may have been stopped
+        driver.resetEvaluationThrew()
+        newState = driver.runParseResult(res)(using state)
     }
     Evaluated(newState, output, thrown, driver.evaluationThrew)
 
@@ -291,7 +304,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
   private def withOutputCapture(onEnter: => Unit = ())(run: => Unit): (String, Option[Throwable]) =
     val acquired =
       try outputLock.tryLock(OutputLockWaitMs, TimeUnit.MILLISECONDS)
-      catch case _: InterruptedException => false
+      catch
+        // Interrupted while waiting (e.g. a user interrupt landed here): the lock
+        // may well be free — retry once, uninterruptibly, before crying "stuck".
+        case _: InterruptedException => outputLock.tryLock()
     onEnter
     if !acquired then ("", Some(RuntimeException(StuckEvaluationMessage)))
     else

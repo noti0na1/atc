@@ -2,22 +2,30 @@
 
 [![Scala CI](https://github.com/noti0na1/atc/actions/workflows/scala.yml/badge.svg)](https://github.com/noti0na1/atc/actions/workflows/scala.yml)
 
-ATC (Agent with Tracked Capabilities) is a minimal terminal coding agent whose **only tool is a
-Scala 3 REPL** protected by [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html) and [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html). Every action the model wants to take (read a file,
-run a command, fetch a URL) has to be written as Scala against a small, capability-typed
-library, and that code is compiled before it is allowed to run.
+ATC (Agent with Tracked Capabilities) is **a terminal coding agent that, by construction, cannot exceed the permissions you gave it**.
 
-What the agent may do is therefore decided by **which capabilities are in scope**, and an
-attempt to exceed them is a compile error rather than a runtime check somebody had to
-remember to write. The ideas come from [TACIT](https://github.com/lampepfl/tacit)
-(*Securing Agents With Tracked Capabilities*, CAIS '26); ATC re-packages them as a
-self-contained agent instead of an MCP server, with a redesigned file-permission model and
-interactive permission requests.
+The only tool given to it is a Scala 3 REPL. Every action the model takes (read a file, run a command,
+fetch a URL) is Scala code against a small, capability-typed library, compiled before it
+runs and its effects tracked in the type system by
+[capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
+and [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html):
+a capability calculus with a formal metatheory. The design comes from
+[TACIT](https://github.com/lampepfl/tacit) (*Securing Agents With Tracked Capabilities*,
+CAIS '26), repackaged as a self-contained terminal agent, to achieve better interactivity and a more practical permission control.
 
-This page is the user's guide: how to install and drive ATC, and the idea that makes it
-safe. Everything under the hood (architecture, the configuration semantics in depth, the
-sandbox, the terminal internals, building, testing, releases) is in
-[doc/development.md](doc/development.md).
+**Safety and privacy first:**
+
+- **Effects are tracked, not trusted.** File, command, network, and secret access are
+  capabilities the compiler sees, so overstepping is a compile error, caught before anything
+  runs.
+- **Privacy is typed.** Secrets become `Classified` values the model can compute on but never
+  read, and cannot reach a channel you did not allow.
+- **You hold every permission.** A layered, deny-by-default policy over files, commands, and
+  hosts, with deny lists nothing can override.
+- **Fewer interruptions.** Grant the routine once, and ATC asks only for what is left, through
+  a scope the extra permission cannot leak out of.
+- **Extensible.** A new tool is just a method on the library, inheriting the same tracking,
+  permission checks, and classified-data discipline.
 
 ## What it looks like
 
@@ -492,6 +500,64 @@ subcommands you mean rather than `git *`. `hosts` are glob patterns on host name
 `http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
 `denyHosts` are the denylists, same syntax: **deny wins over every allow**, over a session
 grant, over an open `request*` scope and over `--approve-all`.
+
+## What it protects, and what it does not
+
+A security tool that is vague about its edges is worse than none, so here is the guarantee
+stated plainly, together with what it rests on and how to stay inside it.
+
+### What holds
+
+- **No ambient authority.** The Scala the model writes can do only what the capabilities in
+  scope allow; naming a method it has no capability for is a compile error, before the code
+  runs, a typing rule rather than a check that could be forgotten.
+- **Deny by default.** No policy is compiled into the program. A file, command, or host is
+  reachable only because a config *you* can read grants it.
+- **Capabilities cannot escape.** The wider permission a `request*` block lends cannot be
+  stored, returned, or captured to outlive the block, and the host closes the scope on exit.
+- **Secrets stay typed.** `Classified` content can be computed on but not routed to a
+  channel you did not sanction, and a computation that fails on a secret is not turned into
+  a one-bit oracle.
+- **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
+  open scope, and `--approve-all`.
+
+### What it assumes
+
+- **You are trusted; the model is not.** ATC defends against a mistaken, confused, or
+  prompt-injected *model* exceeding what you allowed. It does not defend the machine against
+  *you*: a generous config, `--approve-all`, or a permission you grant at a pop-up is
+  honored as written.
+- **An allowed command is arbitrary code, run with your privileges, outside the sandbox.**
+  The capability system governs the Scala the model writes, not what a program you
+  permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
+  runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
+  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill test`); never grant
+  an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
+- **Allowed hosts can receive data.** Permit a host and hand the agent non-classified data,
+  and it can send that data there; `classified` content is the exception the types stop.
+  Allow only hosts you would trust as an exfiltration endpoint.
+- **Your provider sees your context.** Everything that is not `classified` (your prompts,
+  the file contents the agent reads, command output) goes to the model provider you
+  configured. Choose providers you trust; route secrets to a `classifiedModel` you trust (a
+  local model, say) or leave it unset so they never leave the machine.
+- **A trusted base underneath.** The JVM, the Scala compiler and its capture checker, the
+  OS, the terminal library, the agent library's host implementation, and ATC itself are
+  trusted; a bug in any of them (or in your config) can break a guarantee. Capture
+  checking and safe mode are experimental compiler features.
+
+### Keeping it safe in practice
+
+- Grant the least you need, and start in the least mode that works: read-only, then local,
+  then full (which is the one that adds the network).
+- Do not grant shells or interpreters as commands; list the exact subcommands you mean.
+- Keep the config small enough to read in one sitting; you can only audit what you can hold
+  in your head, so prefer several specific rules over one broad one.
+- Keep credentials behind `classified`, keep `.atc` out of the agent's reach (the templates
+  do both), and keep `safeMode` on.
+- Use `denyCommands`/`denyHosts` as a hard backstop for what must never happen, since deny
+  overrides everything else.
+- Prefer the pop-up (grant *this time*) over a broad standing grant for anything risky, and
+  keep `--approve-all` for sandboxes and CI you already trust.
 
 ## The terminal
 

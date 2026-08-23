@@ -37,9 +37,24 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
 object KeyBindings:
   val empty: KeyBindings = KeyBindings(Nil)
 
-  /** Read the `keys.properties` files that exist, most specific first. */
+  /** Read the `keys.properties` files that exist, most specific first. A file
+    * readable by other users earns a warning (it holds API keys). */
   def load(paths: List[Path]): KeyBindings =
-    KeyBindings(paths.filter(Files.isRegularFile(_)).distinctBy(_.toAbsolutePath.normalize).map(p => p -> read(p)))
+    val present = paths.filter(Files.isRegularFile(_)).distinctBy(_.toAbsolutePath.normalize)
+    present.foreach { p =>
+      if sharedReadable(p) then
+        System.err.println(s"atc: warning: $p can be read by other users and holds API keys; chmod 600 it")
+    }
+    KeyBindings(present.map(p => p -> read(p)))
+
+  /** Whether `p` is group- or other-readable (false where POSIX permissions
+    * do not exist or cannot be read). */
+  private def sharedReadable(p: Path): Boolean =
+    try
+      import java.nio.file.attribute.PosixFilePermission as P
+      val perms = Files.getPosixFilePermissions(p).nn
+      perms.contains(P.GROUP_READ) || perms.contains(P.OTHERS_READ)
+    catch case _: Exception => false
 
   /** The bindings of one file, in the standard `.properties` format (`#` and
     * `!` comments, `=` or `:` after the name, `\` escapes and continuations;

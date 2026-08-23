@@ -106,6 +106,12 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(render("", "x", ""), "x\n")
     assertEquals(md().finish(), "")
 
+  test("a rule line under a |-line is a horizontal rule, not a one-column table"):
+    // `---` has no pipe: it must not be taken as the delimiter row of a table.
+    assertEquals(plain(render("| a | b |\n---\n")), "| a | b |\n" + "─" * 40 + "\n")
+    // a one-column table (pipes around the delimiter cell) still renders as a table
+    assertEquals(plain(render("| a |\n|---|\n| 1 |\n")), "a\n─\n1\n")
+
   test("splitCarrying reopens the active colour on every line and closes it at the end"):
     assertEquals(Highlight.splitCarrying(s"$E[32ma\nb$R c\n"), List(s"$E[32ma$R", s"$E[32mb$R c"))
     assertEquals(Highlight.splitCarrying("plain"), List("plain"))

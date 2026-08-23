@@ -416,6 +416,65 @@ class ConfigSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](Config.withTopLevel("[1, 2]", "model", ujson.Str("x")))
     intercept[IllegalArgumentException](Config.withTopLevel("{ oops", "model", ujson.Str("x")))
 
+  test("withTopLevel edits the LAST of duplicated keys (the one the JSON reader honors)"):
+    val text = "{\n  \"model\": \"a\",\n  \"model\": \"b\"\n}\n"
+    val out = Config.withTopLevel(text, "model", ujson.Str("c"))
+    assertEquals(out, "{\n  \"model\": \"a\",\n  \"model\": \"c\"\n}\n")
+    assertEquals(ujson.read(out)("model").str, "c") // the effective value actually changed
+
+  // ── project detection, key files, init ──────────────────────────
+
+  test("a .atc holding only keys.properties still marks a project root"):
+    val dir = Files.createTempDirectory("atc-projkeys").nn.toRealPath().nn
+    val sub = Files.createDirectories(dir.resolve("sub")).nn
+    Files.createDirectories(dir.resolve(".atc"))
+    Files.writeString(dir.resolve(".atc").resolve(Config.KeysFile), "K=v\n")
+    assertEquals(Config.projectRoot(sub), Some(dir))
+
+  test("KeyBindings fall through to the environment after the files"):
+    val keys = KeyBindings.load(Nil)
+    assertEquals(keys.get("PATH"), Option(System.getenv("PATH")).filter(_.nonEmpty))
+
+  test("ensureGlobal creates the keys file readable by the owner only"):
+    val dir = Files.createTempDirectory("atc-ensure").nn
+    val created = Config.ensureGlobal(dir.resolve("config.json").nn)
+    assertEquals(created.size, 2)
+    import java.nio.file.attribute.PosixFilePermission as P
+    val perms = Files.getPosixFilePermissions(dir.resolve(Config.KeysFile)).nn
+    assert(!perms.contains(P.GROUP_READ) && !perms.contains(P.OTHERS_READ), perms.toString)
+
+  test("initProject adds keys.properties to a pre-existing .atc/.gitignore"):
+    val dir = Files.createTempDirectory("atc-initproj").nn
+    Files.createDirectories(dir.resolve(".atc"))
+    Files.writeString(dir.resolve(".atc/.gitignore"), "target\n")
+    val created = Config.initProject(dir)
+    assert(created.contains(Config.projectPath(dir)), created.toString)
+    val gi = Files.readString(dir.resolve(".atc/.gitignore")).nn
+    assert(gi.startsWith("target\n") && gi.linesIterator.exists(_.trim == Config.KeysFile), gi)
+    // already covered: untouched
+    val dir2 = Files.createTempDirectory("atc-initproj2").nn
+    Files.createDirectories(dir2.resolve(".atc"))
+    Files.writeString(dir2.resolve(".atc/.gitignore"), "keys.properties\n")
+    Config.initProject(dir2)
+    assertEquals(Files.readString(dir2.resolve(".atc/.gitignore")).nn, "keys.properties\n")
+
+  test("an invalid reasoning effort or summary is a config error, not a per-turn crash"):
+    def withModel(model: String): IllegalArgumentException =
+      val dir = Files.createTempDirectory("atc-cfg-reasoning").nn
+      val cfg =
+        writeCfg(dir, "config.json", s"""{ "providers": { "p": { "api": "echo", "models": { "m": $model } } } }""")
+      intercept[IllegalArgumentException](load(dir, Some(cfg)))
+    assert(withModel("""{ "reasoning": "hihg" }""").getMessage.nn.contains("reasoning"))
+    assert(withModel("""{ "reasoningSummary": "loud" }""").getMessage.nn.contains("reasoningSummary"))
+    // valid values pass
+    val dir = Files.createTempDirectory("atc-cfg-reasoning-ok").nn
+    val cfg = writeCfg(
+      dir,
+      "config.json",
+      """{ "providers": { "p": { "api": "echo", "models": { "m": { "reasoning": "high", "reasoningSummary": "auto" } } } } }"""
+    )
+    assertEquals(load(dir, Some(cfg)).settings.providers("p").models("m").reasoning, Some("high"))
+
   test("setTopLevel rewrites the project config, and a null classifiedModel there unsets a global one"):
     val dir = Files.createTempDirectory("atc-cfg-set").nn
     val projectDir = Files.createDirectories(dir.resolve(".atc")).nn

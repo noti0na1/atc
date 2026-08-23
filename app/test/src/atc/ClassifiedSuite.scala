@@ -126,12 +126,22 @@ class ClassifiedSuite extends munit.FunSuite:
         () => f.forEachLine((_, _) => ()),
         () => read("secrets/data.txt"),
         () => readLines("secrets/data.txt"),
-        () => grep("secrets/data.txt", "SECRET")
+        () => grep("secrets/data.txt", "SECRET"),
+        () => cat("secrets/data.txt"),
+        () => sed("secrets/data.txt", "S", "x"),
+        () => replaceLines("secrets/data.txt", 1, 1, "x"),
+        () => insertLines("secrets/data.txt", 1, "x"),
       )
     do
       val e = intercept[SecurityException](op())
       assert(e.getMessage.nn.contains("classified"), e.getMessage)
       assert(e.getMessage.nn.contains("readClassified"), e.getMessage)
+
+  test("move/copy out of a classified path are refused (the read check fires first), nothing is created"):
+    intercept[SecurityException](move("secrets/data.txt", "moved.txt"))
+    intercept[SecurityException](copy("secrets/data.txt", "copied.txt"))
+    assert(!env.existsOnDisk("moved.txt") && !env.existsOnDisk("copied.txt"))
+    assertEquals(env.contents("secrets/data.txt"), "TOP SECRET DATA") // and the source is untouched
 
   test("plain writes into a classified path are refused"):
     val f = secret("secrets/data.txt")
@@ -208,12 +218,20 @@ class ClassifiedSuite extends munit.FunSuite:
     intercept[SecurityException](writeClassified(env.root.resolve("leak2.txt").toString, s.map(_.toUpperCase)))
     assert(!env.existsOnDisk("leak.txt") && !env.existsOnDisk("leak2.txt"))
 
-  test("writeClassified of a failed computation reports a sanitized error and writes nothing"):
+  test("writeClassified of a failed computation is failure-blind for the agent"):
+    // The failure bit must not reach the agent (a pure `map` failing conditionally
+    // on the secret would be a per-bit oracle). It must not leak through a thrown
+    // exception NOR through the target's existence: the file is created either way
+    // (empty on failure), so `exists` cannot distinguish success from failure. The
+    // user sees a sanitized note; the agent gets nothing.
+    env.clearOutput()
     val failed = readClassified("secrets/data.txt").map(s => throw RuntimeException(s"oops $s"))
-    val e = intercept[IllegalStateException](writeClassified("secrets/failed.txt", failed))
-    assert(!e.getMessage.nn.contains("TOP SECRET"), e.getMessage)
-    assert(!e.getMessage.nn.contains("oops"), e.getMessage)
-    assert(!env.existsOnDisk("secrets/failed.txt"))
+    writeClassified("secrets/failed.txt", failed) // no throw
+    assert(env.existsOnDisk("secrets/failed.txt")) // created, so existence does not reveal the failure
+    assertEquals(env.contents("secrets/failed.txt"), "") // but empty: no content was written
+    assert(env.userOut.toString.contains("failed computation"), env.userOut.toString)
+    assert(!env.userOut.toString.contains("TOP SECRET"), env.userOut.toString)
+    assert(!env.agentOut.toString.contains("failed computation"), env.agentOut.toString)
 
   test("readClassified of an unreadable path fails inside the Classified"):
     val outside = TestEnv.outsideDir("nope")

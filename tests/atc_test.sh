@@ -74,6 +74,21 @@ stderr_of() {
   ("$@" 2>&1 >/dev/null) || true
 }
 
+# A curl stub that "downloads" a release asset by copying it from $ASSETS_DIR
+# (set by each download test before use). Parses whatever flags the wrapper's
+# real curl invocation passes, so it stays in step with one edit, not several.
+fake_asset_curl() { # <flags> <url> -o <file>
+  local url="" out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o) out="$2"; shift 2 ;;
+      http*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  cp "$ASSETS_DIR/$(basename "$url")" "$out"
+}
+
 APP_URL="https://github.com/noti0na1/atc/releases/download/v0.2.0/atc.jar"
 LIB_URL="https://github.com/noti0na1/atc/releases/download/v0.2.0/atc-lib.jar"
 APP_DIGEST="sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
@@ -147,13 +162,22 @@ if have_sha256_tool; then
   partial_info="$(printf 'atc.jar\t%s\t\natc-lib.jar\t%s\tsha256:%s\n' "$APP_URL" "$LIB_URL" "$(sha256_of "$LIB_JAR")")"
   assert_succeeds "cache matches its digests" cached_jars_match_digests "$good_info"
   assert_fails "cache with a changed jar does not match" cached_jars_match_digests "$bad_info"
-  assert_succeeds "asset without digest is skipped" cached_jars_match_digests "$partial_info"
+  assert_fails "an asset without a digest makes the cache untrusted (fail closed)" cached_jars_match_digests "$partial_info"
   rm -f "$APP_JAR"
   assert_fails "missing cached jar does not match" cached_jars_match_digests "$good_info"
   rm -rf "$CACHE_DIR"
 else
   echo "  SKIP: no sha256 tool"
 fi
+
+# Without any sha256 tool the cache cannot be verified: 'cannot verify' (exit 2),
+# not 'verified' — the caller then keeps a matching install rather than deleting it.
+no_sha256_cache() {
+  have_sha256_tool() { return 1; }
+  cached_jars_match_digests "atc.jar	x	sha256:whatever"
+  [[ $? -eq 2 ]]
+}
+assert_succeeds "no sha256 tool: cache is 'cannot verify' (exit 2)" no_sha256_cache
 
 # ---------------------------------------------------------------------------
 echo "--- cache marker ---"
@@ -318,7 +342,7 @@ if have_sha256_tool; then
     | sed -e "s/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890/$(sha256_of "$ASSETS_DIR/atc.jar")/" \
           -e "s/fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321/$(sha256_of "$ASSETS_DIR/atc-lib.jar")/")"
   release_json() { printf '%s\n' "$RELEASE_JSON_OVERRIDE"; }
-  curl() { local url="$2" out="$4"; cp "$ASSETS_DIR/$(basename "$url")" "$out"; }
+  curl() { fake_asset_curl "$@"; }
   out="$(main update)"
   assert_contains "update downloads the release over a dev install" "Downloading ATC v0.2.0" "$out"
   assert_eq "update restores the released app jar" "released app" "$(cat "$APP_JAR")"
@@ -348,10 +372,7 @@ if have_sha256_tool; then
   }
   RELEASE_JSON_OVERRIDE="$(make_release_json 1001 v1.0.0 "$(sha256_of "$ASSETS_DIR/atc.jar")" "$(sha256_of "$ASSETS_DIR/atc-lib.jar")")"
   release_json() { printf '%s\n' "$RELEASE_JSON_OVERRIDE"; }
-  curl() { # curl -fL <url> -o <file>
-    local url="$2" out="$4"
-    cp "$ASSETS_DIR/$(basename "$url")" "$out"
-  }
+  curl() { fake_asset_curl "$@"; }
 
   out="$(download_latest_release)"
   assert_contains "downloads the release" "Downloading ATC v1.0.0" "$out"
@@ -397,6 +418,151 @@ if have_sha256_tool; then
 else
   echo "  SKIP: no sha256 tool"
 fi
+
+# 'atc update' with a matching cache but NO sha256 tool must KEEP the working
+# install, not delete it and then fail the re-download's own verification.
+no_tool_keeps_matching_cache() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/notool-cache"
+    export ATC_INSTALL_DIR="$TEST_TMP/notool-bin"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    release_json() { printf '%s\n' "$FIXTURE_JSON"; }
+    have_sha256_tool() { return 1; } # pretend no sha256sum/shasum on PATH
+    local key
+    key="$(release_key_from_json "$FIXTURE_JSON")"
+    printf 'app\n' > "$APP_JAR"
+    printf 'lib\n' > "$LIB_JAR"
+    printf '%s\n' "$key" > "$RELEASE_MARKER" # the cache matches the latest release
+    local out
+    out="$(download_latest_release 2>&1)"
+    [[ -f "$APP_JAR" && -f "$LIB_JAR" ]] || { echo "jars were deleted: $out"; return 1; }
+    printf '%s' "$out" | grep -q "keeping the existing install" || { echo "no keep message: $out"; return 1; }
+  )
+}
+assert_succeeds "update without a sha256 tool keeps a matching install" no_tool_keeps_matching_cache
+
+# ---------------------------------------------------------------------------
+echo "--- hardening: hostile JSON, quoting, guards, self update ---"
+
+# Fake asset tokens in the free-text release body must not override the real
+# assets in the grep fallback (first match wins: the body follows the assets).
+fake_tokens='\"name\": \"atc.jar\", \"digest\": \"sha256:1111111111111111111111111111111111111111111111111111111111111111\", \"browser_download_url\": \"http://evil.example/atc.jar\"'
+hostile_json="${FIXTURE_JSON/Release notes/$fake_tokens}"
+hostile_out="$(extract_assets_grep "$hostile_json")"
+assert_contains "hostile body: real app URL wins" "$APP_URL" "$hostile_out"
+assert_contains "hostile body: real app digest wins" "$APP_DIGEST" "$hostile_out"
+assert_eq "hostile body: evil URL absent" "0" "$(printf '%s' "$hostile_out" | grep -c 'evil.example' || true)"
+if command -v jq >/dev/null 2>&1; then
+  assert_eq "hostile body: jq unaffected" "$jq_assets" "$(extract_assets_jq "$hostile_json")"
+fi
+
+# A quote in ATC_CACHE_DIR must not break the cleanup trap into an arbitrary rm -rf.
+trap_injection_safe() {
+  local sentinel="$TEST_TMP/victim"
+  mkdir -p "$sentinel"
+  printf 'keep\n' > "$sentinel/file"
+  (
+    # shellcheck disable=SC2088
+    export ATC_CACHE_DIR="$TEST_TMP/x' $sentinel #"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    release_json() { printf '%s\n' "$FIXTURE_JSON"; }
+    curl() { return 1; } # the download fails; fail() exits through the EXIT trap
+    download_latest_release >/dev/null 2>&1
+  )
+  [[ -f "$sentinel/file" ]]
+}
+assert_succeeds "a quote in ATC_CACHE_DIR cannot weaponize the cleanup trap" trap_injection_safe
+
+# A non-https asset URL is refused before any download.
+non_https_refused() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/cache-http"
+    source "$WRAPPER"
+    local http_json="${FIXTURE_JSON//https:\/\/github.com/http:\/\/github.com}"
+    release_json() { printf '%s\n' "$http_json"; }
+    download_latest_release >/dev/null 2>&1
+  )
+}
+assert_fails "a non-https asset URL is refused" non_https_refused
+non_https_msg() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/cache-http2"
+    source "$WRAPPER"
+    local http_json="${FIXTURE_JSON//https:\/\/github.com/http:\/\/github.com}"
+    release_json() { printf '%s\n' "$http_json"; }
+    download_latest_release 2>&1 >/dev/null
+  ) || true
+}
+assert_contains "non-https refusal is explained" "refusing a non-https download URL" "$(non_https_msg)"
+
+# Uninstall must not remove a directory that does not look like the jar cache.
+uninstall_guard_keeps() { # $1 = the cache dir to try
+  (
+    export ATC_CACHE_DIR="$1"
+    export ATC_INSTALL_DIR="$TEST_TMP/guard-bin"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    printf 'precious\n' > "$CACHE_DIR/keep.txt"
+    ( cmd_uninstall ) >/dev/null 2>&1 && exit 1 # must refuse (fail exits that nested subshell)
+    [[ -f "$CACHE_DIR/keep.txt" ]]
+  )
+}
+assert_succeeds "uninstall refuses ATC_CACHE_DIR=HOME" uninstall_guard_keeps "$HOME"
+assert_succeeds "uninstall refuses a cache dir not named jars" uninstall_guard_keeps "$TEST_TMP/notjars"
+# and the refusal is explained
+uninstall_guard_msg() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/notjars2"
+    export ATC_INSTALL_DIR="$TEST_TMP/guard-bin2"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    cmd_uninstall 2>&1 >/dev/null
+  ) || true
+}
+assert_contains "uninstall guard message" "no ATC release marker or jars" "$(uninstall_guard_msg)"
+
+# But a custom ATC_CACHE_DIR that IS our cache (holds the release marker) is removed,
+# so a non-default cache name is not a permanent obstacle to uninstalling.
+uninstall_removes_custom_cache() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/mycache"
+    export ATC_INSTALL_DIR="$TEST_TMP/guard-bin3"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    printf '12345678|v0.2.0\n' > "$RELEASE_MARKER" # marks it as ours
+    cmd_uninstall >/dev/null 2>&1
+    [[ ! -d "$CACHE_DIR" ]]
+  )
+}
+assert_succeeds "uninstall removes a custom cache that holds the ATC marker" uninstall_removes_custom_cache
+
+# self update, with a copy of the wrapper so self_path points at the copy.
+mkdir -p "$TEST_TMP/selfbin"
+cp "$WRAPPER" "$TEST_TMP/selfbin/atc"
+self_update_case() { # $1 = same|broken|changed
+  (
+    source "$TEST_TMP/selfbin/atc"
+    case "$1" in
+      same)    download_latest_self() { cp "$TEST_TMP/selfbin/atc" "$1"; } ;;
+      broken)  download_latest_self() { printf 'not bash (((\n' > "$1"; } ;;
+      changed) download_latest_self() { printf '#!/usr/bin/env bash\n# newer\n' > "$1"; } ;;
+    esac
+    cmd_self_update
+  )
+}
+assert_succeeds "self update with an identical script is a no-op" self_update_case same
+assert_contains "no-op says so" "already up to date" "$(self_update_case same)"
+assert_fails "an invalid downloaded script is refused" self_update_case broken
+assert_contains "invalid script message" "not a valid Bash" "$(self_update_case broken 2>&1 || true)"
+assert_succeeds "the refused update kept the original" cmp -s "$WRAPPER" "$TEST_TMP/selfbin/atc"
+assert_eq "no temp file left" "" "$(ls "$TEST_TMP/selfbin"/atc.self-update.* 2>/dev/null || true)"
+assert_succeeds "a changed script replaces the wrapper" self_update_case changed
+assert_contains "the copy was replaced" "# newer" "$(cat "$TEST_TMP/selfbin/atc")"
+self_perms="$(stat -f %Lp "$TEST_TMP/selfbin/atc" 2>/dev/null || stat -c %a "$TEST_TMP/selfbin/atc")"
+assert_eq "the installed wrapper is world-readable +x" "755" "$self_perms"
+assert_eq "no temp file left after replacement" "" "$(ls "$TEST_TMP/selfbin"/atc.self-update.* 2>/dev/null || true)"
 
 # ---------------------------------------------------------------------------
 echo

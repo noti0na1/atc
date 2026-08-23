@@ -148,6 +148,60 @@ class ModelSuite extends munit.FunSuite:
     val out = Agent.renderForModel(r, 10000)
     assert(out.contains("requestFiles"), out)
 
+  test("the system prompt really bundles the API reference"):
+    // `Prompts.interfaceSource` falls back to "(API reference unavailable)" when the
+    // packaged resource is missing — pin that the bundling works.
+    val src = atc.agent.Prompts.interfaceSource
+    assert(src.contains("def httpPostClassified"), src.take(200))
+    assert(!src.contains("API reference unavailable"), "the Interface.scala resource was not bundled")
+
+  test("renderForModel adds the PATH/no-shell hint for a program that cannot run"):
+    val r = ExecutionResult(false, "Cannot run program \"gti\": error=2, No such file or directory")
+    val out = Agent.renderForModel(r, 10000)
+    assert(out.contains("PATH"), out)
+    assert(out.contains("no shell"), out)
+
+  test("renderForModel adds the switch-mode hint for read-only capture errors"):
+    val out1 = Agent.renderForModel(ExecutionResult(false, "... cannot subsume a read-only capture set ..."), 10000)
+    assert(out1.contains("/mode"), out1)
+    val out2 = Agent.renderForModel(ExecutionResult(false, "... Cannot call update method ..."), 10000)
+    assert(out2.contains("/mode"), out2)
+
+  test("renderForModel adds the mode hint for a capability the mode does not hand out"):
+    val out1 = Agent.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Network ..."), 10000)
+    assert(out1.contains("/mode"), out1)
+    val out2 = Agent.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Exec ..."), 10000)
+    assert(out2.contains("/mode"), out2)
+
+  test("renderForModel reports a denial in the tool result"):
+    val out = Agent.renderForModel(
+      ExecutionResult(true, "ok"),
+      10000,
+      List(atc.perms.Decision.Deny -> "write on '/x'")
+    )
+    assert(out.contains("the user denied write on '/x' (do not ask again for the same thing)"), out)
+
+  // ── EchoModel ───────────────────────────────────────────────────
+
+  test("echo: a run: message calls run_scala, even with a prepended agent note"):
+    val m = EchoModel("echo")
+    // the agent prepends notes (`/new`, `/run`) to the user text; the trigger must survive that
+    val noted = "[sandbox notice] The Scala REPL was restarted (x).\n\nrun: 1 + 1"
+    val (c, _) = collect(m, List(Msg.User(noted)))
+    assertEquals(c.toolCalls.size, 1)
+    val code = Json.parseObject(c.toolCalls.head.arguments).value("code").str
+    assertEquals(code, "1 + 1")
+    // without the note, and a plain message echoes
+    assertEquals(collect(m, List(Msg.User("run: 2 + 2")))._1.toolCalls.size, 1)
+    val (plain, _) = collect(m, List(Msg.User("hello")))
+    assertEquals(plain.text, "echo: hello")
+    assert(plain.toolCalls.isEmpty)
+
+  test("echo: a configured contextWindow is honored (so context-fitting demos work key-less)"):
+    val m = EchoModel("echo", "echo", Some(5000))
+    assertEquals(m.contextWindow, Some(5000))
+    assertEquals(EchoModel("echo").contextWindow, None)
+
   test("renderForModel truncates overlong output keeping head and tail"):
     val big = ("H" * 400) + ("T" * 400)
     val out = Agent.renderForModel(ExecutionResult(true, big), 120)

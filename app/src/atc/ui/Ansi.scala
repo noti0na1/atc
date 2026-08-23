@@ -26,3 +26,15 @@ object Ansi:
 
   /** Matches one SGR sequence. */
   val Sgr = """\u001b\[[0-9;]*m""".r
+
+  /** Strip terminal control from untrusted text (model prose, program output,
+    * file content, paths): C0 controls except `\n` and `\t`, DEL, and C1. ESC is
+    * dropped outright, so even an escape sequence straddling two streamed chunks
+    * dies with it. Applied where such text enters the TUI, never to the TUI's
+    * own styled output. */
+  def sanitize(s: String): String =
+    if !s.exists(isControl) then s
+    else s.filterNot(isControl)
+
+  private def isControl(c: Char): Boolean =
+    (c < ' ' && c != '\n' && c != '\t') || c == '\u007f' || (c >= '\u0080' && c <= '\u009f')

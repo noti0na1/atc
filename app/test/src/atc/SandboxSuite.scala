@@ -46,6 +46,29 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     assert(env.userOut.toString.contains("safe:secret"), env.userOut.toString)
     assert(!r.output.contains("secret"), r.output)
 
+  test("exfiltration drill: the agent never sees the classified content, on any channel"):
+    // One classified file pushed at every outward channel the sandbox offers:
+    // masked sinks, the REPL echo, a failed computation, declassifying writes and
+    // command redirections. The agent-visible streams must never carry the value.
+    env.file("secrets/drill.txt", "DRILL-SECRET-42")
+    env.clearOutput()
+    // masked channels: println and the REPL echo show Classified(***)
+    val printed = assertOk(run("""println(readClassified("secrets/drill.txt"))"""))
+    assert(printed.output.contains("Classified(***)"), printed.output)
+    val echoed = assertOk(run("""val echoed = readClassified("secrets/drill.txt"); ()"""))
+    assert(!echoed.output.contains("DRILL-SECRET-42"), echoed.output)
+    // a failed computation over the secret prints a sanitized note, not the error
+    assertOk(run("""println(readClassified("secrets/drill.txt").map(s => throw RuntimeException(s)))"""))
+    // refused channels: declassifying write, classified redirection in and out
+    assertFails(run("""writeClassified("leak.txt", readClassified("secrets/drill.txt"))"""), "declassify")
+    assertFails(run("""exec("echo x < secrets/drill.txt")"""), "classified")
+    assertFails(run("""exec("echo x > secrets/out.txt")"""), "classified")
+    assert(!env.existsOnDisk("leak.txt"))
+    assert(!env.existsOnDisk("secrets/out.txt"))
+    // the agent saw none of it anywhere; the user saw it (the println above)
+    assert(!env.agentOut.toString.contains("DRILL-SECRET-42"), env.agentOut.toString)
+    assert(env.userOut.toString.contains("DRILL-SECRET-42"), env.userOut.toString)
+
   test("the preamble gives each capability its own REPL round"):
     // Separate rounds put each given in its own line wrapper, which is what lets
     // a pure `Classified.map` capture the read-only `fs` without dragging in the
@@ -66,6 +89,14 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     // Shared, so the host can implement the interface the agent programs against.
     assert(loader.loadClass("atc.lib.Interface") eq classOf[atc.lib.Interface])
     assert(loader.loadClass("scala.collection.immutable.List") eq classOf[List[?]])
+
+  test("the sandbox loader hides *.class resources (only REPL classes get interrupt-instrumented)"):
+    // With interrupt instrumentation on, the REPL loader would otherwise read the
+    // bytecode of shared classes through its parent and re-define an instrumented
+    // copy — including atc.lib.Interface, losing the installed host.
+    val loader = Sandbox.newLoader()
+    assertEquals(loader.getResource("atc/lib/Interface.class"), null)
+    assertEquals(loader.getResource("scala/collection/immutable/List.class"), null)
 
   // ── Safety nets ─────────────────────────────────────────────────
 
@@ -102,3 +133,27 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     // Interrupts and timeouts stop REPL loops by raising ThreadDeath at back-edges;
     // a loop that caught everything would defeat them.
     assertFails(run("""while true do try { val x = 1 } catch case _ => ()"""), "catch-all")
+
+  test("a catch-all in a LATER arm is rejected too (it catches fatal errors)"):
+    // The catch-all used to slip through as a non-first arm. A recursion needs no
+    // forbidden type name to raise a StackOverflowError, so this WAS a live
+    // per-bit oracle over classified data.
+    val attack =
+      """val c = readClassified("secrets/s.txt")
+        |def bit(ch: Char): Boolean =
+        |  try { c.map(s => if s.contains(ch) then { def r(): Int = r() + 1; r() } else 0); false }
+        |  catch
+        |    case _: RuntimeException => false
+        |    case _ => true
+        |println(bit('e'))""".stripMargin
+    assertFails(run(attack), "catch-all")
+
+  test("a catch-all behind two nested brace levels is rejected too"):
+    assertFails(
+      run("""try println(1) catch { case _: RuntimeException => { val x = { 1 }; x }; case _ => 2 }"""),
+      "catch-all"
+    )
+
+  test("a type alias cannot smuggle a fatal catch past the validator"):
+    assertFails(run("type T = Throwable\ntry println(1) catch case _: T => 2"), "catch-fatal-alias")
+    assertFails(run("type E = StackOverflowError\ntry println(1) catch case _: E => 2"), "catch-fatal-alias")

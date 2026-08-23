@@ -134,7 +134,9 @@ release_json() {
 
   require_command curl
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    # Through an anonymous-pipe config file, not the command line: a -H
+    # argument would show the token in the process list.
+    curl_args+=(--config <(printf 'header = "Authorization: Bearer %s"\n' "${GITHUB_TOKEN}"))
   fi
 
   response="$(curl "${curl_args[@]}" -w $'\n%{http_code}' "$api_url")" \
@@ -222,9 +224,14 @@ extract_assets_grep() {
       continue
     fi
     if [[ "$token" =~ \"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+      # First match wins: the whole document is scanned (no structure), and the
+      # free-text release notes follow the assets array, so tokens there must
+      # not overwrite the real asset's URL or digest.
       case "$current_name" in
-        "$APP_JAR_NAME") app_url="${BASH_REMATCH[1]}"; app_digest="$current_digest" ;;
-        "$LIB_JAR_NAME") lib_url="${BASH_REMATCH[1]}"; lib_digest="$current_digest" ;;
+        "$APP_JAR_NAME")
+          if [[ -z "$app_url" ]]; then app_url="${BASH_REMATCH[1]}"; app_digest="$current_digest"; fi ;;
+        "$LIB_JAR_NAME")
+          if [[ -z "$lib_url" ]]; then lib_url="${BASH_REMATCH[1]}"; lib_digest="$current_digest"; fi ;;
       esac
       current_name=""
       current_digest=""
@@ -281,21 +288,24 @@ cached_release_matches() {
   [[ "$(cat "$RELEASE_MARKER")" == "$release_key" ]]
 }
 
-# Whether the cached jars still match the digests of the release they came
-# from. Without a sha256 tool the cache is trusted; an asset without a digest
-# cannot be checked and is skipped.
+# Whether the cached jars still match the digests of the release they came from.
+# Exit status: 0 = every jar verified against its digest; 1 = a digest MISMATCHED
+# (real corruption — the caller re-downloads); 2 = CANNOT verify (no sha256 tool,
+# or an asset lacks a usable digest). On 2 the caller keeps the existing install
+# rather than deleting a working cache it has no way to re-check.
 cached_jars_match_digests() {
   local assets_info="$1" name _url digest expected actual
 
-  have_sha256_tool || return 0
+  have_sha256_tool || return 2
   while IFS=$'\t' read -r name _url digest; do
-    [[ -n "$name" && -n "$digest" ]] || continue
+    [[ -n "$name" ]] || return 1
+    [[ -n "$digest" ]] || return 2
     if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
       expected="${BASH_REMATCH[1]}"
     else
-      return 1
+      return 2
     fi
-    actual="$(sha256_of "${CACHE_DIR}/${name}" 2>/dev/null)" || return 1
+    actual="$(sha256_of "${CACHE_DIR}/${name}" 2>/dev/null)" || return 2
     [[ "$actual" == "$expected" ]] || return 1
   done <<< "$assets_info"
   return 0
@@ -314,8 +324,19 @@ download_latest_release() {
   assets_info="$(extract_assets "$json")"
 
   if cached_release_matches "$release_key"; then
-    if cached_jars_match_digests "$assets_info"; then
+    local verify_status
+    cached_jars_match_digests "$assets_info"
+    verify_status=$?
+    if [[ $verify_status -eq 0 ]]; then
       echo "ATC $(release_tag_of_key "$release_key") is already up to date in ${CACHE_DIR}."
+      return 0
+    elif [[ $verify_status -eq 2 ]]; then
+      # Cannot re-verify (no sha256 tool, or a digest is missing). The cached jars
+      # already match this release; keep them rather than deleting a working install
+      # only to fail the re-download's own verification for the very same reason.
+      echo "Cannot re-verify the cached ATC jars (no sha256 tool, or a digest is missing);" >&2
+      echo "keeping the existing install in ${CACHE_DIR}. Install coreutils (sha256sum) or" >&2
+      echo "macOS shasum to enable verification." >&2
       return 0
     fi
     echo "Cached ATC jars failed checksum verification; downloading again."
@@ -325,13 +346,23 @@ download_latest_release() {
   fi
 
   tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")"
-  trap "rm -rf '$tmp_dir'" EXIT
+  # The trap string is evaluated at EXIT: reference the variable (single
+  # quotes), never interpolate the path into it — a quote in ATC_CACHE_DIR
+  # would otherwise break out of the quoting into an arbitrary rm -rf. On the
+  # success path below this trap is cleared (see the note there).
+  DOWNLOAD_TMP_DIR="$tmp_dir"
+  trap '[[ -z "$DOWNLOAD_TMP_DIR" ]] || rm -rf -- "$DOWNLOAD_TMP_DIR"' EXIT
 
   echo "Downloading ATC $(release_tag_of_key "$release_key") to ${CACHE_DIR}"
   while IFS=$'\t' read -r name url _digest; do
     [[ -n "$name" && -n "$url" ]] || continue
+    case "$url" in
+      https://*) ;;
+      *) fail "refusing a non-https download URL for ${name}: ${url}" ;;
+    esac
     echo "- ${name}"
-    curl -fL "$url" -o "${tmp_dir}/${name}" || fail "failed to download ${name} from ${url}."
+    curl -fL --proto =https --proto-redir =https "$url" -o "${tmp_dir}/${name}" \
+      || fail "failed to download ${name} from ${url}."
   done <<< "$assets_info"
 
   echo "Verifying checksums..."
@@ -345,7 +376,11 @@ download_latest_release() {
   mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR"
   printf '%s\n' "$release_key" > "$RELEASE_MARKER"
 
+  # Success: clean up directly and drop the cleanup trap. Note this clears any
+  # EXIT trap a sourcing caller had when called in-process (not via a subshell);
+  # the trap-string injection is what mattered, and it is fixed above.
   trap - EXIT
+  DOWNLOAD_TMP_DIR=""
   rmdir "$tmp_dir" 2>/dev/null || true
 
   echo "ATC $(release_tag_of_key "$release_key") is ready:"
@@ -451,11 +486,12 @@ install_self() {
 }
 
 download_latest_self() {
-  local output_path="$1" curl_args=(-fsSL)
+  local output_path="$1" curl_args=(-fsSL --proto =https --proto-redir =https)
 
   require_command curl
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    # See release_json: keep the token out of the process list.
+    curl_args+=(--config <(printf 'header = "Authorization: Bearer %s"\n' "${GITHUB_TOKEN}"))
   fi
   curl "${curl_args[@]}" -o "$output_path" "$SCRIPT_SOURCE_URL"
 }
@@ -537,6 +573,9 @@ cmd_self_update() {
   [[ -f "$source_path" ]] || fail "Current atc script was not found at ${source_path}."
   source_dir="$(dirname "$source_path")"
   tmp_path="$(mktemp "${source_dir}/atc.self-update.XXXXXX")" || fail "Unable to create a temporary file in ${source_dir}."
+  # Clean up the temp file on a signal too; global so the trap sees it at fire time.
+  SELF_UPDATE_TMP="$tmp_path"
+  trap 'rm -f -- "$SELF_UPDATE_TMP"; trap - INT TERM; exit 130' INT TERM
 
   echo "Checking ${SCRIPT_SOURCE_URL}"
   if ! download_latest_self "$tmp_path"; then
@@ -549,14 +588,17 @@ cmd_self_update() {
   fi
   if cmp -s "$source_path" "$tmp_path"; then
     rm -f "$tmp_path"
+    trap - INT TERM
     echo "atc is already up to date at ${source_path}."
     return 0
   fi
-  chmod +x "$tmp_path"
+  # 755, not mktemp's 600 +x: the installed wrapper is for every user (install_self).
+  chmod 755 "$tmp_path"
   if ! mv "$tmp_path" "$source_path"; then
     rm -f "$tmp_path"
     fail "Unable to replace ${source_path}. Check file permissions and try again."
   fi
+  trap - INT TERM
   echo "Updated atc at ${source_path}"
 }
 
@@ -568,8 +610,15 @@ cmd_uninstall() {
     echo "No installed atc wrapper was found at ${INSTALL_PATH}."
   fi
   if [[ -d "$CACHE_DIR" ]]; then
-    rm -rf "$CACHE_DIR"
-    echo "Removed ${CACHE_DIR}"
+    # Guard against a mistyped ATC_CACHE_DIR (e.g. $HOME): only remove a directory
+    # that IS our cache — it holds the release marker or the jars — or the default
+    # 'jars' name. A custom ATC_CACHE_DIR is then still removable by its contents.
+    if [[ -f "$RELEASE_MARKER" || ( -f "$APP_JAR" && -f "$LIB_JAR" ) || "$(basename "$CACHE_DIR")" == "jars" ]]; then
+      rm -rf -- "$CACHE_DIR"
+      echo "Removed ${CACHE_DIR}"
+    else
+      fail "refusing to remove ${CACHE_DIR}: it has no ATC release marker or jars and is not the default 'jars' cache."
+    fi
   else
     echo "No downloaded ATC jars were found at ${CACHE_DIR}."
   fi

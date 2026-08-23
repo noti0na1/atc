@@ -21,6 +21,7 @@ final class TestEnv(
   hosts: List[String] = Nil,
   prefix: String = "atc-test",
   denyCommands: List[String] = Nil,
+  denyHosts: List[String] = Nil,
 ):
   val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
 
@@ -36,7 +37,7 @@ final class TestEnv(
       case d :: rest => decisions = rest; d
       case Nil => Decision.Deny
 
-  val policy: Policy = Policy(mkRules(root), commands, hosts, prompter, denyCommands)
+  val policy: Policy = Policy(mkRules(root), commands, hosts, prompter, denyCommands, denyHosts)
 
   // ── recorded host interactions ──
   val agentOut: StringBuilder = StringBuilder()
@@ -66,7 +67,14 @@ final class TestEnv(
     override def commandRunning(commandLine: String): Unit = liveCommands += commandLine
     override def whileCommandRuns[T](body: => T): T =
       commandsWrapped += 1
-      body
+      // Mirror `App`: the time a command runs does not count against the
+      // evaluation timeout of the snippet that launched it.
+      session match
+        case Some(s) =>
+          s.clock.pause()
+          try body
+          finally s.clock.resume()
+        case None => body
     override def processStarted(id: Int, commandLine: String): Unit =
       processEvents.synchronized(processEvents += s"p$id started: $commandLine")
     override def processInput(id: Int, text: String): Unit =

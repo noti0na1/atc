@@ -40,7 +40,13 @@ object GitIgnore:
       val file = dir.resolve(".gitignore").nn
       if !Files.isRegularFile(file) then Nil
       else
-        try Files.readAllLines(file).nn.asScala.toList.flatMap(Rule.parse)
+        try
+          Files.readAllLines(file).nn.asScala.toList.flatMap { line =>
+            // A malformed pattern (e.g. an unbalanced character class makes an
+            // invalid regex) disables just its line, as git does — not the file.
+            try Rule.parse(line)
+            catch case _: Exception => None
+          }
         catch case _: Exception => Nil // unreadable or not text: no rules from it
 
     /** Component by component, as git decides it: a path is ignored as soon as

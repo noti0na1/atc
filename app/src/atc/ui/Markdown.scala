@@ -279,8 +279,10 @@ object MarkdownStream:
   private val BulletRe = """^( *)[-*+] (.*)$""".r
   private val OrderedRe = """^( *)(\d{1,3}\.) .*$""".r
   private val QuoteRe = """^ {0,3}> ?(.*)$""".r
-  /** `| --- | :---: | ---: |` (outer pipes optional). */
-  private val DelimiterRow = """^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$""".r
+  /** `| --- | :---: | ---: |`, outer pipes optional. Some pipe must appear
+    * (the lookahead): a bare `---` is a horizontal rule, not a one-column
+    * delimiter row. */
+  private val DelimiterRow = """^(?=[^\n]*\|)\s*\|?(?:\s*:?-+:?\s*\|)*\s*:?-+:?\s*\|?\s*$""".r
 
   /** Whether `s` (a line so far, without newline) may still turn into a line
     * marker once more characters arrive — then we wait rather than render.

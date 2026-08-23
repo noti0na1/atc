@@ -69,16 +69,29 @@ object PathPattern:
     def variants(g: String): List[String] = if g.startsWith("**/") then g :: variants(g.stripPrefix("**/")) else List(g)
     variants(glob).flatMap(g => List(fs.getPathMatcher(s"glob:$g"), fs.getPathMatcher(s"glob:$g/**")))
 
-  /** Absolute, normalized, symlink-resolved as far as the path exists. */
+  /** Absolute, normalized, symlink-resolved as far as the path exists. A symlink
+    * is resolved even when its target does NOT exist (a dangling link): a write
+    * through the link creates/writes the target, so the policy must judge the
+    * target, not the link. */
   def canonical(p: Path): Path =
     val abs = p.toAbsolutePath.normalize
-    realPathOfNearestAncestor(abs)
+    realPathOfNearestAncestor(abs, MaxLinkDepth)
 
-  private def realPathOfNearestAncestor(abs: Path): Path =
-    if Files.exists(abs) then
+  /** Symlink-chain cap, like the kernel's ELOOP threshold. */
+  private val MaxLinkDepth = 40
+
+  private def realPathOfNearestAncestor(abs: Path, depth: Int): Path =
+    if depth <= 0 then abs // a symlink loop: judge the path literally
+    else if Files.isSymbolicLink(abs) then // NOFOLLOW: true for dangling links too
+      try
+        val target = Files.readSymbolicLink(abs).nn
+        val resolved = if target.isAbsolute then target else abs.getParent.resolve(target).nn
+        realPathOfNearestAncestor(resolved.toAbsolutePath.normalize, depth - 1)
+      catch case _: java.io.IOException => abs
+    else if Files.exists(abs) then
       try abs.toRealPath()
       catch case _: java.io.IOException => abs
     else
       val parent = abs.getParent
       val name = abs.getFileName
-      if parent != null && name != null then realPathOfNearestAncestor(parent).resolve(name) else abs
+      if parent != null && name != null then realPathOfNearestAncestor(parent, depth).resolve(name) else abs

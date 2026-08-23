@@ -29,7 +29,8 @@ final class Host(
 
   /** Canonical absolute path: relative to `cwd`, `~` expanded, normalized,
     * symlinks resolved as far as the path exists (a link inside an allowed
-    * directory pointing elsewhere is judged by its target). */
+    * directory pointing elsewhere is judged by its target — including a dangling
+    * link, because a write through it creates/writes the target). */
   private[atc] def canonical(p: String): Path =
     val raw = Paths.get(PathPattern.expandHome(p)).nn
     PathPattern.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
@@ -59,10 +60,24 @@ final class Host(
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
   /** Run a `request*` block: `op` gets a capability for the freshly opened
-    * scope `id`, which is closed again however the block ends. */
+    * scope `id`, which is closed again however the block ends. Any process spawned
+    * in that scope is killed as it closes: a one-time grant must not leave a live
+    * (and, once the scope is gone, invisible and undrivable) process behind. A
+    * lasting process must be spawned in a standing grant (the base scope, never
+    * closed here). */
   private def inScope[T](id: ScopeId)(op: ScopeId => T): T =
     try op(id)
-    finally policy.closeScope(id)
+    finally
+      killProcessesInScope(id)
+      policy.closeScope(id)
+
+  /** Kill and drop every spawned process whose owning scope is exactly `id`. */
+  private def killProcessesInScope(id: ScopeId): Unit = spawned.synchronized:
+    spawned.values.toList.filter(_.scope == id).foreach { p =>
+      try p.managed.kill()
+      catch case _: Exception => ()
+    }
+    reapProcesses()
 
   // ── file effects shared by FileEntryImpl and the path helpers ─────
 
@@ -84,14 +99,35 @@ final class Host(
     Files.write(p, content)
     ()
 
-  private[atc] def writeClassifiedFile(scope: ScopeId, p: Path, content: String): Unit =
+  private[atc] def writeClassifiedFile(scope: ScopeId, p: Path, content: Try[String]): Unit =
+    // Permission and target checks run BEFORE looking at the value's success/failure
+    // bit, so a denied or non-classified target throws identically whether the
+    // classified computation succeeded or failed — the throw must not be an oracle.
     val pm = requireWrite(scope, p, "writeClassified")
     if !pm.classified then
       throw SecurityException(
         s"Access denied: '$p' is not a classified path; writing classified content there would declassify it."
       )
     ensureParent(p)
-    Files.writeString(p, content, StandardCharsets.UTF_8)
+    content match
+      case Success(v) => Files.writeString(p, v, StandardCharsets.UTF_8)
+      // A failed computation is failure-blind to the agent: still create the target
+      // (so its mere existence cannot reveal the failure bit; the content stays
+      // unreadable on a classified path), report it on the user channel only, and
+      // never signal the failure back to the agent.
+      case Failure(_) =>
+        if !Files.exists(p) then { Files.createFile(p); () }
+        classifiedSinkFailed(s"writing '$p'")
+
+  /** Report a failed classified computation at a sink, on the user channel
+    * only. The agent must not observe the failure bit: it is a per-bit oracle
+    * over the classified value (a pure `map` can fail conditionally on the
+    * secret), so sinks stay failure-blind and simply do nothing. */
+  private[atc] def classifiedSinkFailed(what: String): Unit =
+    output.print(
+      "",
+      s"<$what failed: the classified value is the result of a failed computation; its error is confidential>\n"
+    )
 
   /** The entries of `dir` (itself canonical) the scope may see, each as the
     * canonical path the policy judges it by, flagged when the entry is a
@@ -208,14 +244,17 @@ final class Host(
 
   /** Composed of the checked primitives (read `from`, write `to`, delete `from`),
     * so it grants nothing they would not: a classified source is refused by the
-    * read, a classified target by the write. */
+    * read, a classified target by the write. Moving a file onto itself is a no-op
+    * (read → write → delete would otherwise destroy it). */
   def move(from: String, to: String)(using fs: FileSystem): Unit =
     val src = fs.access(from)
     if src.isDirectory then
       throw IllegalArgumentException(s"move: '$from' is a directory; move its files and mkdir/delete the directories")
-    val bytes = src.readBytes()
-    fs.access(to).writeBytes(bytes)
-    src.delete()
+    val dst = fs.access(to)
+    if src.path != dst.path then
+      val bytes = src.readBytes()
+      dst.writeBytes(bytes)
+      src.delete()
 
   def copy(from: String, to: String)(using fs: FileSystem): Unit =
     val src = fs.access(from)
@@ -470,20 +509,26 @@ final class Host(
         keepHead = false,
         onExit = code => port.processExited(id, code),
       )
-      val handle = ProcessImpl(id, managed, output)
+      val handle = ProcessImpl(id, managed, output, scopeOf(ex), policy)
       spawned(id) = handle
       output.processStarted(id, p.line)
       handle
 
-  def runningProcesses(using Exec): List[Process] = spawned.synchronized:
+  /** The live processes visible to the caller's scope: a process spawned inside
+    * a `requestExec` block is unreachable once that block has closed, so a
+    * one-time grant cannot leave a drivable handle behind (`Policy.scopeVisibleFrom`). */
+  def runningProcesses(using ex: Exec): List[Process] = spawned.synchronized:
     reapProcesses()
-    spawned.values.toList
+    val caller = scopeOf(ex)
+    spawned.values.toList.filter(p => policy.scopeVisibleFrom(caller, p.scope))
 
-  private def reapProcesses(): Unit = spawned.filterInPlace((_, p) => p.isAlive)
+  private def reapProcesses(): Unit = spawned.filterInPlace((_, p) => p.managed.isAlive)
 
-  /** Kill every spawned process (session end, `/kill all`). */
+  /** Kill every spawned process (session end, `/kill all`). Goes through
+    * `managed` directly: this is host-internal cleanup and must work even for
+    * handles whose scope has already closed. */
   private[atc] def killProcesses(): Unit = spawned.synchronized:
-    spawned.values.foreach(_.kill())
+    spawned.values.foreach(_.managed.kill())
     spawned.clear()
 
   /** `/kill`: `p3`, `3` or `all`; a message for the user either way. */
@@ -497,7 +542,7 @@ final class Host(
       case r =>
         r.stripPrefix("p").toIntOption.flatMap(spawned.get) match
           case Some(p) =>
-            p.kill()
+            p.managed.kill()
             spawned.remove(p.id)
             s"killed p${p.id} (${p.commandLine})"
           case None => s"no running process '$ref' (see /ps)"
@@ -550,7 +595,11 @@ final class Host(
     val scheme = Option(uri.getScheme).map(_.toLowerCase).getOrElse("")
     if scheme != "http" && scheme != "https" then
       throw SecurityException(s"Invalid URL (only http/https are supported): $url")
-    val host = Option(uri.getHost).getOrElse(throw SecurityException(s"Invalid URL (no host): $url"))
+    // Matched as normalized: lower-case, no trailing dot, numeric IP literals in
+    // canonical form — `evil.com.` must not dodge a deny rule for `evil.com`, and
+    // `2852039166` is judged as `169.254.169.254`.
+    val host =
+      Option(uri.getHost).map(Host.normalizeHost(_)).getOrElse(throw SecurityException(s"Invalid URL (no host): $url"))
     policy.hostDenied(host) match
       case Some(pattern) =>
         throw SecurityException(
@@ -563,8 +612,21 @@ final class Host(
           )
     val b = HttpRequest.newBuilder(uri).nn.timeout(Duration.ofSeconds(60)).nn
     headers.foreach((k, v) => b.header(k, v))
-    // Classified header values are unwrapped here and sent, never shown to the agent.
-    secretHeaders.foreach((k, c) => b.header(k, ClassifiedImpl.get(c)))
+    // Classified header values are unwrapped here and sent, never shown to the
+    // agent. If a computation FAILED there is no value: abort rather than send the
+    // request with the header dropped — a request missing its auth header returns a
+    // different response (a 401 vs a 200) that would itself signal the failure and
+    // could have side effects at the endpoint. The user is told; `httpPostClassified`
+    // catches this into its failed `Classified`, so its response stays confidential.
+    // (On a plaintext-response request the secret value is already an intended
+    // channel to an allowed host, so this abort adds no leak the value did not.)
+    val resolvedSecrets = secretHeaders.view.mapValues(ClassifiedImpl.unwrap).toMap
+    if resolvedSecrets.valuesIterator.exists(_.isFailure) then
+      classifiedSinkFailed("a classified request header")
+      throw SecurityException(
+        "A classified header value could not be computed; the request was not sent. Its error is confidential."
+      )
+    resolvedSecrets.foreach((k, v) => b.header(k, v.get))
     val publisher = body match
       case None => HttpRequest.BodyPublishers.noBody().nn
       case Some(text) =>
@@ -718,6 +780,67 @@ object Host:
   val MaxProcesses: Int = 8
   /** How much of an error body `httpGet`/`httpPost` quote. */
   val HttpErrorBodyChars: Int = 500
+
+  /** The host as the policy matches it: lower-case, without a trailing dot, and
+    * for a numeric IP literal its canonical form — a dotted-quad for IPv4 and for
+    * an IPv4-mapped IPv6 literal — so `evil.com.` cannot dodge a rule for
+    * `evil.com`, `2852039166` is judged as `169.254.169.254`, and neither can
+    * `[::ffff:169.254.169.254]`. Pure literal parsing, no DNS: a real hostname is
+    * returned as-is. */
+  def normalizeHost(host: String): String =
+    val h = host.stripSuffix(".").toLowerCase
+    // An IPv6 literal arrives bracketed from `URI.getHost`: `[::1]`,
+    // `[::ffff:169.254.169.254]`. Canonicalise it too, so an IPv4-mapped IPv6
+    // spelling of a denied IPv4 address does not dodge the rule.
+    val (bare, bracketed) =
+      if h.startsWith("[") && h.endsWith("]") then (h.substring(1, h.length - 1), true) else (h, false)
+    literalIpAddress(bare)
+      .orElse(if bracketed || looksLikeIpv6(bare) then ipv6Literal(bare) else None)
+      .getOrElse(bare)
+
+  /** Only IPv6-literal characters (hex, `:`, and `.` for an IPv4-mapped suffix).
+    * Gates the no-DNS parse: a real hostname (other letters) never reaches it. */
+  private def looksLikeIpv6(h: String): Boolean =
+    h.contains(':') && h.forall(c => c == ':' || c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
+
+  /** The canonical form of an IPv6 literal, and for an IPv4-mapped address its
+    * dotted-quad IPv4 form (so `[::ffff:169.254.169.254]` is judged as the IPv4
+    * literal `169.254.169.254`). A string with a `:` is parsed as a literal, never
+    * resolved, so this triggers no DNS lookup. */
+  private def ipv6Literal(h: String): Option[String] =
+    try
+      java.net.InetAddress.getByName(h) match
+        case v4: java.net.Inet4Address => Some(v4.getHostAddress.nn)
+        case v6: java.net.Inet6Address => Some(v6.getHostAddress.nn)
+        case _ => None
+    catch case _: java.net.UnknownHostException => None
+
+  /** The canonical dotted-quad of a numeric IPv4 literal: 1–4 dot-separated
+    * decimal parts (the forms `InetAddress` accepts without DNS — `127.1` is
+    * 127.0.0.1, `2852039166` is 169.254.169.254), the last part covering the
+    * remaining bytes. None for anything else. The address is built from bytes,
+    * so parsing one never triggers a DNS lookup. */
+  private[host] def literalIpAddress(h: String): Option[String] =
+    val parts = h.split("\\.", -1).toList
+    def partValue(p: String): Option[Long] =
+      if p.nonEmpty && p.forall(_.isDigit) then
+        try Some(java.lang.Long.parseLong(p, 10))
+        catch case _: NumberFormatException => None
+      else None
+    if parts.lengthIs < 1 || parts.lengthIs > 4 then None
+    else
+      val values = parts.map(partValue)
+      if values.exists(_.isEmpty) then None
+      else
+        val vs = values.flatten
+        val lastMax = 1L << (8 * (5 - parts.length)) // the last part covers 5-n bytes
+        if vs.init.exists(_ > 255) || vs.last >= lastMax then None
+        else
+          var addr = vs.last
+          for i <- 0 until vs.length - 1 do addr = addr | (vs(i) << (8 * (3 - i)))
+          val bytes = Array.tabulate(4)(i => ((addr >> (8 * (3 - i))) & 0xff).toByte)
+          try Some(java.net.InetAddress.getByAddress(bytes).nn.getHostAddress.nn)
+          catch case _: java.net.UnknownHostException => None
 
   /** gitignore-flavoured glob over a `/`-separated relative path: `**` spans
     * directories (a leading `**` + `/` also matches none), `*` and `?` stay within

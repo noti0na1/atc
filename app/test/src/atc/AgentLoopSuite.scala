@@ -76,10 +76,15 @@ final class RecordingUI extends AgentUI:
   val deltas, notes, statuses, warnings, toolStarts = ListBuffer[String]()
   val toolEnds = ListBuffer[Boolean]()
   var ends = 0
+  /** When set, `toolStart` throws — a stand-in for anything that can fail while a
+    * tool call is being run, after its `Msg.Assistant` is in history. */
+  var toolStartThrows: Boolean = false
   def assistantDelta(text: String): Unit = deltas += text
   def assistantNote(text: String): Unit = notes += text
   def assistantEnd(): Unit = ends += 1
-  def toolStart(code: String): Unit = toolStarts += code
+  def toolStart(code: String): Unit =
+    if toolStartThrows then throw RuntimeException("render blew up")
+    toolStarts += code
   def toolEnd(result: ExecutionResult, millis: Long): Unit = toolEnds += result.success
   def status(text: String): Unit = statuses += text
   def warn(text: String): Unit = warnings += text
@@ -291,6 +296,60 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.toolCalls, 0)
     assert(ui.warnings.exists(_.contains("tool budget")))
 
+  test("declining the tool budget asks once per turn, not once per queued call"):
+    // A batch of calls past the budget used to prompt once per call, and again on
+    // every later round; the refusal is now remembered for the rest of the turn.
+    val steps = Seq(
+      ScriptedModel.tool("1 + 1"),
+      ScriptedModel.tools("2 + 2", "3 + 3", "4 + 4"), // three calls, all over budget
+      ScriptedModel.tool("5 + 5"), // and the model keeps asking
+      ScriptedModel.Reply("done"),
+    )
+    val (_, s, ui, agent) = setup(ScriptedModel("m", steps), cfg = Config(maxToolCalls = 1))
+    ui.allowMoreToolCalls = false
+    agent.turn(s, "go", never)
+    assertEquals(agent.toolCalls, 1) // only the first call ran
+    assertEquals(ui.budgetAsks, 1) // one decline covers the whole turn
+    val errs = toolResults(agent).flatMap(_.results).filter(_.isError)
+    assertEquals(errs.size, 4) // the remaining four calls all got the budget result
+    assert(errs.forall(_.output.contains("budget")), errs.toString)
+
+  test("a failed turn appends an assistant marker, keeping the history well-formed"):
+    // Without the marker the next turn would stack two user messages in a row,
+    // which providers (Anthropic) reject.
+    val model =
+      ScriptedModel("m", Seq(ScriptedModel.Throw(RuntimeException("api down")), ScriptedModel.Reply("recovered")))
+    val (_, s, _, agent) = setup(model)
+    intercept[RuntimeException](agent.turn(s, "first", never))
+    assertEquals(agent.history.last, Msg.Assistant("[turn failed: api down]", Nil, None))
+    agent.turn(s, "second", never)
+    val users = agent.history.collect { case u: Msg.User => u.text }
+    assertEquals(users, List("first", "second")) // no consecutive user messages
+    assertEquals(agent.history.last, Msg.Assistant("recovered", Nil, None))
+
+  test("a failure while running a tool call answers the pending call (no dangling tool_use)"):
+    // The assistant asked for a tool; running it throws before the result is
+    // recorded. The transcript must not end on a tool_use with no tool_result, nor
+    // stack a second assistant message — either is a provider 400 that would wedge
+    // every later turn. It must be answered with an error tool_result instead.
+    val (_, s, ui, agent) = setup(ScriptedModel(
+      "m",
+      Seq(ScriptedModel.tool("1 + 1"), ScriptedModel.Reply("recovered"))
+    ))
+    ui.toolStartThrows = true
+    intercept[RuntimeException](agent.turn(s, "go", never))
+    assertEquals(assistants(agent).length, 1) // just the tool request, no second assistant
+    agent.history.last match
+      case Msg.ToolResults(rs) => assert(rs.nonEmpty && rs.forall(_.isError), rs.toString)
+      case other => fail(s"expected an error ToolResults last, got $other")
+    // the tool_use is immediately followed by its tool_result
+    val idx = agent.history.indexWhere { case _: Msg.Assistant => true; case _ => false }
+    assert(idx >= 0 && agent.history(idx + 1).isInstanceOf[Msg.ToolResults], agent.history.toString)
+    // and the session recovers on the next turn
+    ui.toolStartThrows = false
+    agent.turn(s, "again", never)
+    assertEquals(agent.history.last, Msg.Assistant("recovered", Nil, None))
+
   test("an unfinished completion is resumed"):
     val (_, s, ui, agent) = setup(ScriptedModel(
       "m",
@@ -358,6 +417,9 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(kept2, List(u("q3"), a("a3")))
     assertEquals(d2, 7)
     assertEquals(Agent.fitToContext(Nil, 1), (Nil, 0))
+    // no user message at all: untouched (a cut must start at a user message)
+    val noUser = List(a("a1"), tr("t1"), a("a2"))
+    assertEquals(Agent.fitToContext(noUser, 1), (noUser, 0))
 
   test("a model with a context window sees the oldest exchanges dropped, and is told"):
     val big = "y" * 8000 // ~2000 tokens
@@ -478,6 +540,12 @@ class AgentLoopSuite extends munit.FunSuite:
     ))
     agent.turn(s, "go", never)
     assertEquals(agent.history.last, Msg.Assistant("with native", Nil, Some(native)))
+
+  test("estimateTokens counts the native replay payload (thinking blocks go back on the wire)"):
+    val plain = Agent.estimateTokens(Msg.Assistant("text", Nil, None))
+    val withNative =
+      Agent.estimateTokens(Msg.Assistant("text", Nil, Some(NativeTurn("anthropic", "x" * 4000))))
+    assert(withNative >= plain + 1000, s"$plain -> $withNative")
 
   test("the system prompt says whether a classified model exists, never which one"):
     val (_, _, _, without) = setup(ScriptedModel("m", Nil))

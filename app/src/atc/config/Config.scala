@@ -142,21 +142,35 @@ object Config:
     up(from.toAbsolutePath.nn.normalize)
 
   /** Write the global config, and the key bindings beside it, if they are
-    * missing: there has to be a base to narrow. Returns what it created. */
+    * missing: there has to be a base to narrow. The key bindings are created
+    * owner-only (they will hold API keys). Returns what it created. */
   def ensureGlobal(path: Path = globalPath): List[Path] =
     val keys = path.getParent.nn.resolve(KeysFile).nn
     List(path -> globalTemplate, keys -> keysTemplate).flatMap { (target, content) =>
       Option.when(!Files.exists(target)) {
         Option(target.getParent).foreach(Files.createDirectories(_))
-        Files.writeString(target, content)
+        if target.getFileName.toString == KeysFile then writeOwnerOnly(target, content)
+        else Files.writeString(target, content)
         target
       }
     }
 
+  /** Write `content` to `target` readable only by the owner where the file
+    * system has POSIX permissions (a plain write where it has not). */
+  private def writeOwnerOnly(target: Path, content: String): Unit =
+    import java.nio.file.StandardOpenOption.{CREATE, WRITE}
+    import java.nio.file.attribute.PosixFilePermissions
+    val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
+    try
+      Files.createFile(target, ownerOnly) // ensureGlobal/initProject call this only for missing files
+      Files.writeString(target, content)
+    catch case _: UnsupportedOperationException => Files.writeString(target, content)
+
   /** Write the starting project config for `dir`, and a `.gitignore` beside
     * it keeping the keys out of version control (the config travels with the
-    * repository; `.atc/keys.properties` must not). Returns what it created:
-    * nothing when the config already exists. */
+    * repository; `.atc/keys.properties` must not). An existing `.gitignore`
+    * gains a `keys.properties` line when it does not have one. Returns what it
+    * created: nothing when the config already exists. */
   def initProject(dir: Path): List[Path] =
     val config = projectPath(dir)
     if Files.exists(config) then Nil
@@ -164,8 +178,13 @@ object Config:
       Files.createDirectories(config.getParent)
       Files.writeString(config, projectTemplate)
       val ignore = config.getParent.nn.resolve(".gitignore").nn
-      val ignored = Option.when(!Files.exists(ignore)) { Files.writeString(ignore, KeysFile + "\n"); ignore }
-      config :: ignored.toList
+      val ignoreChanged =
+        if !Files.exists(ignore) then { Files.writeString(ignore, KeysFile + "\n"); true }
+        else
+          val text = Files.readString(ignore).nn
+          if text.linesIterator.exists(_.trim == KeysFile) then false
+          else { Files.writeString(ignore, text.stripSuffix("\n") + "\n" + KeysFile + "\n"); true }
+      config :: Option.when(ignoreChanged)(ignore).toList
 
   // ── layers ────────────────────────────────────────────────────────
 
@@ -209,7 +228,9 @@ object Config:
         case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
     // Relative patterns of a project config are read against the folder its
     // `.atc` sits in; every other layer reads them against the working directory.
-    val base = Option.when(origin == Origin.Project)(path.getParent.nn.getParent.nn)
+    // The base is canonicalized: the policy judges canonical paths, so a project
+    // reached through a symlink (macOS /tmp, /var) would otherwise never grant.
+    val base = Option.when(origin == Origin.Project)(PathPattern.canonical(path.getParent.nn.getParent.nn))
     ConfigLayer(origin, Some(path), readObj(text, path.toString), parse(text, path.toString), base)
 
   private def readObj(text: String, where: String): ujson.Obj =
@@ -256,6 +277,9 @@ object Config:
     * intersection), so only the granting layers care about their order.
     */
   def combine(layers: List[ConfigLayer], keys: KeyBindings = KeyBindings.empty): Configuration =
+    // Validate each layer's own `mode` against its own path, before any merge — so a
+    // typo is blamed on the file that holds it, not on whichever layer narrows it.
+    layers.foreach(validateLayerMode)
     val (granting, narrowing) = layers.partition(_.origin.grants)
     def merged(ls: List[ConfigLayer]) = ls.map(_.json).foldLeft(ujson.Obj())(mergeJson)
     val everything = merged(layers)
@@ -295,8 +319,20 @@ object Config:
       denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
     )
 
-  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an
-    * unset mode means the most permissive one. */
+  /** Reject a malformed `mode` in one layer, naming that layer's own file (every
+    * layer is checked up front by `combine`, so `stricterMode` never has to). */
+  private def validateLayerMode(layer: ConfigLayer): Unit =
+    layer.config.mode.foreach { m =>
+      try Mode.parse(m)
+      catch
+        case e: IllegalArgumentException =>
+          throw IllegalArgumentException(
+            s"Invalid config ${layer.path.map(_.toString).getOrElse(s"(${layer.origin.label} layer)")}: ${e.getMessage}"
+          )
+    }
+
+  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an unset
+    * mode means the most permissive one. Both are already validated per layer. */
   private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
     def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
     Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
@@ -318,6 +354,9 @@ object Config:
 
   /** Reject limits that would otherwise fail much later in output slicing,
     * timeout accounting, or provider request construction. */
+  private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
+  private val ReasoningSummaries = Set("auto", "concise", "detailed")
+
   def validate(config: Config): Config =
     def positive(name: String, value: Long): Unit =
       if value <= 0 then throw IllegalArgumentException(s"Invalid config: $name must be greater than zero (was $value)")
@@ -353,6 +392,20 @@ object Config:
         model.contextWindow.foreach(t => positive(s"$where.contextWindow", t.toInt))
         model.temperature.foreach { value =>
           if !value.isFinite then throw IllegalArgumentException(s"Invalid config: $where.temperature must be finite")
+        }
+        // Enum-valued settings: a typo here would otherwise throw deep inside
+        // every request, on every turn.
+        model.reasoning.foreach { r =>
+          if !ReasoningEfforts.contains(r.trim.toLowerCase) then
+            throw IllegalArgumentException(
+              s"Invalid config: $where.reasoning must be one of ${ReasoningEfforts.mkString("|")} (was '$r')"
+            )
+        }
+        model.reasoningSummary.foreach { s =>
+          if !ReasoningSummaries.contains(s.trim.toLowerCase) then
+            throw IllegalArgumentException(
+              s"Invalid config: $where.reasoningSummary must be one of ${ReasoningSummaries.mkString("|")} (was '$s')"
+            )
         }
       }
     }
@@ -445,7 +498,9 @@ object Config:
     readObj(text, where) // fail clearly on anything that is not a JSON object
     val obj = ObjectText.scan(text)
     val rendered = ujson.write(value)
-    obj.members.find(_.key == key) match
+    // A duplicated key: the LAST occurrence is the one ujson honors, so that is
+    // the one to rewrite (editing the first would silently not stick).
+    obj.members.findLast(_.key == key) match
       case Some(m) => text.substring(0, m.valueStart) + rendered + text.substring(m.valueEnd)
       case None =>
         val entry = s"${ujson.write(ujson.Str(key))}: $rendered"

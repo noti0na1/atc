@@ -194,8 +194,12 @@ class ReplSessionSuite extends munit.FunSuite:
   test("safe mode: mutable collections are rejected"):
     assertFails(run("scala.collection.mutable.ArrayBuffer[String]()"), "safe code")
     assertFails(run("import scala.collection.mutable.ListBuffer\nListBuffer[Int]()"), "safe code")
-  test("safe mode: StringBuilder is rejected (documented quirk)"):
+  test("safe mode: the StringBuilder companion is rejected, but `new StringBuilder` works"):
     assertFails(run("val sb = StringBuilder()"), "safe code")
+    val top = assertOk(run("val sb: StringBuilder = new StringBuilder()\nsb.append(\"x\")\nsb.toString"))
+    assert(top.output.contains("x"), top.output)
+    val local = assertOk(run("def b(): String = { val sb = new StringBuilder(); sb.append(\"y\").toString }\nb()"))
+    assert(local.output.contains("y"), local.output)
   test("safe mode: Thread.sleep and sys.error are rejected"):
     assertFails(run("Thread.sleep(1)"), "safe code")
     assertFails(run("""sys.error("boom")"""), "safe code")
@@ -253,6 +257,31 @@ class ReplSessionSuite extends munit.FunSuite:
     assert(!t.isAlive, "evaluation did not stop after interrupt")
     assert(result.exists(!_.success), result.toString)
     assert(assertOk(s.run("2 + 2")).output.contains("4"))
+
+  test("close() interrupts a running evaluation and refuses later runs"):
+    val env = TestEnv(prefix = "atc-repl-close")
+    val s = env.newSession(timeoutMs = Some(60000L))
+    @volatile var result: Option[ExecutionResult] = None
+    val t = Thread(() => result = Some(s.run("while true do ()")))
+    t.setDaemon(true)
+    t.start()
+    Thread.sleep(700)
+    s.close()
+    t.join(10000)
+    assert(!t.isAlive, "evaluation did not stop after close()")
+    assert(result.exists(!_.success), result.toString)
+    val after = s.run("1 + 1")
+    assert(!after.success)
+    assert(after.error.exists(_.contains("closed")), after.error.toString)
+
+  test("time a command runs is not counted against the snippet's timeout"):
+    // `exec` runs inside `whileCommandRuns`, which pauses the execution clock:
+    // a 2 s command must fit a 1 s snippet budget.
+    val env = TestEnv(commands = List("sleep"), prefix = "atc-repl-cmdpause")
+    val s = env.newSession(timeoutMs = Some(1000L))
+    val r = assertOk(s.run("""exec("sleep", List("2")); println("woke")"""))
+    assert(r.output.contains("woke"), r.output)
+    assertEquals(env.commandsWrapped, 1) // it did go through the pausing hook
 
   // ── Output capture ──────────────────────────────────────────────
 

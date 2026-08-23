@@ -344,6 +344,95 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertRejected("try\n  f()\ncatch\n  case _ => ()", "catch-all")
   test("reject a bare catch-all fallback after typed arms"):
     assertRejected("try f() catch {\n  case _: RuntimeException => 1\n  case _ => 2\n}", "catch-all")
+  test("reject a braceless multi-arm catch whose LAST arm is the catch-all"):
+    assertRejected("try f()\ncatch\n  case _: RuntimeException => 1\n  case _ => 2", "catch-all")
+  test("reject a braced catch-all behind two levels of nested braces"):
+    assertRejected(
+      "try f() catch { case _: RuntimeException => { val x = { 1 }; x }; case _ => 2 }",
+      "catch-all"
+    )
+  test("reject a catch-all in a deeply nested braced catch"):
+    assertRejected("try f() catch { case _: Exception => { { { 1 } } }; case e => 2 }", "catch-all")
+  test("reject a catch-all with a guarded binder arm after a typed arm"):
+    assertRejected("try f() catch { case _: IllegalArgumentException => 1; case e if true => 2 }", "catch-all")
+  test("reject an underscore-prefixed binder catch-all"):
+    assertRejected("try f() catch case _ignored => ()", "catch-all")
+  test("reject a nested catch's catch-all inside a typed catch arm"):
+    assertRejected("try f() catch { case _: Exception => (try g() catch { case _ => 1 }) }", "catch-all")
+  test("allow a multi-arm catch when every arm is typed"):
+    assertAllowed(
+      "try read(\"x\") catch {\n  case _: IllegalArgumentException => \"a\"\n  case _: IllegalStateException => \"b\"\n}"
+    )
+  test("allow a braceless multi-arm catch when every arm is typed"):
+    assertAllowed(
+      "try read(\"x\")\ncatch\n  case _: IllegalArgumentException => \"a\"\n  case _: RuntimeException => \"b\""
+    )
+  test("allow a nested braced match with a wildcard inside a catch arm"):
+    assertAllowed(
+      "try read(\"x\") catch { case _: IllegalArgumentException => List(1) match { case _ => 0 } }"
+    )
+  test("allow a typed catch followed by finally"):
+    assertAllowed("try read(\"x\") catch { case _: Exception => \"d\" } finally println(\"done\")")
+  test("allow a braced catch-all in a comment"):
+    assertAllowed("val x = 1 // try f() catch { case _ => 2 }")
+  test("allow a braced catch-all inside a string"):
+    assertAllowed("""val s = "try f() catch { case _ => 2 }"""")
+
+  test("reject a type alias of Throwable (would defeat catch-fatal)"):
+    assertRejected("type T = Throwable\ntry f() catch case _: T => 2", "catch-fatal-alias")
+  test("reject a type alias of a fatal Error"):
+    assertRejected("type S = StackOverflowError", "catch-fatal-alias")
+  test("reject a type alias of a qualified fatal type"):
+    assertRejected("type T = java.lang.Throwable", "catch-fatal-alias")
+  test("reject a type alias whose union has a fatal member"):
+    assertRejected("type T = RuntimeException | Throwable", "catch-fatal-alias")
+  test("allow a benign type alias"):
+    assertAllowed("type S = String\ntype L = List[Int]")
+  test("no-fp: a fatal type nested in type arguments is not an alias of it"):
+    // `case _: M` catches Map, not AnyRef — the RHS scan must not cross a '['.
+    assertAllowed("type M = Map[String, AnyRef]")
+    assertAllowed("type L = List[Any]")
+    assertAllowed("type R = Either[Throwable, Int]")
+
+  // ── Catch-fatal evasions: parenthesised / union types and erased bounds ──
+
+  test("reject catch of a parenthesised Throwable"):
+    assertRejected("try f() catch case _: (Throwable) => ()", "catch-fatal")
+  test("reject catch of a union type containing a fatal type"):
+    assertRejected("try f() catch case _: (RuntimeException | Throwable) => ()", "catch-fatal")
+    assertRejected("try f() catch case _: (Throwable | RuntimeException) => ()", "catch-fatal")
+  test("reject a type parameter bounded by a fatal type (erased catch of the bound)"):
+    assertRejected("def g[T <: Throwable](b: => String) = try b catch case _: T => \"x\"", "catch-fatal-bound")
+    assertRejected("def g[E <: Error] = 1", "catch-fatal-bound")
+  test("no-fp: an AnyRef upper bound is a normal, allowed bound"):
+    assertAllowed("def g[T <: AnyRef](x: T): T = x")
+  test("reject catching an unbounded type parameter (erases to a fatal-catching bound)"):
+    // Demonstrated to swallow a real StackOverflowError in the sandbox.
+    assertRejected("def g[T](b: => Int): String = try b.toString catch case _: T => \"x\"", "catch-type-param")
+  test("reject catching a class/enum type parameter"):
+    assertRejected(
+      "class Box[E]:\n  def run(b: => Int): String = try b.toString catch case _: E => \"x\"",
+      "catch-type-param"
+    )
+  test("no-fp: a generic def that does not catch its parameter is fine"):
+    assertAllowed("def id[A](a: A): A = a\ndef first[A, B](p: (A, B)): A = p._1")
+  test("no-fp: a generic def catching a concrete non-fatal type is fine"):
+    assertAllowed("def f[A](b: => Int): String = try b.toString catch case _: RuntimeException => \"x\"")
+  test("no-fp: a catch guard that merely mentions a fatal type is not a fatal catch"):
+    assertAllowed("try read(\"x\") catch case _: RuntimeException if List[Throwable]().isEmpty => \"d\"")
+
+  // ── Catch-all evasions: @-binder and parenthesised patterns ──────
+
+  test("reject an @-binder catch-all"):
+    assertRejected("try f() catch case e @ _ => ()", "catch-all")
+  test("reject a parenthesised binder catch-all"):
+    assertRejected("try f() catch case (e) => ()", "catch-all")
+    assertRejected("try f() catch case (_) => ()", "catch-all")
+  test("allow an @-binder over a typed (non-fatal) pattern"):
+    assertAllowed("try read(\"x\") catch case e @ (_: RuntimeException) => e.getMessage")
+
+  test("reject backquoted getClass") { assertRejected("x.`getClass`", "reflect-getclass") }
+  test("allow getClass inside a string") { assertAllowed("""val s = "x.getClass"""") }
 
   test("reject throwing InterruptedException") {
     assertRejected("throw new InterruptedException()", "throwable-interrupted")

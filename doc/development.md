@@ -6,13 +6,24 @@ for working on ATC itself: building and testing, the architecture, the capabilit
 depth, the sandbox, the permission model, the exact semantics of the configuration, the
 terminal, and the conventions and gotchas that are easy to trip over.
 
-Contents: [Building and running](#building-and-running) · [Architecture](#architecture) ·
-[The capability design](#the-capability-design) · [Defence in depth](#defence-in-depth) ·
-[The sandbox](#the-sandbox) · [The permission model](#the-permission-model) ·
-[Configuration semantics](#configuration-semantics) · [Models and providers](#models-and-providers) ·
-[What the model sees](#what-the-model-sees-the-context) · [The agent loop](#the-agent-loop) · [The terminal](#the-terminal) ·
-[Testing](#testing) · [Conventions and gotchas](#conventions-and-gotchas) ·
-[The wrapper script](#the-wrapper-script) · [Releases and CI](#releases-and-ci)
+## Table of Contents
+
+1. [Building and running](#building-and-running)
+2. [Architecture](#architecture)
+3. [Capture checking in brief](#capture-checking-in-brief)
+4. [The capability design](#the-capability-design)
+5. [Defence in depth](#defence-in-depth)
+6. [The sandbox](#the-sandbox)
+7. [The permission model](#the-permission-model)
+8. [Configuration semantics](#configuration-semantics)
+9. [Models and providers](#models-and-providers)
+10. [What the model sees: the context](#what-the-model-sees-the-context)
+11. [The agent loop](#the-agent-loop)
+12. [The terminal](#the-terminal)
+13. [Testing](#testing)
+14. [Conventions and gotchas](#conventions-and-gotchas)
+15. [The wrapper script](#the-wrapper-script)
+16. [Releases and CI](#releases-and-ci)
 
 ## Building and running
 
@@ -154,10 +165,94 @@ so the agent sees the API; parser/renderer in `lib/.../JsonCodec.scala`, not bun
 `ExecOptions` and `Todo` are plain data types, so their default arguments are fine: the no-
 defaults rule is about capability-taking methods.
 
+## Capture checking in brief
+
+The whole design rests on one experimental Scala 3 feature, so here is enough of it to read
+the rest. [Capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
+adds a second dimension to the type system: beside *what* a value is, the compiler tracks
+*which capabilities it can reach*. A **capability** is a value tracked this way; its type is a
+subtype of `caps.Capability` (ATC's `FileSystem`, `Exec`, `Network`, `UserIO` and `IOCap` all
+are, through `caps.ExclusiveCapability`). The feature is a small formal calculus with a
+soundness proof; the papers are [at the end](#references).
+
+**Capture sets.** Every type carries a *capture set*, written in `^{...}`, naming the
+capabilities that values of the type may use:
+
+```scala
+val a: FileSystem^{fs}        // may use exactly fs
+val b: FileSystem^{fs, net}   // may use fs and net
+val c: FileSystem^            // ^ abbreviates ^{cap}: may use anything
+```
+
+A type with no `^` at all captures nothing (it is *pure*). The compiler propagates these sets
+through calls, closures and fields, and never widens one by accident: a value typed `^{fs}`
+has been proved unable to touch the network.
+
+**Subcapturing.** Capture sets are ordered by inclusion, and that order lifts to subtyping:
+`T^{fs}` is a subtype of `T^{fs, net}`. A value that uses *less* can stand in for one allowed
+to use more, never the other way round, so passing a `T^{fs, net}` where a `T^{fs}` is
+expected is a type error. This single rule is the backbone of both the read-only views and
+the mode ladder.
+
+**Functions capture what their body uses.** A function value's capture set is the union of
+the capabilities its body refers to. `A -> B` is a pure function (empty set); `A => B` is
+sugar for `A ->{cap} B`, one that may use anything; and `A ->{fs} B` may use `fs` and nothing
+else. That is exactly the type of `Classified.map`:
+
+```scala
+def map[B](op: T ->{any.rd} B): Classified[B]
+```
+
+`op` may capture only *read-only* capabilities (`any.rd`), so a body that tries to print,
+write, `exec` or `httpGet` does not compile: each of those needs a full capability the set
+does not admit. The confidential value can be transformed, never routed out.
+
+**Capabilities cannot escape their scope.** A capability introduced for a bounded region may
+not be captured by anything that outlives the region: storing it in a longer-lived binding,
+returning it, or closing over it in an escaping function is a compile error (the calculus
+models this with *boxes*, and the message reads "... cannot be included in outer capture set
+..."). That is what lets a `request*` block be handed a wider capability safely:
+
+```scala
+val stolen = requestFiles("/tmp", Access.Write, "cache") { // lends a full FileSystem^
+  write("/tmp/x", "ok")     // fine: the capability is used inside the block
+  summon[FileSystem^]       // error: returning it would let it escape the block
+}
+```
+
+**Safe mode** ([reference](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html))
+is a second experimental layer ATC enables with the first. Capture checking is sound only
+while *every* capability is tracked; a library that quietly handed out an untracked one (a
+`println` secretly holding `System.out`, say) would be a hole. Safe mode closes it by refusing
+any definition not vouched safe: the agent-visible API is `@assumeSafe`, the sandbox injection
+point is `@rejectSafe` (agent code cannot even name it), and untagged stdlib objects are simply
+unavailable, which is why a few standard methods have pure stand-ins in the API. Safe mode
+comes from [TACIT](https://github.com/lampepfl/tacit), the work ATC builds on.
+
+**Mutability.** On top of all this ATC uses the nightly's
+[mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html),
+which *reinterprets the bare type as the read-only view* (`FileSystem` means
+`FileSystem^{any.rd}`, not the pure empty set) and marks the mutating operations `update`,
+callable only through the full `^`. That refinement, and everything ATC assembles from these
+pieces, is [the capability design](#the-capability-design).
+
+### References
+
+* **The feature:** the Scala 3 nightly documentation, which the code tracks against a pinned
+  build ([capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html),
+  [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html),
+  [mutability](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html)).
+* **The formalized calculus:** *Capturing Types*, by Boruch-Gruszecki, Brachthäuser, Lee,
+  Lhoták and Odersky (ACM TOPLAS, 2023), which defines the capture calculus (CC<:, with boxes
+  for the escape checking above) and proves it sound.
+* **The agent application:** *Securing Agents with Tracked Capabilities* (TACIT, CAIS '26),
+  which introduces safe mode and the capability-typed sandbox that ATC re-packages.
+
 ## The capability design
 
 This expands the README's [idea section](../README.md#the-idea-capabilities-instead-of-ambient-authority)
-with what the implementation relies on.
+with what the implementation relies on (read [Capture checking in brief](#capture-checking-in-brief)
+first if the `^{...}` capture-set notation is new).
 
 **Capabilities cannot be forged.** The capability classes have `private[atc]` constructors
 (agent code is compiled into the empty package), the only instances are the ones the REPL
@@ -224,15 +319,16 @@ in every mode.
 Types decide what compiles; four more layers sit underneath, each independent of the others.
 
 1. **The policy at run time.** Every host method checks the permission `Policy` for the
-   path, command or host (and the scope id of the capability it was called through);
+   path, command or host (and the scope id of the capability it was called through); a `spawn`ed process handle likewise carries its spawning scope, so `runningProcesses` shows a capability only its own chain's processes, and every operation on the handle is refused once the block has closed; a process spawned inside a `requestExec` block is also killed when that block closes (`killProcessesInScope`), so a one-time grant leaves no live, invisible orphan and an allow-once interactive process can be neither driven nor left running afterwards;
    `Policy.mode` enforces the three modes again (writes downgraded to read, `exec`/network
    refused), so nothing rests on the type check alone.
 2. **The validator** (`sandbox/CodeValidator.scala`), a regex pre-check before compilation:
    it blocks `atc.(host|agent|sandbox|perms|config|llm|ui)`, reflection, `java.io/nio/net`,
    `System.out/err/in`, `System.exit/setProperty/getenv/getProperty/load*`, `caps.unsafe`,
-   `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`, and catching fatal throwables (`catch case _:
-   Throwable/Error/…`, a bare `catch case _ =>` via a cross-line rule, and any
-   `InterruptedException`/`ThreadDeath`). Fatal throwables (a real SOE/OOM, or the
+   `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`, and every way of catching a fatal throwable: a typed
+   catch of a fatal type incl. parenthesised/union forms (`case _: Throwable`, `case _: (A | Throwable)`), a bare `catch case _ =>`/`case e @ _ =>`/`case (e) =>` in any arm
+   position (a small `catch`-arm scanner, not a regex), type aliases of fatal types (but not ones merely nested in type arguments), a type parameter with a fatal upper bound,
+   a catch of any name declared as a type parameter (`case _: T` erases to a catch of the bound), and any `InterruptedException`/`ThreadDeath`. Fatal throwables (a real SOE/OOM, or the
    `ThreadDeath` stop signal) deliberately propagate out of `Classified.map` and abort the
    run; forbidding the catch is what stops them being used as a per-bit oracle over
    classified data or to swallow a timeout/interrupt. Add rules there for new escape
@@ -264,8 +360,10 @@ grants and open scopes; rules, deny lists and mode stay), calls `System.gc()` (t
 compiler and class loader are most of the process's memory) and starts a fresh REPL.
 
 **Evaluation, timeouts, interrupts** (`sandbox/ReplSession.scala`): evaluation runs on a
-worker thread; `ExecutionClock.paused` excludes time waiting for the user and the time a command runs (`HostOutput.whileCommandRuns`, which `App` maps to the same clock pause; pauses nest) (permission
-prompts, questions), so a slow human does not trip the timeout; interrupt/timeout raise the
+worker thread; `ExecutionClock.paused` excludes both the time spent waiting for the user
+(permission prompts, questions) and the time a command runs (`HostOutput.whileCommandRuns`,
+which `App` maps to the same clock pause; pauses nest), so a slow human does not trip the
+timeout; interrupt/timeout raise the
 REPL stop flag through `OpenReplDriver` (a subclass of the compiler's `ReplDriver`; it also
 installs `CappedRendering`, which lives in **package `dotty.tools.repl`** because
 `Rendering` is `private[repl]`) and `skipPoisonedWrapper()` advances the wrapper index so a
@@ -317,14 +415,14 @@ so a sub-folder inherits its parent's permission and can only be made stricter
 `visibleEntries` for listings): a symlink is listed as, and judged by, its target, so an
 entry from `children`/`walk` is checked exactly like the same path given by name (a link in
 a readable directory to a classified file is classified through the listing too; regression
-test in `HostSuite`), and only links pay for `toRealPath` since a plain child of a canonical
+test in `HostSuite`), and a dangling link is resolved too (a write through it creates the target, so the policy must judge the target), and only links pay for `toRealPath` since a plain child of a canonical
 directory is canonical. Symlinked directories are listed but never entered.
 
 **Classified paths.** Content is only observable as `Classified[String]`; a classified
 directory's structure is classified too (listing needs `childrenClassified`/
 `walkClassified`, returning `Classified[List[String]]`; `walk`/`grepRecursive`/`find` do not
 descend into it). A plain `write` to a classified path is refused (use `writeClassified`),
-and `writeClassified` to a non-classified path is refused too, since it would declassify.
+and `writeClassified` to a non-classified path is refused too, since it would declassify. Sinks are failure-blind for the agent (a pure `map` can fail conditionally on the secret — the failure bit would be a per-bit oracle), and how they stay blind depends on whether a response reaches the agent. `writeClassified` checks the permission and classified target *before* it inspects the value (a denied or non-classified target throws either way), then on failure writes nothing but still creates the target file (so its existence cannot reveal the bit) and reports on the user channel only. A secret HTTP header whose value failed cannot simply be dropped: the request would go out without it and its different response (a 401 vs a 200) would signal the failure, so on a plaintext-response request (`httpGet`/`httpPost`/`httpRequest`) the request is aborted with a generic error and the user is told; inside `httpPostClassified` the same abort is caught into the failed `Classified`, whose response never reaches the agent.
 
 **Commands and hosts.** `commands` are patterns over the whole command line: `*` is a
 wildcard, a pattern without `*` matches by word prefix (`"git status"` allows `git status
@@ -474,7 +572,7 @@ thinking/effort, the same as `complete`.
 `.atc/keys.properties` (`config/Keys.scala`, read with `java.util.Properties`, so
 `NAME=value`, `NAME: value`, `#`/`!` comments, `\` escapes and line continuations).
 `KeyBindings.get` tries the project file, then `~/.atc/keys.properties`, then
-`System.getenv`; an empty value is not a binding, so the lookup falls through.
+`System.getenv`; an empty value is not a binding, so the lookup falls through. The file is created owner-only (0600) and a group/other-readable one warns at load.
 `Config.resolveApiKey(provider, bindings)` feeds `ModelCatalog.from(config, keys)`.
 `ModelSpec.toString` masks the key and `/config` prints variable names only, never values.
 
@@ -702,7 +800,7 @@ tells them apart:
   ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
 ```
 
-All output goes through one `write` that tracks the last two chars (`tail`) so gutters can
+Untrusted text (model prose and thinking, tool code and output, prompt paths) passes through `Ansi.sanitize` (C0/C1 controls and ESC stripped) before display. All output goes through one `write` that tracks the last two chars (`tail`) so gutters can
 be inserted into arbitrarily chunked streams; `LiveRegion` redraws in place, and the two
 things that use it own their state as inner components (`thinking` = the reasoning window /
 full stream, `liveOutput` = folding of long program output, budgeted in wrapped terminal

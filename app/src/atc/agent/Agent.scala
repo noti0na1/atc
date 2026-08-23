@@ -56,9 +56,9 @@ final class Agent(
 ):
   var history: List[Msg] = Nil
   /** Every model call since the last `clear()`, by what it was for
-    * ([[Agent.Turns]], [[Agent.Chat]], ...). Guarded: the next-input
-    * prediction records from its own thread. */
-  private var usageBy: Map[String, TokenUsage] = Map.empty
+    * ([[Agent.Turns]], [[Agent.Chat]], ...), in the order the purposes first
+    * occurred. Guarded: the next-input prediction records from its own thread. */
+  private val usageBy = scala.collection.mutable.LinkedHashMap[String, TokenUsage]()
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
   /** Observed prompt tokens per estimated one, from the last completion: the
@@ -74,7 +74,7 @@ final class Agent(
   def usageByPurpose: List[(String, TokenUsage)] = synchronized(usageBy.toList)
   /** Add what one model call cost. */
   def recordUsage(purpose: String, u: TokenUsage): Unit =
-    synchronized { usageBy = usageBy.updated(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
+    synchronized { usageBy.update(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
 
   /** The one and only native tool: everything else is a Scala function. */
   private val tools = List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))
@@ -121,7 +121,7 @@ final class Agent(
 
   def clear(): Unit =
     history = Nil
-    synchronized { usageBy = Map.empty }
+    synchronized { usageBy.clear() }
     toolCalls = 0
     tokenCalibration = 1.0
     contextDropped = 0
@@ -148,7 +148,28 @@ final class Agent(
 
     def run(): Unit =
       var outcome = Continue
-      while outcome == Continue do outcome = round()
+      try while outcome == Continue do outcome = round()
+      catch
+        // A failed turn must leave the transcript well-formed for the next request,
+        // and how depends on where it broke (a provider rejects both two user
+        // messages in a row and a tool_use with no tool_result):
+        //  - the assistant asked for tools but we failed before recording their
+        //    results (e.g. rendering a tool call threw): answer every pending call
+        //    with an error, so no `tool_use` is left dangling;
+        //  - the last message is the user's (the model call threw immediately): add
+        //    an assistant marker, so the next turn's user message is not the second
+        //    in a row;
+        //  - otherwise the history already ends on an assistant/tool-result message
+        //    and needs nothing (a second assistant marker would itself be invalid).
+        case e if scala.util.control.NonFatal(e) =>
+          val marker = s"[turn failed: ${Option(e.getMessage).getOrElse(e.toString)}]"
+          history.lastOption match
+            case Some(Msg.Assistant(_, calls, _)) if calls.nonEmpty =>
+              history :+= Msg.ToolResults(calls.map(c => ToolResult(c.id, marker, isError = true)))
+            case Some(Msg.User(_)) =>
+              history :+= Msg.Assistant(marker, Nil, None)
+            case _ => ()
+          throw e
 
     /** Ask the model once, record its answer, then act on it. */
     private def round(): Outcome =
@@ -225,12 +246,19 @@ final class Agent(
           Done
 
     /** The budget is a checkpoint, not a wall: ask the UI (the human, when there is
-      * one) for another `maxToolCalls`. A budget of 0 means "no tools" and is never extended. */
+      * one) for another `maxToolCalls`. A budget of 0 means "no tools" and is never
+      * extended. A decline is remembered for the rest of the turn: with several
+      * calls left in the batch (or a model that keeps asking), the user must not be
+      * re-prompted for the same "no". */
+    private var budgetDenied = false
     private def extendBudget(): Boolean =
-      config.maxToolCalls > 0 && ui.confirmMoreToolCalls(used, config.maxToolCalls) && {
+      if budgetDenied || config.maxToolCalls <= 0 then false
+      else if ui.confirmMoreToolCalls(used, config.maxToolCalls) then
         budget += config.maxToolCalls
         true
-      }
+      else
+        budgetDenied = true
+        false
 
     /** The provider cut the response after a server-side tool call: re-send the history. */
     private def resume(): Outcome =
@@ -279,10 +307,15 @@ object Agent:
     * time by [[Agent]]'s calibration against the provider's own numbers. */
   def estimateTokens(text: String): Long = (text.length + 3) / 4
 
-  /** A message's share of a request, with a little per-message framing. */
+  /** A message's share of a request, with a little per-message framing. The
+    * provider-native replay payload (Anthropic thinking blocks, Responses
+    * reasoning items) goes back on the wire whole, so its rendered size counts
+    * too — a thinking-heavy history is otherwise wildly undercounted. */
   def estimateTokens(msg: Msg): Long = msg match
     case Msg.User(t) => estimateTokens(t) + 4
-    case Msg.Assistant(t, calls, _) => estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum + 4
+    case Msg.Assistant(t, calls, native) =>
+      estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum +
+        native.map(n => (n.payloadChars + 3L) / 4).getOrElse(0L) + 4
     case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
 
   /** `history` cut to an estimated `budget` tokens by dropping whole exchanges

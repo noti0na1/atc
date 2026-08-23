@@ -27,16 +27,28 @@ final class EchoModel(val alias: String, override val ref: String, override val 
       sink.text(text)
       Completion(text, calls, None, TokenUsage(1, 1), if calls.isEmpty then "end_turn" else "tool_use")
     history.lastOption match
-      case Some(Msg.User(text)) if text.trim.startsWith("run:") =>
-        counter += 1
-        val code = text.trim.stripPrefix("run:").trim
-        reply(
-          "Running that in the sandbox.",
-          List(ToolCall(s"echo-$counter", "run_scala", ujson.write(ujson.Obj("code" -> code))))
-        )
+      case Some(Msg.User(text)) =>
+        runPayload(text) match
+          case Some(code) =>
+            counter += 1
+            reply(
+              "Running that in the sandbox.",
+              List(ToolCall(s"echo-$counter", "run_scala", ujson.write(ujson.Obj("code" -> code))))
+            )
+          case None => reply(s"echo: $text")
       case Some(Msg.ToolResults(results)) => reply("Result:\n" + results.map(_.output).mkString("\n"))
-      case Some(Msg.User(text)) => reply(s"echo: $text")
       case _ => Completion("", Nil, None, TokenUsage(), "end_turn")
+
+  /** The `run: <scala>` payload of a user message, if it has one. Agent notes
+    * (`[sandbox notice] ...`) may be prepended to the text, so the marker is
+    * looked for at the start of any line, not just the first. */
+  private def runPayload(text: String): Option[String] =
+    val lines = text.linesIterator.toList
+    lines.indexWhere(_.trim.startsWith("run:")) match
+      case -1 => None
+      case i =>
+        val code = (lines(i).trim.stripPrefix("run:") +: lines.drop(i + 1)).mkString("\n").trim
+        Some(code).filter(_.nonEmpty)
 
   def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
     Reply(s"echo: $prompt", TokenUsage(1, 1))

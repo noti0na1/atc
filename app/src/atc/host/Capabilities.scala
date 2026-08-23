@@ -5,7 +5,7 @@ import atc.perms.ScopeId
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
-import scala.util.{Failure, Success, Try, Using}
+import scala.util.{Try, Using}
 
 /** Concrete capabilities. Each carries the id of its permission scope; the
   * policy resolves the effective permissions of that scope (its own grants
@@ -89,6 +89,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(_.toString))
 
   def writeClassified(content: Classified[String]): Unit =
-    ClassifiedImpl.unwrap(content) match
-      case Success(v) => host.writeClassifiedFile(scope, p, v)
-      case Failure(_) => throw ClassifiedImpl.failed() // never rethrow: the message may hold the secret
+    // Hand the raw `Try` to the host: it runs the permission/target checks before
+    // it branches on success/failure, so neither the thrown exception nor the
+    // target's existence can become a per-bit oracle over the classified value.
+    host.writeClassifiedFile(scope, p, ClassifiedImpl.unwrap(content))

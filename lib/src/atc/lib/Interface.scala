@@ -155,7 +155,9 @@ abstract class Network private[atc] () extends caps.ExclusiveCapability
  *  dev server, a watcher). It holds the `Exec` it was started with, so it cannot
  *  be used where `Exec` cannot (inside `Classified.map`). It lives until it exits,
  *  you `kill()` it, or the session ends; `runningProcesses` finds the live ones
- *  again. Waits take a timeout and throw `RuntimeException` when it passes, with
+ *  again. One spawned inside a `requestExec` block is also killed when that block
+ *  ends, so spawn a lasting process from a standing grant, not a one-time one.
+ *  Waits take a timeout and throw `RuntimeException` when it passes, with
  *  what did arrive in the message (and still unread, so `read()` can fetch it).
  *
  *  {{{
@@ -534,8 +536,9 @@ trait Interface:
    *  return at once with a `Process` to talk to: for REPLs, servers and watchers.
    *  Its stdin stays open for `send` (`ExecOptions(stdin = ...)` is sent first);
    *  `workingDir` applies, `timeoutMs` does not: it runs until it exits, you `kill()`
-   *  it, or the session ends. At most 8 live at a time; `kill()` what you are done
-   *  with. The user sees it start, what you send it, and it exit. */
+   *  it, or the session ends (and, if spawned inside a `requestExec` block, when that
+   *  block ends). At most 8 live at a time; `kill()` what you are done with. The user
+   *  sees it start, what you send it, and it exit. */
   def spawn(command: String)(using ex: Exec^, fs: FileSystem): Process^{ex}
   def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem): Process^{ex}
   /** The processes you started that are still running (to find a handle again). */
