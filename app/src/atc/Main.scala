@@ -2,6 +2,7 @@ package atc
 
 import atc.config.Config
 import atc.perms.Mode
+import atc.ui.Ansi
 
 import java.nio.file.{Path, Paths}
 
@@ -58,7 +59,7 @@ object Main:
       try parseArgs(argv.toList)
       catch
         case e: IllegalArgumentException =>
-          System.err.println(e.getMessage)
+          System.err.println(Ansi.sanitize(Option(e.getMessage).getOrElse(e.getClass.getSimpleName)))
           sys.exit(2)
     val exitCode =
       if args.help then
@@ -79,15 +80,16 @@ object Main:
     catch
       case App.Exit(code) => code
       case e: Throwable =>
-        System.err.println(s"atc: ${e.getMessage}")
+        val message = Option(e.getMessage).filter(_.nonEmpty).getOrElse(e.getClass.getSimpleName)
+        System.err.println(Ansi.sanitize(s"atc: $message"))
         Debug.trace(e)
         1
 
   /** `--init` / `--init-global`: say what was written, or refuse to overwrite. */
   private def report(target: Path, created: List[Path], todo: String): Int =
     if created.isEmpty then
-      System.err.println(s"$target already exists")
+      System.err.println(Ansi.sanitize(s"$target already exists"))
       1
     else
-      println(s"Wrote ${created.mkString(" and ")}; $todo, then run atc again.")
+      println(Ansi.sanitize(s"Wrote ${created.mkString(" and ")}; $todo, then run atc again."))
       0

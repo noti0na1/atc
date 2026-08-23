@@ -231,6 +231,21 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
       val r = run(code)
       assert(!r.success, s"$what leaked into Classified.map:\n${r.output}")
 
+  test("capability values cannot be smuggled into Classified.map as its argument"):
+    // `classify` does not erase a value's capture provenance. Even though each
+    // capability arrives as the lambda parameter rather than a free variable,
+    // using it for an effect would make `map` impure and must be rejected.
+    val attacks = List(
+      "FileSystem" -> """classify(fs).map(hidden => hidden.access("leak.txt").write("x"))""",
+      "FileEntry" -> """classify(access("a.txt")).map(hidden => hidden.write("x"))""",
+      "Network" -> """classify(net).map(hidden => httpGet("http://example.com")(using hidden))""",
+      "UserIO" -> """classify(user).map(hidden => println("leak")(using hidden))""",
+      "Exec" -> """classify(ex).map(hidden => exec("echo", List("leak"))(using hidden, fs).stdout)""",
+    )
+    for (capability, code) <- attacks do
+      val result = run(code)
+      assert(!result.success, s"$capability was usable after being classified:\n${result.render}")
+
   test("map rejects outward channels wrapped in a def (eta-expansion)"):
     // Regression guard for the default-argument leak: an API method with a
     // defaulted parameter used to eta-expand to a *pure* function here, which
@@ -256,9 +271,16 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     val defaults = classOf[atc.lib.Interface].getMethods.map(_.getName).filter(_.contains("$default$")).distinct
     assertEquals(defaults.toList.sorted, Nil, "atc.lib.Interface must not use default arguments")
 
-  test("chat(Classified) needs no capability at all, so it is usable on classified data"):
-    // The safe-model overload is the one sanctioned way to ask about a secret:
-    // it takes no capability, so it also passes the `map` capture contract.
-    assertOk(run("""classify("x").map(c => 1)"""))
-    assertOk(run("""val answer: Classified[String] = chat(classify("topsecret")); answer.toString"""))
+  test("classifiedChat is deliberately pure and its Classified wrapper preserves the label"):
+    // The classified model is trusted to run in an isolated, effect-free
+    // environment, so its String overload is admitted inside the pure map.
+    assertOk(run("""classify("topsecret").map(classifiedChat).toString"""))
     assert(env.classifiedChats.contains("topsecret"), env.classifiedChats.toString)
+    assertOk(run("""def trusted(s: String) = classifiedChat(s)"""))
+    assertOk(run("""classify("def-secret").map(trusted).toString"""))
+    assert(env.classifiedChats.contains("def-secret"), env.classifiedChats.toString)
+    // The Classified overload is exactly the convenient label-preserving wrapper.
+    assertOk(
+      run("""val answer: Classified[String] = classifiedChat(classify("wrapped-secret")); answer.toString""")
+    )
+    assert(env.classifiedChats.contains("wrapped-secret"), env.classifiedChats.toString)

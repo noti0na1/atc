@@ -173,6 +173,27 @@ class PermissionSuite extends munit.FunSuite:
     assert(!env.policy.commandAllowed(ScopeId.Base, "git push"))
     assert(!env.policy.commandAllowed(ScopeId.Base, "npm")) // "npm *" requires an arg
 
+  test("permission matching preserves argv boundaries"):
+    val env = TestEnv(commands = List("./allowed safe"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    // This is one executable whose filename contains a space, not `./allowed`
+    // with argument `safe`; its canonical permission line retains the quotes.
+    val error = intercept[SecurityException](env.host.exec("'./allowed safe'"))
+    assert(error.getMessage.nn.contains("no permitted pattern"), error.getMessage)
+
+  test("exec rejects non-positive timeouts before starting a process"):
+    val env = TestEnv(commands = List("echo"))
+    import env.given
+    given ex: Exec = env.host.processes
+    given fs: FileSystem = env.host.fileSystem
+    for timeout <- List(0L, -1L, Long.MinValue) do
+      val error = intercept[IllegalArgumentException](
+        env.host.exec("echo", List("must-not-run"), ExecOptions(timeoutMs = timeout))
+      )
+      assert(error.getMessage.nn.contains("positive"), error.getMessage)
+
   // ── requestExec scopes ──────────────────────────────────────────
 
   test("requestExec opens a scope, prompts once, and closes it"):
@@ -394,6 +415,8 @@ class PermissionSuite extends munit.FunSuite:
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     val sleeper = env.host.spawn("sleep 30")
+    intercept[IllegalArgumentException](sleeper.readUntil("never", -1))
+    intercept[IllegalArgumentException](sleeper.waitFor(Long.MinValue))
     val e = intercept[RuntimeException](sleeper.readUntil("never", 300))
     assert(e.getMessage.nn.contains("timed out"), e.getMessage)
     assertEquals(sleeper.waitFor(100), None)
@@ -445,8 +468,8 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(hosts = List(host))
     import env.given
     given net: Network = env.host.network
-    assertEquals(env.host.httpPost(url("/echo"), "ping", "text/plain", Map.empty, Map.empty), "ping")
-    val resp = env.host.httpRequest("DELETE", url("/method"), "", Map.empty, Map.empty)
+    assertEquals(env.host.httpPost(url("/echo"), "ping", "text/plain", Map.empty), "ping")
+    val resp = env.host.httpRequest("DELETE", url("/method"), "", Map.empty)
     assertEquals(resp.status, 200)
     assertEquals(resp.body, "DELETE")
 
@@ -456,8 +479,10 @@ class PermissionSuite extends munit.FunSuite:
     given net: Network = env.host.network
     val token: Classified[String] = env.host.classify("s3cr3t")
     val echoed = env.host.httpGet(url("/header"), Map.empty, Map("X-Token" -> token))
-    assertEquals(echoed, "s3cr3t") // the server saw it...
-    // ...but nothing classified was handed back to the agent as a plain value here.
+    // The server reflects the header verbatim. The response must nevertheless
+    // stay classified; otherwise this endpoint launders the token into a String.
+    assertEquals(echoed.toString, "Classified(***)")
+    assertEquals(ClassifiedImpl.get(echoed), "s3cr3t") // host-only test inspection
 
   test("a failed classified secret header aborts the request without leaking the failure bit"):
     val env = TestEnv(hosts = List(host))
@@ -466,16 +491,40 @@ class PermissionSuite extends munit.FunSuite:
     env.clearOutput()
     val before = echoRequests.get()
     val failed = env.host.classify("s3cr3t").map(s => throw RuntimeException(s"boom $s"))
-    // The request is NOT sent with the header dropped: a request missing its auth
-    // header returns a different response (a 401 vs a 200), itself signalling the
-    // failure. The agent gets a generic error (no secret, no which-header); the
-    // user a sanitized note; the server sees nothing.
-    val e = intercept[SecurityException](env.host.httpGet(url("/header"), Map.empty, Map("X-Token" -> failed)))
-    assert(e.getMessage.nn.contains("could not be computed"), e.getMessage)
-    assert(!e.getMessage.nn.contains("s3cr3t"), e.getMessage)
+    // The request is NOT sent with the header dropped. Its failure stays inside
+    // the classified response, so neither the failure bit nor its message is a
+    // plain exception available to the agent.
+    val result = env.host.httpGet(url("/header"), Map.empty, Map("X-Token" -> failed))
+    assertEquals(result.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(result).isFailure)
     assertEquals(echoRequests.get(), before) // no request went out
-    assert(env.userOut.toString.contains("failed computation"), env.userOut.toString)
-    assert(!env.agentOut.toString.contains("failed computation"), env.agentOut.toString)
+    env.host.println(result)
+    assert(env.userOut.toString.contains("boom s3cr3t"), env.userOut.toString)
+    assert(!env.agentOut.toString.contains("s3cr3t"), env.agentOut.toString)
+
+  test("a secret-dependent invalid header value fails only inside the classified response"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    val secret = "HEADER-SECRET\nforged: yes"
+    val result = env.host.httpGet(url("/ok"), Map.empty, Map("X-Token" -> env.host.classify(secret)))
+    assertEquals(result.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(result).isFailure)
+    env.host.println(result)
+    assert(!env.agentOut.toString.contains("HEADER-SECRET"), env.agentOut.toString)
+
+  test("secret-header names cannot collide with plain headers case-insensitively"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    val error = intercept[IllegalArgumentException](
+      env.host.httpGet(
+        url("/ok"),
+        Map("authorization" -> "plain"),
+        Map("Authorization" -> env.host.classify("secret"))
+      )
+    )
+    assert(error.getMessage.nn.contains("case-insensitive"), error.getMessage)
 
   test("httpPostClassified with a failed body makes no request and returns the failure unchanged"):
     val env = TestEnv(hosts = List(host))
@@ -507,13 +556,16 @@ class PermissionSuite extends munit.FunSuite:
     val env = TestEnv(hosts = List(host))
     import env.given
     given net: Network = env.host.network
-    assertEquals(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty, Map.empty), "[text/plain]")
+    assertEquals(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty), "[text/plain]")
     assertEquals(
-      env.host.httpPost(url("/content-type"), "x", "text/plain", Map("content-type" -> "application/xml"), Map.empty),
+      env.host.httpPost(url("/content-type"), "x", "text/plain", Map("content-type" -> "application/xml")),
       "[application/xml]"
     )
     val secret = Map("Content-Type" -> env.host.classify("text/csv"))
-    assertEquals(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty, secret), "[text/csv]")
+    assertEquals(
+      ClassifiedImpl.get(env.host.httpPost(url("/content-type"), "x", "text/plain", Map.empty, secret)),
+      "[text/csv]"
+    )
 
   test("host matching honours glob patterns, case-insensitively"):
     assert(GlobMatcher.matchesHost("API.GitHub.com", "*.github.com"))
@@ -544,6 +596,11 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(Host.normalizeHost("example.com"), "example.com")
     assertEquals(Host.normalizeHost("999.1.2.3"), "999.1.2.3") // out of range: not a literal
     assertEquals(Host.normalizeHost(""), "")
+
+  test("exact IPv6 host rules are canonicalized on both sides"):
+    val env = TestEnv(hosts = List("::1"), denyHosts = List("2001:db8::1"))
+    assert(env.policy.hostAllowed(ScopeId.Base, "[0:0:0:0:0:0:0:1]"))
+    assertEquals(env.policy.hostDenied("[2001:db8:0:0:0:0:0:1]"), Some("2001:db8::1"))
 
   test("requestNetwork widens the host set for its block only"):
     val env = TestEnv(hosts = Nil)
@@ -595,6 +652,19 @@ class PermissionSuite extends munit.FunSuite:
       val ok = s.run(s"""requestNetwork(Set("$host"), "fetch") { httpGet("${url("/ok")}") }""")
       assert(ok.success, ok.error.toString)
       assert(ok.output.contains("hello"), ok.output)
+    }
+
+  test("REPL: a server cannot launder a classified request header through its response"):
+    withSession(hosts = List(host)) { (env, s) =>
+      env.clearOutput()
+      val result = s.run(
+        s"""println(httpGet("${url("/header")}", Map.empty, Map("X-Token" -> classify("REFLECTED-SECRET"))))"""
+      )
+      assert(result.success, result.render)
+      assert(result.output.contains("Classified(***)"), result.output)
+      assert(!result.render.contains("REFLECTED-SECRET"), result.render)
+      assert(!env.agentOut.toString.contains("REFLECTED-SECRET"), env.agentOut.toString)
+      assert(env.userOut.toString.contains("REFLECTED-SECRET"), env.userOut.toString)
     }
 
   test("REPL: exec capability cannot leak out of requestExec"):

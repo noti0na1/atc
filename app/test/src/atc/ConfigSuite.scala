@@ -457,6 +457,14 @@ class ConfigSuite extends munit.FunSuite:
     Files.writeString(dir2.resolve(".atc/.gitignore"), "keys.properties\n")
     Config.initProject(dir2)
     assertEquals(Files.readString(dir2.resolve(".atc/.gitignore")).nn, "keys.properties\n")
+    val dir3 = Files.createTempDirectory("atc-initproj3").nn
+    Files.createDirectories(dir3.resolve(".atc"))
+    Files.writeString(dir3.resolve(".atc/.gitignore"), "keys.properties\n!keys.properties\n")
+    Config.initProject(dir3)
+    assertEquals(
+      Files.readString(dir3.resolve(".atc/.gitignore")).nn,
+      "keys.properties\n!keys.properties\nkeys.properties\n"
+    )
 
   test("an invalid reasoning effort or summary is a config error, not a per-turn crash"):
     def withModel(model: String): IllegalArgumentException =
@@ -475,6 +483,31 @@ class ConfigSuite extends munit.FunSuite:
     )
     assertEquals(load(dir, Some(cfg)).settings.providers("p").models("m").reasoning, Some("high"))
 
+  test("provider APIs, web-search versions, and case-insensitive model references validate at load time"):
+    def rejected(providers: String): IllegalArgumentException =
+      val dir = Files.createTempDirectory("atc-cfg-provider-validation").nn
+      val cfg = writeCfg(dir, "config.json", s"""{ "providers": $providers }""")
+      intercept[IllegalArgumentException](load(dir, Some(cfg)))
+    assert(rejected("""{ "p": { "api": "opneai", "models": {} } }""").getMessage.nn.contains("api"))
+    assert(rejected(
+      """{ "p": { "api": "anthropic", "models": { "m": { "webSearchVersion": "2026509" } } } }"""
+    ).getMessage.nn.contains("webSearchVersion"))
+    assert(rejected(
+      """{ "p": { "api": "anthropic", "models": { "m": { "reasoning": " high " } } } }"""
+    ).getMessage.nn.contains("whitespace"))
+    assert(rejected(
+      """{ "p": { "api": "anthropic", "models": { "m": { "webSearchVersion": " 20250305 " } } } }"""
+    ).getMessage.nn.contains("whitespace"))
+    val duplicate = rejected(
+      """{ "P": { "api": "echo", "models": { "M": {} } },
+        |    "p": { "api": "echo", "models": { "m": {} } } }""".stripMargin
+    )
+    assert(duplicate.getMessage.nn.contains("unique ignoring case"), duplicate.getMessage)
+    assert(rejected("""{ " p": { "api": "echo", "models": { "m": {} } } }""")
+      .getMessage.nn.contains("provider name"))
+    assert(rejected("""{ "p": { "api": "echo", "models": { "m ": {} } } }""")
+      .getMessage.nn.contains("model alias"))
+
   test("setTopLevel rewrites the project config, and a null classifiedModel there unsets a global one"):
     val dir = Files.createTempDirectory("atc-cfg-set").nn
     val projectDir = Files.createDirectories(dir.resolve(".atc")).nn
@@ -485,13 +518,22 @@ class ConfigSuite extends munit.FunSuite:
       """{ "model": "b", "classifiedModel": "b",
         |  "providers": { "p": { "api": "echo", "models": { "a": {}, "b": {} } } } }""".stripMargin
     )
+    val posix = Files.getFileAttributeView(project, classOf[java.nio.file.attribute.PosixFileAttributeView])
+    val permissions = Option(posix).map(_ => Files.getPosixFilePermissions(project).nn)
     Config.setTopLevel(project, "model", ujson.Str("b"))
     Config.setTopLevel(project, "classifiedModel", ujson.Null, after = List("model"))
     assertEquals(
       Files.readString(project),
       "{\n  \"model\": \"b\",\n  \"classifiedModel\": null,\n  \"commands\": [\"ls\"]\n}\n"
     )
+    permissions.foreach(p => assertEquals(Files.getPosixFilePermissions(project).nn, p))
     val loaded = Config.load(dir, None, global)
     assertEquals(loaded.settings.model, Some("b"))
     assertEquals(loaded.settings.classifiedModel, None)
     assertEquals(loaded.settings.commands, List("ls"))
+    val victim = writeCfg(dir, "victim.json", "{ \"model\": \"a\" }")
+    val link = dir.resolve("link.json").nn
+    Files.createSymbolicLink(link, victim)
+    Config.setTopLevel(link, "model", ujson.Str("b"))
+    assert(Files.isSymbolicLink(link), "an intentional shared-config symlink must survive")
+    assertEquals(ujson.read(Files.readString(victim))("model").str, "b")

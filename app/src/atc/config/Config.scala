@@ -4,7 +4,7 @@ import upickle.default.*
 
 import atc.perms.{Access, Mode, PathPattern}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, Paths, StandardCopyOption}
 import scala.util.Properties
 
 /** One model of a provider: the id the provider knows it by, plus the
@@ -71,7 +71,7 @@ case class Config(
   /** The agent's model: a model alias, or `provider/alias` when two providers
     * use the same alias. Unset picks the first configured model. */
   model: Option[String] = None,
-  /** The model that handles classified data (`chat(Classified)`), named the
+  /** The isolated, effect-free model trusted by `classifiedChat`, named the
     * same way. Unset means classified data is never sent to a model. */
   classifiedModel: Option[String] = None,
   /** LLM endpoints by name, each with its own models. */
@@ -185,7 +185,11 @@ object Config:
 
   private def ensureIgnored(path: Path, entry: String): Boolean =
     val current = Option.when(Files.exists(path))(Files.readString(path).nn)
-    if current.exists(_.linesIterator.exists(_.trim == entry)) then false
+    // Git uses the last matching rule; an earlier exclusion followed by
+    // `!keys.properties` does not actually protect the key file.
+    val lastRule = current.toList.flatMap(_.linesIterator)
+      .map(_.trim).filter(line => line == entry || line == s"!$entry").lastOption
+    if lastRule.contains(entry) then false
     else
       val prefix = current.fold("")(_.stripSuffix("\n") + "\n")
       Files.writeString(path, s"$prefix$entry\n")
@@ -361,6 +365,9 @@ object Config:
     * timeout accounting, or provider request construction. */
   private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
+  private val ProviderApis =
+    Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "echo")
+  private val AnthropicWebSearchVersions = Set("20250305", "20260209")
 
   private def invalid(message: String): Nothing = throw IllegalArgumentException(s"Invalid config: $message")
 
@@ -371,6 +378,7 @@ object Config:
     requireValid(value > 0, s"$name must be greater than zero (was $value)")
 
   private def validateChoice(where: String, value: String, allowed: Set[String]): Unit =
+    requireValid(value == value.trim, s"$where must not start or end with whitespace (was '$value')")
     requireValid(
       allowed.contains(value.trim.toLowerCase),
       s"$where must be one of ${allowed.mkString("|")} (was '$value')"
@@ -379,6 +387,7 @@ object Config:
   private def validateModel(provider: String, alias: String, model: ModelConfig): Unit =
     val where = s"providers.$provider.models.$alias"
     requireValid(alias.trim.nonEmpty, s"model aliases of provider '$provider' must not be blank")
+    requireValid(alias == alias.trim, s"model alias '$alias' must not start or end with whitespace")
     requireValid(!alias.contains('/'), s"model alias '$alias' must not contain '/'")
     requireValid(!model.name.exists(_.trim.isEmpty), s"$where.name must not be blank")
     model.maxTokens.foreach(requirePositive(s"$where.maxTokens", _))
@@ -386,15 +395,18 @@ object Config:
     model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))
     model.reasoning.foreach(validateChoice(s"$where.reasoning", _, ReasoningEfforts))
     model.reasoningSummary.foreach(validateChoice(s"$where.reasoningSummary", _, ReasoningSummaries))
+    model.webSearchVersion.foreach(validateChoice(s"$where.webSearchVersion", _, AnthropicWebSearchVersions))
 
   private def validateProvider(name: String, provider: ProviderConfig): Unit =
     requireValid(name.trim.nonEmpty, "provider names must not be blank")
+    requireValid(name == name.trim, s"provider name '$name' must not start or end with whitespace")
     // `api` may be absent from a layer that only extends an earlier provider, but
     // the fully merged provider must define it.
     requireValid(
       provider.api.exists(_.trim.nonEmpty),
       s"provider '$name' has no api (expected anthropic | openai | openai-responses | echo)"
     )
+    provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
     provider.models.foreach((alias, model) => validateModel(name, alias, model))
 
   def validate(config: Config): Config =
@@ -409,6 +421,11 @@ object Config:
     // Fail here rather than at the first request: a typo in `model` is a
     // config error, and the catalog message lists what is configured.
     val catalog = ModelCatalog.from(config)
+    val duplicateRefs = catalog.models.groupBy(_.ref.toLowerCase).values.filter(_.size > 1).toList
+    requireValid(
+      duplicateRefs.isEmpty,
+      s"model references must be unique ignoring case: ${duplicateRefs.flatten.map(_.ref).sorted.mkString(", ")}"
+    )
     config.model.foreach(catalog.find)
     config.classifiedModel.foreach(catalog.find)
     config
@@ -479,7 +496,18 @@ object Config:
     val text =
       try Files.readString(path).nn
       catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
-    Files.writeString(path, withTopLevel(text, key, value, after, path.toString))
+    val updated = withTopLevel(text, key, value, after, path.toString)
+    // Preserve intentional shared configs: resolve an existing symlink and
+    // atomically replace its target, rather than replacing the link itself.
+    val target = path.toRealPath().nn
+    val temp = Files.createTempFile(target.getParent.nn, s".${target.getFileName}.", ".tmp").nn
+    try
+      Files.writeString(temp, updated)
+      try Files.setPosixFilePermissions(temp, Files.getPosixFilePermissions(target))
+      catch case _: UnsupportedOperationException => ()
+      try Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+      catch case _: AtomicMoveNotSupportedException => Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
+    finally Files.deleteIfExists(temp)
 
   /** `text` (a JSON object) with the top-level `key` set to `value`: an
     * existing key keeps its place and only its value changes; a new one is

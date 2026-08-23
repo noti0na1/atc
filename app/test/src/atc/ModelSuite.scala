@@ -14,6 +14,22 @@ class ModelSuite extends munit.FunSuite:
     val c = m.complete(SystemPrompt("sys"), history, Nil, StreamSink(sb.append(_)), () => false)
     (c, sb.toString)
 
+  test("model stop reasons distinguish resumable truncation from safety blocks"):
+    assert(Completion.isTruncatedStop("length"))
+    assert(Completion.isTruncatedStop("MAX-TOKENS"))
+    assert(Completion.isTruncatedStop("max_output_tokens"))
+    assert(!Completion.isTruncatedStop("content_filter"))
+    assert(Completion.isBlockedStop("CONTENT-FILTER"))
+    assert(Completion.isBlockedStop("refusal"))
+    assert(!Completion.isBlockedStop("stop"))
+
+  test("stream cancellation is checked before probing the network-backed iterator"):
+    var generated = false
+    val events = java.util.stream.Stream.generate(() => { generated = true; "event" })
+    try intercept[CancelledException](Streaming.drain(events, () => true)(_ => ()))
+    finally events.close()
+    assert(!generated)
+
   // ── OpenAI reasoning effort for non-thinking calls ──────────────
 
   test("the lowest reasoning effort follows the model family, and is not sent to models not known to reason"):
@@ -31,6 +47,13 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(lowest("llama3.1"), None)
     // a model the config gives an effort to takes the parameter, so ask for the universal minimum
     assertEquals(lowest("deepseek-v4-pro", configured = true), Some("low"))
+
+  test("effort fallback recognizes only reasoning-effort bad requests"):
+    assert(Providers.isReasoningEffortRejection(Some("reasoning_effort"), "unsupported parameter"))
+    assert(Providers.isReasoningEffortRejection(Some("reasoning"), "unsupported block"))
+    assert(Providers.isReasoningEffortRejection(None, "The reasoning.effort field is not supported"))
+    assert(!Providers.isReasoningEffortRejection(Some("input"), "input is too long"))
+    assert(!Providers.isReasoningEffortRejection(None, "unknown model"))
 
   test("the thinking switch of OpenAI-compatible vendors is `{\"type\": \"enabled\"|\"disabled\"}`"):
     import scala.jdk.OptionConverters.*
@@ -82,6 +105,12 @@ class ModelSuite extends munit.FunSuite:
     val e = intercept[IllegalArgumentException](ChatModel.create(spec("myllm")))
     assert(e.getMessage.nn.contains("myllm"), e.getMessage)
     assert(e.getMessage.nn.contains("anthropic"), e.getMessage)
+
+  test("provider models expose the output allowance used by context fitting"):
+    val capped = ModelSpec("p", "gpt", "openai", "gpt", None, None, ModelConfig(maxTokens = Some(1234)))
+    assertEquals(ChatModel.create(capped).maxOutputTokens, Some(1234))
+    // Anthropic requires max_tokens; the adapter sends 32k when it is not configured.
+    assertEquals(ChatModel.create(spec("anthropic")).maxOutputTokens, Some(32000))
 
   // ── ModelCatalog ────────────────────────────────────────────────
 
@@ -142,6 +171,20 @@ class ModelSuite extends munit.FunSuite:
     val r = ExecutionResult(false, "Cannot refer to object ArrayBuffer ... from safe code since it is neither ...")
     val out = Agent.renderForModel(r, 10000)
     assert(out.toLowerCase.contains("not available in safe mode"), out)
+
+  test("renderForModel gives precise safe-mode hints for StringBuilder and top-level var"):
+    val builder = Agent.renderForModel(
+      ExecutionResult(false, "Cannot refer to object StringBuilder ... from safe code since it is neither ..."),
+      10000
+    )
+    assert(builder.contains("new StringBuilder()"), builder)
+    assert(builder.contains("val b: StringBuilder"), builder)
+    val variable = Agent.renderForModel(
+      ExecutionResult(false, "Mutable variable counter is defined in a class that does not extend Stateful"),
+      10000
+    )
+    assert(variable.contains("top-level `var`"), variable)
+    assert(variable.contains("inside a `def`"), variable)
 
   test("renderForModel adds the ambiguous-FileSystem hint"):
     val r = ExecutionResult(false, "Ambiguous given instances: both fs and fs2 match type FileSystem ...")

@@ -44,7 +44,7 @@ class AgentSuite extends munit.FunSuite:
       userSeen.append(if agentText == userText then userText else s"[C]$userText")
   val llm = new HostLlm:
     def chat(m: String) = s"normal:$m"
-    def chatClassified(m: String) = s"safe:$m"
+    def classifiedChat(m: String) = s"safe:$m"
   var answers: List[Option[String]] = Nil
   val questions = collection.mutable.ListBuffer[(String, List[String], Boolean)]()
   var shownTodos: List[atc.lib.Todo] = Nil
@@ -98,7 +98,7 @@ class AgentSuite extends munit.FunSuite:
   test("classified: model sees mask, user sees content, classified model used"):
     agent.turn(
       session,
-      """run: val c = readClassified("secrets/token.txt"); println(c); println(chat(c.map(_ + "?")))""",
+      """run: val c = readClassified("secrets/token.txt"); println(c); println(classifiedChat(c.map(_ + "?")))""",
       () => false
     )
     assert(lastResult.success, lastResult.toString)

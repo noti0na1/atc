@@ -198,7 +198,7 @@ final class Policy(
     if !mode.allowsExec then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; commands cannot be run")
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
-    val missing = commands.filterNot(commandPatterns(parent).toSet)
+    val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
       decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") { base.commands ++= missing }
     openScope(parent, commands = commands)
@@ -219,7 +219,10 @@ final class Policy(
     if !mode.allowsNetwork then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; the network is not reachable")
     refuseDenied("host", hosts, denyHosts, GlobMatcher.matchesHost)
-    val missing = hosts.filterNot(hostPatterns(parent).toSet)
+    // Coverage is by glob/canonical-host matching, not textual equality. In
+    // particular, a standing `*` grant needs no prompt for a concrete host and
+    // an exact `::1` grant covers the equivalent expanded IPv6 spelling.
+    val missing = hosts.filterNot(host => hostPatterns(parent).exists(GlobMatcher.matchesHost(host, _)))
     if missing.nonEmpty then
       decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") { base.hosts ++= missing }
     openScope(parent, hosts = hosts)
@@ -313,7 +316,8 @@ final class Policy(
 
   /** The same without the session grants: what the system prompt states.
     * Grants reach the model through the tool results instead, so the prompt
-    * stays the same for the whole session (see `decisionsSince`). */
+    * prefix does not change after a grant (a mode switch rebuilds it; see
+    * `decisionsSince`). */
   def configSummary: String = render(withSession = false)
 
   private def render(withSession: Boolean): String =

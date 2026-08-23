@@ -85,7 +85,7 @@ final class TestEnv(
 
   val llm: HostLlm = new HostLlm:
     def chat(m: String): String = { chats += m; s"normal:$m" }
-    def chatClassified(m: String): String = { classifiedChats += m; s"safe:$m" }
+    def classifiedChat(m: String): String = { classifiedChats += m; s"safe:$m" }
 
   val ui: HostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =

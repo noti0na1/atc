@@ -442,6 +442,31 @@ no_tool_keeps_matching_cache() {
 }
 assert_succeeds "update without a sha256 tool keeps a matching install" no_tool_keeps_matching_cache
 
+# Exercise the same status-2 branch in a fresh `bash -e`: calling a function
+# from assert_succeeds's `||` context suppresses errexit inside that function
+# and would otherwise hide an unsafe bare status capture.
+errexit_script="$TEST_TMP/errexit-update.sh"
+cat > "$errexit_script" <<'EOF'
+set -euo pipefail
+export HOME="$ERREXIT_TMP/home"
+export ATC_CACHE_DIR="$ERREXIT_TMP/cache"
+export ATC_INSTALL_DIR="$ERREXIT_TMP/bin"
+source "$WRAPPER_UNDER_TEST"
+mkdir -p "$CACHE_DIR"
+FIXTURE_JSON="$(cat "$FIXTURE_PATH")"
+release_json() { printf '%s\n' "$FIXTURE_JSON"; }
+have_sha256_tool() { return 1; }
+key="$(release_key_from_json "$FIXTURE_JSON")"
+printf 'app\n' > "$APP_JAR"
+printf 'lib\n' > "$LIB_JAR"
+printf '%s\n' "$key" > "$RELEASE_MARKER"
+download_latest_release > "$ERREXIT_TMP/output" 2>&1
+grep -q 'keeping the existing install' "$ERREXIT_TMP/output"
+EOF
+assert_succeeds "matching-cache status handling works under bash -e" \
+  env ERREXIT_TMP="$TEST_TMP/errexit" WRAPPER_UNDER_TEST="$WRAPPER" FIXTURE_PATH="$SCRIPT_DIR/fixtures/release.json" \
+  bash -e "$errexit_script"
+
 # ---------------------------------------------------------------------------
 echo "--- hardening: hostile JSON, quoting, guards, self update ---"
 
@@ -475,6 +500,24 @@ trap_injection_safe() {
 }
 assert_succeeds "a quote in ATC_CACHE_DIR cannot weaponize the cleanup trap" trap_injection_safe
 
+# Download cleanup runs in its own subshell and must not replace a sourcing
+# application's EXIT trap.
+download_preserves_exit_trap() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/trap-cache"
+    source "$WRAPPER"
+    trap 'true # caller-owned-trap' EXIT
+    release_json() { printf '%s\n' "$FIXTURE_JSON"; }
+    curl() { return 1; }
+    download_latest_release >/dev/null 2>&1 || true
+    [[ "$(trap -p EXIT)" == *caller-owned-trap* ]]
+  )
+}
+assert_succeeds "download cleanup preserves a caller's EXIT trap" download_preserves_exit_trap
+
+assert_succeeds "a normal GitHub token is accepted" validate_github_token "github_pat_ABC123"
+assert_fails "curl-config syntax is refused in GITHUB_TOKEN" validate_github_token $'abc"\noutput = "/tmp/x"'
+
 # A non-https asset URL is refused before any download.
 non_https_refused() {
   (
@@ -498,18 +541,25 @@ non_https_msg() {
 assert_contains "non-https refusal is explained" "refusing a non-https download URL" "$(non_https_msg)"
 
 # Uninstall must not remove a directory that does not look like the jar cache.
-uninstall_guard_keeps() { # $1 = the cache dir to try
+uninstall_guard_keeps() { # $1 = the cache dir to try, $2 = empty|marker|jars
   (
     export ATC_CACHE_DIR="$1"
     export ATC_INSTALL_DIR="$TEST_TMP/guard-bin"
     source "$WRAPPER"
     mkdir -p "$CACHE_DIR"
     printf 'precious\n' > "$CACHE_DIR/keep.txt"
+    case "${2:-}" in
+      marker) printf '12345678|v0.2.0\n' > "$RELEASE_MARKER" ;;
+      jars) printf 'app\n' > "$APP_JAR"; printf 'lib\n' > "$LIB_JAR" ;;
+    esac
     ( cmd_uninstall ) >/dev/null 2>&1 && exit 1 # must refuse (fail exits that nested subshell)
     [[ -f "$CACHE_DIR/keep.txt" ]]
   )
 }
 assert_succeeds "uninstall refuses ATC_CACHE_DIR=HOME" uninstall_guard_keeps "$HOME"
+assert_succeeds "a marker cannot authorize deleting HOME" uninstall_guard_keeps "$HOME" marker
+assert_succeeds "jar filenames cannot authorize deleting HOME" uninstall_guard_keeps "$HOME" jars
+assert_succeeds "uninstall refuses ATC_CACHE_DIR=~/.atc" uninstall_guard_keeps "$HOME/.atc" marker
 assert_succeeds "uninstall refuses a cache dir not named jars" uninstall_guard_keeps "$TEST_TMP/notjars"
 # and the refusal is explained
 uninstall_guard_msg() {
@@ -521,7 +571,7 @@ uninstall_guard_msg() {
     cmd_uninstall 2>&1 >/dev/null
   ) || true
 }
-assert_contains "uninstall guard message" "no ATC release marker or jars" "$(uninstall_guard_msg)"
+assert_contains "uninstall guard message" "no valid ATC release marker or jar pair" "$(uninstall_guard_msg)"
 
 # But a custom ATC_CACHE_DIR that IS our cache (holds the release marker) is removed,
 # so a non-default cache name is not a permanent obstacle to uninstalling.
@@ -537,6 +587,22 @@ uninstall_removes_custom_cache() {
   )
 }
 assert_succeeds "uninstall removes a custom cache that holds the ATC marker" uninstall_removes_custom_cache
+
+# Even a valid custom cache marker owns only ATC's artifacts, not arbitrary
+# neighbours that happen to share the override directory.
+uninstall_keeps_unrelated_custom_files() {
+  (
+    export ATC_CACHE_DIR="$TEST_TMP/shared-custom-cache"
+    export ATC_INSTALL_DIR="$TEST_TMP/guard-bin4"
+    source "$WRAPPER"
+    mkdir -p "$CACHE_DIR"
+    printf '12345678|v0.2.0\n' > "$RELEASE_MARKER"
+    printf 'precious\n' > "$CACHE_DIR/keep.txt"
+    cmd_uninstall >/dev/null 2>&1
+    [[ -d "$CACHE_DIR" && -f "$CACHE_DIR/keep.txt" && ! -e "$RELEASE_MARKER" ]]
+  )
+}
+assert_succeeds "uninstall removes only owned artifacts from a shared custom cache" uninstall_keeps_unrelated_custom_files
 
 # self update, with a copy of the wrapper so self_path points at the copy.
 mkdir -p "$TEST_TMP/selfbin"

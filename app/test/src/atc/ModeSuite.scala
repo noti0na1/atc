@@ -73,7 +73,8 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
 
   test("classified reads and the classified model work in every mode"):
     onlyIn(allModes.toSet, """classify("x").map(_.length)""")
-    onlyIn(allModes.toSet, """chat(classify("x")).toString.length""")
+    onlyIn(allModes.toSet, """classifiedChat(classify("x")).toString.length""")
+    onlyIn(allModes.toSet, """classify("x").map(classifiedChat).toString.length""")
 
   // ── Writing: local and full only ────────────────────────────────
 

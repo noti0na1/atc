@@ -87,7 +87,7 @@ app/src/atc/
   host/            the Interface implementation: policy checks, file/process/network effects, Classified
   llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
   perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
-  sandbox/         the in-process REPL: preamble, validator, class-loader isolation, timeouts, interrupts
+  sandbox/         the in-process REPL: preamble, diagnostic preflight, class-loader isolation, timeouts, interrupts
   ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
 app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
 app/resources/atc/ the starting configs (config-template.json, project-template.json, keys-template.properties)
@@ -99,21 +99,24 @@ capture-checking-bug/  a runnable repro of an upstream separate-compilation bug 
 ### Data flow of one turn
 
 `App` (wiring) → `Agent.turn` → `ChatModel.complete` → tool call `run_scala` →
-`ReplSession.run(code)` → `CodeValidator` (regex pre-check) → REPL compile + eval with the
+`ReplSession.run(code)` → `CodeValidator` (fast diagnostic preflight) → compiler safe-mode
+check → REPL eval with the
 `Host` installed as the API implementation → `ExecutionResult` → `Agent.renderForModel`
 (bounded, hint-annotated) back into `Msg.ToolResults` → the model again, until it answers.
 
 `ChatModel.complete` takes one `SystemPrompt(text)` built by `Prompts.system` from the
 configuration, the working directory and the mode, the configured permissions included;
-nothing in it changes during a session (a mode switch restarts the sandbox anyway), and a
-permission the user grants for the session is reported in the tool result of the call that
-asked. So every request of a session is the same prefix plus what was appended, whatever
-caching the provider offers (see [What the model sees](#what-the-model-sees-the-context)).
+permission grants do not change it (a mode switch restarts the sandbox, while an explicit
+`/classifiedmodel` switch rebuilds the prefix once). A permission the user grants for the
+session is reported in the tool result of the call that asked. Between explicit switches,
+every request uses the same prefix plus what was appended, whatever caching the provider
+offers (see [What the model sees](#what-the-model-sees-the-context)).
 Completions stream into a `StreamSink` (text / notes / thinking) that the UI renders live.
 
 History (`llm.Msg`) is provider-neutral, so `/model` can switch vendors mid-conversation;
 each provider stashes a `NativeTurn` on the assistant message for exact replay when the
-same provider continues.
+exact same model reference continues. Another model, even on the same protocol, receives
+only the neutral text and tool calls; model-bound encrypted reasoning is never replayed to it.
 
 ### The lib ⇄ app boundary
 
@@ -182,12 +185,13 @@ entries, and `App` calls `host.killProcesses()` when the REPL session ends. The 
 start, input, and exit events inside the tool block and can use `/ps` or `/kill [id|all]`.
 Spawned output is not streamed automatically; the agent reads it explicitly, and the
 result panel displays what it read. `Agent.hints` turns `Cannot run program` failures into
-PATH and no-shell guidance.
+PATH and no-shell guidance. A single parsed pipeline is capped at 16 stages.
 
 **HTTP.** `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
-(`Host.checked`), `httpRequest` is raw, and `httpPostClassified` goes through the raw
-request, never `httpPost`, so nothing about its response reaches the agent outside the
-classified value. JSON: `atc.lib.Json` (the enum and its companion live in `Interface.scala`
+(`Host.checked`), `httpRequest` is raw, and response bodies are capped at 8 MiB. Any request
+carrying a classified body or header returns `Classified[...]`; construction, transport,
+status and body failures after unwrapping stay inside it, so a peer cannot reflect a secret
+back into plain data. JSON: `atc.lib.Json` (the enum and its companion live in `Interface.scala`
 so the agent sees the API; parser/renderer in `lib/.../JsonCodec.scala`, not bundled).
 `ExecOptions` and `Todo` are plain data types, so their default arguments are fine: the no-
 defaults rule is about capability-taking methods.
@@ -291,8 +295,9 @@ required by the implementation. If the `^{...}` capture-set notation is unfamili
 (agent code is compiled into the empty package), the only instances are the ones the REPL
 preamble binds. `atc.lib.Runtime` contains `current`, `rootIO`, `rootUser`, `install`, and
 the `fileSystem`, `readOnlyFileSystem`, `processes`, and `network` derivations. It is
-`@rejectSafe`, so agent code cannot even name it under safe mode. The regex validator refuses
-the names anyway, as a second line.
+`@rejectSafe`, so agent code cannot even name it under safe mode. The regex validator also
+recognises the common direct spelling so it can return a shorter error before compilation;
+the compiler check is authoritative.
 
 **Mutability / read-only tracking** follows the nightly's `mutability.md`: the mode-tracked
 capabilities (`IOCap`, `UserIO`, `FileSystem`, `FileEntry`) extend
@@ -306,8 +311,8 @@ may not be captured (what the API's `readOnlyFileSystem` used to hand out; it no
 
 **Two roots.** `IOCap` derives `fs`/`ex`/`net` and is read-only in local and read-only mode
 (so no writable `fs`, `Exec` or `Network` can be derived from it); `UserIO` is *always* full
-(`given user: UserIO^`) and is what `println`/`print`/`printf`/`ask`/`setTodos`/`markTodo`/
-`chat(String)` and every `request*` take, so reporting and permission prompts work in every
+(`given user: UserIO^`) and is what `println`/`print`/`printf`/`ask`/`setTodos`/`markTodo`,
+normal-model `chat(String)` and every `request*` take, so reporting and permission prompts work in every
 mode while those effects stay out of `Classified.map`. `todos` takes a read-only `UserIO`.
 `Exec`/`Network` are plain `ExclusiveCapability` (no read-only view) derived only from a
 full `IOCap^`. Why `UserIO` is not derived from `IOCap`: a mode withdraws the machine
@@ -321,13 +326,20 @@ No given instance of type atc.lib.Network was found for parameter x$2 of method 
 ```
 
 **`Classified.map`** is `T ->{any.rd} B`: the callback may capture *read-only* capabilities
-only. Every outward channel needs a full capability (`println`/`ask`/`chat`/`setTodos` →
+only. Every untrusted outward channel needs a full capability (`println`/`ask`/`chat`/`setTodos` →
 `UserIO^`; `write`/`append` → `FileSystem^`; `exec` → `Exec`; `httpGet` → `Network`;
 `request*` → `UserIO^`), so none of them compile inside `map`; reading files does compile
 where `fs` is itself read-only (read-only mode). Do **not** loosen any of those to a
 read-only capability without re-running the leak audit (`CapabilitySuite`).
 `chat(message: String)` in particular used to be the hole that made a bare `{any.rd}`
 unsound.
+
+`classifiedChat(String)` is the deliberate trusted primitive: its configured model is
+assumed to run in an isolated classified environment with no outward connection or side
+effects, so the API treats it as pure and admits it inside `Classified.map`.
+`classifiedChat(Classified[String])` is the label-preserving
+`message.map(classifiedChat)` wrapper. This is a trusted-computing-base/configuration
+assumption, not something the host can prove about an arbitrary configured endpoint.
 
 **The API has no default arguments on capability-taking methods**; use overloads instead.
 A defaulted parameter makes a `def` wrapper eta-expand to a pure function and slip into
@@ -350,7 +362,10 @@ in every mode.
 
 ## Defence in depth
 
-Types decide what compiles; four more layers sit underneath, each independent of the others.
+Scala compiler safe mode, together with capture checking, is the authoritative static safety
+check for agent code. The runtime policy, class-loader boundary and deny rules support that
+compiler-enforced model at execution time. `CodeValidator` appears earlier in the pipeline
+only to improve feedback; it is not an independent safety layer.
 
 1. **The policy at run time.** Every host method checks the permission `Policy` for the
    path, command, or host, including the scope ID of the capability used for the call. A
@@ -361,30 +376,26 @@ Types decide what compiles; four more layers sit underneath, each independent of
    one-time grant cannot leave behind a live but inaccessible process. `Policy.mode`
    enforces the three modes again by downgrading writes to reads and refusing `exec` or
    network access, so the type check is not the only safeguard.
-2. **The validator** (`sandbox/CodeValidator.scala`) runs before compilation. Its regular
-   expression checks block `atc.(host|agent|sandbox|perms|config|llm|ui)`, reflection,
-   `java.io/nio/net`,
-   `System.out/err/in`, `System.exit/setProperty/getenv/getProperty/load*`, `caps.unsafe`,
-   and `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`.
-   The validator also rejects every supported way to catch fatal throwables. These include
-   typed catches with parenthesised or union types (`case _: Throwable`,
-   `case _: (A | Throwable)`); bare binders in any catch arm (`case _ =>`, `case e @ _ =>`,
-   `case (e) =>`); aliases of fatal types; type parameters with fatal upper bounds; catches
-   of any declared type parameter, which erase to a catch of the bound; and catches of
-   `InterruptedException` or `ThreadDeath`. A dedicated catch-arm scanner handles the bare
-   binder forms. Fatal throwables, including real `StackOverflowError` or `OutOfMemoryError`
-   instances and the `ThreadDeath` stop signal, deliberately escape `Classified.map` and
-   abort the run. Preventing agent code from catching them avoids both per-bit oracles over
-   classified data and attempts to swallow a timeout or interrupt. Add new escape-hatch
-   rules here and cover them in `CodeValidatorSuite`.
+2. **Preflight feedback (not a safety layer).** `sandbox/CodeValidator.scala` is a
+   deliberately small, fast lexical preflight before compilation. It recognises common invalid forms—direct ambient APIs,
+   known escape-hatch spellings and evaluator-hostile catches—and returns focused guidance
+   without paying for a compiler round. It does not parse or type-check Scala, is not
+   exhaustive, and may have both false positives and false negatives. Accepted code is not
+   thereby safe: safe mode must still compile and approve it. Keep the implementation to
+   cheap regexes and linear scans; do not turn it into a second Scala parser or security
+   checker. Add a rule only when its early diagnostic is useful, and cover that feedback in
+   `CodeValidatorSuite`. If `safeMode` is disabled, the authoritative compiler check is
+   deliberately absent; stricter validator feedback does not restore the same guarantee.
 3. **Class-loader isolation** (`sandbox/Sandbox.scala`): the REPL's class loader has
    `SandboxLoader` as parent, which delegates only `scala.*` and `atc.lib.*` to the app
    loader and everything else to the platform loader, so agent code cannot see `atc.host`,
    the LLM clients, JLine or the compiler, and the sandbox classpath holds no third-party
    library. `getResource` hides `*.class` so `-Xrepl-interrupt-instrumentation:true`
    instruments only REPL-defined classes (otherwise the REPL would re-define
-   `atc.lib.Interface` and lose the installed host). One sandbox per JVM: `Interface`'s
-   companion holds the installed host.
+   `atc.lib.Interface` and lose the installed host). `Runtime`'s bootstrap slot is
+   process-global; the process-wide evaluation lock re-selects a session's own host before
+   lazy preamble initialization and every evaluation, so concurrent session objects cannot
+   mix their capabilities.
 4. **Deny lists at the effect.** `commandDenied`/`hostDenied` are consulted where the
    effect happens (so a session grant, an open scope or `--approve-all` cannot pass them),
    and `refuseDenied` throws out of `requestExec`/`requestNet` before the prompter is
@@ -406,7 +417,8 @@ compiler and class loader are most of the process's memory) and starts a fresh R
 **Evaluation, timeouts, interrupts** (`sandbox/ReplSession.scala`): evaluation runs on a
 worker thread. `ExecutionClock.paused` excludes both the time spent waiting for the user
 (permission prompts, questions) and the time a command runs (`HostOutput.whileCommandRuns`,
-which `App` maps to the same clock pause; pauses nest), so a slow human does not trip the
+which `App` maps to the same clock pause), plus nested `chat` model calls that own a provider
+request timeout (pauses nest), so an external wait does not trip the snippet's shorter
 timeout. Interrupts and timeouts raise the REPL stop flag through `OpenReplDriver`, a
 subclass of the compiler's `ReplDriver`. The driver also installs `CappedRendering`, which
 lives in **package `dotty.tools.repl`** because `Rendering` is `private[repl]`.
@@ -476,10 +488,15 @@ value, ensuring that a denied or non-classified target fails identically in eith
 the computation failed, it writes no content but still creates the target, preventing file
 existence from revealing the failure bit, and reports the failure only to the user. A
 failed secret HTTP header cannot simply be omitted because the resulting response, such as
-a 401 instead of a 200, could reveal the failure. For requests with plaintext responses
-(`httpGet`, `httpPost`, and `httpRequest`), ATC therefore aborts with a generic error and
-notifies the user. Inside `httpPostClassified`, the same abort is captured in the failed
-`Classified` result, whose response is never exposed to the agent.
+a 401 instead of a 200, could reveal the failure. All overloads carrying classified input
+therefore keep both failure and response in a `Classified` result. Rendering a classified
+value is guarded too: an agent-defined `toString` or `Throwable.getMessage` cannot throw a
+secret-bearing exception back into the REPL result.
+
+The information-flow claim is **termination-insensitive**. A pure callback can still vary
+its running time, resource consumption or termination with a secret, and a timeout can make
+that difference observable. The prompt forbids using such side channels; the in-process
+sandbox cannot make arbitrary Scala computations constant-time or total.
 
 **Commands and hosts.** `commands` are patterns over the whole command line: `*` is a
 wildcard, a pattern without `*` matches by word prefix (`"git status"` allows `git status
@@ -521,7 +538,9 @@ either `config.json` or `keys.properties` establishes a project.
 interactive run, `App.setup` offers to create `config-template.json` and
 `keys-template.properties` when `~/.atc/config.json` is missing (`Config.ensureGlobal`). If
 the user declines, ATC loads the template as an in-memory `Origin.Global` layer with
-`path = None`; `/config` displays this as `(bundled)`. Non-interactive `-p` runs never ask.
+`path = None`; `/config` displays this as `(bundled)`. Non-interactive `-p` runs never ask:
+setup offers are skipped and permission requests fail closed unless the caller chose
+`--approve-all`; this is reported as a scripted-run limitation, not as a user denial.
 If no configuration grants the working directory and it has no project configuration,
 `App.setup` offers to create `project-template.json` and `.atc/.gitignore` through
 `Config.initProject`, the same operation used by `--init`, and then reloads. After creating
@@ -555,6 +574,8 @@ same rule in a project config always opens the whole project.
 model alias, so a project config can add a model to a provider the global config defined
 without repeating its `api`, `url` or `key`, and a redefined alias replaces that model entry
 outright.
+This makes repository configuration authoritative inside its checkout; users should review
+project model endpoints, standing command/host grants, and instructions before running it.
 
 **Policy settings come from the granting layers** (global and `-c`) and are then narrowed
 by the project layer:
@@ -620,14 +641,15 @@ two protocols is two providers, since the protocol belongs to the endpoint.
 * `echo`: `EchoModel`, key-less, for tests and smoke runs; it honours `contextWindow` so
   the context display can be demoed.
 
-`ChatModel.simple(system, prompt, thinking)` is the one-shot call (`chat()` from the
-sandbox, the next-input prediction). With `thinking = false` it disables Anthropic thinking
+`ChatModel.simple(system, prompt, thinking)` is the one-shot call (normal `chat`, trusted
+`classifiedChat`, and next-input prediction). With `thinking = false` it disables Anthropic thinking
 and sends OpenAI the lowest `reasoning_effort` the model family takes
 (`Providers.lowestEffort`: `none` ≥ 5.1, `minimal` GPT-5, `low` o-series or any model the
 config gives an effort; nothing for models not known to reason), or `disabled` when the
 vendor thinking switch is configured; a `BadRequestException` on that guess sets
-`effortRejected` on the model (`OpenAIShapedModel.withEffortFallback`) and the request is
-repeated plainly, once per process. `thinking = true` applies the configured
+`effortRejected` only when its parameter/message specifically identifies reasoning effort
+(`OpenAIShapedModel.withEffortFallback`), and the request is then repeated plainly, once per
+process. Unrelated 400 responses are not retried. `thinking = true` applies the configured
 thinking/effort, the same as `complete`.
 
 **API keys**: a provider keeps `key`/`keyEnv` naming a `${VAR}`; the *values* come from
@@ -647,8 +669,10 @@ drops whole exchanges from the front of `agent.history` (`Agent.fitToContext`, c
 `Msg.User` boundaries, keeps the last user message) until `estimateTokens` (chars/4 ×
 `tokenCalibration`, the ratio observed prompt tokens / estimate from the previous
 completion; `TokenUsage.input` is the whole prompt for every provider, Anthropic's cache
-reads/writes included) fits `window − window/8 − system prompt − tool schema`; the first
-kept user message gets `Agent.contextCutNotice(total dropped)` prepended and the UI warns.
+reads/writes included) fits after reserving `max(window/8, configured max output tokens)`;
+the first kept user message gets `Agent.contextCutNotice(total dropped)` prepended and the
+UI warns. The estimate uses a native assistant payload only for the exact model that can
+replay it and resets its tokenizer calibration when `/model` switches.
 `Agent.contextUsage` (the same calibrated estimate of the next request, plus the window)
 is what the turn summary line (`Tui.TurnStats`, `Tui.contextUsage`) and `/cost` show as
 `context 45.2k/200k (23%)`. TODO: compaction (summarise instead of cut).
@@ -662,14 +686,14 @@ what `/cost` prints.
 
 Every request to the agent model is assembled from the same four parts, in this order.
 The order matters for prompt caching (the provider caches a prefix), so the parts that
-never change within a session come first and the history last. A **turn** is one user
+change least often come first and the history last. A **turn** is one user
 message and everything until the model's final answer; within it, every **round** (one
 model call) re-sends the whole context so far, plus the tool results of the previous round.
 
 ```
-┌ system prompt (one text, the same for the whole session) ──────────────────┐  Prompts.system(...).text
+┌ system prompt (stable between explicit mode/classified-model switches) ───┐  Prompts.system(...).text
 │ identity: "a coding agent with tracked capabilities … acts only by         │  changes only with cwd, config,
-│   writing Scala and running it with run_scala"                             │  mode (→ REPL restart)
+│   writing Scala and running it with run_scala"                             │  mode or classified-model switch
 │ Environment: working directory, OS, REPL flags, whether a classified       │
 │   model is configured (never which), the gitignore note                    │
 │ How to work: orient first (find and read AGENTS.md/CLAUDE.md/README/…,     │
@@ -683,7 +707,7 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 │ Rules of the sandbox: what is forbidden, read-only vs full views,          │
 │   top-level val/var quirks, Option/effects, fatal throwables, Classified   │
 │ API reference: the full source of lib/…/Interface.scala                    │  Prompts.interfaceSource
-│ Project instructions: config "instructions", if any                        │
+│ Configured instructions: config "instructions", if any                     │
 │ Current permissions: mode, file rules (classified-only patterns folded     │  policy.configSummary:
 │   into one line), commands, hosts, the always-refused lists; never the     │  no session grants, so
 │   session grants                                                           │  it never changes
@@ -710,14 +734,15 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**The system prompt** is a single `SystemPrompt(text)` that remains unchanged throughout a
-session. Its contents, including `Policy.configSummary` without session grants, change only
-when the sandbox restarts because of a mode or configuration change. This structure keeps
-requests cacheable across providers: each request consists of the same prefix followed by
-new messages. OpenAI-compatible APIs can use automatic prefix caching, while Anthropic uses
-explicit breakpoints on the system block and the final history message. Providers without
-caching lose nothing. Keeping a live permissions block in the prompt would invalidate this
-prefix after every grant, which an earlier implementation did.
+**The system prompt** is a single `SystemPrompt(text)`. Its contents include
+`Policy.configSummary` without session grants, so permission decisions never invalidate the
+prefix. A mode switch restarts the sandbox and rebuilds it; `/classifiedmodel` also changes
+the one availability line and therefore the prefix. Between those explicit switches each
+request consists of the same cacheable prefix followed by new messages. OpenAI-compatible
+APIs can use automatic prefix caching, while Anthropic uses explicit breakpoints on the
+system block and final history message. Providers without caching lose nothing. Keeping a
+live permissions block in the prompt would invalidate this prefix after every grant, which
+an earlier implementation did.
 
 The prompt embeds the complete source of `Interface.scala`, which is also displayed by
 `/interface`. Its docstrings are therefore the authoritative descriptions of individual
@@ -725,9 +750,9 @@ methods. The surrounding prompt explains workflow, permission requests, and REPL
 safe-mode conventions, then directs the model to those docstrings for API details. A mode
 paragraph is also included, which is why changing modes restarts the REPL and rebuilds the
 prompt. The prompt states whether a classified model is configured, so the model knows
-whether `chat(Classified)` is available, but never identifies that model.
-`Agent.systemPrompt` is recomputed from the live `Policy` before every round; ATC does not
-cache it internally, but the result remains identical within a session.
+whether `classifiedChat` is available, but never identifies that model.
+`Agent.systemPrompt` is recomputed before every round; ATC does not cache it internally, but
+the result remains identical while mode and classified-model availability stay unchanged.
 
 **Prompt decisions travel in the history.** The model cannot see the pop-ups, so without
 feedback it takes an "allow once" for a standing grant and a later "no" for a revocation
@@ -755,10 +780,13 @@ said and done, never the terminal's rendering:
   rather than inserted as messages of their own, again so that nothing already sent changes.
 * `Msg.Assistant(text, toolCalls, native)`: the model's prose and its `run_scala` calls
   (`ToolCall(id, name, arguments)`, the code as JSON), plus the provider's `NativeTurn` for
-  exact replay when the same provider continues (Anthropic content blocks including
-  server-side web-search results, Responses output items); another provider gets the
-  neutral text and calls. An interrupted turn ends with `Assistant("[interrupted by
+  exact replay when the same model reference continues (Anthropic content blocks including
+  server-side web-search results, Responses output items); another model gets the neutral
+  text and calls. An interrupted turn ends with `Assistant("[interrupted by
   user]")` so the history stays well-formed.
+* `Msg.Continuation(text)`: an internal user-role bridge after an output-limit stop. It asks
+  the provider to continue the truncated assistant response without pretending to be a new
+  real user turn; prediction and context-cut boundaries therefore ignore it.
 * `Msg.ToolResults(results)`: one `ToolResult(callId, output, isError)` per call, where
   `output` is `Agent.renderForModel(result, config.maxToolOutputChars)`:
   `ExecutionResult.render` (the captured REPL output with host stack frames trimmed, then
@@ -779,25 +807,29 @@ program, not as messages. What it does *not* contain: the live output of a long 
 (that is display only; the `ProcessResult` carries it), the contents of `.atc` (locked by
 the starting policy), and any key (`/config` and the prompt name variables only). The
 model's own reasoning is in the context only as part of a provider's native turn (Anthropic
-thinking blocks, Responses reasoning items) when the same provider continues; the neutral
-history, and so any other provider, has only the text and the calls.
+thinking blocks, Responses reasoning items) when the exact same model reference continues;
+the neutral history, and so any other model, has only the text and the calls.
 
 **Fitting the window.** Before every model call, when the model has a `contextWindow`,
 `Turn.fitHistoryToContext` estimates the request (`fixedTokens` = system prompt + tool
 schema, plus `Agent.estimateTokens` of every message, chars/4 scaled by the calibration
-from the provider's last prompt count) against `window − window/8` and drops whole
+from the provider's last prompt count) after reserving the larger of `window/8` and the
+adapter's configured maximum output tokens, and drops whole
 exchanges from the front (`Agent.fitToContext`: cuts only at `Msg.User` boundaries so no
 tool result loses its call, and always keeps the last user message); `contextDropped`
 accumulates so the notice states the total. The same estimate is `Agent.contextUsage`,
-shown after each turn and by `/cost`.
+shown after each turn and by `/cost`. If the fixed prompt or latest exchange cannot fit,
+the turn proceeds for advisory/custom windows but emits an actionable warning.
 
 **The other model calls have their own, smaller contexts.** `chat(message)` from agent
-code is a one-shot `ChatModel.simple(None, message)` with no history; `chat(Classified)`
-goes to the classified model with a one-line system prompt ("a trusted assistant handling
-confidential data") and the secret as the only content; the next-input prediction sends
+code is a capability-requiring one-shot call to the untrusted normal model.
+`classifiedChat(String)` is exposed as an assumed-pure call to the isolated classified
+model, with a one-line system prompt ("a trusted assistant handling confidential data");
+the `Classified[String]` overload maps it without removing the label. The next-input prediction sends
 `InputPredictor.System` and a rendered transcript of the last `Exchanges` user/agent text
 pairs (tool calls and results left out, each message cut to `MessageChars`), never to the
-classified model. All of them are recorded under their own purpose in `/cost`.
+classified model. Nested chats pause the snippet clock while their provider-level timeout
+is in force. All of them are recorded under their own purpose in `/cost`.
 
 ## The agent loop
 
@@ -808,6 +840,10 @@ resumes, or stops. Per-turn counters enforce `Agent.Max*` and `config.maxToolCal
   model is asked again.
 - If the provider returns `unfinished` after a server-side tool such as web search
   (Anthropic `pause_turn`), the model is asked to resume, up to `MaxResumes` times.
+- Output-limit stops (`length`, `max_tokens`, `max_output_tokens`) append a
+  `Msg.Continuation` and resume. Tool calls accompanying a truncated or safety-blocked
+  response are treated as partial and never executed. Empty terminal responses get a
+  visible assistant marker so later provider history stays valid.
 - The tool budget (`maxToolCalls`, 200 by default) is a checkpoint. When it is exhausted, the
   UI is asked (`AgentUI.confirmMoreToolCalls`; the TUI shows a yes/no pop-up, `-p` runs and
   test doubles decline) whether the turn may go on for another budget; if not, the model gets
@@ -816,9 +852,9 @@ resumes, or stops. Per-turn counters enforce `Agent.Max*` and `config.maxToolCal
   reply's prose misread too many closings; the system prompt says that ending without a tool
   call means the turn is finished, and the user can always say "go on."
 
-`cancelled` is polled while streaming and before every tool call; an interrupted turn ends
-with an `[interrupted by user]` assistant message so the history stays well-formed. A
-refusal stop reason is shown to the user.
+`cancelled` is polled before probing each stream event and before every tool call; an
+interrupted turn ends with an `[interrupted by user]` assistant message when role repair is
+needed. Safety/refusal stop reasons are shown to the user.
 
 **Pending notes.** Things the model must hear at the start of its next turn (`[sandbox
 notice]` after a REPL restart, `[user ran code]` after `/run`) are queued in an ordered
@@ -827,13 +863,16 @@ messages in a row; `clear()` drops them.
 
 **Next-input prediction** (`agent/InputPredictor.scala`, config `predictInput`, default
 on): after each interactive turn `App` calls `predictor.start()`, which asks
-`agent.model.simple` for the likely next request on a daemon thread and hands it to
+`agent.model.simple` for the likely next request on one coalescing daemon worker and hands it to
 `Tui.suggest`; the TUI draws it as faint ghost text through a `DefaultHighlighter` subclass
 (display only: JLine positions the cursor from the buffer), and Tab / → accept it
 (`atc-accept-suggestion-*` widgets fall back to the previous binding). A generation counter
-drops guesses that arrive after `invalidate()` (next turn, `/clear`, `/new`); `Tui.suggest`
-redraws via `callWidget(REDISPLAY)`, which JLine only honours while reading. Plain mode and
-`-p` runs never predict; the classified model is never used.
+drops stale guesses; rapid starts retain only the newest waiting job and interrupt the
+current SDK call best-effort, so a client that ignores interruption still cannot create
+unbounded workers. Model/session changes and `/run` invalidate old state. Prediction
+transcripts are JSON-quoted data, and output is reduced to one control-free line.
+`Tui.suggest` redraws via `callWidget(REDISPLAY)`, which JLine only honours while reading.
+Plain mode and `-p` runs never predict; the classified model is never used.
 
 **`/run [code]`** (`App.runCode`) lets the user run Scala in the same `ReplSession`:
 rendered with `tui.toolStart(code, "/run")`/`toolEnd` inside `beginTurn`/`endTurn` (so
@@ -897,8 +936,9 @@ from the drain threads; `Host.exec` maps these to `HostOutput.commandRunning(lin
 `commandOutput(text)` (default no-ops on the trait; `TestEnv` records them), and `App`
 forwards to `Tui.commandRunning`/`commandOutput`, which print `$ line` and the chunks into
 the same `├ output` section as the prints but *not* into the subtraction buffer (the tool
-result does not carry them). Quick commands show nothing. Agent code cannot write to
-`System.out/err` itself (validator), so only `println` and this are live; the REPL's
+result does not carry them). Quick commands show nothing. Compiler safe mode rejects direct
+`System.out/err` access (the validator reports the common spelling earlier), so only
+`println` and this are live; the REPL's
 captured stream (echoes, diagnostics, `printStackTrace()`) stays in the result panel.
 
 **Input.** `Tui.readLine` is a JLine `LineReader` with: a `Completer` for slash commands
@@ -948,7 +988,7 @@ where the code lives):
   compiles in exactly those modes) plus the policy's runtime enforcement and the config/CLI
   plumbing.
 * **`SandboxSuite`**: the sandbox itself (session, host wiring, persistence, loader
-  isolation, validator/fatal-throwable safety nets).
+  isolation, compiler boundary and validator diagnostics).
 * **`ReplSessionSuite`**: REPL mechanics (language coverage, errors, timeouts, interrupts,
   output capture and caps, REPL command allow-list).
 * **`ClassifiedSuite`**: `Classified` semantics against the host directly.
@@ -956,17 +996,17 @@ where the code lives):
   policy algebra, the host's path canonicalisation, exec (incl. live output) and network.
 * **`LayerSuite`**, **`ConfigSuite`**, **`ModelSuite`**, **`GitIgnoreSuite`**,
   **`CodeValidatorSuite`**: configuration layering, the config model, the model catalog and
-  adapters, gitignore matching, the validator rules.
+  adapters, gitignore matching, the validator's early diagnostics.
 * **`AgentLoopSuite`**, **`AgentSuite`**, **`InputPredictorSuite`**: the loop, the system
   prompt and rendering for the model, the context cut, pending notes, usage, prediction.
 * **`TuiSuite`**, **`RenderSuite`**, **`SlashCommandSuite`**: the terminal's pure helpers
   (row placement, print subtraction, number formatting, the continuation rules), the
   Markdown/highlighting renderers, the slash-command table.
 
-The installed host is process-global (one sandbox per JVM), so a suite holding more than
-one live session must call `env.activate()` before each `run` (`ModeSuite` keeps one
-session per mode this way); otherwise a session picks up another env's host when its `api`
-object is first forced. `Scratch` (`./mill app.test.runMain atc.Scratch file.scala`) runs
+The bootstrap host slot is process-global, but `ReplSession` re-selects its own host under
+the evaluation lock before lazy preamble initialization and every run. `TestEnv.activate`
+remains useful for direct setup code, but live sessions no longer depend on callers racing
+to select the slot. `Scratch` (`./mill app.test.runMain atc.Scratch file.scala`) runs
 `// ---`-separated snippets in a sandbox and prints the results, handy for trying agent
 code by hand.
 
@@ -998,9 +1038,10 @@ code by hand.
 `tacit`: `atc setup` (install to `~/.local/bin`, PATH snippet in the shell profile, Java 17+
 check, download), `atc update`, `atc self update|uninstall`, and anything else (`atc`,
 `atc -C dir`, `atc run ...`) execs `java -Datc.lib.classpath=atc-lib.jar -jar atc.jar` from
-`~/.atc/jars/` (beside the global config, in its own directory so uninstall's `rm -rf` never
-touches `config.json`/`keys.properties`; `ATC_CACHE_DIR`/`ATC_INSTALL_DIR` override, used by
-the tests). It fetches `releases/latest` from the GitHub API (`GITHUB_TOKEN` raises the
+`~/.atc/jars/` (beside the global config; uninstall validates the cache root and removes only
+ATC-owned artifacts, never the surrounding `config.json`/`keys.properties`;
+`ATC_CACHE_DIR`/`ATC_INSTALL_DIR` override, used by the tests). It fetches `releases/latest`
+from the GitHub API (`GITHUB_TOKEN` raises the
 rate limit; `jq` when available, a grep fallback otherwise), needs the assets `atc.jar` and
 `atc-lib.jar`, and fails closed on a missing or mismatching sha256 `digest`; the marker
 `release.txt` holds `id|tag`, and a cache whose jars no longer match their digests is

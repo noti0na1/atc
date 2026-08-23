@@ -116,7 +116,7 @@ private[atc] object JsonCodec:
         case 't' => lit("true", Json.Bool(true))
         case 'f' => lit("false", Json.Bool(false))
         case 'n' => lit("null", Json.Null)
-        case c if c == '-' || c.isDigit => number()
+        case c if c == '-' || (c >= '0' && c <= '9') => number()
         case c => fail(s"unexpected character '$c'")
 
     private def lit(word: String, v: Json): Json =
@@ -128,17 +128,28 @@ private[atc] object JsonCodec:
     private def number(): Json =
       val start = i
       if s.charAt(i) == '-' then i += 1
-      while i < s.length && s.charAt(i).isDigit do i += 1
+      if i >= s.length then fail("expected a digit after '-'")
+      if s.charAt(i) == '0' then
+        i += 1
+        if i < s.length && s.charAt(i) >= '0' && s.charAt(i) <= '9' then fail("leading zero in number")
+      else if s.charAt(i) >= '1' && s.charAt(i) <= '9' then
+        while i < s.length && s.charAt(i) >= '0' && s.charAt(i) <= '9' do i += 1
+      else fail("expected a digit")
       if i < s.length && s.charAt(i) == '.' then
         i += 1
-        while i < s.length && s.charAt(i).isDigit do i += 1
+        val fraction = i
+        while i < s.length && s.charAt(i) >= '0' && s.charAt(i) <= '9' do i += 1
+        if i == fraction then fail("expected a digit after the decimal point")
       if i < s.length && (s.charAt(i) == 'e' || s.charAt(i) == 'E') then
         i += 1
         if i < s.length && (s.charAt(i) == '+' || s.charAt(i) == '-') then i += 1
-        while i < s.length && s.charAt(i).isDigit do i += 1
+        val exponent = i
+        while i < s.length && s.charAt(i) >= '0' && s.charAt(i) <= '9' do i += 1
+        if i == exponent then fail("expected a digit in the exponent")
       val t = s.slice(start, i)
       t.toDoubleOption match
-        case Some(d) => Json.Num(d)
+        case Some(d) if d.isFinite => Json.Num(d)
+        case Some(_) => fail(s"number out of range '$t'")
         case None => fail(s"bad number '$t'")
 
     private def str(): String =
@@ -173,6 +184,7 @@ private[atc] object JsonCodec:
               sb.append(code.toChar)
               i += 4
             case other => fail(s"bad escape '\\$other'")
+        else if c < ' ' then fail("unescaped control character in string")
         else
           sb.append(c)
           i += 1

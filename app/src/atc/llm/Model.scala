@@ -11,9 +11,12 @@ case class ToolResult(callId: String, output: String, isError: Boolean)
 
 /** Provider-native replay data for an assistant turn (e.g. Anthropic content
   * blocks including server web-search results, OpenAI Responses output
-  * items). Reused when the same provider continues the conversation; other
-  * providers rebuild the turn from the neutral fields. */
-case class NativeTurn(providerKey: String, payload: Any):
+  * items). Reused only by the exact model endpoint that produced it; another
+  * model using the same wire protocol rebuilds the turn from the neutral
+  * fields. This matters for model-bound data such as encrypted reasoning. */
+case class NativeTurn(providerKey: String, modelRef: String, payload: Any):
+  def isFor(key: String, ref: String): Boolean = providerKey == key && modelRef == ref
+
   /** Cache the rendered size of `payload`. The context-window estimator revisits
     * every retained message before each request, and a Responses reasoning payload
     * can be tens of kilobytes. Rendering it on every round would make estimation
@@ -25,6 +28,10 @@ enum Msg:
   case User(text: String)
   case Assistant(text: String, toolCalls: List[ToolCall], native: Option[NativeTurn])
   case ToolResults(results: List[ToolResult])
+  /** Internal user-role message asking a provider to continue a response that
+    * hit its output limit. Kept distinct from real user input for prediction,
+    * context-cut boundaries and transcript accounting. */
+  case Continuation(text: String)
 
 case class TokenUsage(input: Long = 0, output: Long = 0, cacheRead: Long = 0):
   def +(o: TokenUsage): TokenUsage = TokenUsage(input + o.input, output + o.output, cacheRead + o.cacheRead)
@@ -41,12 +48,24 @@ case class Completion(
   unfinished: Boolean = false
 )
 
-/** The system prompt of a request. It is one text on purpose: everything in
-  * it changes only together with a sandbox restart (configuration, mode), so
-  * every request starts with the same prefix and whatever cache the provider
-  * has (a marker, automatic prefix caching, none) works as well as it can.
-  * Anything that changes during a session (a permission granted at a prompt)
-  * is reported in the history instead, which is append-only. */
+object Completion:
+  /** Provider stop reasons that mean the generated response was cut short and
+    * can be continued by replaying it. */
+  private val TruncatedStops = Set("length", "max_tokens", "max_output_tokens")
+  /** Provider safety stops. Any tool calls accompanying one are partial or
+    * contradictory and must never be executed. */
+  private val BlockedStops = Set("content_filter", "refusal")
+
+  private def normalized(reason: String): String = reason.trim.toLowerCase.replace('-', '_')
+
+  def isTruncatedStop(reason: String): Boolean = TruncatedStops.contains(normalized(reason))
+  def isBlockedStop(reason: String): Boolean = BlockedStops.contains(normalized(reason))
+
+/** The system prompt of a request. It is one text on purpose: configuration
+  * and mode changes rebuild it, as does an explicit classified-model switch;
+  * between those events every request starts with the same prefix and whatever
+  * cache the provider has can work. Permission decisions are reported in the
+  * append-only history instead of mutating this prefix. */
 final case class SystemPrompt(text: String)
 
 /** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
@@ -55,12 +74,16 @@ case class Reply(text: String, usage: TokenUsage)
 /** Thrown when the user cancels a streaming completion. */
 class CancelledException extends RuntimeException("cancelled")
 
-private[llm] object Streaming:
+private[atc] object Streaming:
   /** Feed the events of a provider stream to `f`, polling `cancelled` before each one. */
   def drain[E](events: java.util.stream.Stream[E], cancelled: () => Boolean)(f: E => Unit): Unit =
     val it = events.iterator()
-    while it.hasNext do
+    // Check before `hasNext`: for a network-backed iterator even probing for
+    // the next event may block, and an already-cancelled request should not do so.
+    while
       if cancelled() then throw CancelledException()
+      it.hasNext
+    do
       f(it.next())
 
 /** Where a streaming completion reports progress. */
@@ -89,11 +112,15 @@ trait ChatModel:
   /** The name that identifies this model unambiguously (`provider/alias`). */
   def ref: String = alias
   def modelId: String
-  /** The wire protocol, matched against [[NativeTurn]] when replaying a turn. */
+  /** The wire protocol, matched together with [[ref]] against [[NativeTurn]]
+    * when replaying a turn. */
   def providerKey: String
   def webSearch: Boolean
   /** The context window in tokens, when the config states it (`contextWindow`). */
   def contextWindow: Option[Int] = None
+  /** Configured maximum output tokens, when the adapter sends one. Context
+    * fitting reserves at least this much room for the answer. */
+  def maxOutputTokens: Option[Int] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;
     * `cancelled` is polled between events. */

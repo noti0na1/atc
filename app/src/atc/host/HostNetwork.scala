@@ -2,11 +2,13 @@ package atc.host
 
 import atc.lib.*
 
+import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse as JHttpResponse}
 import java.nio.charset.StandardCharsets
 import java.time.Duration
-import scala.util.{Failure, Success, Try}
+import java.util.Locale
+import scala.util.{Success, Try, Using}
 
 /** Network-facing operations supplied by [[Host]]. Keeping HTTP construction
   * here makes the permission boundary and classified-data handling reviewable
@@ -21,7 +23,7 @@ private[host] trait HostNetwork:
     user: UserIO,
     parent: Network
   ): T =
-    val patterns = hosts.toList.map(_.trim.toLowerCase).filter(_.nonEmpty)
+    val patterns = hosts.toList.map(_.trim).filter(_.nonEmpty)
     inScope(policy.requestNet(scopeOf(parent), patterns, reason))(id => op(using NetworkImpl(id)))
 
   private val http = HttpClient.newBuilder().nn
@@ -44,14 +46,51 @@ private[host] trait HostNetwork:
         )
       case None => ()
 
-  private def resolveSecretHeaders(headers: Map[String, Classified[String]]): Map[String, String] =
-    val attempted = headers.iterator.map((name, value) => name -> ClassifiedImpl.unwrap(value)).toList
-    if attempted.exists(_._2.isFailure) then
-      classifiedSinkFailed("a classified request header")
-      throw SecurityException(
-        "A classified header value could not be computed; the request was not sent. Its error is confidential."
+  private final case class Prepared(uri: URI, method: String)
+
+  /** Validate everything that is independent of classified header values before
+    * inspecting any of them. Header names are plain strings even in
+    * `secretHeaders`, so duplicate/restricted-name errors are safe to report. */
+  private def prepare(
+    net: Network,
+    method: String,
+    url: String,
+    headers: Map[String, String],
+    secretHeaderNames: Iterable[String],
+  ): Prepared =
+    val uri = URI(url)
+    val scheme = Option(uri.getScheme).map(_.toLowerCase(Locale.ROOT)).getOrElse("")
+    if scheme != "http" && scheme != "https" then
+      throw SecurityException(s"Invalid URL (only http/https are supported): $url")
+    requireAllowedHost(net, uri, url)
+
+    val normalizedMethod = method.toUpperCase(Locale.ROOT)
+
+    val names = headers.keysIterator.toList ++ secretHeaderNames.toList
+    val duplicates =
+      names.groupBy(_.toLowerCase(Locale.ROOT)).collect { case (_, variants) if variants.sizeIs > 1 => variants }.toList
+    if duplicates.nonEmpty then
+      throw IllegalArgumentException(
+        s"HTTP header names are case-insensitive and may be supplied only once: ${duplicates.flatten.distinct.sorted.mkString(", ")}"
       )
-    attempted.collect { case (name, Success(value)) => name -> value }.toMap
+
+    // Ask the JDK to validate the non-secret values now, outside the classified
+    // failure boundary. Secret values are deliberately not touched here.
+    val validator = HttpRequest.newBuilder(uri).nn
+    headers.foreach((name, value) => validator.header(name, value))
+    validator.method(normalizedMethod, HttpRequest.BodyPublishers.noBody())
+    Prepared(uri, normalizedMethod)
+
+  /** Sequence classified header computations without making their success or
+    * failure observable. The resulting `Try` is consumed only inside another
+    * classified value. */
+  private def resolveSecretHeaders(headers: Map[String, Classified[String]]): Try[Map[String, String]] =
+    headers.iterator.foldLeft(Try(Map.empty[String, String])) { case (result, (name, classified)) =>
+      for
+        resolved <- result
+        value <- ClassifiedImpl.unwrap(classified)
+      yield resolved.updated(name, value)
+    }
 
   private def requestBody(
     builder: HttpRequest.Builder,
@@ -65,6 +104,42 @@ private[host] trait HostNetwork:
         if !headerNames.exists(_.equalsIgnoreCase("Content-Type")) then builder.header("Content-Type", contentType)
         HttpRequest.BodyPublishers.ofString(text, StandardCharsets.UTF_8).nn
 
+  /** Consume a response through a bounded stream. `ofString`/`ofByteArray`
+    * buffer without a limit and let an allowed peer exhaust the process heap. */
+  private def responseBody(response: JHttpResponse[java.io.InputStream], url: String): String =
+    Using.resource(response.body.nn) { input =>
+      val bytes = ByteArrayOutputStream(math.min(8192, Host.HttpMaxResponseBytes))
+      val buffer = new Array[Byte](8192)
+      var total = 0
+      var read = input.read(buffer)
+      while read >= 0 do
+        if read > 0 then
+          if total > Host.HttpMaxResponseBytes - read then
+            throw RuntimeException(
+              s"HTTP response from $url exceeded the ${Host.HttpMaxResponseBytes}-byte limit"
+            )
+          bytes.write(buffer, 0, read)
+          total += read
+        read = input.read(buffer)
+      String(bytes.toByteArray.nn, StandardCharsets.UTF_8)
+    }
+
+  private def send(
+    prepared: Prepared,
+    url: String,
+    body: Option[String],
+    contentType: String,
+    headers: Map[String, String],
+    secretHeaders: Map[String, String],
+  ): HttpResponse =
+    val builder = HttpRequest.newBuilder(prepared.uri).nn.timeout(Duration.ofSeconds(60)).nn
+    headers.foreach((name, value) => builder.header(name, value))
+    secretHeaders.foreach((name, value) => builder.header(name, value))
+    val publisher = requestBody(builder, body, contentType, headers.keys ++ secretHeaders.keys)
+    builder.method(prepared.method, publisher)
+    val response = http.send(builder.build(), JHttpResponse.BodyHandlers.ofInputStream()).nn
+    HttpResponse(response.statusCode, responseBody(response, url))
+
   private def request(
     net: Network,
     method: String,
@@ -72,25 +147,31 @@ private[host] trait HostNetwork:
     body: Option[String],
     contentType: String,
     headers: Map[String, String],
-    secretHeaders: Map[String, Classified[String]]
   ): HttpResponse =
-    val uri = URI(url)
-    val scheme = Option(uri.getScheme).map(_.toLowerCase).getOrElse("")
-    if scheme != "http" && scheme != "https" then
-      throw SecurityException(s"Invalid URL (only http/https are supported): $url")
-    requireAllowedHost(net, uri, url)
+    val prepared = prepare(net, method, url, headers, Nil)
+    send(prepared, url, body, contentType, headers, Map.empty)
 
-    val builder = HttpRequest.newBuilder(uri).nn.timeout(Duration.ofSeconds(60)).nn
-    headers.foreach((name, value) => builder.header(name, value))
-    // Unwrap classified headers only for transmission; never expose them to the
-    // agent. A failed header must abort the request: silently omitting it could
-    // produce a distinguishable response and reveal the failure.
-    val resolvedSecrets = resolveSecretHeaders(secretHeaders)
-    resolvedSecrets.foreach((name, value) => builder.header(name, value))
-    val publisher = requestBody(builder, body, contentType, headers.keys ++ resolvedSecrets.keys)
-    builder.method(method.toUpperCase, publisher)
-    val response = http.send(builder.build(), JHttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)).nn
-    HttpResponse(response.statusCode, response.body.nn)
+  /** Any request containing classified input produces a classified response.
+    * JDK validation, construction, transport, status and body failures after
+    * unwrapping are retained inside it; none of their messages can reach the
+    * agent as a plain exception. */
+  private def requestClassified(
+    net: Network,
+    method: String,
+    url: String,
+    body: Try[Option[String]],
+    contentType: String,
+    headers: Map[String, String],
+    secretHeaders: Map[String, Classified[String]],
+  ): Classified[HttpResponse] =
+    val prepared = prepare(net, method, url, headers, secretHeaders.keys)
+    val result =
+      for
+        resolvedBody <- body
+        resolvedHeaders <- resolveSecretHeaders(secretHeaders)
+        response <- Try(send(prepared, url, resolvedBody, contentType, headers, resolvedHeaders))
+      yield response
+    ClassifiedImpl.fromTry(result)
 
   private val noHeaders = Map.empty[String, String]
   private val noSecrets = Map.empty[String, Classified[String]]
@@ -105,44 +186,67 @@ private[host] trait HostNetwork:
       )
     response.body
 
-  def httpGet(url: String)(using Network): String = httpGet(url, noHeaders, noSecrets)
-  def httpGet(url: String, headers: Map[String, String])(using Network): String = httpGet(url, headers, noSecrets)
+  private def checkedClassified(method: String, url: String, response: Classified[HttpResponse]): Classified[String] =
+    ClassifiedImpl.fromTry(ClassifiedImpl.unwrap(response).flatMap(value => Try(checked(method, url, value))))
+
+  def httpGet(url: String)(using net: Network): String =
+    checked("GET", url, request(net, "GET", url, None, JsonContentType, noHeaders))
+  def httpGet(url: String, headers: Map[String, String])(using net: Network): String =
+    checked("GET", url, request(net, "GET", url, None, JsonContentType, headers))
   def httpGet(url: String, headers: Map[String, String], secretHeaders: Map[String, Classified[String]])(using
     net: Network
-  ): String =
-    checked("GET", url, request(net, "GET", url, None, JsonContentType, headers, secretHeaders))
+  ): Classified[String] =
+    checkedClassified(
+      "GET",
+      url,
+      requestClassified(net, "GET", url, Success(None), JsonContentType, headers, secretHeaders)
+    )
 
   def httpPost(url: String, body: String)(using Network): String =
-    httpPost(url, body, JsonContentType, noHeaders, noSecrets)
+    httpPost(url, body, JsonContentType, noHeaders)
   def httpPost(url: String, body: String, contentType: String)(using Network): String =
-    httpPost(url, body, contentType, noHeaders, noSecrets)
-  def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network): String =
-    httpPost(url, body, contentType, headers, noSecrets)
+    httpPost(url, body, contentType, noHeaders)
+  def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using
+    net: Network
+  ): String =
+    checked("POST", url, request(net, "POST", url, Some(body), contentType, headers))
   def httpPost(
     url: String,
     body: String,
     contentType: String,
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
-  )(using net: Network): String =
-    checked("POST", url, request(net, "POST", url, Some(body), contentType, headers, secretHeaders))
+  )(using net: Network): Classified[String] =
+    checkedClassified(
+      "POST",
+      url,
+      requestClassified(net, "POST", url, Success(Some(body)), contentType, headers, secretHeaders)
+    )
 
   def httpRequest(method: String, url: String)(using Network): HttpResponse =
-    httpRequest(method, url, "", noHeaders, noSecrets)
+    httpRequest(method, url, "", noHeaders)
   def httpRequest(method: String, url: String, body: String)(using Network): HttpResponse =
-    httpRequest(method, url, body, noHeaders, noSecrets)
+    httpRequest(method, url, body, noHeaders)
   def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using
-    Network
+    net: Network
   ): HttpResponse =
-    httpRequest(method, url, body, headers, noSecrets)
+    request(net, method, url, Option(body).filter(_.nonEmpty), JsonContentType, headers)
   def httpRequest(
     method: String,
     url: String,
     body: String,
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
-  )(using net: Network): HttpResponse =
-    request(net, method, url, Option(body).filter(_.nonEmpty), JsonContentType, headers, secretHeaders)
+  )(using net: Network): Classified[HttpResponse] =
+    requestClassified(
+      net,
+      method,
+      url,
+      Success(Option(body).filter(_.nonEmpty)),
+      JsonContentType,
+      headers,
+      secretHeaders
+    )
 
   def httpPostClassified(url: String, body: Classified[String])(using Network): Classified[String] =
     httpPostClassified(url, body, JsonContentType, noHeaders, noSecrets)
@@ -157,8 +261,13 @@ private[host] trait HostNetwork:
     headers: Map[String, String],
     secretHeaders: Map[String, Classified[String]]
   )(using net: Network): Classified[String] =
-    ClassifiedImpl.unwrap(body) match
-      case Success(value) =>
-        // Use the raw request: `httpPost` may expose an error response in its exception.
-        ClassifiedImpl.fromTry(Try(request(net, "POST", url, Some(value), contentType, headers, secretHeaders).body))
-      case Failure(_) => body
+    val classifiedResponse = requestClassified(
+      net,
+      "POST",
+      url,
+      ClassifiedImpl.unwrap(body).map(Some(_)),
+      contentType,
+      headers,
+      secretHeaders,
+    )
+    ClassifiedImpl.fromTry(ClassifiedImpl.unwrap(classifiedResponse).map(_.body))

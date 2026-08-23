@@ -21,8 +21,9 @@ import caps.*
 //     "Cannot call update method … its capture set is read-only".
 //
 // `Classified.map` accepts functions that capture only *read-only* capabilities,
-// so nothing that changes the world (writing, running a command, the network,
-// printing, asking) can happen on confidential data. See below.
+// so ordinary world-changing operations (writing, commands, network, printing,
+// asking) cannot happen on confidential data. The explicit exception is the
+// trusted, assumed-pure `classifiedChat` primitive. See below.
 
 // ─── Classified data ─────────────────────────────────────────────────────────
 
@@ -31,14 +32,20 @@ import caps.*
  *  `map` and `flatMap` accept functions that may capture only **read-only**
  *  capabilities. Within them, you can compute freely, use local `var`s and
  *  arrays, and read files where your `fs` is itself read-only. You can never
- *  write, run a command, use the network, `println`, `chat` or `ask`, because
+ *  write, run a command, use the network, `println`, normal-model `chat` or `ask`, because
  *  each of those needs a full capability. Whatever you compute stays
  *  classified; `toString` shows `Classified(***)`.
  *
+ *  This is termination-insensitive information flow: do not branch on a secret
+ *  into nontermination, a timeout, or materially different resource use. The
+ *  sandbox cannot make the running time or termination of arbitrary pure Scala
+ *  code indistinguishable.
+ *
  *  The only supported destinations are `println` (the user sees the value while
  *  you still see `Classified(***)`), `writeClassified` (to a classified file),
- *  `chat` with the classified model, and `httpPostClassified` or `secretHeaders`
- *  to an allowed host.
+ *  `classifiedChat` with the classified model, and `httpPostClassified` or `secretHeaders`
+ *  to an allowed host. Every response to a request carrying classified input is
+ *  itself `Classified`, so a server cannot reflect a secret back into plain data.
  *
  *  {{{
  *  val secret = readClassified(".env")          // Classified[String]
@@ -280,8 +287,8 @@ enum Json:
     case _      => expected("a number")
   /** A whole number (`3.0` is fine, `3.5` throws). */
   def int: Int = this match
-    case Num(v) if v.isWhole && v.abs <= Int.MaxValue => v.toInt
-    case _                                            => expected("a whole number")
+    case Num(v) if v.isWhole && v >= Int.MinValue && v <= Int.MaxValue => v.toInt
+    case _                                                            => expected("a whole number")
   def bool: Boolean = this match
     case Bool(v) => v
     case _       => expected("a boolean")
@@ -354,7 +361,7 @@ object Json:
  *  sed("src/Main.scala", """^import (\w+)\._$""", "import $1.*")   // in-place edit, fails loudly if nothing matches
  *  write("src/Main.scala", src + "\n// appended")   // or rewrite the whole file
  *  grepRecursive("src", "def main", "*.scala").foreach(m => println(s"${m.file}:${m.lineNumber}"))
- *  val r = exec("git status --short")   // split like a shell line, but no shell: no `|`, `&&`, `>`
+ *  val r = exec("git status --short")   // split like a small shell grammar; `|`/redirection work, `&&` does not
  *  println(s"exit ${r.exitCode}\n${r.stdout}${r.stderr}")
  *  val pkg = Json.parse(read("package.json")); println(pkg("scripts")("test").str)
  *
@@ -517,6 +524,7 @@ trait Interface:
    *  one throws): run steps one by one and combine in Scala, feed text with
    *  `ExecOptions(stdin = ...)`. With several commands the exit code is the rightmost
    *  non-zero one (pipefail) and stderr is labelled per stage.
+   *  A pipeline has at most 16 stages.
    *  Runs in the working directory unless `workingDir`/`options` say otherwise. The
    *  result carries the exit code and both streams (a non-zero exit does not throw;
    *  `execOutput` does). Throws `SecurityException` if the command line matches no
@@ -553,15 +561,17 @@ trait Interface:
   def requestNetwork[T](hosts: Iterable[String])(op: Network^ ?=> T)(using UserIO^, Network^): T
   def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network^ ?=> T)(using UserIO^, Network^): T
 
-  /** HTTP GET: the body of a 2xx/3xx response; a status of 400 or more throws
+  /** HTTP GET: the body of a 2xx/3xx response (at most 8 MiB); a status of 400 or more throws
    *  `RuntimeException` with the status and the start of the body (use `httpRequest`
    *  to inspect a failure). Redirects are not followed (each URL is checked against
    *  the allowed hosts). A `secretHeaders` value (e.g. a token read with
-   *  `readClassified`) is sent but never shown to you. Only `http`/`https` URLs. */
+   *  `readClassified`) is sent without being shown to you; because a peer could
+   *  reflect it, that overload's response stays `Classified`. Only `http`/`https`
+   *  URLs. */
   def httpGet(url: String)(using Network^): String
   def httpGet(url: String, headers: Map[String, String])(using Network^): String
   def httpGet(url: String, headers: Map[String, String],
-              secretHeaders: Map[String, Classified[String]])(using Network^): String
+              secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
   /** HTTP POST, same contract as `httpGet`. `contentType` (default
    *  `application/json`) becomes the `Content-Type` header unless `headers` or
@@ -571,7 +581,7 @@ trait Interface:
   def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network^): String
   def httpPost(url: String, body: String, contentType: String,
                headers: Map[String, String],
-               secretHeaders: Map[String, Classified[String]])(using Network^): String
+               secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
   /** Any method; the raw status and body, never throws on an HTTP error. */
   def httpRequest(method: String, url: String)(using Network^): HttpResponse
@@ -579,7 +589,7 @@ trait Interface:
   def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String,
                   headers: Map[String, String],
-                  secretHeaders: Map[String, Classified[String]])(using Network^): HttpResponse
+                  secretHeaders: Map[String, Classified[String]])(using Network^): Classified[HttpResponse]
 
   /** POST a classified body; the response stays classified. */
   def httpPostClassified(url: String, body: Classified[String])(using Network^): Classified[String]
@@ -635,8 +645,15 @@ trait Interface:
 
   // ── LLM ─────────────────────────────────────────────────────────
 
-  /** Ask the normal model a one-shot question (e.g. to summarize a long text). */
+  /** Ask the untrusted normal model a one-shot question. This outward effect
+   *  requires the full user capability. */
   def chat(message: String)(using UserIO^): String
 
-  /** Ask the *classified* model about classified content; the answer stays classified. */
-  def chat(message: Classified[String]): Classified[String]
+  /** Ask the trusted classified model. Its deployment is assumed to be an
+   *  isolated, effect-free classified environment, so this operation is treated
+   *  as pure and may be called inside `Classified.map`. */
+  def classifiedChat(message: String): String
+
+  /** Ask the trusted classified model about classified content; implemented as
+   *  `message.map(classifiedChat)`, so the answer stays classified. */
+  def classifiedChat(message: Classified[String]): Classified[String]

@@ -19,7 +19,7 @@ if [ -f "$ENV_FILE" ]; then
     line=${line#export }
     key=${line%%=*}
     value=${line#*=}
-    case "$key" in *[!A-Za-z0-9_]*|'') continue ;; esac
+    case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
     # strip surrounding quotes
     case "$value" in
       \"*\") value=${value#\"}; value=${value%\"} ;;

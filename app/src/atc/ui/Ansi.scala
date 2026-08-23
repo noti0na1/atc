@@ -28,7 +28,8 @@ object Ansi:
   val Sgr = """\u001b\[[0-9;]*m""".r
 
   /** Strip terminal control from untrusted text (model prose, program output,
-    * file content, paths): C0 controls except `\n` and `\t`, DEL, and C1. ESC is
+    * file content, paths): C0 controls except `\n` and `\t`, DEL, C1, and the
+    * Unicode bidirectional-formatting controls used for visual spoofing. ESC is
     * dropped outright, so even an escape sequence straddling two streamed chunks
     * dies with it. Applied where such text enters the TUI, never to the TUI's
     * own styled output. */
@@ -37,4 +38,9 @@ object Ansi:
     else s.filterNot(isControl)
 
   private def isControl(c: Char): Boolean =
-    (c < ' ' && c != '\n' && c != '\t') || c == '\u007f' || (c >= '\u0080' && c <= '\u009f')
+    (c < ' ' && c != '\n' && c != '\t') ||
+      c == '\u007f' ||
+      (c >= '\u0080' && c <= '\u009f') ||
+      c == '\u061c' || c == '\u200e' || c == '\u200f' ||
+      (c >= '\u202a' && c <= '\u202e') ||
+      (c >= '\u2066' && c <= '\u2069')

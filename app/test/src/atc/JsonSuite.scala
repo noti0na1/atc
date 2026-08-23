@@ -32,6 +32,8 @@ class JsonSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](j("a")("b")(0).bool)
     intercept[IllegalArgumentException](Json.Num(1.5).int)
     assertEquals(Json.Num(3.0).int, 3)
+    assertEquals(Json.Num(Int.MinValue.toDouble).int, Int.MinValue)
+    assertEquals(Json.Num(Int.MaxValue.toDouble).int, Int.MaxValue)
     assertEquals(j("a").keys, List("b"))
     assertEquals(j.keys, List("a"))
     assertEquals(Json.Str("x").keys, Nil)
@@ -69,6 +71,15 @@ class JsonSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](Json.parse(""))
     assertEquals(Json.parse("""[1, 2, ]""").arr.length, 2)
     assertEquals(Json.parse("""{"a": 1, }""").keys, List("a"))
+
+  test("numbers and strings otherwise follow JSON syntax"):
+    for bad <- List("01", "-01", "1.", "-.1", "1e", "1e+", "1e400") do
+      val e = intercept[IllegalArgumentException](Json.parse(bad))
+      assert(e.getMessage.nn.contains("invalid JSON"), s"$bad: ${e.getMessage}")
+    for bad <- List("\"raw\nnewline\"", "\"tab\tcharacter\"", "\"bell\u0007\"") do
+      intercept[IllegalArgumentException](Json.parse(bad))
+    assertEquals(Json.parse("-0.25e+2").num, -25.0)
+    assertEquals(Json.parse("\"escaped\\nnewline\"").str, "escaped\nnewline")
 
   test("control characters and non-finite numbers render as valid JSON"):
     assertEquals(Json.Str("tab\t bell\u0007").render, "\"tab\\t bell\\u0007\"")

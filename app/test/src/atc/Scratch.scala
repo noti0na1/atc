@@ -26,7 +26,7 @@ object Scratch:
         userOut.append(if agentText == userText then userText else s"[C]$userText")
     val llm = new HostLlm:
       def chat(m: String) = s"echo:$m"
-      def chatClassified(m: String) = s"safe:$m"
+      def classifiedChat(m: String) = s"safe:$m"
     val hostUi = new HostUi:
       def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = Some("yes")
       def showTodos(items: List[atc.lib.Todo]): Unit = println(s"[todos] $items")

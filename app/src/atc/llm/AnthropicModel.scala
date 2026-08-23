@@ -17,6 +17,7 @@ import scala.util.Using
   * server-side web-search tool when enabled. */
 final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   val providerKey: String = "anthropic"
+  override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(32000))
 
   private lazy val client: AnthropicClient =
     val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
@@ -62,9 +63,14 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
           val block = TextBlockParam.builder().text(text)
           if mark then block.cacheControl(cache)
           b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
+        case Msg.Continuation(text) =>
+          val block = TextBlockParam.builder().text(text)
+          if mark then block.cacheControl(cache)
+          b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
         case Msg.Assistant(text, calls, native) =>
           native match
-            case Some(NativeTurn(`providerKey`, p: MessageParam)) => b.addMessage(p)
+            case Some(n) if n.isFor(providerKey, ref) && n.payload.isInstanceOf[MessageParam] =>
+              b.addMessage(n.payload.asInstanceOf[MessageParam])
             case _ =>
               val blocks = List.newBuilder[ContentBlockParam]
               if text.nonEmpty then blocks += ContentBlockParam.ofText(text)
@@ -108,11 +114,11 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     val usage = usageOf(m)
     val stop = m.stopReason().toScala.map(_.toString).getOrElse("end_turn").toLowerCase
     val lastBlock = m.content().asScala.lastOption
-    val unfinished = stop == "pause_turn" ||
+    val unfinished = stop == "pause_turn" || Completion.isTruncatedStop(stop) ||
       (calls.result().isEmpty && lastBlock.exists(b =>
         b.serverToolUse().isPresent || b.webSearchToolResult().isPresent
       ))
-    Completion(text.toString, calls.result(), Some(NativeTurn(providerKey, m.toParam())), usage, stop, unfinished)
+    Completion(text.toString, calls.result(), Some(NativeTurn(providerKey, ref, m.toParam())), usage, stop, unfinished)
 
   def complete(
     system: SystemPrompt,

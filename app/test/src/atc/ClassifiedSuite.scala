@@ -233,6 +233,18 @@ class ClassifiedSuite extends munit.FunSuite:
     assert(!env.userOut.toString.contains("TOP SECRET"), env.userOut.toString)
     assert(!env.agentOut.toString.contains("failed computation"), env.agentOut.toString)
 
+  test("writeClassified masks post-unwrapping I/O failures"):
+    // A directory is a predictably invalid write target on every supported
+    // platform. Success and classified-computation failure must both return
+    // normally and expose no bit through the agent channel.
+    env.dir("secrets/write-target")
+    env.clearOutput()
+    writeClassified("secrets/write-target", classify("secret-value"))
+    val failed = classify("secret-value").map(value => throw RuntimeException(value))
+    writeClassified("secrets/write-target", failed)
+    assertEquals(env.agentOut.toString, "")
+    assertEquals(env.userOut.toString.linesIterator.count(_.contains("writing")), 2)
+
   test("readClassified of an unreadable path fails inside the Classified"):
     val outside = TestEnv.outsideDir("nope")
     val c = readClassified(s"$outside/o.txt")
@@ -282,6 +294,34 @@ class ClassifiedSuite extends munit.FunSuite:
     assertEquals(env.agentOut.toString, "Classified(***)\n")
     assert(env.userOut.toString.contains("<classified error: boom-v>"), env.userOut.toString)
 
+  test("classified rendering failures cannot escape through println, print, or printf"):
+    env.clearOutput()
+    val value = classify("RENDER-SECRET").map(secret =>
+      new Object:
+        override def toString: String = throw RuntimeException(secret)
+    )
+    println(value)
+    print(value)
+    printf("%s%n", value)
+    assertEquals(
+      env.agentOut.toString,
+      "Classified(***)\nClassified(***)Classified(***)\n",
+    )
+    assert(!env.agentOut.toString.contains("RENDER-SECRET"), env.agentOut.toString)
+    assert(env.userOut.toString.contains("RENDER-SECRET"), env.userOut.toString)
+
+  test("a malicious Throwable.getMessage stays behind the classified output boundary"):
+    env.clearOutput()
+    val failed = classify("MESSAGE-SECRET").map(secret =>
+      throw new RuntimeException("outer"):
+        override def getMessage: String = throw RuntimeException(secret)
+    )
+    println(failed)
+    printf("%s%n", failed)
+    assertEquals(env.agentOut.toString, "Classified(***)\nClassified(***)\n")
+    assert(!env.agentOut.toString.contains("MESSAGE-SECRET"), env.agentOut.toString)
+    assert(env.userOut.toString.contains("error details could not be rendered"), env.userOut.toString)
+
   test("printf with no classified arguments is identical for both"):
     env.clearOutput()
     printf("%s-%d%n", "a", 1)
@@ -290,20 +330,36 @@ class ClassifiedSuite extends munit.FunSuite:
 
   // ── LLM sink ────────────────────────────────────────────────────
 
-  test("chat(Classified) goes to the classified model and stays classified"):
-    val answer = chat(readClassified("secrets/data.txt").map(_.toLowerCase))
+  test("classifiedChat(Classified) goes to the classified model and stays classified"):
+    val answer = classifiedChat(readClassified("secrets/data.txt").map(_.toLowerCase))
     assertEquals(answer.toString, "Classified(***)")
     assertEquals(env.classifiedChats.toList, List("top secret data"))
     assertEquals(ClassifiedImpl.get(answer), "safe:top secret data")
     assert(env.chats.isEmpty)
 
-  test("chat(Classified) with a failed value does not call the model"):
+  test("classifiedChat(Classified) with a failed value does not call the model"):
     val before = env.classifiedChats.size
     val failed = classify("s").map(_ => throw RuntimeException("x"))
-    val r = chat(failed)
+    val r = classifiedChat(failed)
     assert(ClassifiedImpl.unwrap(r).isFailure)
     assertEquals(env.classifiedChats.size, before)
 
   test("chat(String) goes to the normal model"):
     assertEquals(chat("hello"), "normal:hello")
     assertEquals(env.chats.toList, List("hello"))
+
+  test("classifiedChat(String) returns the trusted classified model's plain response"):
+    assertEquals(classifiedChat("hello"), "safe:hello")
+    assert(env.classifiedChats.contains("hello"), env.classifiedChats.toString)
+
+  test("classifiedChat(Classified) masks a trusted-model failure through map"):
+    val throwing = new HostLlm:
+      def chat(message: String): String = message
+      def classifiedChat(message: String): String = throw RuntimeException(s"provider failed on $message")
+    val host = Host(env.policy, env.root, env.output, throwing, env.ui)
+    val direct = intercept[RuntimeException](host.classifiedChat("PLAIN"))
+    assert(direct.getMessage.nn.contains("PLAIN")) // the String overload is an ordinary pure primitive
+    val wrapped = host.classifiedChat(host.classify("WRAPPED-SECRET"))
+    assertEquals(wrapped.toString, "Classified(***)")
+    assert(ClassifiedImpl.unwrap(wrapped).isFailure)
+    assert(!env.agentOut.toString.contains("WRAPPED-SECRET"), env.agentOut.toString)

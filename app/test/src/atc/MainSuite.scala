@@ -1,6 +1,6 @@
 package atc
 
-import atc.perms.Mode
+import atc.perms.{Decision, ExecRequest, Mode}
 
 /** The CLI argument parser (Main.parseArgs). */
 class MainSuite extends munit.FunSuite:
@@ -29,3 +29,18 @@ class MainSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Unknown argument"), e.getMessage)
     intercept[IllegalArgumentException](parse("--mode", "bogus"))
     intercept[IllegalArgumentException](parse("-p")) // missing value
+
+  test("scripted runs deny permission requests without prompting unless approve-all is explicit"):
+    val request = ExecRequest(List("git status"), "test")
+    var asked = 0
+    def interactive(request: atc.perms.PermissionRequest): Decision = { asked += 1; Decision.AllowOnce }
+    val scripted = App.permissionPrompter(Main.Args(prompt = Some("work")), interactive)
+    val denied = intercept[SecurityException](scripted.ask(request))
+    assert(denied.getMessage.nn.contains("non-interactive run cannot ask"), denied.getMessage)
+    assertEquals(asked, 0)
+    val approved = App.permissionPrompter(Main.Args(prompt = Some("work"), approveAll = true), interactive)
+    assertEquals(approved.ask(request), Decision.AllowSession)
+    assertEquals(asked, 0)
+    val normal = App.permissionPrompter(Main.Args(), interactive)
+    assertEquals(normal.ask(request), Decision.AllowOnce)
+    assertEquals(asked, 1)

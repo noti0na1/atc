@@ -93,6 +93,7 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertRejected("Runtime.processes", "atc-runtime")
     assertRejected("Runtime.readOnlyFileSystem", "atc-runtime")
     assertRejected("Runtime.network", "atc-runtime")
+    assertRejected("val hidden = Runtime; hidden.rootIO", "atc-runtime")
   test("allow the Interface type name itself"):
     assertAllowed("val i: Interface = ???")
 
@@ -130,6 +131,26 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertAllowed("val consoleOutput = 1; val systemName = 2; val processBuilderLike = 3")
   test("allow System.currentTimeMillis / nanoTime / lineSeparator"):
     assertAllowed("val t = System.currentTimeMillis(); val n = System.nanoTime(); System.lineSeparator()")
+
+  test("reject import aliases that could rename a restricted API"):
+    assertRejected("import java.{io as jio}\nnew jio.File(\"/x\")", "import-alias")
+    assertRejected("import java.lang.{System => S}\nS.getenv(\"HOME\")", "import-alias")
+    assertRejected("import java.lang.System.{getenv as readEnv}\nreadEnv(\"HOME\")", "import-alias")
+    assertRejected("import java.{\n  io as jio\n}\nnew jio.File(\"/x\")", "import-alias")
+    assertRejected("import java.lang.System.\n  getenv as readEnv\nreadEnv(\"HOME\")", "import-alias")
+
+  test("safe mode may delegate harmless aliases to the compiler"):
+    assertEquals(
+      CodeValidator.validate("import java.time.{Duration as JDuration}", strictImportAliases = false),
+      Nil,
+    )
+
+  test("reject importing System members even without an alias"):
+    assertRejected("import java.lang.System.*\ngetenv(\"HOME\")", "sys-system-import")
+
+  test("backticks cannot hide restricted dotted identifiers"):
+    assertRejected("Runtime.`rootIO`", "atc-runtime")
+    assertRejected("new java.`io`.File(\"/x\")", "file-io-java")
 
   // ── String and comment stripping ─────────────────────────────────
 

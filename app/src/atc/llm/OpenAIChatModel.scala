@@ -39,9 +39,11 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     if webSearch then b.webSearchOptions(ChatCompletionCreateParams.WebSearchOptions.builder().build())
     history.foreach {
       case Msg.User(text) => b.addUserMessage(text)
+      case Msg.Continuation(text) => b.addUserMessage(text)
       case Msg.Assistant(text, calls, native) =>
         native match
-          case Some(NativeTurn(`providerKey`, p: ChatCompletionAssistantMessageParam)) => b.addMessage(p)
+          case Some(n) if n.isFor(providerKey, ref) && n.payload.isInstanceOf[ChatCompletionAssistantMessageParam] =>
+            b.addMessage(n.payload.asInstanceOf[ChatCompletionAssistantMessageParam])
           case _ =>
             val ab = ChatCompletionAssistantMessageParam.builder()
             if text.nonEmpty then ab.content(text)
@@ -69,7 +71,14 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     }
     val usage = usageOf(c)
     val stop = choice.map(_.finishReason().toString.toLowerCase).getOrElse("stop")
-    Completion(text, calls, msg.map(m => NativeTurn(providerKey, m.toParam())), usage, stop)
+    Completion(
+      text,
+      calls,
+      msg.map(m => NativeTurn(providerKey, ref, m.toParam())),
+      usage,
+      stop,
+      unfinished = Completion.isTruncatedStop(stop)
+    )
 
   def complete(
     system: SystemPrompt,

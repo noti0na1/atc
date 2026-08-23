@@ -2,6 +2,8 @@ package atc
 
 import atc.ui.{Ansi, Tui}
 
+import java.nio.file.Files
+
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
 
@@ -53,7 +55,28 @@ class TuiSuite extends munit.FunSuite:
 
   test("uniqueIds keeps labels and disambiguates duplicates"):
     assertEquals(Tui.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
+    assertEquals(Tui.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)
+
+  test("history is an owner-only regular file and a final symlink is refused"):
+    val dir = Files.createTempDirectory("atc-history").nn
+    val history = dir.resolve("nested/history").nn
+    assertEquals(Tui.secureHistoryFile(history), history.toRealPath())
+    assert(Files.isRegularFile(history))
+    val view = Files.getFileAttributeView(history, classOf[java.nio.file.attribute.PosixFileAttributeView])
+    if view != null then
+      val permissive = java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--")
+      Files.setPosixFilePermissions(history, permissive)
+      Tui.secureHistoryFile(history)
+      val perms = Files.getPosixFilePermissions(history).nn
+      assertEquals(perms, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+      val target = dir.resolve("target").nn
+      Files.writeString(target, "do not append here")
+      val link = dir.resolve("history-link").nn
+      Files.createSymbolicLink(link, target)
+      val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
+      assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
+      assertEquals(Files.readString(target), "do not append here")
 
   // ── sanitization, widths, durations, the tail buffer ─────────────
 
@@ -68,6 +91,8 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Ansi.sanitize("x" + esc + "]52;c;eGk=" + 7.toChar + "y"), "x]52;c;eGk=y")
     assertEquals(Ansi.sanitize("c1: " + 0x85.toChar), "c1: ")
     assertEquals(Ansi.sanitize("del: " + 0x7f.toChar), "del: ")
+    assertEquals(Ansi.sanitize("safe\u202eevil\u202c.txt"), "safeevil.txt")
+    assertEquals(Ansi.sanitize("a\u2066b\u2069c\u200fd"), "abcd")
     assertEquals(Ansi.sanitize(""), "")
 
   test("duration never prints 60 seconds"):

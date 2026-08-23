@@ -28,10 +28,10 @@ trait HostOutput:
   def processInput(id: Int, text: String): Unit = ()
   def processExited(id: Int, exitCode: Int): Unit = ()
 
-/** One-shot LLM completions used by the library's `chat`. */
+/** One-shot LLM completions used by normal `chat` and trusted `classifiedChat`. */
 trait HostLlm:
   def chat(message: String): String
-  def chatClassified(message: String): String
+  def classifiedChat(message: String): String
 
 /** Interaction with the human on behalf of the agent. */
 trait HostUi:

@@ -104,7 +104,7 @@ class GitIgnoreSuite extends munit.FunSuite:
       def print(agentText: String, userText: String): Unit = ()
     val llm = new HostLlm:
       def chat(m: String) = m
-      def chatClassified(m: String) = m
+      def classifiedChat(m: String) = m
     val ui = new HostUi:
       def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = None
       def showTodos(items: List[atc.lib.Todo]): Unit = ()

@@ -111,6 +111,8 @@ private[host] trait HostProcesses:
     Prepared(pbs, pipeline.stages.map(_.line), pipeline.line)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
+    if options.timeoutMs <= 0 then
+      throw IllegalArgumentException(s"exec: timeoutMs must be positive (got ${options.timeoutMs})")
     val prepared = prepare(command, args, options)
     val port = output
     val live = new Processes.LiveOutput:

@@ -40,7 +40,7 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
 
   test("a classified file round-trips to the classified model without reaching the agent"):
     env.clearOutput()
-    val r = assertOk(run("""val c = chat(readClassified("secrets/s.txt")); println(c); c"""))
+    val r = assertOk(run("""val c = classifiedChat(readClassified("secrets/s.txt")); println(c); c"""))
     assert(env.classifiedChats.contains("secret"), env.classifiedChats.toString)
     assert(env.agentOut.toString.contains("Classified(***)"), env.agentOut.toString)
     assert(env.userOut.toString.contains("safe:secret"), env.userOut.toString)
@@ -68,6 +68,29 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     // the agent saw none of it anywhere; the user saw it (the println above)
     assert(!env.agentOut.toString.contains("DRILL-SECRET-42"), env.agentOut.toString)
     assert(env.userOut.toString.contains("DRILL-SECRET-42"), env.userOut.toString)
+
+  test("a classified value cannot leak through an agent-defined toString or Throwable.getMessage"):
+    env.clearOutput()
+    val rendering = assertOk(run(
+      """val evilRender = classify("TOSTRING-SECRET").map(secret => new Object:
+        |  override def toString: String = throw RuntimeException(secret)
+        |)
+        |println(evilRender)
+        |print(evilRender)
+        |printf("%s%n", evilRender)""".stripMargin
+    ))
+    val message = assertOk(run(
+      """val evilMessage = classify("MESSAGE-SECRET").map(secret =>
+        |  throw new RuntimeException("outer"):
+        |    override def getMessage: String = throw RuntimeException(secret)
+        |)
+        |println(evilMessage)""".stripMargin
+    ))
+    assert(!rendering.render.contains("TOSTRING-SECRET"), rendering.render)
+    assert(!message.render.contains("MESSAGE-SECRET"), message.render)
+    assert(!env.agentOut.toString.contains("TOSTRING-SECRET"), env.agentOut.toString)
+    assert(!env.agentOut.toString.contains("MESSAGE-SECRET"), env.agentOut.toString)
+    assert(env.userOut.toString.contains("TOSTRING-SECRET"), env.userOut.toString)
 
   test("the preamble gives each capability its own REPL round"):
     // Separate rounds put each given in its own line wrapper, which is what lets

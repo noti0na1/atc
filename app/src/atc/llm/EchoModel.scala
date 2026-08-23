@@ -36,6 +36,7 @@ final class EchoModel(val alias: String, override val ref: String, override val 
               List(ToolCall(s"echo-$counter", "run_scala", ujson.write(ujson.Obj("code" -> code))))
             )
           case None => reply(s"echo: $text")
+      case Some(Msg.Continuation(text)) => reply(s"echo: $text")
       case Some(Msg.ToolResults(results)) => reply("Result:\n" + results.map(_.output).mkString("\n"))
       case _ => Completion("", Nil, None, TokenUsage(), "end_turn")
 

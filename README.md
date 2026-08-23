@@ -166,6 +166,8 @@ Useful flags: `-m <alias>` pick a model, `--mode readonly|local|full` pick a san
 `-p "<request>"` run one turn and exit, `-c <file>` add a config file, `-C <dir>` set the
 working directory, `--approve-all` auto-approve permission requests (scripted use only);
 `atc run --help` lists them all (`atc --help` describes the wrapper).
+Because `-p` has no human to answer a pop-up, an unconfigured permission request fails
+without reading stdin; use `--approve-all` only in a trusted setup.
 
 ## The idea: capabilities instead of ambient authority
 
@@ -206,7 +208,7 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 | `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
 | `Exec` | running commands | the preamble's `ex` (local and full mode) |
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
-| `UserIO` | printing, questions, the TODO list, `chat` with the normal model | the preamble (`given user`), always full |
+| `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
 
 `UserIO` is deliberately *not* derived from `IOCap`: reporting to the human is an effect on
 the conversation, not on the machine, so it survives even when the agent may touch nothing
@@ -251,14 +253,15 @@ that escapes it.
 Capabilities constrain *effects*. Confidential content follows a second, independent set
 of rules: `readClassified(path)` returns a `Classified[String]`, whose `map` and `flatMap`
 take a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
-outward channel needs a *full* one (`println`/`ask`/`chat` need `UserIO^`, `write` needs
-`FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
+untrusted outward channel needs a *full* one (`println`/`ask`/normal-model `chat` need
+`UserIO^`, `write` needs `FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
 inside a `map`. The agent can compute on a secret but never see it; `toString` is
 `Classified(***)`. There are only a few deliberate output paths: `println` (you see the
 value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
-`writeClassified` into a classified path, `chat(Classified)` with the configured classified
-model, and
-`httpPostClassified` / `secretHeaders` to an allow-listed host.
+`writeClassified` into a classified path, `classifiedChat` with the configured classified
+model, and `httpPostClassified` / `secretHeaders` to an allow-listed host. A response to a
+request carrying classified content stays `Classified`, so a peer cannot reflect a secret
+header or body back into a plain model-visible value.
 
 Here it is at work. `secrets/` is classified in the project config; the agent is asked a
 question about a key it must never see:
@@ -410,6 +413,8 @@ backstop when a project reaches beyond its tree. `denyCommands` and `denyHosts` 
 and no layer can remove an entry. Scalar limits (`mode`, `safeMode`, `maxToolCalls`,
 `executionTimeoutMs`, …) can only become stricter. Non-permission settings (`model`,
 `providers`, `instructions`, …) merge in layer order, with later values taking precedence.
+Repository configuration is therefore authoritative for models, endpoints, commands, hosts,
+and instructions inside that checkout; review it before running ATC on code you do not trust.
 Permissions that *you* grant in a pop-up are not narrowed by a layer because the human is
 the final authority. The exact rules are in
 [doc/development.md](doc/development.md#configuration-semantics).
@@ -476,10 +481,13 @@ project file, then `~/.atc/keys.properties`, and finally the environment). The s
 policy hides `.atc` from the agent, and `/config` shows only
 which variables are bound, never values.
 
-**Two roles**: `model` is the agent and never sees classified data; `classifiedModel`
-handles `Classified` values (`chat(Classified)`), so point it at something you trust with
-your secrets, or leave it unset. `/model` and `/classifiedmodel` switch them for the
-session. Per-adapter settings are listed in
+**Two roles**: `model` is the untrusted agent; talking to it through `chat(String)` is an
+effect requiring `UserIO^`. `classifiedModel` is assumed to run in an isolated classified
+environment with no outward connection or side effects. Its capability-free
+`classifiedChat(String)` may therefore run inside `Classified.map`, while
+`classifiedChat(Classified[String])` keeps the response classified. Leave the role unset
+if that deployment assumption does not hold. `/model` and `/classifiedmodel` switch the
+roles for the session. Per-adapter settings are listed in
 [doc/development.md](doc/development.md#models-and-providers).
 
 ### File permissions, commands and hosts
@@ -549,8 +557,12 @@ assumptions behind those guarantees, and how to use it safely.
   Allow only hosts you trust to receive project data.
 - **Your provider sees your context.** Everything that is not `classified` (your prompts,
   the file contents the agent reads, command output) goes to the model provider you
-  configured. Choose providers you trust; route secrets to a `classifiedModel` you trust (a
-  local model, say) or leave it unset so they never leave the machine.
+  configured. Use `classifiedModel` only for a deployment that satisfies the isolated,
+  effect-free assumption (a locked-down local model, for example), or leave it unset.
+- **Classified flow is termination-insensitive.** Capture checking prevents effects in
+  `Classified.map`, but arbitrary pure code can still vary its running time, resource use,
+  or termination with the secret. Do not treat timeouts or timing as a declassification
+  mechanism; ATC does not claim resistance to those side channels.
 - **The trusted computing base.** The JVM, the Scala compiler and its capture checker, the
   OS, the terminal library, the agent library's host implementation, and ATC itself are
   trusted; a bug in any of them (or in your config) can break a guarantee. Capture

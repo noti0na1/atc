@@ -175,7 +175,13 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   /** Evaluate one set-up round, failing loudly: nothing the agent writes has run yet. */
   private def setUp(what: String, code: String): Unit =
-    val (out, thrown) = withOutputCapture() { state = driver.run(code)(using state) }
+    val (out, thrown) = withOutputCapture() {
+      // Runtime's bootstrap slot is process-global. The same JVM may host more
+      // than one session, so select this session's host while holding the same
+      // process-wide lock that serializes evaluation and lazy wrapper loading.
+      Sandbox.installHost(host)
+      state = driver.run(code)(using state)
+    }
     thrown.foreach(throw _)
     if out.toLowerCase.contains("error") then throw IllegalStateException(s"$what failed to compile:\n$out")
 
@@ -199,7 +205,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   def run(code: String): ExecutionResult =
     clock.reset() // per run, whichever way it ends (callers read `clock.paused` afterwards)
-    val violations = CodeValidator.validate(code)
+    // Safe mode resolves aliases before admitting an API, so ordinary Scala
+    // import aliases are useful and safe there. Without safe mode the lexical
+    // validator is the remaining barrier and aliases must not hide a forbidden API.
+    val violations = CodeValidator.validate(code, strictImportAliases = !config.safeMode)
     if closed then ExecutionResult(false, "", Some("The sandbox session is closed; start a new one."))
     else if violations.nonEmpty then ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
     else
@@ -234,6 +243,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       // fired during THIS run). If so, do not execute the cancelled code — and do
       // not clear the stop flag it raised. `adopt` then honestly reports the abort.
       if !stopRequested then
+        // A preamble object/given can be initialized lazily on the first agent
+        // line, long after `init`. Re-select the owning host inside the global
+        // evaluation lock so another session cannot supply its capabilities.
+        Sandbox.installHost(host)
         driver.setStopFlag(false) // a previous evaluation may have been stopped
         driver.resetEvaluationThrew()
         newState = driver.runParseResult(res)(using state)

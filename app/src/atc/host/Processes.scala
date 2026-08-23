@@ -15,6 +15,8 @@ object Processes:
   private val LiveBacklogChars = 64 * 1024
   /** How much of each stream a timeout error quotes. */
   private val TimeoutTailChars = 2000
+  /** Bound the process/thread fan-out of one pipeline. */
+  val MaxPipelineStages = 16
 
   // ── The command-line grammar ──────────────────────────────────────
   //
@@ -25,7 +27,11 @@ object Processes:
 
   /** One program of a pipeline and whether its stderr joins its stdout (`2>&1`). */
   final case class Stage(argv: List[String], mergeErr: Boolean = false):
-    def line: String = argv.mkString(" ")
+    /** An injective, human-readable rendering used for permission matching.
+      * Argument boundaries must not disappear here: otherwise a permitted
+      * `./tool safe` could also authorize an executable literally named
+      * `./tool safe`. */
+    def line: String = argv.map(renderArg).mkString(" ")
 
   /** A parsed command line: stages joined by pipes, an optional input file for the
     * first stage and output file (truncate or append) for the last. */
@@ -46,6 +52,24 @@ object Processes:
   private enum Tok:
     case Word(text: String)
     case Pipe, In, Out, Append, MergeErr
+
+  private def renderArg(arg: String): String =
+    val plain = arg.nonEmpty && arg.forall { char =>
+      (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+      (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char)
+    }
+    if plain then arg
+    else
+      val escaped = StringBuilder()
+      arg.foreach:
+        case '\\' => escaped.append("\\\\")
+        case '"' => escaped.append("\\\"")
+        case '\n' => escaped.append("\\n")
+        case '\r' => escaped.append("\\r")
+        case '\t' => escaped.append("\\t")
+        case char if Character.isISOControl(char) => escaped.append(f"\\u${char.toInt}%04x")
+        case char => escaped.append(char)
+      s"\"$escaped\""
 
   private def noShell(line: String, what: String, instead: String): Nothing =
     throw IllegalArgumentException(
@@ -189,7 +213,12 @@ object Processes:
     go(toks)
     if words == 0 && stages.result().isEmpty then throw IllegalArgumentException("exec: empty command line")
     endStage("after '|'")
-    Pipeline(stages.result(), stdinFile, stdoutFile, append)
+    val parsedStages = stages.result()
+    if parsedStages.lengthIs > MaxPipelineStages then
+      throw IllegalArgumentException(
+        s"exec: a pipeline may have at most $MaxPipelineStages stages (got ${parsedStages.size})"
+      )
+    Pipeline(parsedStages, stdinFile, stdoutFile, append)
 
   /** A single program's words: the line must hold one stage and no redirection
     * (what `exec(command, args, ...)` accepts as `command`). */
@@ -320,7 +349,7 @@ object Processes:
       * did arrive (left unread, so `read()` can still fetch it). */
     def readUntil(regex: String, timeoutMs: Long): String =
       val pattern = java.util.regex.Pattern.compile(regex)
-      val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+      val started = System.nanoTime()
       def tryMatch(): Option[String] =
         val text = stdoutBuf.peek
         val m = pattern.matcher(text)
@@ -335,7 +364,7 @@ object Processes:
               s"'$line' exited with code ${exitCode.getOrElse(-1)} before '$regex' matched; unread output:\n${stdoutBuf.peek.takeRight(TimeoutTailChars)}"
             )
         else
-          val remaining = (deadline - System.nanoTime()) / 1_000_000L
+          val remaining = timeoutMs - (System.nanoTime() - started) / 1_000_000L
           if remaining <= 0 then
             throw RuntimeException(
               s"timed out after ${timeoutMs}ms waiting for '$regex' from '$line'; output so far (still unread):\n${stdoutBuf.peek.takeRight(TimeoutTailChars)}"
@@ -346,9 +375,9 @@ object Processes:
 
     /** Wait (at most `timeoutMs`) for every stage to exit; whether they did. */
     def awaitExit(timeoutMs: Long): Boolean =
-      val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+      val started = System.nanoTime()
       procs.foreach { p =>
-        val remaining = math.max(0L, (deadline - System.nanoTime()) / 1_000_000L)
+        val remaining = math.max(0L, timeoutMs - (System.nanoTime() - started) / 1_000_000L)
         if p.isAlive then p.waitFor(remaining, TimeUnit.MILLISECONDS)
       }
       !isAlive

@@ -13,7 +13,8 @@ OWNER_REPO="noti0na1/atc"
 SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/${OWNER_REPO}/refs/heads/main/atc"
 # The jars go beside ATC's own config (~/.atc/config.json, keys.properties), in
 # their own directory so uninstall can remove them without touching those.
-CACHE_DIR="${ATC_CACHE_DIR:-${HOME}/.atc/jars}"
+DEFAULT_CACHE_DIR="${HOME}/.atc/jars"
+CACHE_DIR="${ATC_CACHE_DIR:-${DEFAULT_CACHE_DIR}}"
 INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
 INSTALL_PATH="${INSTALL_DIR}/atc"
 APP_JAR_NAME="atc.jar"
@@ -134,6 +135,7 @@ release_json() {
 
   require_command curl
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    validate_github_token "$GITHUB_TOKEN"
     # Through an anonymous-pipe config file, not the command line: a -H
     # argument would show the token in the process list.
     curl_args+=(--config <(printf 'header = "Authorization: Bearer %s"\n' "${GITHUB_TOKEN}"))
@@ -152,6 +154,14 @@ release_json() {
   esac
 
   printf '%s\n' "$body"
+}
+
+# A GitHub token is opaque but GitHub's token formats use only letters, digits
+# and underscores. Reject config-file syntax rather than letting quotes,
+# backslashes or newlines inject another curl --config directive.
+validate_github_token() {
+  [[ "$1" =~ ^[A-Za-z0-9_]+$ ]] \
+    || fail "GITHUB_TOKEN contains unsupported characters; refusing to place it in a curl config file."
 }
 
 extract_release_field() {
@@ -315,7 +325,7 @@ cached_jars_match_digests() {
 # Download
 # ---------------------------------------------------------------------------
 
-download_latest_release() {
+download_latest_release() (
   local json release_key assets_info tmp_dir name url _digest digest
 
   mkdir -p "$CACHE_DIR"
@@ -325,8 +335,11 @@ download_latest_release() {
 
   if cached_release_matches "$release_key"; then
     local verify_status
-    cached_jars_match_digests "$assets_info"
-    verify_status=$?
+    if cached_jars_match_digests "$assets_info"; then
+      verify_status=0
+    else
+      verify_status=$?
+    fi
     if [[ $verify_status -eq 0 ]]; then
       echo "ATC $(release_tag_of_key "$release_key") is already up to date in ${CACHE_DIR}."
       return 0
@@ -374,11 +387,13 @@ download_latest_release() {
 
   mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR"
   mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR"
-  printf '%s\n' "$release_key" > "$RELEASE_MARKER"
+  # Write the marker in the private temp directory first, then rename it: a
+  # pre-existing release.txt symlink must never redirect this write.
+  printf '%s\n' "$release_key" > "${tmp_dir}/release.txt"
+  mv "${tmp_dir}/release.txt" "$RELEASE_MARKER"
 
-  # Success: clean up directly and drop the cleanup trap. Note this clears any
-  # EXIT trap a sourcing caller had when called in-process (not via a subshell);
-  # the trap-string injection is what mattered, and it is fixed above.
+  # Success: clean up directly and drop this subshell's cleanup trap. The
+  # caller's EXIT trap is outside the subshell and remains untouched.
   trap - EXIT
   DOWNLOAD_TMP_DIR=""
   rmdir "$tmp_dir" 2>/dev/null || true
@@ -386,7 +401,7 @@ download_latest_release() {
   echo "ATC $(release_tag_of_key "$release_key") is ready:"
   echo "- ${APP_JAR}"
   echo "- ${LIB_JAR}"
-}
+)
 
 # ---------------------------------------------------------------------------
 # PATH and the wrapper itself
@@ -474,22 +489,28 @@ self_path() {
   printf '%s\n' "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/$(basename -- "${BASH_SOURCE[0]}")"
 }
 
-install_self() {
-  local source_path
+install_self() (
+  local source_path tmp_path=""
   source_path="$(self_path)"
   mkdir -p "$INSTALL_DIR"
   if [[ "$source_path" != "$INSTALL_PATH" ]]; then
-    cp "$source_path" "$INSTALL_PATH"
+    tmp_path="$(mktemp "${INSTALL_DIR}/atc.install.XXXXXX")"
+    trap '[[ -z "$tmp_path" ]] || rm -f -- "$tmp_path"' EXIT
+    cp "$source_path" "$tmp_path"
+    chmod 755 "$tmp_path"
+    mv "$tmp_path" "$INSTALL_PATH"
+    tmp_path=""
   fi
   chmod +x "$INSTALL_PATH"
   echo "Installed atc to ${INSTALL_PATH}"
-}
+)
 
 download_latest_self() {
   local output_path="$1" curl_args=(-fsSL --proto =https --proto-redir =https)
 
   require_command curl
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    validate_github_token "$GITHUB_TOKEN"
     # See release_json: keep the token out of the process list.
     curl_args+=(--config <(printf 'header = "Authorization: Bearer %s"\n' "${GITHUB_TOKEN}"))
   fi
@@ -523,8 +544,8 @@ dev_source() {
 # Copy <checkout>/out/dist.dest/{atc.jar,atc-lib.jar} over the cached jars.
 # The marker then names the checkout instead of a release, so 'atc update'
 # (which compares it with the latest release) downloads the release again.
-install_dev_build() {
-  local dir="$1" dist app lib
+install_dev_build() (
+  local dir="$1" dist app lib tmp_dir=""
 
   [[ -n "$dir" ]] || fail "atc dev needs the checkout directory: atc dev <checkout> (build it first with './mill dist')."
   [[ -d "$dir" ]] || fail "${dir} does not exist."
@@ -539,17 +560,22 @@ install_dev_build() {
   fi
 
   mkdir -p "$CACHE_DIR"
-  cp "$app" "${APP_JAR}.tmp" && cp "$lib" "${LIB_JAR}.tmp" \
-    || { rm -f "${APP_JAR}.tmp" "${LIB_JAR}.tmp"; fail "failed to copy the jars from ${dist}."; }
-  mv "${APP_JAR}.tmp" "$APP_JAR"
-  mv "${LIB_JAR}.tmp" "$LIB_JAR"
-  printf '%s%s\n' "$DEV_MARKER_PREFIX" "$dir" > "$RELEASE_MARKER"
+  tmp_dir="$(mktemp -d "${CACHE_DIR}/dev.XXXXXX")"
+  trap '[[ -z "$tmp_dir" ]] || rm -rf -- "$tmp_dir"' EXIT
+  cp "$app" "${tmp_dir}/${APP_JAR_NAME}" && cp "$lib" "${tmp_dir}/${LIB_JAR_NAME}" \
+    || fail "failed to copy the jars from ${dist}."
+  printf '%s%s\n' "$DEV_MARKER_PREFIX" "$dir" > "${tmp_dir}/release.txt"
+  mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR"
+  mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR"
+  mv "${tmp_dir}/release.txt" "$RELEASE_MARKER"
+  rmdir "$tmp_dir"
+  tmp_dir=""
 
   echo "Installed the local build from ${dist} into ${CACHE_DIR}:"
   echo "- ${APP_JAR}"
   echo "- ${LIB_JAR}"
   echo "'atc' now runs it; 'atc update' restores the latest release."
-}
+)
 
 # ---------------------------------------------------------------------------
 # Commands
@@ -566,7 +592,7 @@ cmd_update() {
   download_latest_release
 }
 
-cmd_self_update() {
+cmd_self_update() (
   local source_path source_dir tmp_path
 
   source_path="$(self_path)"
@@ -600,9 +626,35 @@ cmd_self_update() {
   fi
   trap - INT TERM
   echo "Updated atc at ${source_path}"
+)
+
+# Refuse broad or redirected cache roots before uninstall changes anything.
+# Content is only an identity check; it can never authorize recursive deletion.
+validate_cache_removal() {
+  [[ -d "$CACHE_DIR" ]] || return 0
+  [[ ! -L "$CACHE_DIR" ]] || fail "refusing to remove symbolic-link cache ${CACHE_DIR}."
+
+  local cache_real home_real
+  cache_real="$(cd -- "$CACHE_DIR" && pwd -P)"
+  home_real="$(cd -- "$HOME" && pwd -P)"
+  if [[ "$cache_real" == "/" || "$cache_real" == "$home_real" || "$home_real" == "$cache_real/"* ]]; then
+    fail "refusing to remove broad ATC_CACHE_DIR ${CACHE_DIR}."
+  fi
+  if [[ -d "$home_real/.atc" && "$cache_real" == "$(cd -- "$home_real/.atc" && pwd -P)" ]]; then
+    fail "refusing to remove ${CACHE_DIR}: it is ATC's configuration directory, not its jars subdirectory."
+  fi
+
+  local marked=false
+  if [[ -f "$RELEASE_MARKER" ]] && grep -Eq '^([0-9]+\|[^|[:cntrl:]]+|dev\|.+)$' "$RELEASE_MARKER"; then
+    marked=true
+  fi
+  if [[ "$marked" != true && ! ( -f "$APP_JAR" && -f "$LIB_JAR" ) && "$(basename "$cache_real")" != "jars" ]]; then
+    fail "refusing to remove ${CACHE_DIR}: it has no valid ATC release marker or jar pair and is not the default 'jars' cache."
+  fi
 }
 
 cmd_uninstall() {
+  validate_cache_removal
   if [[ -f "$INSTALL_PATH" ]]; then
     rm -f "$INSTALL_PATH"
     echo "Removed ${INSTALL_PATH}"
@@ -610,14 +662,18 @@ cmd_uninstall() {
     echo "No installed atc wrapper was found at ${INSTALL_PATH}."
   fi
   if [[ -d "$CACHE_DIR" ]]; then
-    # Guard against a mistyped ATC_CACHE_DIR (e.g. $HOME): only remove a directory
-    # that IS our cache — it holds the release marker or the jars — or the default
-    # 'jars' name. A custom ATC_CACHE_DIR is then still removable by its contents.
-    if [[ -f "$RELEASE_MARKER" || ( -f "$APP_JAR" && -f "$LIB_JAR" ) || "$(basename "$CACHE_DIR")" == "jars" ]]; then
-      rm -rf -- "$CACHE_DIR"
+    # Remove only artifacts ATC owns. Never recursively delete an override merely
+    # because it happens to contain marker/jar filenames.
+    rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp"
+    local download_dir
+    for download_dir in "$CACHE_DIR"/download.* "$CACHE_DIR"/dev.*; do
+      [[ -d "$download_dir" || -L "$download_dir" ]] || continue
+      rm -rf -- "$download_dir"
+    done
+    if rmdir -- "$CACHE_DIR" 2>/dev/null; then
       echo "Removed ${CACHE_DIR}"
     else
-      fail "refusing to remove ${CACHE_DIR}: it has no ATC release marker or jars and is not the default 'jars' cache."
+      echo "Removed ATC's cached artifacts from ${CACHE_DIR}; kept the directory because it contains other files."
     fi
   else
     echo "No downloaded ATC jars were found at ${CACHE_DIR}."

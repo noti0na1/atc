@@ -43,9 +43,11 @@ final class ProcessImpl(
     managed.readErr()
   def readUntil(regex: String, timeoutMs: Long): String =
     open()
+    if timeoutMs < 0 then throw IllegalArgumentException(s"readUntil: timeoutMs must not be negative (got $timeoutMs)")
     managed.readUntil(regex, timeoutMs)
   def waitFor(timeoutMs: Long): Option[ProcessResult] =
     open()
+    if timeoutMs < 0 then throw IllegalArgumentException(s"waitFor: timeoutMs must not be negative (got $timeoutMs)")
     if managed.awaitExit(timeoutMs) then Some(managed.result()) else None
   def kill(): Unit =
     open()

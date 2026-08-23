@@ -8,6 +8,7 @@ import com.openai.client.okhttp.OpenAIOkHttpClient
 import com.openai.errors.BadRequestException
 
 import java.time.Duration
+import scala.jdk.OptionConverters.*
 
 /** What every provider adapter takes from its [[ModelSpec]]: the names, the
   * per-model settings (`cfg`) and the two settings the agent loop reads. */
@@ -18,6 +19,7 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   protected val cfg: ModelConfig = spec.settings
   val webSearch: Boolean = cfg.webSearch
   override val contextWindow: Option[Int] = cfg.contextWindow.map(_.toInt)
+  override val maxOutputTokens: Option[Int] = cfg.maxTokens
 
 /** Shared by the two OpenAI-shaped adapters (Chat Completions and Responses):
   * the client, the vendor `thinking` switch, and the guessed lowest reasoning
@@ -48,7 +50,11 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
   protected def withEffortFallback[E, R](thinking: Boolean, effort: Option[E])(request: Option[E] => R): R =
     try request(effort)
     catch
-      case _: BadRequestException if !thinking && effort.isDefined =>
+      case e: BadRequestException
+          if !thinking && effort.isDefined && Providers.isReasoningEffortRejection(
+            e.param().toScala,
+            Option(e.getMessage).getOrElse("")
+          ) =>
         effortRejected = true
         request(None)
 
@@ -56,6 +62,15 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
 private[atc] object Providers:
   /** Generous on purpose: a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
+
+  /** Whether a 400 specifically rejects the guessed reasoning-effort setting.
+    * Do not retry arbitrary bad requests: that duplicates traffic and can
+    * permanently misclassify a model as not supporting effort. */
+  def isReasoningEffortRejection(param: Option[String], message: String): Boolean =
+    def mentions(value: String): Boolean =
+      val s = value.trim.toLowerCase
+      s.contains("reasoning_effort") || s.contains("reasoning.effort") || s.contains("reasoning effort")
+    param.exists(p => p.trim.equalsIgnoreCase("reasoning") || mentions(p)) || mentions(message)
 
   /** The body of a `thinking` switch: `{"type": "enabled"}` / `{"type": "disabled"}`. */
   def thinkingSwitch(on: Boolean): JsonValue =

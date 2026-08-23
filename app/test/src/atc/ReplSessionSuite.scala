@@ -124,6 +124,19 @@ class ReplSessionSuite extends munit.FunSuite:
     assertEquals(envSafe.agentOut.toString, "from-safe\n")
     assertEquals(envNoSafe.agentOut.toString, "from-nosafe\n")
 
+  test("a session selects its own host before lazily initializing preamble values"):
+    // Initialize both sessions before either executes agent code. The process-
+    // global Runtime slot now names B; A's first run must still obtain A's host
+    // and capabilities rather than writing through B's file system.
+    val a = TestEnv(prefix = "atc-lazy-host-a")
+    val b = TestEnv(prefix = "atc-lazy-host-b")
+    val sa = a.newSession()
+    val sb = b.newSession()
+    assertOk(sa.run("""write("owner.txt", "a")"""))
+    assertOk(sb.run("""write("owner.txt", "b")"""))
+    assertEquals(a.contents("owner.txt"), "a")
+    assertEquals(b.contents("owner.txt"), "b")
+
   // ── Errors ──────────────────────────────────────────────────────
 
   test("syntax error"):
@@ -191,6 +204,10 @@ class ReplSessionSuite extends munit.FunSuite:
   // ── Safe mode ───────────────────────────────────────────────────
 
   test("safe mode: top-level var is rejected") { assertFails(run("var counter = 0"), "mutable variable") }
+  test("safe mode: harmless import aliases remain available"):
+    val result = assertOk(run("import java.time.{Duration as JDuration}\nJDuration.ofSeconds(90).toMinutes"))
+    assert(result.output.contains("1"), result.output)
+    assertFails(run("import java.{io as jio}\nnew jio.File(\"/etc/passwd\").exists"), "safe code")
   test("safe mode: mutable collections are rejected"):
     assertFails(run("scala.collection.mutable.ArrayBuffer[String]()"), "safe code")
     assertFails(run("import scala.collection.mutable.ListBuffer\nListBuffer[Int]()"), "safe code")
@@ -221,6 +238,9 @@ class ReplSessionSuite extends munit.FunSuite:
     assertFails(nosafe.run("""sys.props("user.home")"""), "sys-scala")
     assertFails(nosafe.run("import java.\n  io.File"), "file-io-java")
     assertFails(nosafe.run("""val h = s"${System.getProperty("user.home")}"; h"""), "sys-getprop")
+    assertFails(nosafe.run("""val hiddenRuntime = Runtime; hiddenRuntime.rootIO"""), "atc-runtime")
+    assertFails(nosafe.run("""import java.{io as jio}; new jio.File("/etc/passwd").exists"""), "import-alias")
+    assertFails(nosafe.run("""Runtime.`rootIO`"""), "atc-runtime")
   test("no safe mode: :imports lacks the safe import"):
     assert(!assertOk(nosafe.run(":imports")).output.contains("experimental.safe"))
   test("no safe mode: capture checking still prevents leaks"):

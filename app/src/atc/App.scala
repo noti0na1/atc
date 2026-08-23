@@ -62,8 +62,7 @@ final class App(args: Main.Args):
   // ── permission policy ─────────────────────────────────────────────
 
   val prompter: PermissionPrompter =
-    if args.approveAll then (_ => Decision.AllowSession)
-    else request => whileUserDecides(tui.askPermission(request))
+    App.permissionPrompter(args, request => whileUserDecides(tui.askPermission(request)))
   val policy =
     Policy(
       App.fileRules(configuration, cwd),
@@ -90,18 +89,18 @@ final class App(args: Main.Args):
     override def processExited(id: Int, exitCode: Int): Unit = tui.processEvent(s"[p$id exited $exitCode]")
   val llm = new HostLlm:
     def chat(message: String): String =
-      val reply = agent.model.simple(None, message)
+      val reply = withClockPaused(agent.model.simple(None, message))
       agent.recordUsage(Agent.Chat, reply.usage)
       reply.text
-    def chatClassified(message: String): String =
+    def classifiedChat(message: String): String =
       val model = agent.classifiedModel.getOrElse(throw RuntimeException(
-        "No classified model configured: set \"classifiedModel\" in the config to a model that may see classified data."
+        "No classified model configured: set \"classifiedModel\" to an isolated model trusted with classified data."
       ))
       val reply =
-        model.simple(
+        withClockPaused(model.simple(
           Some("You are a trusted assistant handling confidential data. Answer directly and concisely."),
           message
-        )
+        ))
       agent.recordUsage(Agent.ClassifiedChat, reply.usage)
       reply.text
   val hostUi = new HostUi:
@@ -143,7 +142,11 @@ final class App(args: Main.Args):
     * `reason` is passed to the agent so it knows its REPL definitions are gone. */
   private def restartSession(reason: String): Boolean =
     val ok = replaceSession("could not restart the sandbox")
-    if ok then agent.noteSandboxRestarted(reason)
+    if ok then
+      agent.noteSandboxRestarted(reason)
+      // The restart notice is pending, not in history yet; any prediction now
+      // would still assume that old REPL definitions exist.
+      predictor.invalidate()
     ok
 
   /** `/new`: start over as if atc had just been launched, keeping only what
@@ -192,7 +195,7 @@ final class App(args: Main.Args):
     s"${m.ref} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
 
   private def banner(): Unit =
-    val noClassifiedModel = "(none — set \"classifiedModel\" in the config to chat about classified data)"
+    val noClassifiedModel = "(none — set \"classifiedModel\" in the config to use classifiedChat)"
     val noConfig = "(none; built-in defaults — try `atc --init`)"
     tui.banner(
       s"atc ${Main.Version}",
@@ -220,6 +223,12 @@ final class App(args: Main.Args):
   private val predictor =
     InputPredictor(() => agent.model, () => agent.history, tui.suggest, agent.recordUsage(Agent.Prediction, _))
   private val predicting: Boolean = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty
+
+  /** Retire a guess made from stale model/session state and predict again from
+    * the state now in force. */
+  private def refreshPrediction(): Unit =
+    predictor.invalidate()
+    if predicting then predictor.start()
 
   /** Run one turn. Returns `false` if no sandbox is available or the turn throws,
     * allowing a `-p` invocation to exit with a non-zero status. */
@@ -327,6 +336,9 @@ final class App(args: Main.Args):
     * shared, so the agent is told what was run and what came of it on its
     * next turn. */
   private def runCode(arg: String): Unit =
+    // `/run` mutates the persistent REPL and queues a note that is not part of
+    // history until the next real user turn. A prediction made before it is stale.
+    predictor.invalidate()
     val code = if arg.nonEmpty then arg else readCode()
     if code.trim.isEmpty then return
     session match
@@ -400,35 +412,39 @@ final class App(args: Main.Args):
 
   /** `/model`: pick from the list, or switch to the named one. */
   private def switchModel(arg: String): Unit =
-    setModel(arg, "model", agent.model) { spec =>
+    setModel(arg, "model", describe(agent.model)) { spec =>
       agent.model = modelFor(spec)
+      refreshPrediction()
       tui.success(s"model -> ${describe(agent.model)}" + remember("model", Some(spec)))
     }
 
-  /** `/classifiedmodel`: the model that may see classified data. `off` unsets it. */
+  /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   private def switchClassifiedModel(arg: String): Unit =
     if arg.trim.toLowerCase == "off" || arg.trim.toLowerCase == "none" then
       agent.classifiedModel = None
+      refreshPrediction()
       tui.success(
         "classified model -> (none): classified data is no longer sent to any model" + remember("classifiedModel", None)
       )
     else
-      setModel(arg, "classified model", agent.classifiedModel.getOrElse(agent.model)) { spec =>
+      val current = agent.classifiedModel.map(describe).getOrElse("(none)")
+      setModel(arg, "classified model", current) { spec =>
         val m = modelFor(spec)
         agent.classifiedModel = Some(m)
+        refreshPrediction()
         tui.success(s"classified model -> ${describe(m)}" + remember("classifiedModel", Some(spec)))
       }
 
   /** Shared by the two switches: an argument names a model, no argument opens
     * the picker; the current one is reported when nothing is chosen. */
-  private def setModel(arg: String, what: String, current: ChatModel)(use: ModelSpec => Unit): Unit =
+  private def setModel(arg: String, what: String, current: String)(use: ModelSpec => Unit): Unit =
     if arg.nonEmpty then
       try use(catalog.find(arg))
       catch case e: IllegalArgumentException => tui.error(e.getMessage)
     else
       pickModel(s"Choose the $what") match
         case Some(spec) => use(spec)
-        case None => tui.info(s"$what: ${describe(current)}")
+        case None => tui.info(s"$what: $current")
 
   /** The working directory's own `.atc/config.json`, if it has one. Only that
     * file is ever written: a project config found in a parent directory
@@ -491,6 +507,20 @@ object App:
 
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
+
+  /** A scripted turn has nobody to answer permission pop-ups. Fail closed
+    * without reading stdin unless the caller explicitly chose `--approve-all`. */
+  private[atc] def permissionPrompter(
+    args: Main.Args,
+    interactive: PermissionRequest => Decision
+  ): PermissionPrompter =
+    if args.approveAll then _ => Decision.AllowSession
+    else if args.prompt.isDefined then
+      _ =>
+        throw SecurityException(
+          "non-interactive run cannot ask for permission; configure a standing grant or use --approve-all in a trusted setup"
+        )
+    else request => interactive(request)
 
   /** Load the configuration, offering to write what is missing first. No
     * configuration is written without asking, and nothing is asked in a

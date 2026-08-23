@@ -25,7 +25,7 @@ class HostSuite extends munit.FunSuite:
       userOut.append(if agentText == userText then userText else s"<$userText>")
   val llm = new HostLlm:
     def chat(m: String) = s"n:$m"
-    def chatClassified(m: String) = s"s:$m"
+    def classifiedChat(m: String) = s"s:$m"
 
   var decisions: List[Decision] = Nil
   val prompter: PermissionPrompter = _ =>
@@ -210,6 +210,12 @@ class HostSuite extends munit.FunSuite:
     Files.writeString(root.resolve("nonl.txt"), "a\nb")
     replaceLines("nonl.txt", 1, 1, "A")
     assertEquals(Files.readString(root.resolve("nonl.txt")), "A\nb") // no trailing newline stays that way
+    Files.writeString(root.resolve("mixed.txt"), "a\r\nb\nc\rd")
+    assertEquals(replaceLines("mixed.txt", 2, 3, "B\r\nC\n"), "b\r\nc")
+    assertEquals(Files.readString(root.resolve("mixed.txt")), "a\r\nB\r\nC\r\nd")
+    Files.writeString(root.resolve("bare-cr.txt"), "a\rb\r")
+    insertLines("bare-cr.txt", 2, "middle\r\n")
+    assertEquals(Files.readString(root.resolve("bare-cr.txt")), "a\rmiddle\rb\r")
     Files.writeString(root.resolve("empty2.txt"), "")
     insertLines("empty2.txt", 1, "first")
     assertEquals(Files.readString(root.resolve("empty2.txt")), "first\n")
@@ -253,6 +259,10 @@ class HostSuite extends munit.FunSuite:
       intercept[IllegalArgumentException](Processes.parsePipeline(bad))
     intercept[IllegalArgumentException](Processes.parseCommandLine("a 'unterminated"))
     assertEquals(Processes.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
+    assertEquals(Processes.Stage(List("echo", "a b", "")).line, "echo \"a b\" \"\"")
+    intercept[IllegalArgumentException](
+      Processes.parsePipeline(List.fill(Processes.MaxPipelineStages + 1)("echo").mkString(" | "))
+    )
     val r = Host.globRegex("src/**/*.scala")
     assert(
       r.matches("src/X.scala") && r.matches("src/a/b/X.scala") && !r.matches("lib/X.scala") && !r.matches("src/X.java")
@@ -266,6 +276,9 @@ class HostSuite extends munit.FunSuite:
     assert(!Host.globRegex("a/*.md").matches("a/b/c.md"))
     assertEquals(Host.splitLines("a\nb\n"), (List("a", "b"), "\n", true))
     assertEquals(Host.splitLines("a\r\nb"), (List("a", "b"), "\r\n", false))
+    assertEquals(Host.splitLines("a\r\nb\nc\rd"), (List("a", "b", "c", "d"), "\r\n", false))
+    assertEquals(Host.splitLines("a\rb\r"), (List("a", "b"), "\r", true))
+    assertEquals(Host.textLines("a\r\nb\n"), List("a", "b"))
     assertEquals(Host.splitLines(""), (Nil, "\n", true))
     assertEquals(Host.splitLines("\n"), (List(""), "\n", true))
 
@@ -379,7 +392,7 @@ class HostSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("sh *"))
     import env.{host as h, given}
     h.exec("sh", List("-c", "echo a; sleep 1.3; echo b"))
-    assertEquals(env.liveCommands.toList, List("sh -c echo a; sleep 1.3; echo b"))
+    assertEquals(env.liveCommands.toList, List("sh -c \"echo a; sleep 1.3; echo b\""))
     assertEquals(env.liveCommandOut.toString, "a\nb\n")
     h.exec("sh", List("-c", "echo nope"))
     assertEquals(env.liveCommands.size, 1)

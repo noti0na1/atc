@@ -5,12 +5,17 @@ import scala.util.matching.Regex
 /** A violation found by the code validator. */
 case class Violation(ruleId: String, description: String, lineNumber: Int, snippet: String)
 
-/** Static, regex-based validation of agent code before it reaches the REPL.
+/** Fast, regex-based preflight for agent code before it reaches the compiler.
   *
-  * This is defence in depth on top of Scala's safe mode and the class-loader
-  * isolation: it rejects the obvious ways of reaching around the capability
-  * API (java.io, reflection, class loaders, `unsafe*`, ...). Adapted from
-  * TACIT (Apache-2.0).
+  * Its purpose is quick, actionable feedback for common invalid forms
+  * (`java.io`, reflection, class loaders, `unsafe*`, evaluator-hostile catches,
+  * ...). It is intentionally lexical: it does not parse or type-check Scala and
+  * is neither complete nor a safety boundary. Scala compiler safe mode is the
+  * authoritative safety check.
+  *
+  * Keep this implementation simple and fast. Prefer cheap linear scans and
+  * high-value diagnostics; do not grow a second Scala parser or try to prove
+  * that accepted code is safe here. Adapted from TACIT (Apache-2.0).
   */
 object CodeValidator:
 
@@ -45,7 +50,7 @@ object CodeValidator:
     ),
     Forbidden(
       "atc-runtime",
-      raw"\bRuntime\.(current|rootIO|rootUser|install|fileSystem|readOnlyFileSystem|processes|network)\b".r,
+      raw"\b(?:atc\.lib\.)?Runtime\b".r,
       "Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network are internal to the sandbox"
     ),
     // Reflection
@@ -77,6 +82,11 @@ object CodeValidator:
     Forbidden("sys-getenv", raw"System\.getenv".r, "System.getenv is forbidden"),
     Forbidden("sys-getprop", raw"System\.getProperty".r, "System.getProperty is forbidden"),
     Forbidden("sys-load", raw"System\.load\w*".r, "System.load is forbidden"),
+    Forbidden(
+      "sys-system-import",
+      raw"\bimport\s+(?:java\.lang\.)?System\b".r,
+      "Importing System or its members is forbidden; call only the permitted time/line-separator methods directly"
+    ),
     Forbidden(
       "sys-scala",
       raw"\bsys\.(exit|env|props|runtime|allThreads|addShutdownHook)\b".r,
@@ -239,12 +249,58 @@ object CodeValidator:
   private val CatchAllDescription: String =
     "A bare catch-all also catches fatal errors and the sandbox stop signal; catch a specific non-fatal type instead, e.g. case _: Exception"
 
-  /** A bare catch-all arm (`case _ =>`, `case e =>`, `case e if ...`) also catches
-    * fatal errors and the ThreadDeath stop signal. The compiler's safe mode does
-    * not police which exceptions agent code catches, so this check — the only
-    * barrier against a fatal-throwable oracle over Classified data — must live
-    * here, and it must see EVERY arm: the regexes it replaces only saw the first
-    * arm of a braceless catch and one brace level of a braced one.
+  private val ImportAliasDescription: String =
+    "Import aliases are forbidden when safe mode is off because they can hide restricted packages, classes, and methods from validation"
+
+  /** Offsets of `as` / `=>` aliases inside import statements. Imports may have
+    * selectors over several lines, so a per-line regex is not sufficient. */
+  private def importAliasOffsets(code: String): List[Int] =
+    val hits = scala.collection.mutable.ListBuffer[Int]()
+    val len = code.length
+    def keywordAt(i: Int, keyword: String): Boolean =
+      code.regionMatches(i, keyword, 0, keyword.length) &&
+        (i == 0 || !isIdentChar(code.charAt(i - 1))) &&
+        (i + keyword.length >= len || !isIdentChar(code.charAt(i + keyword.length)))
+    var i = 0
+    while i < len do
+      if keywordAt(i, "import") then
+        var k = i + "import".length
+        var braces = 0
+        var brackets = 0
+        var parens = 0
+        var stop = false
+        while k < len && !stop do
+          code.charAt(k) match
+            case '{' => braces += 1; k += 1
+            case '}' => braces = math.max(0, braces - 1); k += 1
+            case '[' => brackets += 1; k += 1
+            case ']' => brackets = math.max(0, brackets - 1); k += 1
+            case '(' => parens += 1; k += 1
+            case ')' => parens = math.max(0, parens - 1); k += 1
+            case '=' if k + 1 < len && code.charAt(k + 1) == '>' => hits += k; k += 2
+            case c if isIdentStart(c) =>
+              val start = k
+              while k < len && isIdentChar(code.charAt(k)) do k += 1
+              if keywordAt(start, "as") then hits += start
+            case ';' if braces == 0 && brackets == 0 && parens == 0 => stop = true; k += 1
+            case '\n' if braces == 0 && brackets == 0 && parens == 0 =>
+              var before = k - 1
+              while before >= 0 && (code.charAt(before) == ' ' || code.charAt(before) == '\t') do before -= 1
+              var after = k + 1
+              while after < len && (code.charAt(after) == ' ' || code.charAt(after) == '\t') do after += 1
+              val continues =
+                (before >= 0 && (code.charAt(before) == '.' || code.charAt(before) == ',')) ||
+                  (after < len && code.charAt(after) == '.')
+              if continues then k += 1 else { stop = true; k += 1 }
+            case _ => k += 1
+        i = k
+      else i += 1
+    hits.toList
+
+  /** Quick diagnostic for a bare catch-all arm (`case _ =>`, `case e =>`,
+    * `case e if ...`), which also catches fatal errors and the ThreadDeath stop
+    * signal. This remains a lexical heuristic, not an exhaustive exception-flow
+    * check or a substitute for compiler safety.
     *
     * One linear pass over the stripped source (strings/comments already blanked).
     * Only `case`s belonging to a `catch` are considered: `match` arms and
@@ -417,10 +473,14 @@ object CodeValidator:
       i += 1
     result.toList
 
-  def validate(code: String): List[Violation] =
-    val stripped = stripLiteralsAndComments(code)
+  def validate(code: String, strictImportAliases: Boolean = true): List[Violation] =
+    // Backticks may quote ordinary identifiers (`Runtime.`rootIO``,
+    // `java.`io``) without changing what they resolve to. Blank them so the
+    // dotted-token normalization and forbidden patterns see the real name while
+    // character offsets/newlines remain stable for diagnostics.
+    val stripped = stripLiteralsAndComments(code).replace('`', ' ')
     val originalLines = code.linesIterator.toArray
-    val stringStrippedLines = stripStringLiteralsOnly(code).linesIterator.toArray
+    val stringStrippedLines = stripStringLiteralsOnly(code).replace('`', ' ').linesIterator.toArray
     val logical = logicalLines(stripped.linesIterator.toArray)
     /** The violation of `pattern` on line `idx`, quoting the original source. */
     def violation(pattern: Forbidden, idx: Int, fallback: String): Violation =
@@ -440,6 +500,13 @@ object CodeValidator:
       yield
         val idx = stripped.substring(0, pos).count(_ == '\n')
         Violation("catch-all", CatchAllDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+    val importAliases =
+      if !strictImportAliases then Nil
+      else
+        for pos <- importAliasOffsets(stripped)
+        yield
+          val idx = stripped.substring(0, pos).count(_ == '\n')
+          Violation("import-alias", ImportAliasDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
     val typeParams = typeParamNames(stripped)
     val typeParamCatches =
       if typeParams.isEmpty then Nil
@@ -450,7 +517,7 @@ object CodeValidator:
         yield
           val idx = stripped.substring(0, m.start).count(_ == '\n')
           Violation("catch-type-param", TypeParamCatchDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
-    perLine ++ catchAlls ++ typeParamCatches
+    perLine ++ catchAlls ++ importAliases ++ typeParamCatches
 
   def formatErrors(violations: List[Violation]): String =
     val header = s"Code validation failed (${violations.size} violation${if violations.size > 1 then "s" else ""}):"

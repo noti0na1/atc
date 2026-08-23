@@ -1,10 +1,9 @@
 package atc.host
 
 import atc.lib.*
-import atc.perms.{GitIgnore, Policy, ScopeId}
+import atc.perms.{GitIgnore, GlobMatcher, Policy, ScopeId}
 
 import java.nio.file.Path
-import scala.util.Try
 
 /** Stable façade for the agent-facing API. Cohesive implementation modules
   * provide filesystem, process, network, and interaction operations, while this
@@ -52,6 +51,8 @@ object Host:
   val MaxProcesses: Int = 8
   /** How much of an error body `httpGet`/`httpPost` quote. */
   val HttpErrorBodyChars: Int = 500
+  /** Largest HTTP response body retained in memory. */
+  val HttpMaxResponseBytes: Int = 8 * 1024 * 1024
 
   /** Normalize a host for policy matching: lowercase, remove a trailing dot, and
     * convert numeric IP literals to canonical form. IPv4 and IPv4-mapped IPv6
@@ -60,63 +61,12 @@ object Host:
     * equivalent rule. Literal parsing does not use DNS; ordinary hostnames are
     * returned unchanged after case and trailing-dot normalization. */
   def normalizeHost(host: String): String =
-    val normalized = host.stripSuffix(".").toLowerCase
-    // URI.getHost returns bracketed IPv6 literals. Canonicalize them so an
-    // IPv4-mapped spelling cannot bypass a rule for the IPv4 address.
-    val (bare, bracketed) =
-      if normalized.startsWith("[") && normalized.endsWith("]") then
-        (normalized.substring(1, normalized.length - 1), true)
-      else (normalized, false)
-    literalIpAddress(bare)
-      .orElse(if bracketed || looksLikeIpv6(bare) then ipv6Literal(bare) else None)
-      .getOrElse(bare)
-
-  /** Whether a string contains only IPv6-literal characters. */
-  private def looksLikeIpv6(value: String): Boolean =
-    value.contains(':') && value.forall { char =>
-      char == ':' || char == '.' || (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')
-    }
-
-  /** Canonicalize an IPv6 literal without resolving ordinary hostnames. */
-  private def ipv6Literal(value: String): Option[String] =
-    try
-      java.net.InetAddress.getByName(value) match
-        case address: java.net.Inet4Address => Some(address.getHostAddress.nn)
-        case address: java.net.Inet6Address => Some(address.getHostAddress.nn)
-        case _ => None
-    catch case _: java.net.UnknownHostException => None
+    GlobMatcher.normalizeHost(host)
 
   /** Convert a numeric IPv4 literal with one to four decimal parts into
     * canonical dotted-quad form without a DNS lookup. */
   private[host] def literalIpAddress(value: String): Option[String] =
-    val parts = value.split("\\.", -1).toList
-
-    def partValue(part: String): Option[Long] =
-      if part.nonEmpty && part.forall(_.isDigit) then
-        try Some(java.lang.Long.parseLong(part, 10))
-        catch case _: NumberFormatException => None
-      else None
-
-    def parseParts: Option[List[Long]] =
-      parts.foldRight(Option(List.empty[Long])) { (part, parsed) =>
-        for
-          number <- partValue(part)
-          tail <- parsed
-        yield number :: tail
-      }
-
-    if parts.isEmpty || parts.lengthIs > 4 then None
-    else
-      for
-        values <- parseParts
-        lastMax = 1L << (8 * (5 - values.length))
-        if values.init.forall(_ <= 255) && values.last < lastMax
-        address = values.init.zipWithIndex.foldLeft(values.last) { case (current, (part, index)) =>
-          current | (part << (8 * (3 - index)))
-        }
-        bytes = Array.tabulate(4)(index => ((address >> (8 * (3 - index))) & 0xff).toByte)
-        canonical <- Try(java.net.InetAddress.getByAddress(bytes).nn.getHostAddress.nn).toOption
-      yield canonical
+    GlobMatcher.literalIpAddress(value)
 
   /** Gitignore-style glob over a `/`-separated relative path. */
   def globRegex(glob: String): scala.util.matching.Regex =
@@ -158,20 +108,35 @@ object Host:
     result.append('$')
     result.toString.r
 
-  /** Split file content while retaining its separator and trailing-newline state. */
+  /** Split file content on LF, CRLF, or bare CR while retaining a stable output
+    * separator (the first one present) and trailing-newline state. Mixed-newline
+    * input is normalized to that first separator when an edit is written back. */
   def splitLines(content: String): (List[String], String, Boolean) =
-    val separator = if content.contains("\r\n") then "\r\n" else "\n"
-    if content.isEmpty then (Nil, separator, true)
+    if content.isEmpty then (Nil, "\n", true)
     else
-      val trailing = content.endsWith(separator) || content.endsWith("\n")
-      val body =
-        if content.endsWith(separator) then content.dropRight(separator.length)
-        else content.stripSuffix("\n")
-      (body.split(java.util.regex.Pattern.quote(separator), -1).toList, separator, trailing)
+      val lines = collection.mutable.ListBuffer[String]()
+      var separator: String | Null = null
+      var start = 0
+      var index = 0
+      while index < content.length do
+        val width =
+          content.charAt(index) match
+            case '\r' if index + 1 < content.length && content.charAt(index + 1) == '\n' => 2
+            case '\r' | '\n' => 1
+            case _ => 0
+        if width == 0 then index += 1
+        else
+          if separator == null then separator = content.substring(index, index + width)
+          lines += content.substring(start, index)
+          index += width
+          start = index
+      val trailing = start == content.length
+      if !trailing then lines += content.substring(start)
+      (lines.toList, Option(separator).getOrElse("\n"), trailing)
 
   /** Lines contributed by an edit; a final newline is not an extra empty line. */
   def textLines(text: String): List[String] =
-    if text.isEmpty then Nil else text.stripSuffix("\n").split("\n", -1).toList
+    splitLines(text)._1
 
   def joinLines(lines: List[String], separator: String, trailing: Boolean): String =
     if lines.isEmpty then "" else lines.mkString(separator) + (if trailing then separator else "")

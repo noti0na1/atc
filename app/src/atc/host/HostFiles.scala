@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.{FileSystems, Files, Path, Paths, StandardOpenOption}
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success, Try, Using}
+import scala.util.control.NonFatal
 
 /** Filesystem effects and file-oriented convenience operations supplied by
   * [[Host]]. All paths pass through the same canonicalization and policy checks. */
@@ -90,11 +91,20 @@ private[host] trait HostFiles:
       )
     ensureParent(path)
     content match
-      case Success(value) => Files.writeString(path, value, StandardCharsets.UTF_8)
+      case Success(value) =>
+        // Once the classified computation has been inspected, neither an I/O
+        // failure nor its message may escape to the agent: that would reveal a
+        // success/failure bit (and an exception can itself quote the content).
+        try Files.writeString(path, value, StandardCharsets.UTF_8)
+        catch case NonFatal(_) => classifiedSinkFailed(s"writing '$path'")
       case Failure(_) =>
-        if !Files.exists(path) then
-          Files.createFile(path)
-          ()
+        // Equalise the observable existence side effect with the successful
+        // branch. `exists` is intentionally available even for classified paths.
+        try
+          if !Files.exists(path) then
+            Files.createFile(path)
+            ()
+        catch case NonFatal(_) => ()
         classifiedSinkFailed(s"writing '$path'")
 
   /** Visible children paired with whether the original directory entry was a

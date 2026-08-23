@@ -27,7 +27,8 @@ import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
 import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader}
 
-import java.nio.file.{Files, Path}
+import java.nio.file.attribute.{PosixFileAttributeView, PosixFilePermissions}
+import java.nio.file.{FileAlreadyExistsException, Files, LinkOption, Path}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.jdk.CollectionConverters.*
 
@@ -64,6 +65,7 @@ import Ansi.{Blue, Bold, ClearLine, Cyan, Dim, Green, Magenta, Red, Reset, Yello
   * `write`, which remembers the last characters written so gutters can be
   * inserted at line starts even when text arrives in arbitrary chunks. */
 final class Tui(historyFile: Path) extends AgentUI:
+  private val historyPath = Tui.secureHistoryFile(historyFile)
   // No grapheme-cluster probing: it sends a DECRQM query to the terminal and
   // waits for a reply, which swallows early input on ptys that don't answer.
   val terminal: Terminal = TerminalBuilder.builder().system(true).graphemeCluster(false).build()
@@ -110,14 +112,13 @@ final class Tui(historyFile: Path) extends AgentUI:
       super.parse(line, cursor, context)
 
   private val reader: LineReader =
-    Files.createDirectories(historyFile.getParent)
     LineReaderBuilder.builder()
       .terminal(terminal)
       .history(DefaultHistory())
       .highlighter(ghostHighlighter)
       .completer(commandCompleter)
       .parser(continuationParser)
-      .variable(LineReader.HISTORY_FILE, historyFile)
+      .variable(LineReader.HISTORY_FILE, historyPath)
       .variable(LineReader.INDENTATION, 2)
       .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
       .build()
@@ -342,14 +343,14 @@ final class Tui(historyFile: Path) extends AgentUI:
 
   // ── plain lines (banner, slash commands, notices) ─────────────────
 
-  def println(s: String = ""): Unit = { stopSpinner(); ensureNewline(); write(s + "\n") }
-  // info/warn/error carry untrusted text (exception and provider-error messages),
-  // so sanitize the message before styling — `println` cannot, as it also receives
-  // the already-styled result (whose SGR escapes sanitize would strip).
-  def info(s: String): Unit = println(styled(Ansi.sanitize(s), Dim))
-  def success(s: String): Unit = println(styled(s, Green))
-  def warn(s: String): Unit = println(styled(s"${g.warn} ${Ansi.sanitize(s)}", Yellow))
-  def error(s: String): Unit = println(styled(s"${g.cross} ${Ansi.sanitize(s)}", Red))
+  private def renderedLine(s: String): Unit = { stopSpinner(); ensureNewline(); write(s + "\n") }
+  /** A plain line supplied by the application. Config values, policy summaries
+    * and paths may be repository-controlled, so terminal controls never pass. */
+  def println(s: String = ""): Unit = renderedLine(Ansi.sanitize(s))
+  def info(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Dim))
+  def success(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Green))
+  def warn(s: String): Unit = renderedLine(styled(s"${g.warn} ${Ansi.sanitize(s)}", Yellow))
+  def error(s: String): Unit = renderedLine(styled(s"${g.cross} ${Ansi.sanitize(s)}", Red))
   /** The start-up banner: a title, aligned `label → value` rows and a dim hint line. */
   def banner(title: String, rows: List[(String, String)], hint: String): Unit =
     stopSpinner()
@@ -360,7 +361,7 @@ final class Tui(historyFile: Path) extends AgentUI:
     rows.foreach((label, value) =>
       write(Indent + styled(label.padTo(labelWidth, ' '), Dim) + "  " + Ansi.sanitize(value) + "\n")
     )
-    write(Indent + styled(hint, Dim) + "\n")
+    write(Indent + styled(Ansi.sanitize(hint), Dim) + "\n")
 
   // ── thinking (streamed reasoning) ─────────────────────────────────
 
@@ -798,27 +799,34 @@ final class Tui(historyFile: Path) extends AgentUI:
     catch case _: UserInterruptException | _: EndOfFileException => None
     finally tail = "\n" // the prompter leaves the cursor at a fresh line
 
-  /** A single-choice menu. */
-  private def menu(message: String, labels: List[String]): Option[String] =
+  /** A single-choice menu, returning its index so duplicate display labels do
+    * not collapse into the first option. */
+  private def menuIndex(message: String, labels: List[String]): Option[Int] =
     val byId = Tui.uniqueIds(labels).zip(labels)
     popup { b =>
       val lp = b.createListPrompt().name("a").message(message)
       byId.foreach((id, l) => lp.add(id, l))
       lp.addPrompt()
     } {
-      case r: ListResult => byId.toMap.get(r.getSelectedId)
+      case r: ListResult => byId.map(_._1).zipWithIndex.toMap.get(r.getSelectedId)
       case _ => None
     }
 
-  /** A multi-choice menu; `Some(Nil)` if nothing was ticked. */
-  private def checkboxes(message: String, labels: List[String]): Option[List[String]] =
+  private def menu(message: String, labels: List[String]): Option[String] =
+    menuIndex(message, labels).flatMap(labels.lift)
+
+  /** A multi-choice menu; `Some(Nil)` if nothing was ticked. Indices preserve
+    * the identity of duplicate labels. */
+  private def checkboxIndices(message: String, labels: List[String]): Option[List[Int]] =
     val byId = Tui.uniqueIds(labels).zip(labels)
     popup { b =>
       val cb = b.createCheckboxPrompt().name("a").message(message)
       byId.foreach((id, l) => cb.add(id, l))
       cb.addPrompt()
     } {
-      case r: CheckboxResult => Some(r.getSelectedIds.asScala.toList.flatMap(byId.toMap.get))
+      case r: CheckboxResult =>
+        val indices = byId.map(_._1).zipWithIndex.toMap
+        Some(r.getSelectedIds.asScala.toList.flatMap(indices.get))
       case _ => None
     }
 
@@ -836,7 +844,10 @@ final class Tui(historyFile: Path) extends AgentUI:
     * `None` when there is no terminal for menus, no options, or the user
     * cancelled with Ctrl-C/Ctrl-D. */
   def choose(title: String, options: List[String]): Option[String] =
-    if plain || options.isEmpty then None else popupBlock(menu(title, options))
+    if plain || options.isEmpty then None
+    else
+      val clean = options.map(Ansi.sanitize)
+      popupBlock(menuIndex(Ansi.sanitize(title), clean)).flatMap(options.lift)
 
   def askPermission(req: PermissionRequest): Decision = popupBlock:
     // The request embeds model-chosen paths and command lines: sanitize.
@@ -866,7 +877,7 @@ final class Tui(historyFile: Path) extends AgentUI:
   /** A yes/no question from the app itself (setup, not the agent): a menu
     * when there is a terminal, a `[y/N]` line otherwise. Cancelling means no. */
   def confirm(question: String): Boolean = popupBlock:
-    write(Indent + styled("? " + question, Cyan, Bold) + "\n")
+    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
     val yes =
       if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase.startsWith("y"))
       else menu("Choose", List(Tui.YesLabel, Tui.NoLabel)).contains(Tui.YesLabel)
@@ -887,17 +898,18 @@ final class Tui(historyFile: Path) extends AgentUI:
         cleanOptions.foreach(o => write(Indent + Indent + styled(s"- $o", Cyan) + "\n"))
         freeText(answerPrompt)
       else if multiple then
-        checkboxes("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.OtherLabel) match
+        checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.OtherLabel) match
           case None => None
           case Some(ids) =>
-            val chosen = ids.filter(_ != Tui.OtherLabel)
-            if ids.contains(Tui.OtherLabel) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
+            val chosen = ids.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
+            if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
             else if chosen.isEmpty then None
             else Some(chosen.mkString("; "))
       else
-        menu("Choose", cleanOptions :+ Tui.OtherLabel) match
-          case Some(Tui.OtherLabel) => freeText(answerPrompt)
-          case other => other
+        menuIndex("Choose", cleanOptions :+ Tui.OtherLabel) match
+          case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
+          case Some(i) => cleanOptions.lift(i)
+          case None => None
     // A single-choice menu echoes the selection itself; confirm the other outcomes.
     answer match
       case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
@@ -996,6 +1008,35 @@ final class Tui(historyFile: Path) extends AgentUI:
     terminal.close()
 
 object Tui:
+  /** Prepare the prompt-history file without following a final symlink and
+    * make it owner-only on POSIX systems: user prompts can contain secrets.
+    * Returning a path under the resolved parent also prevents a parent symlink
+    * from being swapped after this check. */
+  private[atc] def secureHistoryFile(path: Path): Path =
+    val absolute = path.toAbsolutePath.nn.normalize.nn
+    val parent = Option(absolute.getParent).getOrElse(
+      throw IllegalArgumentException(s"history path has no parent: $path")
+    )
+    Files.createDirectories(parent)
+    val resolved = parent.toRealPath().nn.resolve(absolute.getFileName.nn).nn
+    if Files.isSymbolicLink(resolved) then
+      throw IllegalArgumentException(s"refusing a symbolic link as the history file: $path")
+    if !Files.exists(resolved, LinkOption.NOFOLLOW_LINKS) then
+      val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
+      try Files.createFile(resolved, ownerOnly)
+      catch
+        case _: UnsupportedOperationException => Files.createFile(resolved)
+        case _: FileAlreadyExistsException => () // a concurrent ATC created it; validate below
+    if !Files.isRegularFile(resolved, LinkOption.NOFOLLOW_LINKS) then
+      throw IllegalArgumentException(s"history path is not a regular file: $path")
+    val posix = Files.getFileAttributeView(
+      resolved,
+      classOf[PosixFileAttributeView],
+      LinkOption.NOFOLLOW_LINKS,
+    )
+    if posix != null then posix.setPermissions(PosixFilePermissions.fromString("rw-------"))
+    resolved
+
   /** Lines of a tool-result section before it is cut in the middle. */
   val MaxPanelLines = 30
   /** Terminal rows of live output shown before the rest is folded, and the
@@ -1115,13 +1156,18 @@ object Tui:
   val YesLabel = "Yes"
   val NoLabel = "No"
 
-  /** Menu ids are the labels; duplicates get a numeric suffix so they stay unique. */
+  /** Menu ids are the labels where possible; collisions get numeric suffixes
+    * that are themselves checked (so `a`, `a (1)`, `a` still stays unique). */
   def uniqueIds(labels: List[String]): List[String] =
-    val seen = collection.mutable.Map[String, Int]()
+    val used = collection.mutable.Set[String]()
     labels.map { l =>
-      val n = seen.getOrElse(l, 0)
-      seen(l) = n + 1
-      if n == 0 then l else s"$l ($n)"
+      var n = 0
+      var candidate = l
+      while used.contains(candidate) do
+        n += 1
+        candidate = s"$l ($n)"
+      used += candidate
+      candidate
     }
 
   /** The REPL output without the agent's own prints. The host wrote those to

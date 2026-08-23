@@ -49,11 +49,20 @@ final class Agent(
   cwd: Path,
   policy: Policy,
   ui: AgentUI,
-  var model: ChatModel,
+  initialModel: ChatModel,
   /** The model that may see classified data; switchable with `/classifiedmodel`. */
   var classifiedModel: Option[ChatModel],
   extraInstructions: Option[String],
 ):
+  private var currentModel = initialModel
+  def model: ChatModel = currentModel
+  /** Switching model changes both the tokenizer and often the wire payload.
+    * Keep the conversation, but discard calibration learned from the previous
+    * model so it cannot make the new model cut too much or overflow its window. */
+  def model_=(next: ChatModel): Unit =
+    currentModel = next
+    tokenCalibration = 1.0
+
   var history: List[Msg] = Nil
   /** Every model call since the last `clear()`, grouped by purpose
     * ([[Agent.Turns]], [[Agent.Chat]], ...) in order of first use. Access is
@@ -81,7 +90,7 @@ final class Agent(
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
   def systemPrompt: SystemPrompt =
-    Prompts.system(cwd, policy, classifiedModel.isDefined, config.respectGitignore, extraInstructions)
+    Prompts.system(cwd, policy, classifiedModel.isDefined, config.safeMode, config.respectGitignore, extraInstructions)
 
   /** Tokens of every request besides the history: the system prompt and the tool schema. */
   private def fixedTokens: Long =
@@ -94,8 +103,13 @@ final class Agent(
     * against the provider's count for the last one) and the model's window,
     * when the config states it. What the TUI shows after each turn. */
   def contextUsage: (tokens: Long, window: Option[Int]) =
-    val estimate = fixedTokens + history.map(Agent.estimateTokens).sum
+    val estimate = fixedTokens + history.map(estimateForCurrentModel).sum
     (tokens = (estimate * tokenCalibration).round, window = model.contextWindow)
+
+  /** A foreign model cannot replay provider-native reasoning/items; it sends
+    * only the neutral text and tool calls. Do not count payload it will omit. */
+  private def estimateForCurrentModel(msg: Msg): Long =
+    Agent.estimateTokens(msg, model.providerKey, model.ref)
 
   /** Notes prepended to the next user message, in order: that the sandbox was
     * restarted, code the user ran themselves. They are carried this way rather
@@ -145,6 +159,7 @@ final class Agent(
     private var budget = config.maxToolCalls // grows by `maxToolCalls` each time the user says "continue"
     private var resumes = 0
     private var budgetRejections = 0
+    private var contextOverflowWarned = false
 
     def run(): Unit =
       var outcome = Continue
@@ -168,36 +183,62 @@ final class Agent(
       history.lastOption match
         case Some(Msg.Assistant(_, calls, _)) if calls.nonEmpty =>
           history :+= Msg.ToolResults(calls.map(c => ToolResult(c.id, marker, isError = true)))
-        case Some(Msg.User(_)) =>
+        case Some(Msg.User(_) | Msg.Continuation(_)) =>
           history :+= Msg.Assistant(marker, Nil, None)
         case _ => ()
 
     /** Ask the model once, record its answer, then act on it. */
     private def round(): Outcome =
-      fitHistoryToContext()
-      val estimated = fixedTokens + history.map(Agent.estimateTokens).sum
-      ui.status(s"${model.alias} is thinking")
-      completeRound() match
-        case None => interrupted()
-        case Some(completion) =>
-          ui.assistantEnd()
-          recordUsage(Agent.Turns, completion.usage)
-          calibrateTokenEstimate(completion, estimated)
-          history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
-          if completion.stopReason == "refusal" then
-            ui.warn("The model refused this request (stop_reason=refusal).")
+      if cancelled() then interrupted()
+      else
+        fitHistoryToContext()
+        val estimated = fixedTokens + history.map(estimateForCurrentModel).sum
+        ui.status(s"${model.alias} is thinking")
+        completeRound() match
+          case None => interrupted()
+          case Some(raw) =>
+            recordUsage(Agent.Turns, raw.usage)
+            calibrateTokenEstimate(raw, estimated)
 
-          if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
-          else if cancelled() then Done
-          else if completion.unfinished && resumes < Agent.MaxResumes then resume()
-          else Done
+            // A provider safety stop or truncated response must not be allowed
+            // to smuggle a partial/contradictory tool call into execution.
+            val blocked = Completion.isBlockedStop(raw.stopReason)
+            val truncated = raw.unfinished || Completion.isTruncatedStop(raw.stopReason)
+            val unsafeCalls = raw.toolCalls.nonEmpty && (blocked || truncated)
+            val completion =
+              if unsafeCalls then
+                val safeText = Option.when(raw.text.trim.nonEmpty)(raw.text).getOrElse(
+                  s"[${raw.stopReason} model response; tool calls were not executed]"
+                )
+                raw.copy(text = safeText, toolCalls = Nil, native = None, unfinished = truncated)
+              else if raw.text.trim.isEmpty && raw.toolCalls.isEmpty && !truncated then
+                raw.copy(text = s"[model returned no response; stop_reason=${raw.stopReason}]", native = None)
+              else raw.copy(unfinished = truncated)
+            history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
+
+            if unsafeCalls then
+              ui.warn(s"ignored ${raw.toolCalls.size} tool call(s) from a ${raw.stopReason} response")
+            if blocked then
+              ui.warn(s"The model blocked this request (stop_reason=${raw.stopReason}).")
+              Done
+            else if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
+            else if cancelled() then interrupted()
+            else if completion.unfinished && resumes < Agent.MaxResumes then
+              if Completion.isTruncatedStop(raw.stopReason) then
+                history :+= Msg.Continuation(Agent.TruncationContinuation)
+              resume()
+            else if completion.unfinished then
+              ui.warn(s"${model.alias} remained unfinished after ${Agent.MaxResumes} resume attempts")
+              Done
+            else
+              if raw.text.trim.isEmpty then ui.warn("The model returned no response.")
+              Done
 
     private def completeRound(): Option[Completion] =
       try Some(model.complete(systemPrompt, history, tools, sink, cancelled))
       catch
-        case _: CancelledException =>
-          ui.assistantEnd()
-          None
+        case _: CancelledException => None
+      finally ui.assistantEnd()
 
     private def calibrateTokenEstimate(completion: Completion, estimated: Long): Unit =
       if completion.usage.input >= Agent.CalibrationMinTokens && estimated > 0 then
@@ -205,15 +246,20 @@ final class Agent(
 
     /** When the model has a `contextWindow`, drop the oldest exchanges from the
       * history until the next request should fit it, leaving room for the
-      * answer. What was dropped stays in the terminal's scrollback, and the
+      * configured maximum answer (or one eighth of the window as slack). What
+      * was dropped stays in the terminal's scrollback, and the
       * model is told what happened. TODO: compact instead of cut (summarise the
       * dropped exchanges into one message) once the estimator has been proven
       * in use. */
     private def fitHistoryToContext(): Unit =
       model.contextWindow.foreach { window =>
-        val reserve = window / 8 // for the model's own answer and estimation slack
-        val room = ((window - reserve) / tokenCalibration).toLong - fixedTokens
-        val (kept, dropped) = Agent.fitToContext(history, room)
+        // Leave both estimation slack and, when configured, the full output
+        // allowance. A maxTokens larger than the window intentionally leaves
+        // no room and triggers the actionable warning below.
+        val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
+        val availableInput = window.toLong - reserve
+        val room = (availableInput / tokenCalibration).toLong - fixedTokens
+        val (kept, dropped) = Agent.fitToContext(history, room, estimateForCurrentModel)
         if dropped > 0 then
           contextDropped += dropped
           history = kept match
@@ -221,6 +267,21 @@ final class Agent(
             case other => other
           ui.warn(
             s"context window of ${model.alias} (${window} tokens): the oldest $dropped messages were dropped from what the model sees"
+          )
+        val estimatedInput = ((fixedTokens + history.map(estimateForCurrentModel).sum) * tokenCalibration).round
+        if estimatedInput > availableInput && !contextOverflowWarned then
+          contextOverflowWarned = true
+          val fixedInput = (fixedTokens * tokenCalibration).round
+          val cause =
+            if fixedInput > availableInput then "the system prompt and tool schema alone"
+            else "the latest retained exchange (which cannot be dropped)"
+          val reserveWhy = model.maxOutputTokens match
+            case Some(n) if n.toLong >= window.toLong / 8 => s"$reserve tokens reserved for configured maxTokens=$n"
+            case _ => s"$reserve tokens reserved for the answer and estimation slack"
+          ui.warn(
+            s"context window of ${model.alias} ($window tokens): $cause needs an estimated $estimatedInput input tokens, " +
+              s"but only ${availableInput.max(0L)} remain with $reserveWhy; the provider may reject this request. " +
+              "Shorten the request or configure a larger contextWindow/maxTokens combination."
           )
       }
 
@@ -273,7 +334,11 @@ final class Agent(
       Continue
 
     private def interrupted(): Outcome =
-      history :+= Msg.Assistant("[interrupted by user]", Nil, None)
+      // An unfinished/resumed round already ends in an assistant message. Do
+      // not append a second one: neutral provider replays require valid role
+      // alternation. User/tool-result endings do need a closing assistant.
+      if !history.lastOption.exists(_.isInstanceOf[Msg.Assistant]) then
+        history :+= Msg.Assistant("[interrupted by user]", Nil, None)
       ui.warn("interrupted")
       Done
 
@@ -304,7 +369,7 @@ object Agent:
   /** Purposes a model call is recorded under (`/cost`). */
   val Turns = "agent turns"
   val Chat = "chat()"
-  val ClassifiedChat = "chat(Classified)"
+  val ClassifiedChat = "classifiedChat()"
   val Prediction = "next-input prediction"
 
   /** Below this many prompt tokens a completion is not used to calibrate the estimator. */
@@ -320,10 +385,25 @@ object Agent:
     * therefore be included to avoid undercounting reasoning-heavy histories. */
   def estimateTokens(msg: Msg): Long = msg match
     case Msg.User(t) => estimateTokens(t) + 4
-    case Msg.Assistant(t, calls, native) =>
-      estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum +
-        native.map(n => (n.payloadChars + 3L) / 4).getOrElse(0L) + 4
+    case Msg.Continuation(t) => estimateTokens(t) + 4
+    case Msg.Assistant(t, calls, native) => estimateAssistantTokens(t, calls, native)
     case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
+
+  /** Model-aware variant: provider-native data from another model is not put
+    * on the wire, so only the neutral assistant fields count. */
+  private[atc] def estimateTokens(msg: Msg, providerKey: String, modelRef: String): Long = msg match
+    case Msg.User(t) => estimateTokens(t) + 4
+    case Msg.Continuation(t) => estimateTokens(t) + 4
+    case Msg.Assistant(t, calls, native) =>
+      estimateAssistantTokens(t, calls, native.filter(_.isFor(providerKey, modelRef)))
+    case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
+
+  private def estimateAssistantTokens(t: String, calls: List[ToolCall], native: Option[NativeTurn]): Long =
+    val neutral = estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum
+    // A request contains either the exact native payload or the neutral
+    // text/calls, never both. The larger estimate is conservative without
+    // double-counting every assistant turn.
+    neutral.max(native.map(n => (n.payloadChars + 3L) / 4).getOrElse(0L)) + 4
 
   /** `history` cut to an estimated `budget` tokens by dropping whole exchanges
     * from the front: a cut always starts at a user message, so no tool result
@@ -331,15 +411,19 @@ object Agent:
     * follows it are always kept (even when they alone exceed the budget: there
     * is nothing better to send). Returns the kept history and how many
     * messages were dropped. */
-  def fitToContext(history: List[Msg], budget: Long): (List[Msg], Int) =
+  def fitToContext(
+    history: List[Msg],
+    budget: Long,
+    estimate: Msg => Long = Agent.estimateTokens
+  ): (List[Msg], Int) =
     val lastUser = history.lastIndexWhere(_.isInstanceOf[Msg.User])
     var start = 0
-    var total = history.map(estimateTokens).sum
+    var total = history.map(estimate).sum
     while total > budget && start < lastUser do
       // drop up to (excluding) the next user message
       val next = history.indexWhere(_.isInstanceOf[Msg.User], start + 1)
       val cut = if next < 0 || next > lastUser then lastUser else next
-      total -= history.slice(start, cut).map(estimateTokens).sum
+      total -= history.slice(start, cut).map(estimate).sum
       start = cut
     (history.drop(start), start)
 
@@ -349,14 +433,29 @@ object Agent:
 
   /** Server-side tool pauses (web search) per turn; a research turn can take many. */
   val MaxResumes = 20
+  /** User-role bridge after an output-limit stop. Provider APIs generally
+    * require the next completion request to end in a user/tool-result role;
+    * replaying a truncated assistant as the final message is not portable and
+    * is invalid for some thinking modes. */
+  val TruncationContinuation =
+    "[continuation request] Continue exactly where the previous response was truncated. " +
+      "Do not repeat completed work; finish the user's original request."
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */
   val MaxBudgetRejections = 2
   /** A hint appended to tool output for a common capture-checking / safe-mode stumble. */
   private case class Hint(applies: String => Boolean, text: String)
   private val hints = List(
     Hint(
+      out => out.contains("Cannot refer to object StringBuilder") && out.contains("from safe code"),
+      "safe mode rejects the `StringBuilder()` companion call, but construction works: use `new StringBuilder()`; a top-level binding needs `val b: StringBuilder = new StringBuilder()`."
+    ),
+    Hint(
       _.contains("needs an explicit type because the inferred type does not conform"),
       "top-level vals that hold capabilities (FileEntry, closures using println/fs) need an explicit type, e.g. `val e: FileEntry^{fs} = access(...)`, or use a `def` / inline expression."
+    ),
+    Hint(
+      out => out.contains("Mutable variable") && out.contains("does not extend") && out.contains("Stateful"),
+      "safe mode rejects top-level `var`s; put the `var` inside a `def`, block or lambda and return the immutable result."
     ),
     Hint(
       out => out.contains("Cannot refer to") && out.contains("from safe code"),
