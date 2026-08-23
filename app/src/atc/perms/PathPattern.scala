@@ -69,15 +69,14 @@ object PathPattern:
     def variants(g: String): List[String] = if g.startsWith("**/") then g :: variants(g.stripPrefix("**/")) else List(g)
     variants(glob).flatMap(g => List(fs.getPathMatcher(s"glob:$g"), fs.getPathMatcher(s"glob:$g/**")))
 
-  /** Absolute, normalized, symlink-resolved as far as the path exists. A symlink
-    * is resolved even when its target does NOT exist (a dangling link): a write
-    * through the link creates/writes the target, so the policy must judge the
-    * target, not the link. */
+  /** Convert a path to absolute normalized form and resolve symlinks as far as
+    * possible. Resolve dangling links as well because writing through one creates
+    * its target, which is the path the policy must evaluate. */
   def canonical(p: Path): Path =
     val abs = p.toAbsolutePath.normalize
     realPathOfNearestAncestor(abs, MaxLinkDepth)
 
-  /** Symlink-chain cap, like the kernel's ELOOP threshold. */
+  /** Maximum symlink-chain depth, analogous to the kernel's ELOOP threshold. */
   private val MaxLinkDepth = 40
 
   private def realPathOfNearestAncestor(abs: Path, depth: Int): Path =

@@ -175,7 +175,7 @@ final class App(args: Main.Args):
         case Some(p) =>
           tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
           session = Some(newReplSession())
-          // A failed turn is a failed run: scripts key off the exit code.
+          // Report a failed turn through the process exit code so scripts can detect it.
           if runTurn(p) then 0 else 1
         case None =>
           banner()
@@ -221,8 +221,8 @@ final class App(args: Main.Args):
     InputPredictor(() => agent.model, () => agent.history, tui.suggest, agent.recordUsage(Agent.Prediction, _))
   private val predicting: Boolean = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty
 
-  /** Run one turn; `false` when it failed (no sandbox, or the turn threw), so a
-    * `-p` run can exit non-zero. */
+  /** Run one turn. Returns `false` if no sandbox is available or the turn throws,
+    * allowing a `-p` invocation to exit with a non-zero status. */
   private def runTurn(input: String): Boolean =
     predictor.invalidate()
     tui.beginTurn()
@@ -306,7 +306,7 @@ final class App(args: Main.Args):
       predictor.invalidate()
       tui.success("conversation cleared")
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
-    // Both quote the model-chosen spawn command line: sanitize terminal control.
+    // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
     case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
     case Cmd.Cost => showCost()

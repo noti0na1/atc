@@ -149,8 +149,8 @@ class ModelSuite extends munit.FunSuite:
     assert(out.contains("requestFiles"), out)
 
   test("the system prompt really bundles the API reference"):
-    // `Prompts.interfaceSource` falls back to "(API reference unavailable)" when the
-    // packaged resource is missing — pin that the bundling works.
+    // `Prompts.interfaceSource` falls back to "(API reference unavailable)" if the
+    // packaged resource is missing, so verify that packaging succeeds.
     val src = atc.agent.Prompts.interfaceSource
     assert(src.contains("def httpPostClassified"), src.take(200))
     assert(!src.contains("API reference unavailable"), "the Interface.scala resource was not bundled")
@@ -185,13 +185,13 @@ class ModelSuite extends munit.FunSuite:
 
   test("echo: a run: message calls run_scala, even with a prepended agent note"):
     val m = EchoModel("echo")
-    // the agent prepends notes (`/new`, `/run`) to the user text; the trigger must survive that
+    // The agent prepends `/new` and `/run` notes; the trigger must still be detected.
     val noted = "[sandbox notice] The Scala REPL was restarted (x).\n\nrun: 1 + 1"
     val (c, _) = collect(m, List(Msg.User(noted)))
     assertEquals(c.toolCalls.size, 1)
     val code = Json.parseObject(c.toolCalls.head.arguments).value("code").str
     assertEquals(code, "1 + 1")
-    // without the note, and a plain message echoes
+    // The trigger also works without a note, while a regular message is echoed.
     assertEquals(collect(m, List(Msg.User("run: 2 + 2")))._1.toolCalls.size, 1)
     val (plain, _) = collect(m, List(Msg.User("hello")))
     assertEquals(plain.text, "echo: hello")

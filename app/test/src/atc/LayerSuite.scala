@@ -495,16 +495,15 @@ class LayerSuite extends munit.FunSuite:
     assertEquals(w.access("x.txt"), Access.Read)
 
   test("a project reached through a symlink still grants its own tree"):
-    // The policy judges canonical paths; the project layer's base must be
-    // canonical too, or a project under a symlinked path (macOS /tmp, /var)
-    // silently never grants.
+    // The policy evaluates canonical paths, so the project layer's base must also
+    // be canonical. Otherwise, a project reached through a symlink never grants.
     val real = Files.createTempDirectory("atc-symlink-real").nn.toRealPath().nn
     val linkParent = Files.createTempDirectory("atc-symlink-base").nn.toRealPath().nn
     val link = linkParent.resolve("proj").nn
     Files.createSymbolicLink(link, real)
     Files.createDirectories(real.resolve(".atc"))
     Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
-    // load with the project named THROUGH the link (nothing canonicalized)
+    // Load the project through the symlink, before the caller canonicalizes it.
     val configuration = Config.load(link, None, linkParent.resolve("no-global.json").nn)
     val policy = Policy(App.fileRules(configuration, link), Nil, Nil, _ => Decision.Deny)
     assertEquals(

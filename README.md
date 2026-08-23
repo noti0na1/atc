@@ -2,34 +2,37 @@
 
 [![Scala CI](https://github.com/noti0na1/atc/actions/workflows/scala.yml/badge.svg)](https://github.com/noti0na1/atc/actions/workflows/scala.yml)
 
-ATC (Agent with Tracked Capabilities) is **a terminal coding agent that, by construction, cannot exceed the permissions you gave it**.
+ATC (Agent with Tracked Capabilities) is **a terminal coding agent that, by construction,
+cannot exceed the permissions you grant it**.
 
-The only tool given to it is a Scala 3 REPL. Every action the model takes (read a file, run a command,
-fetch a URL) is Scala code against a small, capability-typed library, compiled before it
-runs and its effects tracked in the type system by
+Its only tool is a Scala 3 REPL. Every action the model takes: reading a file, running a
+command, or fetching a URL, is expressed as Scala code against a small, capability-typed
+library. The code is compiled before it runs, and its effects are tracked in the type
+system through
 [capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
 and [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html):
 a capability calculus with a formal metatheory. The design comes from
 [TACIT](https://github.com/lampepfl/tacit) (*Securing Agents With Tracked Capabilities*,
-CAIS '26), repackaged as a self-contained terminal agent, to achieve better interactivity and a more practical permission control.
+CAIS '26). ATC repackages that design as a self-contained terminal agent with improved
+interactivity and more practical permission controls.
 
 **Safety and privacy first:**
 
-- **Effects are tracked, not trusted.** File, command, network, and secret access are
-  capabilities the compiler sees, so overstepping is a compile error, caught before anything
-  runs.
-- **Privacy is typed.** Secrets become `Classified` values the model can compute on but never
-  read, and cannot reach a channel you did not allow.
-- **You hold every permission.** A layered, deny-by-default policy over files, commands, and
-  hosts, with deny lists nothing can override.
-- **Fewer interruptions.** Grant the routine once, and ATC asks only for what is left, through
-  a scope the extra permission cannot leak out of.
+- **Effects are tracked, not trusted.** The compiler tracks file, command, network, and
+  secret access as capabilities. Exceeding them is therefore a compile error caught before
+  any code runs.
+- **Privacy is typed.** Secrets become `Classified` values. The model can compute with them
+  but cannot read them or send them to a channel you have not authorized.
+- **You control every permission.** ATC applies a layered, deny-by-default policy to files,
+  commands, and hosts, backed by deny lists that no other rule can override.
+- **Fewer interruptions.** Grant routine access once, and ATC asks only for the remaining
+  permissions. Each extra permission is confined to a scope from which it cannot escape.
 - **Extensible.** A new tool is just a method on the library, inheriting the same tracking,
   permission checks, and classified-data discipline.
 
 ## What it looks like
 
-A request, the Scala the agent wrote for it, what the program printed, and the answer:
+Here is a request, the Scala code the agent wrote, the program output, and the final answer:
 
 ```scala
 > which methods in the library can mutate a file?
@@ -55,9 +58,9 @@ A request, the Scala the agent wrote for it, what the program printed, and the a
 The snippet was compiled before it ran. The REPL keeps its state between snippets, so a
 `val` defined in one turn is still there in the next.
 
-The same agent in **read-only mode**, asked to change a file, cannot even express the
-write: the sandbox hands it a read-only file system, and `write` is a call to an `update`
-method through it. The compiler says no, and the agent says why:
+When asked to change a file in **read-only mode**, the same agent cannot even express the
+write. The sandbox provides a read-only file system, while `write` is an `update` method
+that requires a full view. The compiler rejects the call, and the agent explains why:
 
 ```scala
 read-only > add a "review the tests" item to TODO.md
@@ -75,8 +78,9 @@ read-only > add a "review the tests" item to TODO.md
   or Shift-Tab) and I will add the line.
 ```
 
-And when the agent needs something the configuration does not grant, it asks for exactly
-that, through a block whose extra permission cannot leak out of it; you decide at a pop-up:
+When the agent needs access that the configuration does not grant, it requests exactly that
+access within a block from which the extra permission cannot escape. You decide whether to
+approve the request in a pop-up:
 
 ```scala
 > install the dependencies and run the tests
@@ -120,33 +124,33 @@ cd ~/my-project
 atc
 ```
 
-The first run finds no `~/.atc/config.json` and offers to write the starting one
-(providers, machine-wide permissions) together with `~/.atc/keys.properties` beside it,
-then exits so you can fill in the keys you use:
+If the first run finds no `~/.atc/config.json`, it offers to create a starter file containing
+providers and machine-wide permissions. It also creates `~/.atc/keys.properties`, then
+exits so you can add the keys you use:
 
 ```properties
 ANTHROPIC_API_KEY=sk-ant-…
 OPENAI_API_KEY=
 ```
 
-Alternatively export the variables in your shell, or use a local model that needs no key.
-Answer no and nothing is written: the built-in starting config is used for that run
+Alternatively, export the variables in your shell or use a local model that needs no key.
+If you decline, nothing is written; ATC uses the built-in starter config for that run
 (`atc --init-global` writes it later, on demand).
 
-**2. Start it again.** With the keys in place, run `atc` again. Started in a directory no
-config grants, atc offers to write a starting `.atc/config.json` there and uses it at
-once, so you land in the prompt with the project open:
+**2. Start it again.** With the keys in place, run `atc` again. If no configuration grants
+access to the current directory, ATC offers to create a starter `.atc/config.json` there
+and applies it immediately, so the project is open when the prompt appears:
 
 ```bash
 atc
 ```
 
-That file opens the project to the agent: without it (or a rule in `~/.atc/config.json`)
-nothing is readable and the agent has to ask for every file. Open it when you like and
-decide two things: which **models** to use, and which **files, commands and hosts** the
-agent may touch without asking. Both have working defaults; the permissions are the part
-worth reading; see [Configuration](#configuration). (`atc --init` writes the same file
-without asking, for scripts.)
+That file gives the agent access to the project. Without it—or a matching rule in
+`~/.atc/config.json`—nothing is readable, and the agent must request access to every file.
+Review the file to choose which **models** to use and which **files, commands, and hosts**
+the agent may access without asking. The defaults work as written, but you should review
+the permissions; see [Configuration](#configuration). For scripts, `atc --init` writes the
+same file without prompting.
 
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
 Scala in the sandbox, and asks before touching anything the config does not grant.
@@ -177,10 +181,10 @@ def httpGet(url: String)(using Network): String
 def println(x: Any)(using UserIO^): Unit
 ```
 
-A snippet can therefore do exactly what the givens in its scope allow, and it cannot conjure
-a new one: the capability classes cannot be constructed by agent code, the only instances
-are the ones the REPL preamble binds, and the object holding the roots is off limits under
-safe mode.
+A snippet can therefore perform only the operations allowed by the givens in its scope. It
+cannot create new capabilities: agent code cannot construct the capability classes, the
+REPL preamble binds the only instances, and safe mode prevents access to the object that
+holds the roots.
 
 ### Two roots
 
@@ -210,12 +214,12 @@ at all.
 
 ### Read-only and full views
 
-Each capability type has two views, following the nightly's
+Each capability type has two views, following the nightly compiler's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html):
 the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view; `^`, or `^{io}` ("as
 capable as `io`"), is the **full** view. The mutating operations are declared `update def`
-in the library, and an `update` method can only be called through a full capture set. That
-one rule is what turns "read-only" from a runtime check into a typing rule:
+in the library, and an `update` method can only be called through a full capture set. This
+rule turns "read-only" from a runtime check into a typing rule:
 
 ```scala
 val e: FileEntry^{fs} = fs.access("notes.md")   // as capable as `fs` itself
@@ -223,14 +227,15 @@ e.read()                                       // fine through either view
 e.write("hello")                               // only if `fs` is the full view
 ```
 
-With a read-only `fs`, that last line is the whole security argument in one message:
+With a read-only `fs`, the compiler rejects the final line directly:
 
 ```
 Cannot call update method write of e
 since its capture set {e} is read-only.
 ```
 
-It propagates into your own helpers, so a `def` that writes has to say so in its signature
+The restriction also propagates into your own helpers, so a `def` that writes must declare
+the requirement in its signature
 (`def save(path: String, text: String)(using fs: FileSystem^): Unit`).
 
 ### Capabilities cannot escape
@@ -243,15 +248,16 @@ that escapes it.
 
 ### Classified data
 
-Capabilities constrain *effects*. Confidential content gets a second, independent
-discipline: `readClassified(path)` gives a `Classified[String]`, whose `map`/`flatMap` take
-a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
+Capabilities constrain *effects*. Confidential content follows a second, independent set
+of rules: `readClassified(path)` returns a `Classified[String]`, whose `map` and `flatMap`
+take a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
 outward channel needs a *full* one (`println`/`ask`/`chat` need `UserIO^`, `write` needs
 `FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
 inside a `map`. The agent can compute on a secret but never see it; `toString` is
-`Classified(***)`. The ways out are deliberate and few: `println` (you see the value in the
-terminal, marked `[classified]`; the model sees `Classified(***)`), `writeClassified` into a
-classified path, `chat(Classified)` with the configured classified model, and
+`Classified(***)`. There are only a few deliberate output paths: `println` (you see the
+value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
+`writeClassified` into a classified path, `chat(Classified)` with the configured classified
+model, and
 `httpPostClassified` / `secretHeaders` to an allow-listed host.
 
 Here it is at work. `secrets/` is classified in the project config; the agent is asked a
@@ -280,10 +286,10 @@ question about a key it must never see:
 ● Your terminal shows the answer; on my side that line reads `Classified(***)`.
 ```
 
-Now the part the types enforce. Every way of getting the key *out* of the `map` needs a full
-capability, and the function `map` accepts may only capture read-only ones, so each attempt
-is the same compile error, whether the channel is the terminal, a file, a process or the
-network:
+The type system enforces the boundary. Every way to move the key *out* of the `map` requires
+a full capability, but the function passed to `map` may capture only read-only capabilities.
+The compiler therefore rejects every attempt, whether the destination is the terminal, a
+file, a process, or the network:
 
 ```scala
 ● run_scala
@@ -296,10 +302,10 @@ network:
   └ failed 88 ms
 ```
 
-(`rs$line$3` is the preamble line holding the `user` given; the `exec` and `write` attempts
-name the lines holding `ex` and `fs` instead.) And this is where the read-only/full
-distinction shows its teeth: **the same line compiles in one mode and not in another**,
-because what `fs` *is* differs. In full mode `fs` is the full view, so even a harmless read
+(`rs$line$3` is the preamble line that holds the `user` given; the `exec` and `write`
+attempts name the lines that hold `ex` and `fs`.) The read-only/full distinction matters
+here: **the same line compiles in one mode but not another** because the view of `fs`
+changes. In full mode, `fs` is the full view, so even a harmless read
 inside the `map` captures a full capability and is refused:
 
 ```scala
@@ -307,16 +313,16 @@ inside the `map` captures a full capability and is refused:
 Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 ```
 
-while in read-only mode `fs` is `FileSystem^{io.rd}`, a read-only view, and the identical
-line is accepted (`val res0: Classified[String]^{} = Classified(***)`): reading cannot leak
-anything, writing could, and the capability's view is what tells the two apart. The one
-thing the agent can always do with a secret is route it to a channel that is *allowed* to
-receive it: the terminal, a classified file, the classified model, or an allow-listed host.
+In read-only mode, `fs` is `FileSystem^{io.rd}`, so the identical line is accepted
+(`val res0: Classified[String]^{} = Classified(***)`). Reading cannot leak the secret,
+whereas writing could; the capability view distinguishes the two. The agent can always
+route a secret to an explicitly authorized channel: the terminal, a classified file, the
+classified model, or an allow-listed host.
 
 ### What the types do not know
 
-Types decide what compiles; they know nothing about your configuration. So every host method
-*also* checks the permission policy for the path, command or host in question, and a
+Types decide what compiles, but they know nothing about your configuration. Every host method
+therefore also checks the permission policy for the relevant path, command, or host, and a
 capability from a `request*` block is refused once that block has closed. Underneath sit a
 validator that rejects the obvious escape hatches (`java.io`, reflection, the application's
 own packages) before compilation, and a class loader that shows agent code only the JDK,
@@ -334,13 +340,13 @@ agent can express at all, before the permission policy even comes up.
 | **local** | `io: IOCap` (read-only), `fs: FileSystem^`, `ex: Exec^`, `user: UserIO^` | also write files and run commands |
 | **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `net: Network^{io}`, `user: UserIO^` | also reach the network |
 
-In read-only mode a write is an `update` call through a read-only view (the error shown
+In read-only mode, a write is an `update` call through a read-only view (the error shown
 [above](#what-it-looks-like)); in local mode there is no full `IOCap` to derive a `Network`
 from, so a network call simply has no given to resolve. Either way a mode can withdraw the
-machine and leave the conversation intact, so the agent can always say what it *would* have
-done; the system prompt tells it to do exactly that rather than look for a way around a
-mode. The policy enforces the same three levels again at run time, so nothing rests on the
-type check alone.
+agent's access to the machine while leaving the conversation intact. The agent can therefore
+always explain what it *would* have done; the system prompt directs it to do so instead of
+trying to bypass the mode. The policy enforces the same three levels again at run time, so
+the type check is not the only safeguard.
 
 Switch modes with `/mode` (cycles read-only → local → full), **Shift-Tab** on an empty
 prompt, `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts a
@@ -363,9 +369,9 @@ requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-You get a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*) and the
-block runs with the extra permission; the agent is told what you decided in that call's
-result, so "this time" means it asks again next time and "for the session" means it does
+You receive a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*). If
+approved, the block runs with the extra permission. The result tells the agent what you
+decided, so "this time" requires another request next time, while "for the session" does
 not. `locked` rules cannot be widened at all, and a
 `denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
 leave the block (capture checking), and the host closes the permission scope when the block
@@ -382,29 +388,30 @@ Config files are JSON, and there are three layers:
 | 2 | project | the nearest `.atc/config.json` at or above the working directory | open **its own project** (files inside its folder, commands, hosts); narrow anything |
 | 3 | explicit | `-c <file>` | grant anything |
 
-**`~/.atc/config.json` is the base, and there is nothing behind it.** No policy is compiled
-into the program: what no config grants is not permitted. The
+**`~/.atc/config.json` is the base; there is no implicit policy behind it.** No policy is
+compiled into the program: anything not granted by a configuration is denied. The
 [starting config](app/resources/atc/config-template.json) written on the first run protects
-without granting: it lists the providers, classifies the usual credential paths, puts `.atc`
-itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no file, no command and no
+without granting access: it lists the providers, classifies common credential paths, puts
+`.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no files, commands, or
 host. Edit it to grant things machine-wide.
 
 **A directory is workable because a config says so.** The
 [project config](app/resources/atc/project-template.json) that `atc --init` writes (or the
 first run in a directory offers) opens the project: its own tree (with `./.git` read-only
 and `./secrets` classified), the read-only git commands, and a set of documentation hosts.
-The project layer is found by walking up from the working directory, the way git finds
-`.git`, and its relative patterns are read against the folder holding `.atc`.
+ATC finds the project layer by walking up from the working directory, much as Git finds
+`.git`, and resolves its relative patterns against the directory containing `.atc`.
 
-A project's config ships inside the repository you are working in, so it may open *that
-repository* but nothing beyond it, and never past a limit the machine's owner set: its
-file rules grant only inside its own folder and otherwise only narrow; `commands` and
-`hosts` are the union of every layer (the one place a project reaches beyond its tree,
-with the deny lists as the backstop); `denyCommands`/`denyHosts` accumulate and nothing can
-drop one; the scalar limits (`mode`, `safeMode`, `maxToolCalls`, `executionTimeoutMs`, …)
-only move towards the stricter value. Non-permission settings (`model`, `providers`,
-`instructions`, …) merge in layer order, later wins. What *you* grant at a pop-up is not
-narrowed by any layer: the human is the authority. The exact rules are in
+A project's configuration resides inside the repository, so it may open *that repository*
+but nothing beyond it, and it cannot exceed limits set by the machine's owner. Its file
+rules grant access only within the project directory and can only narrow access elsewhere.
+The `commands` and `hosts` lists are combined across all layers; deny lists provide the
+backstop when a project reaches beyond its tree. `denyCommands` and `denyHosts` accumulate,
+and no layer can remove an entry. Scalar limits (`mode`, `safeMode`, `maxToolCalls`,
+`executionTimeoutMs`, …) can only become stricter. Non-permission settings (`model`,
+`providers`, `instructions`, …) merge in layer order, with later values taking precedence.
+Permissions that *you* grant in a pop-up are not narrowed by a layer because the human is
+the final authority. The exact rules are in
 [doc/development.md](doc/development.md#configuration-semantics).
 
 ```json
@@ -452,19 +459,21 @@ narrowed by any layer: the human is the authority. The exact rules are in
 
 ### Providers and models
 
-A **provider** is one endpoint (`api`, optional `url`, key) with `models` under it; a
-**model** is an alias whose `name` is the provider's id for it (it defaults to the alias)
-plus its own settings (`contextWindow`, `reasoning`, `webSearch`, `thinking`, `maxTokens`,
-…). `api` is `anthropic` (Messages API), `openai-responses` (Responses API, also DeepSeek
-and others via `url`), `openai` (Chat Completions: any OpenAI-compatible server such as
-Ollama, vLLM or OpenRouter, via `url`) or `echo` (key-less, for smoke tests). Name a model
+A **provider** defines one endpoint (`api`, an optional `url`, and a key) and its `models`.
+A **model** is an alias with a provider-specific `name` (which defaults to the alias) and
+its own settings (`contextWindow`, `reasoning`, `webSearch`, `thinking`, `maxTokens`, …).
+The supported `api` values are `anthropic` (Messages API), `openai-responses` (Responses
+API, including DeepSeek and other services through `url`), `openai` (Chat Completions for
+OpenAI-compatible servers such as Ollama, vLLM, or OpenRouter), and `echo` (a keyless
+provider for smoke tests). Name a model
 by its alias (`"model": "claude"`, `/model sonnet`), or by `provider/alias` when two
 providers share one; `/models` lists them. Set `contextWindow` to the model's real window:
 when the conversation no longer fits, the oldest exchanges are dropped and you are warned.
 
-**Keys** never sit in a config: a provider names a variable (`"key": "${DEEPSEEK_API_KEY}"`)
-whose value comes from `.atc/keys.properties` (the project's, then `~/.atc/`, then the
-environment). The starting policy hides `.atc` from the agent, and `/config` shows only
+**Keys** are never stored directly in a configuration. A provider names a variable
+(`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (first the
+project file, then `~/.atc/keys.properties`, and finally the environment). The starter
+policy hides `.atc` from the agent, and `/config` shows only
 which variables are bound, never values.
 
 **Two roles**: `model` is the agent and never sees classified data; `classifiedModel`
@@ -475,14 +484,16 @@ session. Per-adapter settings are listed in
 
 ### File permissions, commands and hosts
 
-Each file rule has a `path` pattern and any of `access` (`none|read|write`), `classified`
-and `locked`. Patterns are gitignore-flavoured: no `/` in the pattern matches a path
-**component** anywhere (`.env`, `*.pem`, `node_modules`); relative with `/` is relative to
-the working directory (to the project folder in a project config), with `*`, `**`, `?`,
-`[…]`; absolute and `~/…` are absolute; `.` is the working directory itself. A rule applies
-to the path it matches **and its whole subtree**; the effective access of a path is the
-**minimum** over all matching rules (no matching rule, no access), it is classified or
-locked if any matching rule says so, and a deeper rule can only make things stricter.
+Each file rule has a `path` pattern and may specify `access` (`none|read|write`),
+`classified`, and `locked`. Patterns follow gitignore-style conventions. A pattern without
+`/` matches a path **component** anywhere (`.env`, `*.pem`, `node_modules`). A relative
+pattern containing `/` is resolved against the working directory—or the project directory
+in a project configuration—and may contain `*`, `**`, `?`, or `[…]`. Absolute paths and
+paths beginning with `~/` remain absolute; `.` denotes the working directory itself. A
+rule applies to the matched path **and its entire subtree**. Effective access is the
+**minimum** granted by all matching rules, and no match means no access. A path is
+classified or locked if any matching rule says so, and a deeper rule can only make access
+more restrictive.
 
 **Classified** content is only observable as `Classified[String]`, and a classified
 directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
@@ -492,31 +503,31 @@ can widen the rule. `"respectGitignore": true` (the default) additionally hides 
 ignores from listings; that is visibility, not permission, so an ignored file is still
 readable by name.
 
-`commands` are patterns over the whole command line: `*` is a wildcard, and a pattern
-without `*` matches by word prefix (`"git status"` allows `git status --short` but not
-`git statusx`). A command also needs read access to the directory it runs in. A pre-approved
+`commands` contains patterns matched against the complete command line. `*` is a wildcard,
+and a pattern without `*` matches by word prefix (`"git status"` allows `git status --short`
+but not `git statusx`). A command also needs read access to the directory it runs in. A pre-approved
 command runs with your privileges and is *not* subject to the file rules, so pre-approve the
 subcommands you mean rather than `git *`. `hosts` are glob patterns on host names; only
 `http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
-`denyHosts` are the denylists, same syntax: **deny wins over every allow**, over a session
-grant, over an open `request*` scope and over `--approve-all`.
+`denyHosts` use the same syntax: **a deny rule overrides every allow rule**, including a
+session grant, an open `request*` scope, and `--approve-all`.
 
 ## What it protects, and what it does not
 
-A security tool that is vague about its edges is worse than none, so here is the guarantee
-stated plainly, together with what it rests on and how to stay inside it.
+Security guarantees need clear boundaries. This section states what ATC guarantees, the
+assumptions behind those guarantees, and how to use it safely.
 
 ### What holds
 
 - **No ambient authority.** The Scala the model writes can do only what the capabilities in
-  scope allow; naming a method it has no capability for is a compile error, before the code
-  runs, a typing rule rather than a check that could be forgotten.
+  scope allow. Calling a method without the required capability is a compile error, so the
+  restriction is a typing rule applied before the code runs.
 - **Deny by default.** No policy is compiled into the program. A file, command, or host is
-  reachable only because a config *you* can read grants it.
+  reachable only when a configuration you control grants access.
 - **Capabilities cannot escape.** The wider permission a `request*` block lends cannot be
   stored, returned, or captured to outlive the block, and the host closes the scope on exit.
 - **Secrets stay typed.** `Classified` content can be computed on but not routed to a
-  channel you did not sanction, and a computation that fails on a secret is not turned into
+  channel you did not authorize, and a computation that fails on a secret is not turned into
   a one-bit oracle.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
@@ -524,23 +535,23 @@ stated plainly, together with what it rests on and how to stay inside it.
 ### What it assumes
 
 - **You are trusted; the model is not.** ATC defends against a mistaken, confused, or
-  prompt-injected *model* exceeding what you allowed. It does not defend the machine against
-  *you*: a generous config, `--approve-all`, or a permission you grant at a pop-up is
-  honored as written.
+  prompt-injected *model* exceeding the access you granted. It does not defend the machine
+  against *you*: a permissive configuration, `--approve-all`, or a permission granted in a
+  pop-up is applied as specified.
 - **An allowed command is arbitrary code, run with your privileges, outside the sandbox.**
   The capability system governs the Scala the model writes, not what a program you
   permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
   runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
   mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill test`); never grant
   an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
-- **Allowed hosts can receive data.** Permit a host and hand the agent non-classified data,
-  and it can send that data there; `classified` content is the exception the types stop.
-  Allow only hosts you would trust as an exfiltration endpoint.
+- **Allowed hosts can receive data.** The agent may send any non-classified data available
+  to it to an allowed host. The type system prevents this only for `classified` content.
+  Allow only hosts you trust to receive project data.
 - **Your provider sees your context.** Everything that is not `classified` (your prompts,
   the file contents the agent reads, command output) goes to the model provider you
   configured. Choose providers you trust; route secrets to a `classifiedModel` you trust (a
   local model, say) or leave it unset so they never leave the machine.
-- **A trusted base underneath.** The JVM, the Scala compiler and its capture checker, the
+- **The trusted computing base.** The JVM, the Scala compiler and its capture checker, the
   OS, the terminal library, the agent library's host implementation, and ATC itself are
   trusted; a bug in any of them (or in your config) can break a guarantee. Capture
   checking and safe mode are experimental compiler features.
@@ -550,14 +561,14 @@ stated plainly, together with what it rests on and how to stay inside it.
 - Grant the least you need, and start in the least mode that works: read-only, then local,
   then full (which is the one that adds the network).
 - Do not grant shells or interpreters as commands; list the exact subcommands you mean.
-- Keep the config small enough to read in one sitting; you can only audit what you can hold
-  in your head, so prefer several specific rules over one broad one.
+- Keep the configuration concise and auditable. Prefer several specific rules to one broad
+  rule.
 - Keep credentials behind `classified`, keep `.atc` out of the agent's reach (the templates
   do both), and keep `safeMode` on.
-- Use `denyCommands`/`denyHosts` as a hard backstop for what must never happen, since deny
-  overrides everything else.
-- Prefer the pop-up (grant *this time*) over a broad standing grant for anything risky, and
-  keep `--approve-all` for sandboxes and CI you already trust.
+- Use `denyCommands` and `denyHosts` as a firm backstop for prohibited operations because a
+  deny rule overrides every other permission.
+- For risky operations, prefer a one-time grant in the pop-up to a broad standing grant.
+  Reserve `--approve-all` for trusted sandboxes and CI environments.
 
 ## The terminal
 
@@ -571,10 +582,10 @@ turn, Ctrl-O shows folded output and reasoning in full, Shift-Tab cycles the mod
 quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a
 `/run` also continues while a bracket is open; Enter on an empty line submits.
 
-After each turn the agent model guesses your next request, shown as ghost text (Tab or →
-accepts it; `"predictInput": false` turns it off), and a summary line says what the turn
-cost and how full the context is. Output is kept short: long program output folds into a
-live tail, long results are cut in the middle, reasoning collapses to one line. Without a
+After each turn, the model predicts your next request and displays it as ghost text (Tab or
+→ accepts it; `"predictInput": false` disables it). A summary line shows the turn's cost
+and how much of the context window is in use. Output is kept short: long program output
+folds into a live tail, long results are cut in the middle, reasoning collapses to one line. Without a
 terminal (`-p` in a pipe) everything is printed plainly; `ATC_ASCII=1` draws with ASCII
 glyphs. The content shapes, keys and multi-line rules are in
 [doc/development.md](doc/development.md#the-terminal).

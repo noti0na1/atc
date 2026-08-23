@@ -141,9 +141,10 @@ object Config:
       case d: Path => if isProject(d) then Some(d) else up(d.getParent)
     up(from.toAbsolutePath.nn.normalize)
 
-  /** Write the global config, and the key bindings beside it, if they are
-    * missing: there has to be a base to narrow. The key bindings are created
-    * owner-only (they will hold API keys). Returns what it created. */
+  /** Create the global configuration and adjacent key bindings if they are
+    * missing, ensuring that narrowing layers have a base. Key bindings are
+    * readable only by the owner because they may contain API keys. Returns the
+    * paths created. */
   def ensureGlobal(path: Path = globalPath): List[Path] =
     val keys = path.getParent.nn.resolve(KeysFile).nn
     List(path -> globalTemplate, keys -> keysTemplate).flatMap { (target, content) =>
@@ -155,8 +156,8 @@ object Config:
       }
     }
 
-  /** Write `content` to `target` readable only by the owner where the file
-    * system has POSIX permissions (a plain write where it has not). */
+  /** Write `content` to `target` with owner-only access on POSIX file systems,
+    * falling back to a regular write when POSIX permissions are unavailable. */
   private def writeOwnerOnly(target: Path, content: String): Unit =
     import java.nio.file.StandardOpenOption.{CREATE, WRITE}
     import java.nio.file.attribute.PosixFilePermissions
@@ -166,11 +167,10 @@ object Config:
       Files.writeString(target, content)
     catch case _: UnsupportedOperationException => Files.writeString(target, content)
 
-  /** Write the starting project config for `dir`, and a `.gitignore` beside
-    * it keeping the keys out of version control (the config travels with the
-    * repository; `.atc/keys.properties` must not). An existing `.gitignore`
-    * gains a `keys.properties` line when it does not have one. Returns what it
-    * created: nothing when the config already exists. */
+  /** Create the starter project configuration for `dir` and ensure that its
+    * `.gitignore` excludes `keys.properties`. The configuration belongs in the
+    * repository; `.atc/keys.properties` does not. Returns the paths created or
+    * modified, or an empty list if the configuration already exists. */
   def initProject(dir: Path): List[Path] =
     val config = projectPath(dir)
     if Files.exists(config) then Nil
@@ -228,8 +228,8 @@ object Config:
         case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
     // Relative patterns of a project config are read against the folder its
     // `.atc` sits in; every other layer reads them against the working directory.
-    // The base is canonicalized: the policy judges canonical paths, so a project
-    // reached through a symlink (macOS /tmp, /var) would otherwise never grant.
+    // The policy evaluates canonical paths, so canonicalize the base as well.
+    // Otherwise, a project reached through a symlink would never grant access.
     val base = Option.when(origin == Origin.Project)(PathPattern.canonical(path.getParent.nn.getParent.nn))
     ConfigLayer(origin, Some(path), readObj(text, path.toString), parse(text, path.toString), base)
 
@@ -277,8 +277,8 @@ object Config:
     * intersection), so only the granting layers care about their order.
     */
   def combine(layers: List[ConfigLayer], keys: KeyBindings = KeyBindings.empty): Configuration =
-    // Validate each layer's own `mode` against its own path, before any merge — so a
-    // typo is blamed on the file that holds it, not on whichever layer narrows it.
+    // Validate each layer before merging so an invalid mode is attributed to the
+    // file that contains it rather than to whichever layer narrows it later.
     layers.foreach(validateLayerMode)
     val (granting, narrowing) = layers.partition(_.origin.grants)
     def merged(ls: List[ConfigLayer]) = ls.map(_.json).foldLeft(ujson.Obj())(mergeJson)
@@ -319,8 +319,8 @@ object Config:
       denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
     )
 
-  /** Reject a malformed `mode` in one layer, naming that layer's own file (every
-    * layer is checked up front by `combine`, so `stricterMode` never has to). */
+  /** Reject an invalid `mode` and identify the layer that defines it. `combine`
+    * validates every layer up front, so `stricterMode` can assume valid input. */
   private def validateLayerMode(layer: ConfigLayer): Unit =
     layer.config.mode.foreach { m =>
       try Mode.parse(m)
@@ -498,8 +498,8 @@ object Config:
     readObj(text, where) // fail clearly on anything that is not a JSON object
     val obj = ObjectText.scan(text)
     val rendered = ujson.write(value)
-    // A duplicated key: the LAST occurrence is the one ujson honors, so that is
-    // the one to rewrite (editing the first would silently not stick).
+    // ujson honors the final occurrence of a duplicate key. Rewrite that occurrence;
+    // changing an earlier one would have no effect on the parsed value.
     obj.members.findLast(_.key == key) match
       case Some(m) => text.substring(0, m.valueStart) + rendered + text.substring(m.valueEnd)
       case None =>

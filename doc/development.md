@@ -1,10 +1,10 @@
 # ATC: development notes
 
-Everything about how ATC is built and why it is built that way. The [README](../README.md)
-is the user's guide (installing, driving the agent, the capability idea); this document is
-for working on ATC itself: building and testing, the architecture, the capability design in
-depth, the sandbox, the permission model, the exact semantics of the configuration, the
-terminal, and the conventions and gotchas that are easy to trip over.
+This document explains how ATC is built and the reasoning behind its design. The
+[README](../README.md) is the user guide; it covers installation, day-to-day use, and the
+capability model at a high level. This document is for contributors. It covers building and
+testing, architecture, the capability design, the sandbox, permissions, configuration
+semantics, the terminal, and important implementation conventions.
 
 ## Table of Contents
 
@@ -155,9 +155,36 @@ big files and can quote line numbers; `read` stays raw for code. Listings
 inside it (`Host.display`), absolute outside; `find`/`grepRecursive` globs match the file
 name, or the path relative to `dir` when the glob contains `/` or `**` (`Host.globRegex`,
 gitignore-flavoured: `**` spans directories, a leading `**` + `/` also matches none).
-Commands: `exec(command)` parses `command` with a tiny grammar (`Processes.parsePipeline`: quoted words, `|` between stages, `< f`, `> f`, `>> f`, `2>&1`; `&&`, `;`, `||`, `&`, `2>`, backticks, `$(` throw, there is no shell); `ProcessBuilder.startPipeline` runs the stages with real pipes, every stage is checked against the patterns and the deny list on its own (the `requestExec` hint lists the missing ones), `<`/`>` go through the read/write checks and refuse classified files, the exit code is pipefail-style and stderr is labelled per stage; `args: Seq[String]` are appended
-verbatim, `ExecOptions(workingDir, timeoutMs, stdin)` carries the rest; `exec` never throws on a non-zero exit, `execOutput` does; a timeout quotes the output so far. Both `exec` and `spawn` go through `Host.prepare` (parse, per-stage checks, `ProcessBuilder`s) and `Processes.ManagedProcess` (the stages, bounded consumable `OutputBuffer`s fed by drain threads, an optional live view, an exit watcher; every live one is in a JVM-wide set killed by a shutdown hook): `exec` = start, wait with the timeout, `result()`; `spawn` returns a `ProcessImpl` (`atc.lib.Process`, an `ExclusiveCapability` capturing `ex`, so it cannot enter `Classified.map`) whose stdin stays open for `send`, with `read`/`readErr` (consume), `readUntil(regex, ms)` (polls the buffer, throws on timeout or exit with the unread text left in place), `waitFor`, `kill`; the host keeps a registry (`Host.MaxProcesses` = 8 live, ids `p1, p2, …` never reused, `runningProcesses` reaps the dead), `App` calls `host.killProcesses()` whenever the REPL session ends, the user sees `HostOutput.processStarted/processInput/processExited` as `[p1 started]` / `p1 > …` / `[p1 exited 0]` lines inside the tool block (`Tui.processEvent`; nothing is printed between turns) and has `/ps` and `/kill [id|all]`; spawned output is not streamed live, the agent reads it and the result panel shows what it read; `Agent.hints` maps `Cannot run program` to PATH/no-shell
-advice. HTTP: `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
+**Commands.** `exec(command)` uses the small grammar in `Processes.parsePipeline`: quoted
+words, `|` between stages, `< f`, `> f`, `>> f`, and `2>&1`. There is no shell, so `&&`,
+`;`, `||`, `&`, `2>`, backticks, and `$(` are rejected. `ProcessBuilder.startPipeline`
+runs the stages with real pipes. Each stage is checked independently against the allowed
+patterns and deny list, and the `requestExec` hint identifies missing permissions. Input
+and output redirections pass through the normal file checks and reject classified paths.
+The pipeline uses pipefail-style exit codes and labels standard error by stage.
+
+Arguments in `args: Seq[String]` are appended verbatim, while
+`ExecOptions(workingDir, timeoutMs, stdin)` controls the remaining behavior. `exec` returns
+non-zero exits normally, whereas `execOutput` throws; timeout errors include the output
+captured so far. Both `exec` and `spawn` use `Host.prepare` for parsing, permission checks,
+and `ProcessBuilder` construction, then `Processes.ManagedProcess` for execution. A managed
+process owns the pipeline stages, bounded output buffers fed by drain threads, an optional
+live view, and an exit watcher. A JVM-wide registry lets the shutdown hook kill any process
+still running.
+
+`exec` starts the process, waits up to the timeout, and returns `result()`. `spawn` returns
+a `ProcessImpl`, an `atc.lib.Process` capability that captures `ex` and therefore cannot
+enter `Classified.map`. Its standard input remains open for `send`; `read` and `readErr`
+consume output, `readUntil(regex, ms)` waits without consuming on failure, and `waitFor`
+and `kill` manage its lifetime. The host permits at most `Host.MaxProcesses` live processes
+and assigns IDs (`p1`, `p2`, …) that are never reused. `runningProcesses` removes completed
+entries, and `App` calls `host.killProcesses()` when the REPL session ends. The user sees
+start, input, and exit events inside the tool block and can use `/ps` or `/kill [id|all]`.
+Spawned output is not streamed automatically; the agent reads it explicitly, and the
+result panel displays what it read. `Agent.hints` turns `Cannot run program` failures into
+PATH and no-shell guidance.
+
+**HTTP.** `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
 (`Host.checked`), `httpRequest` is raw, and `httpPostClassified` goes through the raw
 request, never `httpPost`, so nothing about its response reaches the agent outside the
 classified value. JSON: `atc.lib.Json` (the enum and its companion live in `Interface.scala`
@@ -167,13 +194,15 @@ defaults rule is about capability-taking methods.
 
 ## Capture checking in brief
 
-The whole design rests on one experimental Scala 3 feature, so here is enough of it to read
-the rest. [Capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
-adds a second dimension to the type system: beside *what* a value is, the compiler tracks
-*which capabilities it can reach*. A **capability** is a value tracked this way; its type is a
-subtype of `caps.Capability` (ATC's `FileSystem`, `Exec`, `Network`, `UserIO` and `IOCap` all
-are, through `caps.ExclusiveCapability`). The feature is a small formal calculus with a
-soundness proof; the papers are [at the end](#references).
+ATC's design relies on an experimental Scala 3 feature. This section introduces the
+concepts needed to understand the rest of the document.
+[Capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
+adds a second dimension to the type system: in addition to tracking *what* a value is, the
+compiler tracks *which capabilities it can reach*. A **capability** is a value tracked in
+this way, and its type is a subtype of `caps.Capability`. ATC's `FileSystem`, `Exec`,
+`Network`, `UserIO`, and `IOCap` types all qualify through `caps.ExclusiveCapability`. The
+feature is based on a small formal calculus with a soundness proof; relevant papers are
+listed under [References](#references).
 
 **Capture sets.** Every type carries a *capture set*, written in `^{...}`, naming the
 capabilities that values of the type may use:
@@ -184,34 +213,36 @@ val b: FileSystem^{fs, net}   // may use fs and net
 val c: FileSystem^            // ^ abbreviates ^{cap}: may use anything
 ```
 
-A type with no `^` at all captures nothing (it is *pure*). The compiler propagates these sets
-through calls, closures and fields, and never widens one by accident: a value typed `^{fs}`
-has been proved unable to touch the network.
+A type without `^` captures nothing and is therefore *pure*. The compiler propagates
+capture sets through calls, closures, and fields without widening them implicitly. A value
+typed `^{fs}`, for example, has been proved unable to access the network.
 
 **Subcapturing.** Capture sets are ordered by inclusion, and that order lifts to subtyping:
-`T^{fs}` is a subtype of `T^{fs, net}`. A value that uses *less* can stand in for one allowed
-to use more, never the other way round, so passing a `T^{fs, net}` where a `T^{fs}` is
-expected is a type error. This single rule is the backbone of both the read-only views and
-the mode ladder.
+`T^{fs}` is a subtype of `T^{fs, net}`. A value that uses fewer capabilities can stand in
+for one that may use more, but not the reverse. Passing a `T^{fs, net}` where a `T^{fs}` is
+expected is therefore a type error. This rule underpins both read-only views and the mode
+hierarchy.
 
 **Functions capture what their body uses.** A function value's capture set is the union of
 the capabilities its body refers to. `A -> B` is a pure function (empty set); `A => B` is
 sugar for `A ->{cap} B`, one that may use anything; and `A ->{fs} B` may use `fs` and nothing
-else. That is exactly the type of `Classified.map`:
+else. This is the type used by `Classified.map`:
 
 ```scala
 def map[B](op: T ->{any.rd} B): Classified[B]
 ```
 
-`op` may capture only *read-only* capabilities (`any.rd`), so a body that tries to print,
-write, `exec` or `httpGet` does not compile: each of those needs a full capability the set
-does not admit. The confidential value can be transformed, never routed out.
+`op` may capture only *read-only* capabilities (`any.rd`). A body that tries to print,
+write, call `exec`, or call `httpGet` therefore does not compile because each operation
+requires a full capability. The confidential value can be transformed, but it cannot be
+routed out through one of those channels.
 
-**Capabilities cannot escape their scope.** A capability introduced for a bounded region may
-not be captured by anything that outlives the region: storing it in a longer-lived binding,
-returning it, or closing over it in an escaping function is a compile error (the calculus
-models this with *boxes*, and the message reads "... cannot be included in outer capture set
-..."). That is what lets a `request*` block be handed a wider capability safely:
+**Capabilities cannot escape their scope.** A capability introduced for a bounded region
+cannot be captured by anything that outlives that region. Storing it in a longer-lived
+binding, returning it, or closing over it in an escaping function causes a compile error.
+The calculus models this with *boxes*, and the error says that the capability "cannot be
+included in outer capture set." This rule allows a `request*` block to receive a wider
+capability safely:
 
 ```scala
 val stolen = requestFiles("/tmp", Access.Write, "cache") { // lends a full FileSystem^
@@ -221,43 +252,46 @@ val stolen = requestFiles("/tmp", Access.Write, "cache") { // lends a full FileS
 ```
 
 **Safe mode** ([reference](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html))
-is a second experimental layer ATC enables with the first. Capture checking is sound only
-while *every* capability is tracked; a library that quietly handed out an untracked one (a
-`println` secretly holding `System.out`, say) would be a hole. Safe mode closes it by refusing
-any definition not vouched safe: the agent-visible API is `@assumeSafe`, the sandbox injection
-point is `@rejectSafe` (agent code cannot even name it), and untagged stdlib objects are simply
-unavailable, which is why a few standard methods have pure stand-ins in the API. Safe mode
-comes from [TACIT](https://github.com/lampepfl/tacit), the work ATC builds on.
+is a second experimental layer that ATC enables alongside capture checking. Capture
+checking is sound only when *every* capability is tracked; a library that returned an
+untracked capability—for example, a `println` that secretly held `System.out`—would create
+a hole. Safe mode closes this gap by rejecting definitions that are not explicitly marked
+safe. The agent-visible API is `@assumeSafe`, while the sandbox injection point is
+`@rejectSafe`, so agent code cannot name it. Untagged standard-library objects are
+unavailable, which is why the API provides pure alternatives for a few standard methods.
+Safe mode comes from [TACIT](https://github.com/lampepfl/tacit), on which ATC builds.
 
-**Mutability.** On top of all this ATC uses the nightly's
+**Mutability.** ATC also uses the nightly compiler's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html),
 which *reinterprets the bare type as the read-only view* (`FileSystem` means
 `FileSystem^{any.rd}`, not the pure empty set) and marks the mutating operations `update`,
-callable only through the full `^`. That refinement, and everything ATC assembles from these
-pieces, is [the capability design](#the-capability-design).
+callable only through the full `^`. The next section explains this refinement and how ATC
+combines these pieces into its [capability design](#the-capability-design).
 
 ### References
 
-* **The feature:** the Scala 3 nightly documentation, which the code tracks against a pinned
+- **The feature:** the Scala 3 nightly documentation. The project tracks a pinned compiler
   build ([capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html),
   [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html),
   [mutability](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html)).
-* **The formalized calculus:** *Capturing Types*, by Boruch-Gruszecki, Brachthäuser, Lee,
+- **The formalized calculus:** *Capturing Types*, by Boruch-Gruszecki, Brachthäuser, Lee,
   Lhoták and Odersky (ACM TOPLAS, 2023), which defines the capture calculus (CC<:, with boxes
   for the escape checking above) and proves it sound.
-* **The agent application:** *Securing Agents with Tracked Capabilities* (TACIT, CAIS '26),
-  which introduces safe mode and the capability-typed sandbox that ATC re-packages.
+- **The agent application:** *Securing Agents with Tracked Capabilities* (TACIT, CAIS '26),
+  which introduces safe mode and the capability-typed sandbox that ATC repackages.
 
 ## The capability design
 
-This expands the README's [idea section](../README.md#the-idea-capabilities-instead-of-ambient-authority)
-with what the implementation relies on (read [Capture checking in brief](#capture-checking-in-brief)
-first if the `^{...}` capture-set notation is new).
+This section expands on the README's
+[overview](../README.md#the-idea-capabilities-instead-of-ambient-authority) with the details
+required by the implementation. If the `^{...}` capture-set notation is unfamiliar, read
+[Capture checking in brief](#capture-checking-in-brief) first.
 
 **Capabilities cannot be forged.** The capability classes have `private[atc]` constructors
 (agent code is compiled into the empty package), the only instances are the ones the REPL
-preamble binds, and `atc.lib.Runtime` (`current`/`rootIO`/`rootUser`/`install`, and the `fileSystem`/`readOnlyFileSystem`/`processes`/`network` derivations) is
-`@rejectSafe`: under safe mode agent code cannot even name it. The regex validator refuses
+preamble binds. `atc.lib.Runtime` contains `current`, `rootIO`, `rootUser`, `install`, and
+the `fileSystem`, `readOnlyFileSystem`, `processes`, and `network` derivations. It is
+`@rejectSafe`, so agent code cannot even name it under safe mode. The regex validator refuses
 the names anyway, as a second line.
 
 **Mutability / read-only tracking** follows the nightly's `mutability.md`: the mode-tracked
@@ -319,20 +353,30 @@ in every mode.
 Types decide what compiles; four more layers sit underneath, each independent of the others.
 
 1. **The policy at run time.** Every host method checks the permission `Policy` for the
-   path, command or host (and the scope id of the capability it was called through); a `spawn`ed process handle likewise carries its spawning scope, so `runningProcesses` shows a capability only its own chain's processes, and every operation on the handle is refused once the block has closed; a process spawned inside a `requestExec` block is also killed when that block closes (`killProcessesInScope`), so a one-time grant leaves no live, invisible orphan and an allow-once interactive process can be neither driven nor left running afterwards;
-   `Policy.mode` enforces the three modes again (writes downgraded to read, `exec`/network
-   refused), so nothing rests on the type check alone.
-2. **The validator** (`sandbox/CodeValidator.scala`), a regex pre-check before compilation:
-   it blocks `atc.(host|agent|sandbox|perms|config|llm|ui)`, reflection, `java.io/nio/net`,
+   path, command, or host, including the scope ID of the capability used for the call. A
+   process handle returned by `spawn` also carries its originating scope. Consequently,
+   `runningProcesses` returns only processes visible from the caller's scope chain, and all
+   operations on a handle are refused after its scope closes. A process started inside a
+   `requestExec` block is killed when that block closes (`killProcessesInScope`), so a
+   one-time grant cannot leave behind a live but inaccessible process. `Policy.mode`
+   enforces the three modes again by downgrading writes to reads and refusing `exec` or
+   network access, so the type check is not the only safeguard.
+2. **The validator** (`sandbox/CodeValidator.scala`) runs before compilation. Its regular
+   expression checks block `atc.(host|agent|sandbox|perms|config|llm|ui)`, reflection,
+   `java.io/nio/net`,
    `System.out/err/in`, `System.exit/setProperty/getenv/getProperty/load*`, `caps.unsafe`,
-   `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`, and every way of catching a fatal throwable: a typed
-   catch of a fatal type incl. parenthesised/union forms (`case _: Throwable`, `case _: (A | Throwable)`), a bare `catch case _ =>`/`case e @ _ =>`/`case (e) =>` in any arm
-   position (a small `catch`-arm scanner, not a regex), type aliases of fatal types (but not ones merely nested in type arguments), a type parameter with a fatal upper bound,
-   a catch of any name declared as a type parameter (`case _: T` erases to a catch of the bound), and any `InterruptedException`/`ThreadDeath`. Fatal throwables (a real SOE/OOM, or the
-   `ThreadDeath` stop signal) deliberately propagate out of `Classified.map` and abort the
-   run; forbidding the catch is what stops them being used as a per-bit oracle over
-   classified data or to swallow a timeout/interrupt. Add rules there for new escape
-   hatches, and tests to `CodeValidatorSuite`.
+   and `Runtime.current/rootIO/rootUser/install/fileSystem/readOnlyFileSystem/processes/network`.
+   The validator also rejects every supported way to catch fatal throwables. These include
+   typed catches with parenthesised or union types (`case _: Throwable`,
+   `case _: (A | Throwable)`); bare binders in any catch arm (`case _ =>`, `case e @ _ =>`,
+   `case (e) =>`); aliases of fatal types; type parameters with fatal upper bounds; catches
+   of any declared type parameter, which erase to a catch of the bound; and catches of
+   `InterruptedException` or `ThreadDeath`. A dedicated catch-arm scanner handles the bare
+   binder forms. Fatal throwables, including real `StackOverflowError` or `OutOfMemoryError`
+   instances and the `ThreadDeath` stop signal, deliberately escape `Classified.map` and
+   abort the run. Preventing agent code from catching them avoids both per-bit oracles over
+   classified data and attempts to swallow a timeout or interrupt. Add new escape-hatch
+   rules here and cover them in `CodeValidatorSuite`.
 3. **Class-loader isolation** (`sandbox/Sandbox.scala`): the REPL's class loader has
    `SandboxLoader` as parent, which delegates only `scala.*` and `atc.lib.*` to the app
    loader and everything else to the platform loader, so agent code cannot see `atc.host`,
@@ -360,14 +404,14 @@ grants and open scopes; rules, deny lists and mode stay), calls `System.gc()` (t
 compiler and class loader are most of the process's memory) and starts a fresh REPL.
 
 **Evaluation, timeouts, interrupts** (`sandbox/ReplSession.scala`): evaluation runs on a
-worker thread; `ExecutionClock.paused` excludes both the time spent waiting for the user
+worker thread. `ExecutionClock.paused` excludes both the time spent waiting for the user
 (permission prompts, questions) and the time a command runs (`HostOutput.whileCommandRuns`,
 which `App` maps to the same clock pause; pauses nest), so a slow human does not trip the
-timeout; interrupt/timeout raise the
-REPL stop flag through `OpenReplDriver` (a subclass of the compiler's `ReplDriver`; it also
-installs `CappedRendering`, which lives in **package `dotty.tools.repl`** because
-`Rendering` is `private[repl]`) and `skipPoisonedWrapper()` advances the wrapper index so a
-half-initialized class name is never reused. `clock.reset()` happens at the top of every
+timeout. Interrupts and timeouts raise the REPL stop flag through `OpenReplDriver`, a
+subclass of the compiler's `ReplDriver`. The driver also installs `CappedRendering`, which
+lives in **package `dotty.tools.repl`** because `Rendering` is `private[repl]`.
+`skipPoisonedWrapper()` advances the wrapper index so a half-initialised class name is never
+reused. `clock.reset()` happens at the top of every
 `run`. Whether agent code threw an uncaught exception comes from the renderer
 (`CappedRendering.renderError` sets `threw`; the REPL prints the trace as ordinary output),
 not from scanning the output. `close()` marks the session closed (later `run`s fail with a
@@ -411,18 +455,31 @@ every matching rule (unmatched → none), classified if any rule says so, locked
 so a sub-folder inherits its parent's permission and can only be made stricter
 (`build/generated: write` under `build: read` still yields `read`).
 
-**Every path the host hands out is canonical** (`Host.canonical` for paths given by name,
-`visibleEntries` for listings): a symlink is listed as, and judged by, its target, so an
-entry from `children`/`walk` is checked exactly like the same path given by name (a link in
-a readable directory to a classified file is classified through the listing too; regression
-test in `HostSuite`), and a dangling link is resolved too (a write through it creates the target, so the policy must judge the target), and only links pay for `toRealPath` since a plain child of a canonical
-directory is canonical. Symlinked directories are listed but never entered.
+**Every path returned by the host is canonical** (`Host.canonical` for named paths and
+`visibleEntries` for listings). A symlink is listed and evaluated as its target, so an
+entry returned by `children` or `walk` receives the same checks as that path would receive
+if addressed directly. This also means that a link in a readable directory to a classified
+file remains classified when listed; `HostSuite` contains the regression test. Dangling
+links are resolved as well because writing through one creates its target, and the policy
+must evaluate that target. Only links require `toRealPath`; a plain child of a canonical
+directory is already canonical. Symlinked directories are listed but never traversed.
 
 **Classified paths.** Content is only observable as `Classified[String]`; a classified
 directory's structure is classified too (listing needs `childrenClassified`/
 `walkClassified`, returning `Classified[List[String]]`; `walk`/`grepRecursive`/`find` do not
 descend into it). A plain `write` to a classified path is refused (use `writeClassified`),
-and `writeClassified` to a non-classified path is refused too, since it would declassify. Sinks are failure-blind for the agent (a pure `map` can fail conditionally on the secret — the failure bit would be a per-bit oracle), and how they stay blind depends on whether a response reaches the agent. `writeClassified` checks the permission and classified target *before* it inspects the value (a denied or non-classified target throws either way), then on failure writes nothing but still creates the target file (so its existence cannot reveal the bit) and reports on the user channel only. A secret HTTP header whose value failed cannot simply be dropped: the request would go out without it and its different response (a 401 vs a 200) would signal the failure, so on a plaintext-response request (`httpGet`/`httpPost`/`httpRequest`) the request is aborted with a generic error and the user is told; inside `httpPostClassified` the same abort is caught into the failed `Classified`, whose response never reaches the agent.
+and `writeClassified` to a non-classified path is also refused because it would declassify
+the value. Sinks do not reveal whether a classified computation failed: a pure `map` can
+fail conditionally on the secret, so exposing the failure bit would create a per-bit oracle.
+`writeClassified` checks the permission and target classification *before* inspecting the
+value, ensuring that a denied or non-classified target fails identically in either case. If
+the computation failed, it writes no content but still creates the target, preventing file
+existence from revealing the failure bit, and reports the failure only to the user. A
+failed secret HTTP header cannot simply be omitted because the resulting response, such as
+a 401 instead of a 200, could reveal the failure. For requests with plaintext responses
+(`httpGet`, `httpPost`, and `httpRequest`), ATC therefore aborts with a generic error and
+notifies the user. Inside `httpPostClassified`, the same abort is captured in the failed
+`Classified` result, whose response is never exposed to the agent.
 
 **Commands and hosts.** `commands` are patterns over the whole command line: `*` is a
 wildcard, a pattern without `*` matches by word prefix (`"git status"` allows `git status
@@ -455,29 +512,34 @@ gitignore hides; nested `.gitignore` files hide more the deeper you go.
 The user-facing summary is in the [README](../README.md#configuration); this is the exact
 behaviour (`config/Layers.scala`, `Config.load`/`combine`; tests in `LayerSuite`).
 
-**Three layers**: global (`~/.atc/config.json`) ← project (the nearest `.atc/config.json`
-at or above cwd, found by `Config.projectRoot` walking up; a `.atc` holding *either*
-`config.json` or `keys.properties` counts as a project) ← explicit (`-c file`). **No
-permission is granted anywhere in the program, and no file is written without asking**:
-`App.setup` (interactive runs only; `-p` runs ask nothing) offers, when
-`~/.atc/config.json` is missing, to write `config-template.json` + `keys-template.properties`
-(`Config.ensureGlobal`), otherwise loads the template as an in-memory `Origin.Global` layer
-with `path = None` (`Config.load(..., bundledGlobal = true)`, shown by `/config` as
-`(bundled)`); then, when no config grants cwd and cwd has no `.atc/config.json` of its own,
-offers to write `project-template.json` + `.atc/.gitignore` (`Config.initProject`, shared
-with `--init`) and reloads; and if the global config was written it ends the program with
-`App.Exit(0)` so the user can fill in the keys. Once written, a config is never touched
-again except by `/model`/`/classifiedmodel` (below). The templates protect and grant
-nothing: the global one classifies the usual credential paths (`.ssh`, `.gnupg`, `.env`,
-`.env.*`, `.netrc`, `.npmrc`, `.pypirc`, `.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
+**Three layers** are applied in order: global (`~/.atc/config.json`), project (the nearest
+`.atc/config.json` at or above the working directory), and explicit (`-c file`).
+`Config.projectRoot` finds the project by walking upward; a `.atc` directory containing
+either `config.json` or `keys.properties` establishes a project.
+
+**The program grants no permission implicitly and writes no file without asking.** On an
+interactive run, `App.setup` offers to create `config-template.json` and
+`keys-template.properties` when `~/.atc/config.json` is missing (`Config.ensureGlobal`). If
+the user declines, ATC loads the template as an in-memory `Origin.Global` layer with
+`path = None`; `/config` displays this as `(bundled)`. Non-interactive `-p` runs never ask.
+If no configuration grants the working directory and it has no project configuration,
+`App.setup` offers to create `project-template.json` and `.atc/.gitignore` through
+`Config.initProject`, the same operation used by `--init`, and then reloads. After creating
+the global configuration, ATC exits with `App.Exit(0)` so the user can add keys. Once
+created, configuration files are changed only by `/model` and `/classifiedmodel`.
+
+The templates protect resources but grant no access. The global template classifies common
+credential paths (`.ssh`, `.gnupg`, `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypirc`,
+`.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
 `*.pem`, `id_rsa`, `id_ed25519`), sets `.atc` to `none` and `locked` (the pattern has no
 `/`, so it covers `~/.atc` and any project's `.atc` alike: the agent can read neither the
 config nor the keys, and no prompt can open them), denies `rm -rf *` and `sudo *`, and
-grants no file, command or host; the project template is what opens a project: its tree with `./.git` read-only (git *commands*
-are governed by `commands`, not file rules) and `./secrets` classified, the read-only git
-commands (and `git push*`/`git reset --hard*` denied), and documentation hosts (official
-docs and paper hosts, not package registries or code hosting, since a permitted host is
-also somewhere `httpPost` can send data).
+grants no files, commands, or hosts. The project template opens the project tree, marks
+`./.git` read-only and `./secrets` classified, allows read-only Git commands, denies
+`git push*` and `git reset --hard*`, and permits documentation hosts. Git commands are
+governed by `commands`, not by file rules. The host list includes official documentation
+and paper hosts, but not package registries or code-hosting services, because `httpPost`
+may send data to any permitted host.
 
 **Project rules are read against the project folder**: running atc in `repo/src/main`
 picks up `repo/.atc/config.json`, and `"./build"` there always means `repo/build`. Should
@@ -572,7 +634,9 @@ thinking/effort, the same as `complete`.
 `.atc/keys.properties` (`config/Keys.scala`, read with `java.util.Properties`, so
 `NAME=value`, `NAME: value`, `#`/`!` comments, `\` escapes and line continuations).
 `KeyBindings.get` tries the project file, then `~/.atc/keys.properties`, then
-`System.getenv`; an empty value is not a binding, so the lookup falls through. The file is created owner-only (0600) and a group/other-readable one warns at load.
+`System.getenv`; an empty value is not a binding, so the lookup falls through. New key
+files are readable only by their owner (mode 0600). ATC warns when loading a file that is
+readable by the group or other users.
 `Config.resolveApiKey(provider, bindings)` feeds `ModelCatalog.from(config, keys)`.
 `ModelSpec.toString` masks the key and `/config` prints variable names only, never values.
 
@@ -646,26 +710,24 @@ model call) re-sends the whole context so far, plus the tool results of the prev
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**The system prompt** is one text, `SystemPrompt(text)`, and it is the same for the
-whole session on purpose: everything in it (including the permission summary,
-`Policy.configSummary`, which leaves session grants out) changes only together with a
-sandbox restart (mode switch, config). That is the general, provider-independent way to
-keep a request cacheable: the request is always the same prefix plus what was appended
-since, so automatic prefix caching (OpenAI-shaped APIs) hits up to the newest messages,
-explicit breakpoints (Anthropic: one on the system block and one on the last message of the
-history, so each round reads the previous round's prefix and writes only the new messages)
-do too, and a provider with no cache loses nothing. The alternative, a "current
-permissions" block kept up to date in the prompt, would invalidate the cached history on
-every grant (or, with a single breakpoint on the system prompt, never cache the history at
-all), which is what an earlier design did. The prompt embeds the *whole* source of
-`Interface.scala` (the same text `/interface` prints), which is why wording in that file is
-prompt wording and the *only* place a method's semantics are described (the prompt's own
-prose carries workflow, the permission conversation and REPL/safe-mode quirks, and points at
-the docstrings for everything else, so an API change never needs a prompt change), and a mode
-paragraph, which is why a mode switch restarts the REPL and re-renders the prompt. It says *whether* a classified model is configured (so the model
-knows if `chat(Classified)` works), never which one. `Agent.systemPrompt` is recomputed
-before every round from the live `Policy`, so nothing is cached on the ATC side; it just
-comes out the same.
+**The system prompt** is a single `SystemPrompt(text)` that remains unchanged throughout a
+session. Its contents, including `Policy.configSummary` without session grants, change only
+when the sandbox restarts because of a mode or configuration change. This structure keeps
+requests cacheable across providers: each request consists of the same prefix followed by
+new messages. OpenAI-compatible APIs can use automatic prefix caching, while Anthropic uses
+explicit breakpoints on the system block and the final history message. Providers without
+caching lose nothing. Keeping a live permissions block in the prompt would invalidate this
+prefix after every grant, which an earlier implementation did.
+
+The prompt embeds the complete source of `Interface.scala`, which is also displayed by
+`/interface`. Its docstrings are therefore the authoritative descriptions of individual
+methods. The surrounding prompt explains workflow, permission requests, and REPL or
+safe-mode conventions, then directs the model to those docstrings for API details. A mode
+paragraph is also included, which is why changing modes restarts the REPL and rebuilds the
+prompt. The prompt states whether a classified model is configured, so the model knows
+whether `chat(Classified)` is available, but never identifies that model.
+`Agent.systemPrompt` is recomputed from the live `Policy` before every round; ATC does not
+cache it internally, but the result remains identical within a session.
 
 **Prompt decisions travel in the history.** The model cannot see the pop-ups, so without
 feedback it takes an "allow once" for a standing grant and a later "no" for a revocation
@@ -739,18 +801,20 @@ classified model. All of them are recorded under their own purpose in `/cost`.
 
 ## The agent loop
 
-`Agent.turn` is a loop of *rounds* (`Turn.round`: ask the model, then run tools / resume / stop) with per-turn counters against `Agent.Max*` and `config.maxToolCalls`:
+`Agent.turn` is a loop of *rounds*. Each `Turn.round` asks the model and then runs tools,
+resumes, or stops. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
 
-* tool calls → run them (`run_scala`, one at a time), append the results and ask again;
-* `unfinished` (the provider paused after a server-side tool such as web search, Anthropic
-  `pause_turn`) → ask again so the model resumes, at most `MaxResumes` times;
-* the tool budget (`maxToolCalls`, 200 by default) is a checkpoint: when it is used up the
+- Tool calls run one at a time through `run_scala`; their results are appended before the
+  model is asked again.
+- If the provider returns `unfinished` after a server-side tool such as web search
+  (Anthropic `pause_turn`), the model is asked to resume, up to `MaxResumes` times.
+- The tool budget (`maxToolCalls`, 200 by default) is a checkpoint. When it is exhausted, the
   UI is asked (`AgentUI.confirmMoreToolCalls`; the TUI shows a yes/no pop-up, `-p` runs and
   test doubles decline) whether the turn may go on for another budget; if not, the model gets
-  an error result and the turn is stopped after `MaxBudgetRejections` rounds of it insisting;
-* anything else is the final answer. (There is no "nudge" any more: a heuristic over the
+  an error result and the turn stops after `MaxBudgetRejections` repeated requests.
+- Any other response is the final answer. There is no longer a "nudge": a heuristic over the
   reply's prose misread too many closings; the system prompt says that ending without a tool
-  call means finished, and the user can always say "go on".)
+  call means the turn is finished, and the user can always say "go on."
 
 `cancelled` is polled while streaming and before every tool call; an interrupted turn ends
 with an `[interrupted by user]` assistant message so the history stays well-formed. A
@@ -800,7 +864,10 @@ tells them apart:
   ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
 ```
 
-Untrusted text (model prose and thinking, tool code and output, prompt paths) passes through `Ansi.sanitize` (C0/C1 controls and ESC stripped) before display. All output goes through one `write` that tracks the last two chars (`tail`) so gutters can
+Before display, untrusted text—including model prose and reasoning, tool code and output,
+and paths embedded in prompts—passes through `Ansi.sanitize`, which strips C0/C1 controls
+and ESC. All output then goes through a single `write` method that tracks the final two
+characters (`tail`) so gutters can
 be inserted into arbitrarily chunked streams; `LiveRegion` redraws in place, and the two
 things that use it own their state as inner components (`thinking` = the reasoning window /
 full stream, `liveOutput` = folding of long program output, budgeted in wrapped terminal

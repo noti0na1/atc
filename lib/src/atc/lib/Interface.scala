@@ -28,16 +28,17 @@ import caps.*
 
 /** Confidential data: you can compute with it but never see it.
  *
- *  `map`/`flatMap` take a function that may capture only **read-only**
- *  capabilities. So inside one you can compute freely, use local `var`s and
+ *  `map` and `flatMap` accept functions that may capture only **read-only**
+ *  capabilities. Within them, you can compute freely, use local `var`s and
  *  arrays, and read files where your `fs` is itself read-only. You can never
  *  write, run a command, use the network, `println`, `chat` or `ask`, because
  *  each of those needs a full capability. Whatever you compute stays
  *  classified; `toString` shows `Classified(***)`.
  *
- *  The only ways out are: `println` (the user sees the value, you still see
- *  `Classified(***)`), `writeClassified` (into a classified file), `chat` with
- *  the classified model, and `httpPostClassified` / `secretHeaders` to an allowed host.
+ *  The only supported destinations are `println` (the user sees the value while
+ *  you still see `Classified(***)`), `writeClassified` (to a classified file),
+ *  `chat` with the classified model, and `httpPostClassified` or `secretHeaders`
+ *  to an allowed host.
  *
  *  {{{
  *  val secret = readClassified(".env")          // Classified[String]
@@ -58,23 +59,23 @@ abstract class Classified[+T] private[atc] ():
 @assumeSafe
 trait Cap extends caps.Stateful, caps.ExclusiveCapability
 
-/** The root capability for the file system, commands and network. Which view of
- *  it your sandbox mode gives you decides what you can derive:
+/** The root capability for the file system, commands, and network. The view
+ *  supplied by the sandbox mode determines which capabilities are available:
  *
- *  - **full**: `given io: IOCap^`, so files, commands and network;
- *  - **local**: `given io: IOCap`, a read-only view, but with a full `fs`/`ex`;
- *  - **read-only**: `given io: IOCap`, a read-only view with a read-only `fs`.
+ *  - **full** supplies `given io: IOCap^`, enabling files, commands, and network;
+ *  - **local** supplies a read-only `given io: IOCap` plus full `fs` and `ex`;
+ *  - **read-only** supplies a read-only `given io: IOCap` and read-only `fs`.
  *
  *  The sandbox derives `fs`/`ex`/`net` from `io` when it starts; you cannot derive
- *  anything yourself, so in local/read-only mode, where `io` is read-only, the
- *  mode's givens are all there is (no `Network` in local mode, nothing that writes
+ *  anything yourself. In local and read-only modes, where `io` is read-only, the
+ *  mode's givens are the only available capabilities (no `Network` in local mode and no writes
  *  in read-only mode). Talking to the user is a *separate* capability (`user`), so
  *  it works in every mode. */
 @assumeSafe
 class IOCap private[atc] () extends Cap
 
-/** Capability to talk to the user: `println`/`print`/`printf`, `ask`, the TODO
- *  list (`setTodos`/`markTodo`), and the normal-model `chat`. It is always
+/** Capability for interacting with the user through `println`/`print`/`printf`,
+ *  `ask`, the TODO list (`setTodos`/`markTodo`), and normal-model `chat`. It is
  *  available and mutable (`given user: UserIO^`) in every mode, because these
  *  are effects on the conversation rather than on the file system. You can
  *  always report results, even in read-only mode. Reading the TODO list (`todos`) needs
@@ -98,8 +99,8 @@ abstract class FileSystem private[atc] () extends Cap:
    *  handle is read-only exactly when this file system is. */
   def access(path: String): FileEntry^{this}
 
-/** A handle to a file or directory. The reading members work on any handle; the
- *  `update def`s (write/append/delete/mkdir/writeClassified) need a handle from
+/** A handle to a file or directory. Read operations work on any handle; the
+ *  `update def`s (`write`, `append`, `delete`, `mkdir`, and `writeClassified`) require one from
  *  a full `FileSystem^`. */
 @assumeSafe
 abstract class FileEntry private[atc] () extends Cap:
@@ -151,14 +152,15 @@ abstract class Exec private[atc] () extends caps.ExclusiveCapability
 @assumeSafe
 abstract class Network private[atc] () extends caps.ExclusiveCapability
 
-/** A process started with `spawn` that you can talk to while it runs (a REPL, a
+/** A process started with `spawn` that you can interact with while it runs (a REPL, a
  *  dev server, a watcher). It holds the `Exec` it was started with, so it cannot
  *  be used where `Exec` cannot (inside `Classified.map`). It lives until it exits,
  *  you `kill()` it, or the session ends; `runningProcesses` finds the live ones
  *  again. One spawned inside a `requestExec` block is also killed when that block
- *  ends, so spawn a lasting process from a standing grant, not a one-time one.
- *  Waits take a timeout and throw `RuntimeException` when it passes, with
- *  what did arrive in the message (and still unread, so `read()` can fetch it).
+ *  ends. Start long-lived processes from a standing grant rather than a one-time
+ *  grant. Wait operations accept a timeout and throw `RuntimeException` when it
+ *  expires. The exception includes any output received, which remains available
+ *  for a later `read()`.
  *
  *  {{{
  *  val py: Process^{ex} = spawn("python3 -i")      // top-level val: explicit type, like FileEntry
@@ -188,7 +190,8 @@ abstract class Process private[atc] () extends caps.ExclusiveCapability:
   /** Wait (at most `timeoutMs`) until `regex` matches the unread stdout; returns
    *  everything up to and including the match. */
   def readUntil(regex: String, timeoutMs: Long): String
-  /** Wait (at most `timeoutMs`) for it to exit; its result (unread output, exit code) when it did. */
+  /** Wait up to `timeoutMs` for the process to exit, returning its unread output
+   *  and exit code if it does. */
   def waitFor(timeoutMs: Long): Option[ProcessResult]
   /** Terminate it (and every stage of a pipeline). */
   def kill(): Unit
@@ -394,7 +397,7 @@ trait Interface:
   /** Print a file with 1-based line numbers, like `cat -n` (`     1\tline`); the
    *  first form stops after 400 lines with a note saying which `cat(path, from, to)`
    *  shows the rest, the second prints lines `from` to `to` inclusive, like
-   *  `sed -n 'from,top'`. This is the way to look at a file (`read`/`readLines`
+   *  `sed -n 'from,to'`. This is the way to look at a file (`read`/`readLines`
    *  give the raw text to code with). The numbers are not in the file: never copy
    *  them into a `sed` pattern. `to` may run past the end (`[end of file: N lines]`
    *  marks it), so a large `to` shows the tail. Lines longer than 2000 characters are
@@ -517,7 +520,7 @@ trait Interface:
    *  Runs in the working directory unless `workingDir`/`options` say otherwise. The
    *  result carries the exit code and both streams (a non-zero exit does not throw;
    *  `execOutput` does). Throws `SecurityException` if the command line matches no
-   *  permitted pattern or the directory is unreadable or classified (the check goes
+   *  permitted pattern, or if the directory is unreadable or classified (the check goes
    *  through `FileSystem`, so a `requestFiles` block covers it), and
    *  `RuntimeException` after `timeoutMs` (default 10 minutes) with the output so far;
    *  the time a command runs does not count against the snippet's own timeout. */
@@ -532,13 +535,13 @@ trait Interface:
   def execOutput(command: String, args: Seq[String])(using Exec^, FileSystem): String
   def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): String
 
-  /** Start a command (the same line grammar and the same checks as `exec`) and
-   *  return at once with a `Process` to talk to: for REPLs, servers and watchers.
+  /** Start a command using the same grammar and checks as `exec`, then return
+   *  immediately with a `Process` for interacting with REPLs, servers, or watchers.
    *  Its stdin stays open for `send` (`ExecOptions(stdin = ...)` is sent first);
    *  `workingDir` applies, `timeoutMs` does not: it runs until it exits, you `kill()`
    *  it, or the session ends (and, if spawned inside a `requestExec` block, when that
-   *  block ends). At most 8 live at a time; `kill()` what you are done with. The user
-   *  sees it start, what you send it, and it exit. */
+   *  block ends). At most eight may be live at once; call `kill()` when finished.
+   *  The user sees the process start, the input you send, and its exit. */
   def spawn(command: String)(using ex: Exec^, fs: FileSystem): Process^{ex}
   def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem): Process^{ex}
   /** The processes you started that are still running (to find a handle again). */

@@ -14,10 +14,10 @@ case class ToolResult(callId: String, output: String, isError: Boolean)
   * items). Reused when the same provider continues the conversation; other
   * providers rebuild the turn from the neutral fields. */
 case class NativeTurn(providerKey: String, payload: Any):
-  /** The rendered size of `payload`, computed once. The context-window estimator
-    * re-counts every kept message before every request, and a Responses reasoning
-    * blob can be tens of KB, so rendering it each round is quadratic over a
-    * session; this turn is immutable and reused, so caching the length is exact. */
+  /** Cache the rendered size of `payload`. The context-window estimator revisits
+    * every retained message before each request, and a Responses reasoning payload
+    * can be tens of kilobytes. Rendering it on every round would make estimation
+    * quadratic over a session; the immutable payload makes this cached value exact. */
   lazy val payloadChars: Int = String.valueOf(payload).length
 
 /** Provider-neutral conversation history. */

@@ -27,10 +27,10 @@ final class Host(
 
   // ── paths & permission checks ─────────────────────────────────────
 
-  /** Canonical absolute path: relative to `cwd`, `~` expanded, normalized,
-    * symlinks resolved as far as the path exists (a link inside an allowed
-    * directory pointing elsewhere is judged by its target — including a dangling
-    * link, because a write through it creates/writes the target). */
+  /** Convert a path to canonical absolute form: resolve it against `cwd`, expand
+    * `~`, normalize it, and resolve symlinks as far as possible. The policy
+    * evaluates a link by its target, including a dangling link whose target would
+    * be created by a write. */
   private[atc] def canonical(p: String): Path =
     val raw = Paths.get(PathPattern.expandHome(p)).nn
     PathPattern.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
@@ -59,12 +59,11 @@ final class Host(
     case s: Scoped => s.scope
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
-  /** Run a `request*` block: `op` gets a capability for the freshly opened
-    * scope `id`, which is closed again however the block ends. Any process spawned
-    * in that scope is killed as it closes: a one-time grant must not leave a live
-    * (and, once the scope is gone, invisible and undrivable) process behind. A
-    * lasting process must be spawned in a standing grant (the base scope, never
-    * closed here). */
+  /** Run a `request*` block with a capability for the newly opened scope `id`.
+    * Always close the scope and kill its processes when the block ends. This
+    * prevents a one-time grant from leaving behind a live process that is no
+    * longer visible or controllable. Long-lived processes must use a standing
+    * grant in the base scope. */
   private def inScope[T](id: ScopeId)(op: ScopeId => T): T =
     try op(id)
     finally
@@ -100,9 +99,9 @@ final class Host(
     ()
 
   private[atc] def writeClassifiedFile(scope: ScopeId, p: Path, content: Try[String]): Unit =
-    // Permission and target checks run BEFORE looking at the value's success/failure
-    // bit, so a denied or non-classified target throws identically whether the
-    // classified computation succeeded or failed — the throw must not be an oracle.
+    // Check permissions and target classification before inspecting the result.
+    // A denied or non-classified target must fail identically whether the
+    // classified computation succeeded or failed, preventing a failure oracle.
     val pm = requireWrite(scope, p, "writeClassified")
     if !pm.classified then
       throw SecurityException(
@@ -111,18 +110,16 @@ final class Host(
     ensureParent(p)
     content match
       case Success(v) => Files.writeString(p, v, StandardCharsets.UTF_8)
-      // A failed computation is failure-blind to the agent: still create the target
-      // (so its mere existence cannot reveal the failure bit; the content stays
-      // unreadable on a classified path), report it on the user channel only, and
-      // never signal the failure back to the agent.
+      // Keep the agent unaware of the failure: create the target so its existence
+      // reveals nothing, leave its classified content unreadable, and report the
+      // failure only through the user channel.
       case Failure(_) =>
         if !Files.exists(p) then { Files.createFile(p); () }
         classifiedSinkFailed(s"writing '$p'")
 
-  /** Report a failed classified computation at a sink, on the user channel
-    * only. The agent must not observe the failure bit: it is a per-bit oracle
-    * over the classified value (a pure `map` can fail conditionally on the
-    * secret), so sinks stay failure-blind and simply do nothing. */
+  /** Report a failed classified computation only through the user channel. The
+    * agent must not observe the failure bit because a pure `map` can fail
+    * conditionally on the secret and turn that bit into an oracle. */
   private[atc] def classifiedSinkFailed(what: String): Unit =
     output.print(
       "",
@@ -514,9 +511,9 @@ final class Host(
       output.processStarted(id, p.line)
       handle
 
-  /** The live processes visible to the caller's scope: a process spawned inside
-    * a `requestExec` block is unreachable once that block has closed, so a
-    * one-time grant cannot leave a drivable handle behind (`Policy.scopeVisibleFrom`). */
+  /** Return the live processes visible from the caller's scope. A process created
+    * inside `requestExec` becomes unreachable when the block closes, preventing a
+    * one-time grant from leaving a usable handle (`Policy.scopeVisibleFrom`). */
   def runningProcesses(using ex: Exec): List[Process] = spawned.synchronized:
     reapProcesses()
     val caller = scopeOf(ex)
@@ -524,9 +521,8 @@ final class Host(
 
   private def reapProcesses(): Unit = spawned.filterInPlace((_, p) => p.managed.isAlive)
 
-  /** Kill every spawned process (session end, `/kill all`). Goes through
-    * `managed` directly: this is host-internal cleanup and must work even for
-    * handles whose scope has already closed. */
+  /** Kill every spawned process at session end or for `/kill all`. Use `managed`
+    * directly so host-internal cleanup still works after a handle's scope closes. */
   private[atc] def killProcesses(): Unit = spawned.synchronized:
     spawned.values.foreach(_.managed.kill())
     spawned.clear()
@@ -595,9 +591,9 @@ final class Host(
     val scheme = Option(uri.getScheme).map(_.toLowerCase).getOrElse("")
     if scheme != "http" && scheme != "https" then
       throw SecurityException(s"Invalid URL (only http/https are supported): $url")
-    // Matched as normalized: lower-case, no trailing dot, numeric IP literals in
-    // canonical form — `evil.com.` must not dodge a deny rule for `evil.com`, and
-    // `2852039166` is judged as `169.254.169.254`.
+    // Match a normalized host: lowercase, without a trailing dot, and with numeric
+    // IP literals in canonical form. Thus `evil.com.` cannot bypass a deny rule for
+    // `evil.com`, and `2852039166` is evaluated as `169.254.169.254`.
     val host =
       Option(uri.getHost).map(Host.normalizeHost(_)).getOrElse(throw SecurityException(s"Invalid URL (no host): $url"))
     policy.hostDenied(host) match
@@ -612,14 +608,14 @@ final class Host(
           )
     val b = HttpRequest.newBuilder(uri).nn.timeout(Duration.ofSeconds(60)).nn
     headers.foreach((k, v) => b.header(k, v))
-    // Classified header values are unwrapped here and sent, never shown to the
-    // agent. If a computation FAILED there is no value: abort rather than send the
-    // request with the header dropped — a request missing its auth header returns a
-    // different response (a 401 vs a 200) that would itself signal the failure and
-    // could have side effects at the endpoint. The user is told; `httpPostClassified`
-    // catches this into its failed `Classified`, so its response stays confidential.
-    // (On a plaintext-response request the secret value is already an intended
-    // channel to an allowed host, so this abort adds no leak the value did not.)
+    // Unwrap classified headers only for transmission; never expose them to the
+    // agent. If a header computation failed, abort the request instead of omitting
+    // the header. A missing authentication header could produce a distinguishable
+    // response (for example, 401 instead of 200) or trigger different side effects,
+    // revealing the failure. Notify the user; `httpPostClassified` captures the
+    // error in a failed `Classified`, keeping the response confidential. For a
+    // plaintext-response request, the allowed host is already an intended channel
+    // for the secret, so aborting does not expose any additional information.
     val resolvedSecrets = secretHeaders.view.mapValues(ClassifiedImpl.unwrap).toMap
     if resolvedSecrets.valuesIterator.exists(_.isFailure) then
       classifiedSinkFailed("a classified request header")
@@ -781,32 +777,32 @@ object Host:
   /** How much of an error body `httpGet`/`httpPost` quote. */
   val HttpErrorBodyChars: Int = 500
 
-  /** The host as the policy matches it: lower-case, without a trailing dot, and
-    * for a numeric IP literal its canonical form — a dotted-quad for IPv4 and for
-    * an IPv4-mapped IPv6 literal — so `evil.com.` cannot dodge a rule for
-    * `evil.com`, `2852039166` is judged as `169.254.169.254`, and neither can
-    * `[::ffff:169.254.169.254]`. Pure literal parsing, no DNS: a real hostname is
-    * returned as-is. */
+  /** Normalize a host for policy matching: lowercase, remove a trailing dot, and
+    * convert numeric IP literals to canonical form. IPv4 and IPv4-mapped IPv6
+    * addresses use dotted-quad notation. This ensures that alternate forms such
+    * as `evil.com.`, `2852039166`, and `[::ffff:169.254.169.254]` cannot bypass an
+    * equivalent rule. Literal parsing does not use DNS; ordinary hostnames are
+    * returned unchanged after case and trailing-dot normalization. */
   def normalizeHost(host: String): String =
     val h = host.stripSuffix(".").toLowerCase
-    // An IPv6 literal arrives bracketed from `URI.getHost`: `[::1]`,
-    // `[::ffff:169.254.169.254]`. Canonicalise it too, so an IPv4-mapped IPv6
-    // spelling of a denied IPv4 address does not dodge the rule.
+    // `URI.getHost` returns bracketed IPv6 literals, such as `[::1]`. Canonicalize
+    // them so an IPv4-mapped spelling cannot bypass a rule for the IPv4 address.
     val (bare, bracketed) =
       if h.startsWith("[") && h.endsWith("]") then (h.substring(1, h.length - 1), true) else (h, false)
     literalIpAddress(bare)
       .orElse(if bracketed || looksLikeIpv6(bare) then ipv6Literal(bare) else None)
       .getOrElse(bare)
 
-  /** Only IPv6-literal characters (hex, `:`, and `.` for an IPv4-mapped suffix).
-    * Gates the no-DNS parse: a real hostname (other letters) never reaches it. */
+  /** Whether a string contains only IPv6-literal characters: hexadecimal digits,
+    * `:`, and `.` for an IPv4-mapped suffix. This guard keeps ordinary hostnames
+    * out of the no-DNS literal parser. */
   private def looksLikeIpv6(h: String): Boolean =
     h.contains(':') && h.forall(c => c == ':' || c == '.' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))
 
-  /** The canonical form of an IPv6 literal, and for an IPv4-mapped address its
-    * dotted-quad IPv4 form (so `[::ffff:169.254.169.254]` is judged as the IPv4
-    * literal `169.254.169.254`). A string with a `:` is parsed as a literal, never
-    * resolved, so this triggers no DNS lookup. */
+  /** Return the canonical form of an IPv6 literal, using dotted-quad IPv4 form
+    * for an IPv4-mapped address. For example, `[::ffff:169.254.169.254]` is
+    * evaluated as `169.254.169.254`. Strings containing `:` are parsed strictly
+    * as literals and never trigger a DNS lookup. */
   private def ipv6Literal(h: String): Option[String] =
     try
       java.net.InetAddress.getByName(h) match
@@ -815,11 +811,11 @@ object Host:
         case _ => None
     catch case _: java.net.UnknownHostException => None
 
-  /** The canonical dotted-quad of a numeric IPv4 literal: 1–4 dot-separated
-    * decimal parts (the forms `InetAddress` accepts without DNS — `127.1` is
-    * 127.0.0.1, `2852039166` is 169.254.169.254), the last part covering the
-    * remaining bytes. None for anything else. The address is built from bytes,
-    * so parsing one never triggers a DNS lookup. */
+  /** Convert a numeric IPv4 literal with one to four decimal parts into canonical
+    * dotted-quad form. These are the no-DNS forms accepted by `InetAddress`:
+    * `127.1` means `127.0.0.1`, and `2852039166` means `169.254.169.254`; the final
+    * part supplies the remaining bytes. Return `None` for other input. Building
+    * the address from bytes avoids a DNS lookup. */
   private[host] def literalIpAddress(h: String): Option[String] =
     val parts = h.split("\\.", -1).toList
     def partValue(p: String): Option[Long] =

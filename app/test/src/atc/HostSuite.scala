@@ -410,15 +410,14 @@ class HostSuite extends munit.FunSuite:
     assertEquals(denyPolicy.openScopeCount, 0)
 
   test("normalizeHost canonicalises equivalent spellings so a deny rule cannot be dodged"):
-    // IPv4 in non-canonical decimal forms, and a trailing dot.
+    // Normalize non-canonical decimal IPv4 forms and trailing dots.
     assertEquals(Host.normalizeHost("2852039166"), "169.254.169.254")
     assertEquals(Host.normalizeHost("169.254.169.254."), "169.254.169.254")
-    // IPv4-mapped IPv6, bracketed as URI.getHost returns it: both spellings of the
-    // metadata address collapse to the IPv4 literal an IPv4 deny rule matches.
+    // `URI.getHost` returns bracketed IPv4-mapped IPv6 addresses. Both forms of
+    // the metadata address must normalize to the IPv4 literal used by deny rules.
     assertEquals(Host.normalizeHost("[::ffff:169.254.169.254]"), "169.254.169.254")
     assertEquals(Host.normalizeHost("[::ffff:a9fe:a9fe]"), "169.254.169.254")
-    // A pure IPv6 literal is canonicalised (expanded); a real hostname is returned
-    // as-is (lower-cased), never resolved.
+    // Expand a pure IPv6 literal, but only lowercase a hostname; never resolve it.
     assertEquals(Host.normalizeHost("[::1]"), "0:0:0:0:0:0:0:1")
     assertEquals(Host.normalizeHost("Example.COM"), "example.com")
 
@@ -477,16 +476,16 @@ class HostSuite extends munit.FunSuite:
     assert(!top.contains("link"), top.toString)
 
   test("a dangling symlink is judged by its (non-existent) target"):
-    // A write through a dangling link CREATES the target, so the policy must judge
-    // the target even though nothing exists there yet — otherwise `write` inside an
-    // allowed tree could create a file anywhere the link points.
+    // Writing through a dangling link creates its target. The policy must evaluate
+    // that target even before it exists, or a link in an allowed tree could create
+    // a file anywhere.
     val outside = Files.createTempDirectory("atc-dangling").nn.toRealPath().nn
     val target = outside.resolve("created.txt") // does not exist
     Files.createSymbolicLink(root.resolve("dangling.txt"), target)
     intercept[SecurityException](write("dangling.txt", "PWNED"))
     intercept[SecurityException](append("dangling.txt", "PWNED"))
     assert(!Files.exists(target))
-    // a dangling symlink pointing inside the writable tree still allows the write
+    // A dangling symlink into the writable tree remains writable.
     val inner = root.resolve("inner-created.txt")
     Files.createSymbolicLink(root.resolve("dangling-ok.txt"), inner)
     write("dangling-ok.txt", "fine")
@@ -496,16 +495,16 @@ class HostSuite extends munit.FunSuite:
     Files.createDirectories(root.resolve("real/sub"))
     Files.writeString(root.resolve("real/sub/f.txt"), "f")
     Files.createSymbolicLink(root.resolve("dirlink"), root.resolve("real"))
-    // listed as, and judged by, its target
+    // List and evaluate the link as its target.
     val top = ls(".")
     assert(top.contains("real"), top.toString)
     assert(!top.exists(_.contains("dirlink")), top.toString)
-    // walk enters the real directory once, never the link
+    // Walk the real directory once without traversing the link.
     val walked = walk(".").map(rel)
     assert(walked.contains("real/sub/f.txt"), walked.toString)
     assert(!walked.exists(_.contains("dirlink")), walked.toString)
     assertEquals(walked.count(_ == "real/sub/f.txt"), 1, walked.toString)
-    // access through the link is judged at the target
+    // Evaluate access through the link at its target.
     assertEquals(read("dirlink/sub/f.txt"), "f")
     assertEquals(access("dirlink/sub/f.txt").path, root.resolve("real/sub/f.txt").toString)
 

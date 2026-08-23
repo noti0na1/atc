@@ -55,9 +55,9 @@ final class Agent(
   extraInstructions: Option[String],
 ):
   var history: List[Msg] = Nil
-  /** Every model call since the last `clear()`, by what it was for
-    * ([[Agent.Turns]], [[Agent.Chat]], ...), in the order the purposes first
-    * occurred. Guarded: the next-input prediction records from its own thread. */
+  /** Every model call since the last `clear()`, grouped by purpose
+    * ([[Agent.Turns]], [[Agent.Chat]], ...) in order of first use. Access is
+    * synchronized because next-input prediction records usage on another thread. */
   private val usageBy = scala.collection.mutable.LinkedHashMap[String, TokenUsage]()
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
@@ -150,17 +150,14 @@ final class Agent(
       var outcome = Continue
       try while outcome == Continue do outcome = round()
       catch
-        // A failed turn must leave the transcript well-formed for the next request,
-        // and how depends on where it broke (a provider rejects both two user
-        // messages in a row and a tool_use with no tool_result):
-        //  - the assistant asked for tools but we failed before recording their
-        //    results (e.g. rendering a tool call threw): answer every pending call
-        //    with an error, so no `tool_use` is left dangling;
-        //  - the last message is the user's (the model call threw immediately): add
-        //    an assistant marker, so the next turn's user message is not the second
-        //    in a row;
-        //  - otherwise the history already ends on an assistant/tool-result message
-        //    and needs nothing (a second assistant marker would itself be invalid).
+        // Keep the transcript valid after a failed turn. Providers reject consecutive
+        // user messages and tool requests without matching results:
+        //  - If tool execution failed before its results were recorded, add an error
+        //    result for every pending request.
+        //  - If the model call failed immediately after the user message, add an
+        //    assistant marker to preserve role alternation.
+        //  - Otherwise, the history already ends with an assistant message or tool
+        //    result and needs no repair; another assistant marker would be invalid.
         case e if scala.util.control.NonFatal(e) =>
           val marker = s"[turn failed: ${Option(e.getMessage).getOrElse(e.toString)}]"
           history.lastOption match
@@ -245,11 +242,10 @@ final class Agent(
           ui.warn("model kept requesting tools after exhausting the tool budget; stopping this turn")
           Done
 
-    /** The budget is a checkpoint, not a wall: ask the UI (the human, when there is
-      * one) for another `maxToolCalls`. A budget of 0 means "no tools" and is never
-      * extended. A decline is remembered for the rest of the turn: with several
-      * calls left in the batch (or a model that keeps asking), the user must not be
-      * re-prompted for the same "no". */
+    /** Treat the budget as a checkpoint by asking the user for another
+      * `maxToolCalls` allocation. A budget of zero disables tools and cannot be
+      * extended. If the user declines, remember that decision for the rest of the
+      * turn to avoid repeated prompts from the same batch or later rounds. */
     private var budgetDenied = false
     private def extendBudget(): Boolean =
       if budgetDenied || config.maxToolCalls <= 0 then false
@@ -307,10 +303,10 @@ object Agent:
     * time by [[Agent]]'s calibration against the provider's own numbers. */
   def estimateTokens(text: String): Long = (text.length + 3) / 4
 
-  /** A message's share of a request, with a little per-message framing. The
-    * provider-native replay payload (Anthropic thinking blocks, Responses
-    * reasoning items) goes back on the wire whole, so its rendered size counts
-    * too — a thinking-heavy history is otherwise wildly undercounted. */
+  /** Estimate a message's contribution to a request, including per-message
+    * framing. Provider-native replay payloads, such as Anthropic thinking blocks
+    * and Responses reasoning items, are resent in full. Their rendered size must
+    * therefore be included to avoid undercounting reasoning-heavy histories. */
   def estimateTokens(msg: Msg): Long = msg match
     case Msg.User(t) => estimateTokens(t) + 4
     case Msg.Assistant(t, calls, native) =>

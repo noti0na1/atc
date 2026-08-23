@@ -219,9 +219,9 @@ class PermissionSuite extends munit.FunSuite:
     assert(!ran)
 
   test("a process spawned in a requestExec block cannot be driven after the block closes"):
-    // A one-time grant must not leave a drivable process handle behind: the handle
-    // carries its spawning scope and is refused once the block has closed, and the
-    // base capability does not list it.
+    // A one-time grant must not leave a usable process handle. The handle records
+    // its originating scope, is refused after the block closes, and is not listed
+    // through the base capability.
     val env = TestEnv(commands = List("cat"))
     import env.given
     given ex: Exec = env.host.processes
@@ -318,8 +318,8 @@ class PermissionSuite extends munit.FunSuite:
     assert(d.getMessage.nn.contains("denyCommands"), d.getMessage)
 
   test("an allowed command can read a classified file (the command grant is the user's decision)"):
-    // The classified boundary holds for the file API; a granted command is
-    // trusted with whatever it can read — that is what granting it means.
+    // Classification constrains the file API. A permitted command is trusted with
+    // anything the operating system allows it to read.
     val env = TestEnv(TestEnv.withSecrets, commands = List("cat"))
     import env.given
     given ex: Exec = env.host.processes

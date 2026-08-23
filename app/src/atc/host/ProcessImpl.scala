@@ -7,12 +7,11 @@ import atc.perms.{Policy, ScopeId}
   * plus the session-level id and the hooks that show the user what the agent
   * sends it.
   *
-  * The handle carries the id of the scope its `spawn` ran in and refuses every
-  * operation once that scope has closed — the same "escaped its block" refusal
-  * a leaked capability gets (`Policy.requireScopeOpen`). Without it, a process
-  * spawned inside a `requestExec` granted *once* could still be driven
-  * afterwards through `runningProcesses`, a session-long backdoor around the
-  * one-time grant. */
+  * The handle records the scope in which `spawn` ran and refuses all operations
+  * after that scope closes, matching the "escaped its block" treatment of a
+  * leaked capability (`Policy.requireScopeOpen`). Without this check, a process
+  * started by a one-time `requestExec` grant could remain controllable through
+  * `runningProcesses` for the rest of the session. */
 final class ProcessImpl(
   val id: Int,
   private[atc] val managed: Processes.ManagedProcess,
@@ -38,6 +37,5 @@ final class ProcessImpl(
     if managed.awaitExit(timeoutMs) then Some(managed.result()) else None
   def kill(): Unit = { open(); managed.kill() }
   override def toString: String =
-    // No scope check (and `managed` directly): a toString that throws would break
-    // the REPL echo of a handle whose block has already closed.
+    // Bypass the scope check so the REPL can still render a handle after its block closes.
     s"Process(p$id, \"${managed.line}\", ${managed.exitCode.fold("running")(c => s"exited $c")})"

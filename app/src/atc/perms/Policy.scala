@@ -127,15 +127,14 @@ final class Policy(
       throw SecurityException(s"Permission scope $id is not open (the capability escaped its block?)")
     )
 
-  /** Refuse an operation on a handle (e.g. a spawned `Process`) whose scope has
-    * closed — the same "escaped its block" refusal a leaked capability gets. */
+  /** Refuse an operation on a handle, such as a spawned `Process`, after its
+    * scope closes. This is the same check applied to an escaped capability. */
   def requireScopeOpen(id: ScopeId): Unit = { scope(id); () }
 
-  /** Whether a handle created in scope `owned` may be reached through a
-    * capability of scope `caller`: only while both are open and on the same
-    * chain (one is the other or an ancestor of it). A scope opened by a
-    * `request*` block is closed when the block ends, so a handle it spawned is
-    * unreachable from the base scope afterwards. */
+  /** Whether a capability in `caller` may reach a handle created in `owned`.
+    * Both scopes must remain open and belong to the same chain, meaning one is
+    * the other or its ancestor. Closing a `request*` scope therefore makes its
+    * handles unreachable from the base scope. */
   def scopeVisibleFrom(caller: ScopeId, owned: ScopeId): Boolean =
     (scopes.get(caller), scopes.get(owned)) match
       case (Some(c), Some(o)) =>

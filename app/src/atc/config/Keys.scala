@@ -37,8 +37,8 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
 object KeyBindings:
   val empty: KeyBindings = KeyBindings(Nil)
 
-  /** Read the `keys.properties` files that exist, most specific first. A file
-    * readable by other users earns a warning (it holds API keys). */
+  /** Read existing `keys.properties` files from most to least specific. Warn if
+    * a file containing API keys is readable by other users. */
   def load(paths: List[Path]): KeyBindings =
     val present = paths.filter(Files.isRegularFile(_)).distinctBy(_.toAbsolutePath.normalize)
     present.foreach { p =>
@@ -47,8 +47,8 @@ object KeyBindings:
     }
     KeyBindings(present.map(p => p -> read(p)))
 
-  /** Whether `p` is group- or other-readable (false where POSIX permissions
-    * do not exist or cannot be read). */
+  /** Whether `p` is readable by its group or by other users. Returns `false`
+    * when POSIX permissions are unavailable or cannot be read. */
   private def sharedReadable(p: Path): Boolean =
     try
       import java.nio.file.attribute.PosixFilePermission as P
