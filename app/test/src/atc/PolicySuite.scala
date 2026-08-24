@@ -66,7 +66,7 @@ class PolicySuite extends munit.FunSuite:
     val abs = PathPattern(root.resolve("build").toString, root)
     assert(abs.matches(root.resolve("build/x")))
     assert(!abs.matches(root.resolve("src")))
-    val absoluteGlob = PathPattern(root.resolve("src/*/A.scala").toString, root)
+    val absoluteGlob = PathPattern(s"${PathPattern.portable(root)}/src/*/A.scala", root)
     assert(absoluteGlob.matches(root.resolve("src/main/A.scala")))
     assert(!absoluteGlob.matches(root.resolve("src/main/B.scala")))
     val fileSystemRoot = PathPattern(root.getRoot.nn.toString, root)

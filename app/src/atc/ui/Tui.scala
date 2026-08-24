@@ -194,7 +194,7 @@ final class Tui(historyFile: Path) extends AgentUI:
       // on), as xterm's modifyOtherKeys, and Alt/Option+Enter as ESC CR.
       keyMap.bind(Reference("atc-newline"), "\u001b[13;2u", "\u001b[27;2;13~", "\u001b\r")
   private val g: Glyphs =
-    if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then Glyphs.unicode
+    if terminal.encoding().name.toUpperCase.contains("UTF") && System.getenv("ATC_ASCII") == null then Glyphs.unicode
     else Glyphs.ascii
 
   // ── styles (by role, see `Ansi`) ──────────────────────────────────

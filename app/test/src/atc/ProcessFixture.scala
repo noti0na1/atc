@@ -59,25 +59,7 @@ object ProcessFixture:
   private val base: List[String] =
     List(javaExecutable, "-Dfile.encoding=UTF-8", "-cp", classpath, "atc.TestProcess")
 
-  private def renderArg(arg: String): String =
-    val plain = arg.nonEmpty && arg.forall { char =>
-      (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
-      (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char) || (Windows && char == '\\')
-    }
-    if plain then arg
-    else
-      val escaped = StringBuilder()
-      arg.foreach:
-        case '\\' => escaped.append("\\\\")
-        case '"' => escaped.append("\\\"")
-        case '\n' => escaped.append("\\n")
-        case '\r' => escaped.append("\\r")
-        case '\t' => escaped.append("\\t")
-        case char if Character.isISOControl(char) => escaped.append(f"\\u${char.toInt}%04x")
-        case char => escaped.append(char)
-      s"\"$escaped\""
-
-  def line(argv: String*): String = argv.map(renderArg).mkString(" ")
+  def line(argv: String*): String = Processes.Stage(argv.toList).line
 
   def command(mode: String, args: String*): String = line((base ++ (mode +: args))*)
 

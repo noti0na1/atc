@@ -3,7 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, LinkOption, Path}
 
 /** The host's `Interface` implementation under the policy, called directly. */
 class HostSuite extends munit.FunSuite:
@@ -63,7 +63,7 @@ class HostSuite extends munit.FunSuite:
 
   private def rel(p: String) =
     val path = Path.of(p)
-    if path.isAbsolute then root.relativize(path).toString else p
+    if path.isAbsolute then Host.portablePath(root.relativize(path)) else p
 
   test("plain read/write within cwd, relative paths"):
     assertEquals(read("src/A.scala"), "object A")
@@ -163,7 +163,7 @@ class HostSuite extends munit.FunSuite:
     Files.writeString(outside.resolve("o.txt"), "x")
     decisions = List(Decision.AllowSession)
     requestFiles(outside.toString, atc.lib.Access.Read, "look outside") {
-      assertEquals(ls(outside.toString), List(outside.resolve("o.txt").toString)) // absolute: not under cwd
+      assertEquals(ls(outside.toString), List(Host.portablePath(outside.resolve("o.txt")))) // absolute: not under cwd
     }
 
   test("find matches the name for a plain glob and the relative path for one with / or **"):
@@ -539,11 +539,12 @@ class HostSuite extends munit.FunSuite:
     val outside = Files.createTempDirectory("atc-junction-target").nn.toRealPath().nn
     Files.writeString(outside.resolve("secret.txt"), "outside")
     val junction = root.resolve("junction-out").nn
-    val command = s"mklink /J \"$junction\" \"$outside\""
-    val process = ProcessBuilder("cmd.exe", "/d", "/c", command).redirectErrorStream(true).start().nn
+    val process = ProcessBuilder("cmd.exe", "/d", "/c", "mklink", "/J", junction.toString, outside.toString)
+      .redirectErrorStream(true).start().nn
     val output = String(process.getInputStream.nn.readAllBytes(), java.nio.charset.Charset.defaultCharset())
     val exit = process.waitFor()
-    assume(exit == 0 && Files.isDirectory(junction), s"could not create a junction: $output")
+    assertEquals(exit, 0, s"could not create a junction: $output")
+    assert(Files.isDirectory(junction, LinkOption.NOFOLLOW_LINKS), s"junction was not created: $output")
     intercept[SecurityException](read("junction-out/secret.txt"))
     assert(!ls(".").exists(_.contains("junction-out")), ls(".").toString)
 

@@ -58,7 +58,7 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Tui.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)
 
-  test("history is an owner-only regular file and a final symlink is refused"):
+  test("history is an owner-only regular file where POSIX permissions exist"):
     val dir = Files.createTempDirectory("atc-history").nn
     val history = dir.resolve("nested/history").nn
     assertEquals(Tui.secureHistoryFile(history), history.toRealPath())
@@ -70,13 +70,16 @@ class TuiSuite extends munit.FunSuite:
       Tui.secureHistoryFile(history)
       val perms = Files.getPosixFilePermissions(history).nn
       assertEquals(perms, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
-      val target = dir.resolve("target").nn
-      Files.writeString(target, "do not append here")
-      val link = dir.resolve("history-link").nn
-      Files.createSymbolicLink(link, target)
-      val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
-      assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
-      assertEquals(Files.readString(target), "do not append here")
+
+  test("history refuses a final symbolic link"):
+    val dir = Files.createTempDirectory("atc-history-link").nn
+    val target = dir.resolve("target").nn
+    Files.writeString(target, "do not append here")
+    val link = dir.resolve("history-link").nn
+    assume(TestEnv.trySymbolicLink(link, target), "symbolic links are unavailable for this account")
+    val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
+    assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
+    assertEquals(Files.readString(target), "do not append here")
 
   // ── sanitization, widths, durations, the tail buffer ─────────────
 

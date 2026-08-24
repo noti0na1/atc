@@ -4,7 +4,8 @@ import atc.lib.*
 import atc.perms.{PathPattern, Perm, ScopeId}
 
 import java.nio.charset.StandardCharsets
-import java.nio.file.{FileSystems, Files, Path, Paths, StandardOpenOption}
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.{FileSystems, Files, LinkOption, Path, Paths, StandardOpenOption}
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success, Try, Using}
 import scala.util.control.NonFatal
@@ -122,12 +123,13 @@ private[host] trait HostFiles:
       stream.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).flatMap { entry =>
         try
           // Canonicalize every entry. Windows junctions/reparse points are not
-          // reliably reported by isSymbolicLink; comparing the canonical target
-          // also keeps them out of recursive traversal and evaluates policy on
-          // what the entry actually reaches.
+          // reported as symbolic links, but their NOFOLLOW attributes are
+          // `isOther`. Keep every final reparse point out of recursive traversal
+          // and evaluate policy on what it actually reaches.
           val lexical = entry.toAbsolutePath.nn.normalize.nn
           val path = PathPattern.canonical(lexical)
-          val isLinkLike = Files.isSymbolicLink(entry) || path != lexical
+          val attributes = Files.readAttributes(entry, classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS).nn
+          val isLinkLike = attributes.isSymbolicLink || attributes.isOther
           Option.when(!gitIgnore.ignores(entry) && policy.effective(scope, path).canRead)((path, isLinkLike))
         catch case _: Exception => None
       }

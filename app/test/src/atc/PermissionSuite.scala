@@ -128,7 +128,7 @@ class PermissionSuite extends munit.FunSuite:
     val secrets = env.root.resolve("secrets").toString
     val e = intercept[SecurityException](env.host.exec(fixture("pwd"), Nil, secrets))
     assert(e.getMessage.nn.contains("classified"), e.getMessage)
-    assert(e.getMessage.nn.contains(secrets), e.getMessage) // the path, not a literal "$dir"
+    assert(e.getMessage.nn.contains(Host.portablePath(Path.of(secrets))), e.getMessage) // the path, not "$dir"
 
   test("exec's working-directory check honours a requestFiles grant (allow once)"):
     val env = TestEnv(commands = permits("pwd"))
@@ -339,9 +339,10 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(env.host.exec(s"${fixture("unsorted")} | $sort | $cat").stdout, "a\nb\nc\n")
     assertEquals(env.host.exec(s"${fixture("fail", "1")} | $cat").exitCode, 1) // pipefail: the failing stage wins
     val failing = fixture("fail", "7", "definitely missing")
+    val failingLine = Processes.parsePipeline(failing).stages.head.line
     val err = env.host.exec(s"$failing | $cat")
     assertEquals(err.exitCode, 7)
-    assert(err.stderr.startsWith(s"[stage 1: $failing]\n"), err.stderr)
+    assert(err.stderr.startsWith(s"[stage 1: $failingLine]\n"), err.stderr)
     val e = intercept[SecurityException](env.host.exec(s"${fixture("echo", "hi")} | $sort | head"))
     assert(
       e.getMessage.nn.contains("'head'") && e.getMessage.nn.contains("""requestExec(Set("head")"""),
@@ -398,6 +399,7 @@ class PermissionSuite extends munit.FunSuite:
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     val catLine = fixture("cat")
+    val catShown = Processes.parsePipeline(catLine).stages.head.line
     val cat = env.host.spawn(catLine)
     assert(cat.isAlive && cat.exitCode.isEmpty)
     assertEquals(cat.read(), "") // nothing yet, and read never blocks
@@ -416,7 +418,7 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(
       env.processEvents.toList,
       List(
-        s"p${cat.id} started: $catLine",
+        s"p${cat.id} started: $catShown",
         s"p${cat.id} < hello\n",
         s"p${cat.id} < a b ",
         s"p${cat.id} < c\n",
@@ -429,7 +431,7 @@ class PermissionSuite extends munit.FunSuite:
     sorter.closeStdin()
     assertEquals(sorter.readUntil("(?s)a\nb\n", 5000), "a\nb\n")
     assertEquals(sorter.waitFor(5000).map(_.exitCode), Some(0))
-    assertEquals(cat.toString, s"Process(p${cat.id}, \"$catLine\", exited 0)")
+    assertEquals(cat.toString, s"Process(p${cat.id}, \"$catShown\", exited 0)")
 
   test("spawn: waits time out with the output so far, kill works, the count is bounded, the session end kills all"):
     val env = TestEnv(commands = permits("cat", "sleep"))
