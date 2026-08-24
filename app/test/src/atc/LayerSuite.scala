@@ -26,11 +26,17 @@ class LayerSuite extends munit.FunSuite:
     val home: Path = Files.createTempDirectory("atc-layer-home").nn.toRealPath().nn
     val cwd: Path = Files.createTempDirectory("atc-layer-cwd").nn.toRealPath().nn
     /** `$HOME` and `$CWD` in a layer's text become this world's directories. */
+    private def jsonStringContent(value: String): String =
+      val quoted = ujson.write(value)
+      quoted.substring(1, quoted.length - 1)
     private def write(p: Path, text: String): Option[Path] =
       if text.isEmpty then None
       else
         Option(p.getParent).foreach(Files.createDirectories(_))
-        Files.writeString(p, text.replace("$HOME", home.toString).replace("$CWD", cwd.toString))
+        Files.writeString(
+          p,
+          text.replace("$HOME", jsonStringContent(home.toString)).replace("$CWD", jsonStringContent(cwd.toString)),
+        )
         Some(p)
     val globalPath: Path = home.resolve(".atc").resolve("config.json").nn
     write(globalPath, global)
@@ -500,7 +506,7 @@ class LayerSuite extends munit.FunSuite:
     val real = Files.createTempDirectory("atc-symlink-real").nn.toRealPath().nn
     val linkParent = Files.createTempDirectory("atc-symlink-base").nn.toRealPath().nn
     val link = linkParent.resolve("proj").nn
-    Files.createSymbolicLink(link, real)
+    assume(TestEnv.trySymbolicLink(link, real), "symbolic links are unavailable for this account")
     Files.createDirectories(real.resolve(".atc"))
     Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
     // Load the project through the symlink, before the caller canonicalizes it.

@@ -6,7 +6,7 @@ $envFile = if ($env:ATC_ENV_FILE) { $env:ATC_ENV_FILE } else { Join-Path $root '
 
 # Load simple KEY=value entries without replacing variables inherited from the shell.
 if (Test-Path -LiteralPath $envFile -PathType Leaf) {
-  foreach ($line in Get-Content -LiteralPath $envFile) {
+  foreach ($line in Get-Content -LiteralPath $envFile -Encoding UTF8) {
     if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
       $name = $Matches[1]
       $value = $Matches[2].Trim()
@@ -35,14 +35,13 @@ if (-not $needsBuild -and $env:ATC_SKIP_BUILD -ne '1') {
 }
 
 if ($needsBuild) {
-  Write-Host '[start.cmd] building distribution (Mill JVM launcher)...' -ForegroundColor DarkGray
-  $oldMillVersion = $env:MILL_VERSION
+  Write-Host '[start.cmd] building distribution (Mill Windows launcher)...' -ForegroundColor DarkGray
+  Push-Location -LiteralPath $root
   try {
-    $env:MILL_VERSION = '1.1.8-jvm'
-    & bash (Join-Path $root 'mill') dist
+    & (Join-Path $root 'mill.bat') dist
     if ($LASTEXITCODE -ne 0) { throw "Mill exited with code $LASTEXITCODE" }
   } finally {
-    $env:MILL_VERSION = $oldMillVersion
+    Pop-Location
   }
 }
 
@@ -56,9 +55,37 @@ $javaArgs = [Collections.Generic.List[string]]::new()
 if ($env:ATC_JAVA_OPTS) {
   foreach ($option in ($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })) { $javaArgs.Add($option) }
 }
+$javaArgs.Add('-Dfile.encoding=UTF-8')
 $javaArgs.Add("-Datc.lib.classpath=$libJar")
 $javaArgs.Add('-jar')
 $javaArgs.Add($jar)
 $javaArgs.AddRange($argsList)
-& java @javaArgs
+
+$java = if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe') -PathType Leaf)) {
+  Join-Path $env:JAVA_HOME 'bin\java.exe'
+} else {
+  (Get-Command java.exe -CommandType Application -ErrorAction Stop).Source
+}
+$versionProbe = New-Object System.Diagnostics.Process
+$versionProbe.StartInfo.FileName = $java
+$versionProbe.StartInfo.Arguments = '-version'
+$versionProbe.StartInfo.UseShellExecute = $false
+$versionProbe.StartInfo.CreateNoWindow = $true
+$versionProbe.StartInfo.RedirectStandardOutput = $true
+$versionProbe.StartInfo.RedirectStandardError = $true
+try {
+  if (-not $versionProbe.Start()) { throw "Could not start '$java' to check its version." }
+  $versionText = $versionProbe.StandardOutput.ReadToEnd() + $versionProbe.StandardError.ReadToEnd()
+  $versionProbe.WaitForExit()
+} finally {
+  $versionProbe.Dispose()
+}
+if (-not ($versionText -match '(?im)^\S+\s+version\s+"(?<major>\d+)(?:\.(?<minor>\d+))?')) {
+  throw "Unable to determine the Java version from '$java'. Java 17 or newer is required."
+}
+$major = [int]$Matches.major
+if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
+if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
+
+& $java @javaArgs
 exit $LASTEXITCODE

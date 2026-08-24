@@ -64,7 +64,10 @@ object KeyBindings:
     val props = Properties()
     try
       val in = Files.newBufferedReader(path).nn
-      try props.load(in)
+      try
+        in.mark(1)
+        if in.read() != 0xfeff then in.reset()
+        props.load(in)
       finally in.close()
     catch case e: Exception => throw IllegalArgumentException(s"Cannot read keys $path: ${e.getMessage}")
     props.stringPropertyNames().nn.asScala.iterator

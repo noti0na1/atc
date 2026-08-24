@@ -692,7 +692,7 @@ cmd_run() {
   dev_dir="$(dev_source)"
   [[ -z "$dev_dir" ]] || echo "atc: running the local build from ${dev_dir} ('atc update' restores the release)" >&2
   # shellcheck disable=SC2086
-  exec java ${ATC_JAVA_OPTS:-} -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" "$@"
+  exec java ${ATC_JAVA_OPTS:-} -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" "$@"
 }
 
 main() {

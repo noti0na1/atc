@@ -191,8 +191,17 @@ object Config:
       .map(_.trim).filter(line => line == entry || line == s"!$entry").lastOption
     if lastRule.contains(entry) then false
     else
-      val prefix = current.fold("")(_.stripSuffix("\n") + "\n")
-      Files.writeString(path, s"$prefix$entry\n")
+      val newline = current.flatMap { text =>
+        val index = text.indexWhere(c => c == '\r' || c == '\n')
+        Option.when(index >= 0) {
+          if text.charAt(index) == '\r' && index + 1 < text.length && text.charAt(index + 1) == '\n' then "\r\n"
+          else text.charAt(index).toString
+        }
+      }.getOrElse("\n")
+      val prefix = current.fold("") { text =>
+        if text.isEmpty then "" else text.stripSuffix("\r\n").stripSuffix("\n").stripSuffix("\r") + newline
+      }
+      Files.writeString(path, s"$prefix$entry$newline")
       true
 
   // ── layers ────────────────────────────────────────────────────────
@@ -207,6 +216,10 @@ object Config:
 
   /** As [[load]], with the global path given explicitly (tests). */
   def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
+    explicit.foreach { path =>
+      if !Files.exists(path) then throw IllegalArgumentException(s"Explicit config does not exist: $path")
+      if !Files.isRegularFile(path) then throw IllegalArgumentException(s"Explicit config is not a regular file: $path")
+    }
     val root = projectRoot(cwd)
     val project = root.map(projectPath)
     val candidates =
@@ -244,7 +257,7 @@ object Config:
 
   private def readObj(text: String, where: String): ujson.Obj =
     val parsed =
-      try ujson.read(text)
+      try ujson.read(text.stripPrefix("\uFEFF"))
       catch case e: Exception => throw IllegalArgumentException(s"Cannot parse config $where: ${e.getMessage}")
     parsed match
       case o: ujson.Obj => o
@@ -533,7 +546,9 @@ object Config:
           case Some(prev) =>
             text.substring(0, prev.valueEnd) + s",${obj.separator}$entry" + text.substring(prev.valueEnd)
           case None if obj.members.isEmpty =>
-            text.substring(0, obj.open + 1) + s"\n  $entry\n" + text.substring(obj.close)
+            val separator = obj.separator
+            val newline = if separator.startsWith("\r\n") then "\r\n" else "\n"
+            text.substring(0, obj.open + 1) + separator + entry + newline + text.substring(obj.close)
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
 

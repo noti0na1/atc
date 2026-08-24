@@ -1,10 +1,10 @@
 package atc
 
 import atc.config.Config
-import atc.perms.Mode
+import atc.perms.{Mode, PathPattern}
 import atc.ui.Ansi
 
-import java.nio.file.{Path, Paths}
+import java.nio.file.{Files, Path, Paths}
 
 /** Command line entry point: parses the flags and starts [[App]]. */
 object Main:
@@ -26,8 +26,8 @@ object Main:
 
   def parseArgs(args: List[String], acc: Args = Args()): Args = args match
     case Nil => acc
-    case ("-c" | "--config") :: p :: rest => parseArgs(rest, acc.copy(config = Some(Paths.get(p))))
-    case ("-C" | "--cwd") :: p :: rest => parseArgs(rest, acc.copy(cwd = Paths.get(p).toAbsolutePath.normalize))
+    case ("-c" | "--config") :: p :: rest => parseArgs(rest, acc.copy(config = Some(path(p))))
+    case ("-C" | "--cwd") :: p :: rest => parseArgs(rest, acc.copy(cwd = path(p).toAbsolutePath.normalize))
     case ("-m" | "--model") :: m :: rest => parseArgs(rest, acc.copy(model = Some(m)))
     case ("-p" | "--prompt") :: p :: rest => parseArgs(rest, acc.copy(prompt = Some(p)))
     case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
@@ -36,7 +36,33 @@ object Main:
     case "--init-global" :: rest => parseArgs(rest, acc.copy(initGlobal = true))
     case ("-h" | "--help") :: rest => parseArgs(rest, acc.copy(help = true))
     case ("-v" | "--version") :: rest => parseArgs(rest, acc.copy(version = true))
+    case flag :: Nil if Set("-c", "--config", "-C", "--cwd", "-m", "--model", "-p", "--prompt", "--mode")(flag) =>
+      throw IllegalArgumentException(s"$flag requires a value (try --help)")
     case other :: _ => throw IllegalArgumentException(s"Unknown argument: $other (try --help)")
+
+  private def path(value: String): Path =
+    val expanded = PathPattern.expandHome(value)
+    if java.io.File.separatorChar == '\\' then
+      PathPattern.invalidWindowsPath(expanded).foreach(reason =>
+        throw IllegalArgumentException(s"Invalid Windows path ${atc.host.Host.scalaString(value)}: $reason")
+      )
+    Paths.get(expanded).nn
+
+  /** Validate paths only for actions that use them, so `atc --help` and
+    * `--version` remain available from a deleted working directory. */
+  private[atc] def validateArgs(args: Args): Args =
+    if !args.help && !args.version && !args.initGlobal then
+      if !Files.exists(args.cwd) then
+        throw IllegalArgumentException(s"Working directory does not exist: ${args.cwd}")
+      if !Files.isDirectory(args.cwd) then
+        throw IllegalArgumentException(s"Working directory is not a directory: ${args.cwd}")
+    if !args.help && !args.version && !args.init && !args.initGlobal then
+      args.config.foreach { config =>
+        if !Files.exists(config) then throw IllegalArgumentException(s"Config file does not exist: $config")
+        if !Files.isRegularFile(config) then
+          throw IllegalArgumentException(s"Config path is not a regular file: $config")
+      }
+    args
 
   lazy val usage: String =
     s"""atc $Version — a minimal coding agent with tracked capabilities
@@ -56,7 +82,7 @@ object Main:
 
   def main(argv: Array[String]): Unit =
     val args: Args =
-      try parseArgs(argv.toList)
+      try validateArgs(parseArgs(argv.toList))
       catch
         case e: IllegalArgumentException =>
           System.err.println(Ansi.sanitize(Option(e.getMessage).getOrElse(e.getClass.getSimpleName)))

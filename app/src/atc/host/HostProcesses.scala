@@ -56,7 +56,7 @@ private[host] trait HostProcesses:
         else
           val stages = missing.map(stage => s"'${stage.line}'").mkString(", ")
           s"stage${if missing.lengthIs > 1 then "s" else ""} $stages of the pipeline"
-      val patterns = missing.map(stage => s"\"${stage.argv.head} *\"").mkString(", ")
+      val patterns = missing.map(stage => Host.scalaString(stage.line)).mkString(", ")
       throw SecurityException(
         s"Access denied: $target matches no permitted pattern. Use requestExec(Set($patterns), reason) { ... } to ask the user."
       )
@@ -82,7 +82,8 @@ private[host] trait HostProcesses:
 
   private def processBuilders(pipeline: Processes.Pipeline, dir: Path): List[ProcessBuilder] =
     pipeline.stages.map { stage =>
-      val builder = ProcessBuilder(stage.argv.asJava).directory(dir.toFile).nn
+      val argv = Processes.executableArgv(stage.argv, dir)
+      val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
     }
@@ -215,6 +216,6 @@ private[host] trait HostProcesses:
       val error = result.stderr.trim
       val tail = if error.isEmpty then "" else s"; stderr: ${error.takeRight(Host.ExecErrorTailChars)}"
       throw RuntimeException(
-        s"'${(Processes.parseCommandLine(command) ++ args).mkString(" ")}' exited with ${result.exitCode}$tail (use exec(...) to inspect a failure)"
+        s"'${withArgs(command, args).line}' exited with ${result.exitCode}$tail (use exec(...) to inspect a failure)"
       )
     result.stdout

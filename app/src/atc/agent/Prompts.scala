@@ -1,6 +1,7 @@
 package atc.agent
 
 import atc.llm.SystemPrompt
+import atc.host.Host
 import atc.perms.{Mode, Policy}
 
 import java.nio.file.Path
@@ -88,7 +89,7 @@ object Prompts:
        |capabilities cannot escape their scope, and the host enforces the user's permission policy at runtime.
        |
        |Environment
-       |- working directory: ${quoted(cwd.toString)}
+       |- working directory: ${quoted(Host.portablePath(cwd))}
        |- OS: ${quoted(os)}
        |- REPL: $replDescription
        |- classified model (trusted isolated model used by `classifiedChat`): ${

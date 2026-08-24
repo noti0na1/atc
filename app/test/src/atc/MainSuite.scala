@@ -1,7 +1,7 @@
 package atc
 
 import atc.perms.{Decision, ExecRequest, Mode}
-import java.nio.file.Paths
+import java.nio.file.{Files, Paths}
 
 /** The CLI argument parser (Main.parseArgs). */
 class MainSuite extends munit.FunSuite:
@@ -29,7 +29,27 @@ class MainSuite extends munit.FunSuite:
     val e = intercept[IllegalArgumentException](parse("--bogus"))
     assert(e.getMessage.nn.contains("Unknown argument"), e.getMessage)
     intercept[IllegalArgumentException](parse("--mode", "bogus"))
-    intercept[IllegalArgumentException](parse("-p")) // missing value
+    val missing = intercept[IllegalArgumentException](parse("-p"))
+    assert(missing.getMessage.nn.contains("requires a value"), missing.getMessage)
+
+  test("Windows-friendly path syntax expands home and validates paths before running"):
+    assertEquals(parse("-C", "~").cwd, Paths.get(scala.util.Properties.userHome).toAbsolutePath.normalize)
+    val missingDir = Files.createTempDirectory("atc-main-missing").nn.resolve("gone")
+    val cwdError = intercept[IllegalArgumentException](Main.validateArgs(Main.Args(cwd = missingDir)))
+    assert(cwdError.getMessage.nn.contains("does not exist"), cwdError.getMessage)
+    val file = Files.createTempFile("atc-main-file", ".txt").nn
+    val fileError = intercept[IllegalArgumentException](Main.validateArgs(Main.Args(cwd = file)))
+    assert(fileError.getMessage.nn.contains("not a directory"), fileError.getMessage)
+    val cwd = Files.createTempDirectory("atc-main-cwd").nn
+    val configError = intercept[IllegalArgumentException](
+      Main.validateArgs(Main.Args(cwd = cwd, config = Some(cwd.resolve("missing.json"))))
+    )
+    assert(configError.getMessage.nn.contains("Config file does not exist"), configError.getMessage)
+    // Informational/global-init actions do not depend on cwd or an explicit config.
+    Main.validateArgs(Main.Args(cwd = missingDir, help = true, config = Some(missingDir)))
+    if java.io.File.separatorChar == '\\' then
+      intercept[IllegalArgumentException](parse("-C", "C:work"))
+      intercept[IllegalArgumentException](parse("-c", "NUL.json"))
 
   test("scripted runs deny permission requests without prompting unless approve-all is explicit"):
     val request = ExecRequest(List("git status"), "test")

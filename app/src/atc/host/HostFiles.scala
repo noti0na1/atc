@@ -17,33 +17,41 @@ private[host] trait HostFiles:
   /** Resolve a path against the host working directory and canonicalize it for
     * policy evaluation, including symlinks and dangling write targets. */
   private[atc] def canonical(path: String): Path =
-    val raw = Paths.get(PathPattern.expandHome(path)).nn
+    val expanded = PathPattern.expandHome(path)
+    if Host.Windows then
+      Host.invalidWindowsPath(expanded).foreach(reason =>
+        throw IllegalArgumentException(s"Invalid Windows path ${Host.scalaString(path)}: $reason")
+      )
+    val raw = Paths.get(expanded).nn
     PathPattern.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
 
   private def denied(path: Path, operation: String, permission: Perm, hint: String): SecurityException =
+    val shown = Host.portablePath(path)
     SecurityException(
-      s"Access denied: $operation on '$path' is not permitted (current permission: ${permission.describe}). $hint"
+      s"Access denied: $operation on '$shown' is not permitted (current permission: ${permission.describe}). $hint"
     )
 
   private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = policy.effective(scope, path)
     if !permission.canRead then
+      val shown = Host.portablePath(path)
       throw denied(
         path,
         operation,
         permission,
-        s"""Use requestFiles("$path", Access.Read, reason) { ... } to ask the user."""
+        s"Use requestFiles(${Host.scalaString(shown)}, Access.Read, reason) { ... } to ask the user."
       )
     permission
 
   private[atc] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = policy.effective(scope, path)
     if !permission.canWrite then
+      val shown = Host.portablePath(path)
       throw denied(
         path,
         operation,
         permission,
-        s"""Use requestFiles("$path", Access.Write, reason) { ... } to ask the user."""
+        s"Use requestFiles(${Host.scalaString(shown)}, Access.Write, reason) { ... } to ask the user."
       )
     permission
 
@@ -55,7 +63,7 @@ private[host] trait HostFiles:
   ): Unit =
     if permission.classified then
       throw SecurityException(
-        s"Access denied: '$path' is classified; '$operation' would reveal its content. Use $alternative instead."
+        s"Access denied: '${Host.portablePath(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
       )
 
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
@@ -87,7 +95,7 @@ private[host] trait HostFiles:
     val permission = requireWrite(scope, path, "writeClassified")
     if !permission.classified then
       throw SecurityException(
-        s"Access denied: '$path' is not a classified path; writing classified content there would declassify it."
+        s"Access denied: '${Host.portablePath(path)}' is not a classified path; writing classified content there would declassify it."
       )
     ensureParent(path)
     content match
@@ -113,9 +121,14 @@ private[host] trait HostFiles:
     Using.resource(Files.list(dir).nn) { stream =>
       stream.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).flatMap { entry =>
         try
-          val isLink = Files.isSymbolicLink(entry)
-          val path = if isLink then PathPattern.canonical(entry) else entry
-          Option.when(!gitIgnore.ignores(entry) && policy.effective(scope, path).canRead)((path, isLink))
+          // Canonicalize every entry. Windows junctions/reparse points are not
+          // reliably reported by isSymbolicLink; comparing the canonical target
+          // also keeps them out of recursive traversal and evaluates policy on
+          // what the entry actually reaches.
+          val lexical = entry.toAbsolutePath.nn.normalize.nn
+          val path = PathPattern.canonical(lexical)
+          val isLinkLike = Files.isSymbolicLink(entry) || path != lexical
+          Option.when(!gitIgnore.ignores(entry) && policy.effective(scope, path).canRead)((path, isLinkLike))
         catch case _: Exception => None
       }
     }
@@ -172,7 +185,7 @@ private[host] trait HostFiles:
         if lineCount <= Host.CatMaxLines then body
         else
           val next = math.min(lineCount, 2 * Host.CatMaxLines)
-          body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(\"$path\", ${Host.CatMaxLines + 1}, $next) shows the next]\n"
+          body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${Host.scalaString(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
     output.print(text, text)
 
   /** Print an inclusive, one-based range with line numbers. */
@@ -304,8 +317,8 @@ private[host] trait HostFiles:
   private def display(absolute: String): String =
     val path = Paths.get(absolute).nn
     if path == canonicalCwd then "."
-    else if path.startsWith(canonicalCwd) then canonicalCwd.relativize(path).nn.toString
-    else absolute
+    else if path.startsWith(canonicalCwd) then Host.portablePath(canonicalCwd.relativize(path).nn)
+    else Host.portablePath(path)
 
   private def grepEntry(entry: FileEntry, regex: scala.util.matching.Regex): List[GrepMatch] =
     val matches = collection.mutable.ListBuffer[GrepMatch]()
@@ -334,7 +347,7 @@ private[host] trait HostFiles:
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)
       val regex = Host.globRegex(glob)
-      files.filter(entry => regex.matches(base.relativize(Paths.get(entry.path)).nn.toString))
+      files.filter(entry => regex.matches(Host.portablePath(base.relativize(Paths.get(entry.path)).nn)))
     else
       val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
       files.filter(entry => matcher.matches(Paths.get(entry.path).nn.getFileName))

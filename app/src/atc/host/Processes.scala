@@ -3,12 +3,17 @@ package atc.host
 import atc.lib.ProcessResult
 
 import java.io.File
+import java.nio.file.{Files, Path, Paths}
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 /** Running external processes with bounded, deadlock-free output capture */
 object Processes:
   private val Windows = File.separatorChar == '\\'
+  // OpenJDK's legacy Windows process mode permits ambiguous command/batch
+  // quoting. The strict mode quotes cmd/bat metacharacters and rejects embedded
+  // quotes rather than letting an argument become a second shell command.
+  if Windows then System.setProperty("jdk.lang.Process.allowAmbiguousCommands", "false")
   private val MaxStreamChars = 8 * 1024 * 1024
   private val TruncationMarker = "\n...[truncated: output exceeded 8 MiB cap]..."
   /** A command still running after this long has its output shown live from then on. */
@@ -20,12 +25,73 @@ object Processes:
   /** Bound the process/thread fan-out of one pipeline. */
   val MaxPipelineStages = 16
 
+  /** Resolve a Windows command without CreateProcess's current-directory-first
+    * search. A repository-local `git.exe` must not shadow the Git on PATH just
+    * because policy allowed `git status`. PATHEXT makes normal entry points such
+    * as `npm`/`gradlew` find their `.cmd`/`.bat` launchers. */
+  private[atc] def executableArgv(
+    argv: List[String],
+    workingDir: Path,
+    environment: collection.Map[String, String] = System.getenv().nn.asScala,
+  ): List[String] =
+    if !Windows || argv.isEmpty then argv
+    else
+      val command = argv.head
+      def envValue(name: String): Option[String] =
+        environment.collectFirst { case (key, value) if key.equalsIgnoreCase(name) => value }
+      val extensions = envValue("PATHEXT").getOrElse(".COM;.EXE;.BAT;.CMD")
+        .split(";", -1).iterator.map(_.trim).filter(_.nonEmpty)
+        .map(ext => if ext.startsWith(".") then ext else s".$ext").toList
+      val raw = Paths.get(command).nn
+      val explicit = raw.isAbsolute || command.exists(c => c == '/' || c == '\\')
+      val bases =
+        if explicit then List(if raw.isAbsolute then raw else workingDir.resolve(raw).nn)
+        else
+          envValue("PATH").toList.flatMap(_.split(File.pathSeparator, -1))
+            .map(_.trim).filter(_.nonEmpty)
+            .flatMap { value =>
+              // Empty and relative PATH entries mean "the current directory"
+              // to Windows; accepting them would restore the shadowing issue
+              // this resolver exists to prevent.
+              scala.util.Try(
+                workingDir.getFileSystem.getPath(value.stripPrefix("\"").stripSuffix("\"")).nn
+              ).toOption.filter(_.isAbsolute).map(_.resolve(command).nn)
+            }
+      def candidates(base: Path): List[Path] =
+        val name = Option(base.getFileName).fold("")(_.toString)
+        val exact = List(base)
+        if name.lastIndexOf('.') > 0 then exact
+        else extensions.map(ext => base.resolveSibling(name + ext).nn) ++ exact
+      val resolved = bases.iterator.flatMap(candidates).find(Files.isRegularFile(_))
+      resolved match
+        case None if explicit => argv // let ProcessBuilder report the missing explicit path
+        case None =>
+          throw java.io.IOException(
+            s"Executable '$command' was not found on PATH; on Windows ATC does not search the working directory for bare commands (use .\\$command explicitly)"
+          )
+        case Some(path) =>
+          val lower = path.getFileName.toString.toLowerCase(java.util.Locale.ROOT)
+          if lower.endsWith(".cmd") || lower.endsWith(".bat") then
+            val unsafe = path.toString :: argv.tail
+            unsafe.find(_.exists(c => c == '%' || c == '!' || c == '\r' || c == '\n' || c == 0)).foreach { _ =>
+              throw IllegalArgumentException(
+                s"Unsafe path or argument for Windows batch command '$command': %, ! and line breaks can be expanded by cmd.exe; invoke an explicitly permitted cmd.exe command if shell syntax is intended"
+              )
+            }
+          else if lower.contains('.') && !lower.endsWith(".exe") && !lower.endsWith(".com") then
+            throw IllegalArgumentException(
+              s"Windows cannot execute '$command' directly; invoke its interpreter explicitly (for example powershell.exe -File for .ps1)"
+            )
+          path.toString :: argv.tail
+
   // ── The command-line grammar ──────────────────────────────────────
   //
   // A deliberately tiny subset of a shell: words with quoting, `|` between
   // stages, `< file`, `> file`, `>> file`, and `2>&1` on a stage. No expansion
   // (globs, `$VAR`, `~`), no control operators (`&&`, `;`, `||`, `&`), no
-  // command substitution. The parser produces data; no shell ever sees the line.
+  // command substitution. The parser produces argv data; no general shell sees
+  // the original line (an explicitly selected Windows .cmd/.bat necessarily
+  // runs through the OS command processor after its stage is authorized).
 
   /** One program of a pipeline and whether its stderr joins its stdout (`2>&1`). */
   final case class Stage(argv: List[String], mergeErr: Boolean = false):
@@ -33,7 +99,11 @@ object Processes:
       * Argument boundaries must not disappear here: otherwise a permitted
       * `./tool safe` could also authorize an executable literally named
       * `./tool safe`. */
-    def line: String = argv.map(renderArg).mkString(" ")
+    def line: String = argv match
+      case Nil => ""
+      case executable :: args =>
+        val shown = if Windows then executable.replace('\\', '/') else executable
+        (renderArg(shown) :: args.map(renderArg)).mkString(" ")
 
   /** A parsed command line: stages joined by pipes, an optional input file for the
     * first stage and output file (truncate or append) for the last. */
@@ -59,6 +129,7 @@ object Processes:
     val plain = arg.nonEmpty && arg.forall { char =>
       (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
       (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char)
+      || (Windows && char == '\\')
     }
     if plain then arg
     else
@@ -401,16 +472,34 @@ object Processes:
 
     def goLive(): Unit = gate.foreach(_.goLive())
 
-    /** SIGTERM every stage, give them a moment, then SIGKILL what is left. */
+    private def descendants(): List[java.lang.ProcessHandle] =
+      procs.flatMap { process =>
+        val stream = process.descendants().nn
+        try stream.iterator().nn.asScala.toList
+        finally stream.close()
+      }.distinct
+
+    /** Terminate every descendant and pipeline stage, give them a moment, then
+      * force what is left. Wrapper scripts on Windows commonly start the real
+      * server as a child; killing only cmd/npm/gradlew would leak that server. */
     def kill(): Unit =
+      val children = descendants()
+      children.reverse.foreach(_.destroy())
       procs.foreach(_.destroy())
-      if !awaitExit(2000) then procs.foreach(_.destroyForcibly())
+      val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2000)
+      var interrupted = false
+      while !interrupted && (procs.exists(_.isAlive) || children.exists(_.isAlive)) && System.nanoTime() < deadline do
+        try Thread.sleep(20)
+        catch case _: InterruptedException => interrupted = true
+      children.reverse.filter(_.isAlive).foreach(_.destroyForcibly())
+      procs.filter(_.isAlive).foreach(_.destroyForcibly())
+      if interrupted then Thread.currentThread().interrupt()
       ManagedProcess.live.remove(this)
       ()
 
   object ManagedProcess:
-    /** Every started, not yet exited process of this JVM: killed at shutdown so
-      * an agent's dev server cannot outlive atc. */
+    /** Every started, not yet exited process tree of this JVM: killed at
+      * shutdown so an agent's dev server cannot outlive atc. */
     private val live = java.util.concurrent.ConcurrentHashMap.newKeySet[ManagedProcess]().nn
     java.lang.Runtime.getRuntime.nn.addShutdownHook(Thread(() => live.forEach(_.kill())))
 

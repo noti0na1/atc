@@ -2,6 +2,7 @@ package atc.perms
 
 import java.io.File
 import java.nio.file.{FileSystems, Files, Path, PathMatcher, Paths}
+import java.util.regex.Pattern
 
 /** A path pattern from the configuration, gitignore-flavoured (as in TACIT):
   *
@@ -24,7 +25,10 @@ final class PathPattern private (val raw: String, private val kind: PathPattern.
     case Kind.Component(m) => (0 until p.getNameCount).exists(i => m.matches(p.getName(i)))
     // matched against the path relative to the anchor root
     case Kind.Anchored(root, matchers) =>
-      p.startsWith(root) && matchers.exists(_.matches(if p == root then EmptyPath else root.relativize(p)))
+      p.startsWith(root) && {
+        val relative = if p == root then "" else portable(root.relativize(p))
+        matchers.exists(_.matcher(relative).matches())
+      }
     case Kind.Exact(path) => p == path || p.startsWith(path)
 
   override def toString: String = raw
@@ -33,23 +37,38 @@ object PathPattern:
   private enum Kind:
     case Component(m: PathMatcher)
     /** `root` is an absolute, real path; matchers are applied to the path relative to it. */
-    case Anchored(root: Path, matchers: List[PathMatcher])
+    case Anchored(root: Path, matchers: List[Pattern])
     case Exact(path: Path)
 
   private val globChars = "*?[{"
-  private val EmptyPath = Paths.get("")
-
   def apply(pattern: String, base: Path): PathPattern =
-    val expanded = expandHome(pattern.trim).stripSuffix("/").stripSuffix("\\")
+    val untrimmed = expandHome(pattern.trim)
+    val windows = File.separatorChar == '\\'
+    val isRoot = untrimmed == "/" || (windows && (untrimmed == "\\" || untrimmed.matches("(?i)^[a-z]:[\\\\/]$")))
+    val expanded =
+      if isRoot then untrimmed
+      else untrimmed.reverse.dropWhile(c => c == '/' || (windows && c == '\\')).reverse
     val stripped = if expanded.isEmpty then "." else expanded
+    if windows && stripped.replace('\\', '/').matches("(?i)^[a-z]:(?:$|[^/].*)") then
+      throw IllegalArgumentException(
+        "invalid Windows path: drive-relative paths such as 'C:work' are ambiguous; use 'C:/work'"
+      )
     if stripped == "." then new PathPattern(pattern, Kind.Exact(canonical(base)))
-    else if !stripped.exists(c => c == '/' || c == '\\') then
+    else if !stripped.exists(c => c == '/' || (windows && c == '\\')) then
+      if windows && !globChars.exists(stripped.contains(_)) then
+        invalidWindowsPath(stripped).foreach(reason => throw IllegalArgumentException(s"invalid Windows path: $reason"))
       new PathPattern(pattern, Kind.Component(FileSystems.getDefault.getPathMatcher(s"glob:$stripped")))
     else
-      val abs = Paths.get(stripped)
-      val (root, rest) =
-        if abs.isAbsolute then splitGlob(abs)
-        else splitGlob(base.resolve(stripped))
+      // Windows refuses `*`, `?` and several other glob characters in a Path,
+      // so never hand the glob-bearing suffix to Paths.get. Split it as text,
+      // parse only the literal prefix, and match the remainder in a stable
+      // slash-separated form on every platform.
+      val normalized = if windows then stripped.replace('\\', '/') else stripped
+      val (prefix, rest) = splitGlob(normalized)
+      if windows then
+        invalidWindowsPath(prefix).foreach(reason => throw IllegalArgumentException(s"invalid Windows path: $reason"))
+      val literal = Paths.get(prefix.replace('/', File.separatorChar)).nn
+      val root = if literal.isAbsolute then literal else base.resolve(literal).nn
       if rest.isEmpty then new PathPattern(pattern, Kind.Exact(canonical(root)))
       else new PathPattern(pattern, Kind.Anchored(canonical(root), globOrDescendantMatchers(rest)))
 
@@ -61,18 +80,95 @@ object PathPattern:
       Paths.get(scala.util.Properties.userHome).resolve(relative).toString
     else p
 
-  /** Split an absolute path into its longest glob-free prefix and the rest. */
-  private def splitGlob(abs: Path): (Path, String) =
-    val n = abs.getNameCount
-    val firstGlob = (0 until n).find(i => globChars.exists(abs.getName(i).toString.contains(_))).getOrElse(n)
-    val root = if firstGlob == 0 then abs.getRoot else abs.getRoot.resolve(abs.subpath(0, firstGlob))
-    val rest = if firstGlob == n then "" else abs.subpath(firstGlob, n).toString
-    (root, rest)
+  /** Split a slash-normalized pattern before the first glob-bearing component.
+    * The returned prefix contains no characters Windows rejects in a Path. */
+  private def splitGlob(value: String): (String, String) =
+    value.indexWhere(globChars.contains) match
+      case -1 => (value, "")
+      case firstGlob =>
+        val boundary = value.lastIndexOf('/', firstGlob)
+        if boundary < 0 then ("", value)
+        else (value.substring(0, boundary + 1), value.substring(boundary + 1))
 
-  private def globOrDescendantMatchers(glob: String): List[PathMatcher] =
-    val fs = FileSystems.getDefault
+  private def globOrDescendantMatchers(glob: String): List[Pattern] =
     def variants(g: String): List[String] = if g.startsWith("**/") then g :: variants(g.stripPrefix("**/")) else List(g)
-    variants(glob).flatMap(g => List(fs.getPathMatcher(s"glob:$g"), fs.getPathMatcher(s"glob:$g/**")))
+    variants(glob).flatMap(g => List(globPattern(g), globPattern(s"$g/**")))
+
+  /** Gitignore-style path glob. PathPattern syntax is slash-based even on
+    * Windows, where matching is case-insensitive like the file system. */
+  private def globPattern(glob: String): Pattern =
+    val result = StringBuilder("^")
+    var index = 0
+    var inClass = false
+    var inBraces = false
+    while index < glob.length do
+      val char = glob.charAt(index)
+      if inClass then
+        if char == ']' then inClass = false
+        result.append(char)
+        index += 1
+      else if glob.startsWith("**/", index) then
+        result.append("(?:.*/)?")
+        index += 3
+      else if glob.startsWith("**", index) then
+        result.append(".*")
+        index += 2
+      else
+        char match
+          case '*' => result.append("[^/]*")
+          case '?' => result.append("[^/]")
+          case '[' =>
+            inClass = true
+            result.append('[')
+            if glob.startsWith("[!", index) then
+              result.append('^')
+              index += 1
+          case '{' =>
+            inBraces = true
+            result.append("(?:")
+          case '}' if inBraces =>
+            inBraces = false
+            result.append(')')
+          case ',' if inBraces => result.append('|')
+          case other => result.append(Pattern.quote(other.toString))
+        index += 1
+    result.append('$')
+    Pattern.compile(result.toString, if File.separatorChar == '\\' then Pattern.CASE_INSENSITIVE else 0)
+
+  /** Stable path text exposed to agent code. Forward slashes are accepted by
+    * the Windows file APIs and, unlike backslashes, are safe to copy into a
+    * Scala string literal. */
+  def portable(path: Path): String =
+    val native = path.toString
+    if File.separatorChar == '\\' then native.replace('\\', '/') else native
+
+  /** Why a path is unsafe under Win32 name resolution. Kept string-based so
+    * callers can reject device namespaces before java.nio touches them. */
+  private[atc] def invalidWindowsPath(value: String): Option[String] =
+    val normalized = value.replace('/', '\\')
+    val lower = normalized.toLowerCase(java.util.Locale.ROOT)
+    if lower.startsWith("\\\\.\\") || lower.startsWith("\\\\?\\") || lower.startsWith("\\??\\") then
+      Some("Win32 device namespaces are not allowed")
+    else if normalized.matches("(?i)^[a-z]:(?:$|[^\\\\].*)") then
+      Some("drive-relative paths such as 'C:work' are ambiguous; use 'C:/work'")
+    else
+      normalized.split("\\\\+", -1).iterator
+        .filterNot(component =>
+          component.isEmpty || component == "." || component == ".." || component.matches("(?i)[a-z]:")
+        )
+        .flatMap { component =>
+          if component.contains(':') then Some("alternate data streams are not allowed")
+          else if component.endsWith(".") || component.endsWith(" ") then
+            Some("path components ending in a dot or space are not allowed")
+          else
+            val stem = component.takeWhile(_ != '.').reverse.dropWhile(c => c == '.' || c == ' ').reverse
+              .toUpperCase(java.util.Locale.ROOT)
+            val reserved =
+              Set("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$").contains(stem) ||
+                stem.matches("COM[1-9¹²³]") || stem.matches("LPT[1-9¹²³]")
+            Option.when(reserved)(s"'$component' is a reserved Windows device name")
+        }
+        .nextOption()
 
   /** Convert a path to absolute normalized form and resolve symlinks as far as
     * possible. Resolve dangling links as well because writing through one creates

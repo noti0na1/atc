@@ -133,6 +133,15 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(c.safeMode, false)
     assertEquals(c.maxToolCalls, 10)
 
+  test("UTF-8 BOMs from Windows editors are accepted and preserved when editing"):
+    val dir = Files.createTempDirectory("atc-cfg-bom").nn
+    val cfg = writeCfg(dir, "config.json", "\uFEFF{\r\n  \"safeMode\": true\r\n}\r\n")
+    assert(load(dir, Some(cfg)).settings.safeMode)
+    Config.setTopLevel(cfg, "safeMode", ujson.Bool(false))
+    val edited = Files.readString(cfg).nn
+    assert(edited.startsWith("\uFEFF{\r\n"), edited)
+    assertEquals(ujson.read(edited.stripPrefix("\uFEFF"))("safeMode").bool, false)
+
   test("a malformed config file is a clear error"):
     val dir = Files.createTempDirectory("atc-cfg-bad").nn
     val bad = writeCfg(dir, "config.json", "{ not json ]")
@@ -238,13 +247,13 @@ class ConfigSuite extends munit.FunSuite:
 
   // ── API-key resolution ──────────────────────────────────────────
 
-  test("a keys file is a properties file, and an empty value is not a binding"):
+  test("a BOM-prefixed keys file is a properties file, and an empty value is not a binding"):
     val unset = "ATC_TEST_KEY_" + ProcessHandle.current().pid()
     val dir = Files.createTempDirectory("atc-keys").nn
     val file = dir.resolve(Config.KeysFile).nn
     Files.writeString(
       file,
-      s"""|# a comment
+      s"""|\uFEFF# a comment
           |! also a comment
           |
           |DEEPSEEK_API_KEY=sk-secret
@@ -395,6 +404,16 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(Config.withTopLevel("{}", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
     assertEquals(Config.withTopLevel("{ }", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
 
+  test("withTopLevel preserves CRLF when it inserts a key"):
+    val text = "{\r\n    \"files\": [],\r\n    \"safeMode\": true\r\n}\r\n"
+    val after = Config.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
+    assertEquals(
+      after,
+      "{\r\n    \"files\": [],\r\n    \"model\": \"gpt\",\r\n    \"safeMode\": true\r\n}\r\n",
+    )
+    val empty = Config.withTopLevel("{\r\n}\r\n", "model", ujson.Str("gpt"))
+    assertEquals(empty, "{\r\n  \"model\": \"gpt\"\r\n}\r\n")
+
   test("withTopLevel only touches the top level: nested keys, strings and brackets do not confuse it"):
     val text =
       """{
@@ -439,9 +458,13 @@ class ConfigSuite extends munit.FunSuite:
     val dir = Files.createTempDirectory("atc-ensure").nn
     val created = Config.ensureGlobal(dir.resolve("config.json").nn)
     assertEquals(created.size, 2)
-    import java.nio.file.attribute.PosixFilePermission as P
-    val perms = Files.getPosixFilePermissions(dir.resolve(Config.KeysFile)).nn
-    assert(!perms.contains(P.GROUP_READ) && !perms.contains(P.OTHERS_READ), perms.toString)
+    val keys = dir.resolve(Config.KeysFile).nn
+    val posix = Files.getFileAttributeView(keys, classOf[java.nio.file.attribute.PosixFileAttributeView])
+    if posix != null then
+      import java.nio.file.attribute.PosixFilePermission as P
+      val perms = Files.getPosixFilePermissions(keys).nn
+      assert(!perms.contains(P.GROUP_READ) && !perms.contains(P.OTHERS_READ), perms.toString)
+    else assert(Files.isRegularFile(keys), keys.toString)
 
   test("initProject adds keys.properties to a pre-existing .atc/.gitignore"):
     val dir = Files.createTempDirectory("atc-initproj").nn
@@ -465,6 +488,16 @@ class ConfigSuite extends munit.FunSuite:
       Files.readString(dir3.resolve(".atc/.gitignore")).nn,
       "keys.properties\n!keys.properties\nkeys.properties\n"
     )
+    val dir4 = Files.createTempDirectory("atc-initproj4").nn
+    Files.createDirectories(dir4.resolve(".atc"))
+    Files.writeString(dir4.resolve(".atc/.gitignore"), "target\r\n")
+    Config.initProject(dir4)
+    assertEquals(Files.readString(dir4.resolve(".atc/.gitignore")).nn, "target\r\nkeys.properties\r\n")
+    val dir5 = Files.createTempDirectory("atc-initproj5").nn
+    Files.createDirectories(dir5.resolve(".atc"))
+    Files.writeString(dir5.resolve(".atc/.gitignore"), "")
+    Config.initProject(dir5)
+    assertEquals(Files.readString(dir5.resolve(".atc/.gitignore")).nn, "keys.properties\n")
 
   test("an invalid reasoning effort or summary is a config error, not a per-turn crash"):
     def withModel(model: String): IllegalArgumentException =
@@ -531,9 +564,12 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(loaded.settings.model, Some("b"))
     assertEquals(loaded.settings.classifiedModel, None)
     assertEquals(loaded.settings.commands, List("ls"))
+
+  test("setTopLevel preserves an intentional shared-config symlink"):
+    val dir = Files.createTempDirectory("atc-cfg-set-link").nn
     val victim = writeCfg(dir, "victim.json", "{ \"model\": \"a\" }")
     val link = dir.resolve("link.json").nn
-    Files.createSymbolicLink(link, victim)
+    assume(TestEnv.trySymbolicLink(link, victim), "symbolic links are unavailable for this account")
     Config.setTopLevel(link, "model", ujson.Str("b"))
     assert(Files.isSymbolicLink(link), "an intentional shared-config symlink must survive")
     assertEquals(ujson.read(Files.readString(victim))("model").str, "b")

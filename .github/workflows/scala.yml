@@ -22,10 +22,8 @@ jobs:
           mill_version: 1.1.8
         - os: macos-latest
           mill_version: 1.1.8
-        # Mill's native launcher supports Linux and macOS only. The JVM
-        # launcher is portable and runs normally under the configured JDK.
         - os: windows-latest
-          mill_version: 1.1.8-jvm
+          mill_version: 1.1.8
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -49,14 +47,21 @@ jobs:
       shell: bash
       run: ./mill __.checkFormat
     - name: Compile
+      if: runner.os != 'Windows'
       shell: bash
       run: ./mill __.compile
-    - name: Run tests
-      shell: bash
-      run: ./mill app.test
+    - name: Compile (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./mill.bat __.compile
     - name: Build distribution
+      if: runner.os != 'Windows'
       shell: bash
       run: ./mill dist
+    - name: Build distribution (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./mill.bat dist
     - name: Smoke-test the Unix distribution
       if: runner.os != 'Windows'
       shell: bash
@@ -65,16 +70,104 @@ jobs:
         out/dist.dest/atc --version
         out/dist.dest/atc -c "$RUNNER_TEMP/echo.json" -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee "$RUNNER_TEMP/smoke.log"
         grep -q 'val res1: Int = 42' "$RUNNER_TEMP/smoke.log"
-    - name: Smoke-test the Windows launcher
+    - name: Smoke-test the Windows launchers
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        & out/dist.dest/atc.cmd --version
-        '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/echo.json"
+        $repo = (Get-Location).Path
+        $smokeDir = Join-Path $env:RUNNER_TEMP 'atc smoke ü!'
+        New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+        $config = Join-Path $smokeDir 'echo config.json'
+        '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' | Set-Content -Encoding utf8 $config
+
+        $installDir = Join-Path $smokeDir 'installed atc Ω!'
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        Copy-Item "$repo/out/dist.dest/atc.cmd", "$repo/out/dist.dest/atc.jar", "$repo/out/dist.dest/atc-lib.jar" -Destination $installDir
+        $distLauncher = Join-Path $installDir 'atc.cmd'
+
+        $savedJavaHome = $env:JAVA_HOME
+        Remove-Item Env:JAVA_HOME -ErrorAction SilentlyContinue
+        $env:JAVA_TOOL_OPTIONS = '-Datc.launcher.probe=true'
+        try {
+          & $distLauncher --version
+          $distVersionExit = $LASTEXITCODE
+        } finally {
+          $env:JAVA_HOME = $savedJavaHome
+          Remove-Item Env:JAVA_TOOL_OPTIONS -ErrorAction SilentlyContinue
+        }
+        if ($distVersionExit -ne 0) { throw "atc.cmd --version exited $distVersionExit" }
+        $distOutput = & $distLauncher -c $config -C $smokeDir -p 'run: println("ci"); 21 * 2'
+        $distExit = $LASTEXITCODE
+        $distOutput
+        if ($distExit -ne 0) { throw "atc.cmd smoke test exited $distExit" }
+        if (($distOutput -join "`n") -notmatch 'val res1: Int = 42') { throw 'atc.cmd smoke test did not produce 42' }
+
+        $installedLib = Join-Path $installDir 'atc-lib.jar'
+        $hiddenLib = "$installedLib.hidden"
+        Move-Item $installedLib $hiddenLib
+        try {
+          $missingOutput = & $distLauncher --version 2>&1
+          $missingExit = $LASTEXITCODE
+        } finally {
+          Move-Item $hiddenLib $installedLib
+        }
+        if ($missingExit -eq 0 -or ($missingOutput -join "`n") -notmatch 'atc-lib.jar is missing') {
+          throw 'atc.cmd did not report its missing adjacent library jar'
+        }
+
+        $savedPath = $env:PATH
+        $savedJavaHome = $env:JAVA_HOME
+        $env:PATH = "$installDir;$env:SystemRoot\System32"
+        Remove-Item Env:JAVA_HOME -ErrorAction SilentlyContinue
+        try {
+          $noJavaOutput = & $distLauncher --version 2>&1
+          $noJavaExit = $LASTEXITCODE
+        } finally {
+          $env:PATH = $savedPath
+          $env:JAVA_HOME = $savedJavaHome
+        }
+        if ($noJavaExit -eq 0 -or ($noJavaOutput -join "`n") -notmatch 'java.exe was not found') {
+          throw 'atc.cmd did not report a missing Java runtime'
+        }
+
+        # Force start.ps1's build branch, from outside the checkout. This catches
+        # regressions where Mill is launched in the caller's directory.
+        (Get-Item "$repo/out/dist.dest/atc.jar").LastWriteTimeUtc = [DateTime]::UnixEpoch
+        Remove-Item Env:ATC_SKIP_BUILD -ErrorAction SilentlyContinue
+        Push-Location $smokeDir
+        try {
+          $startVersion = & "$repo/start.cmd" --version
+          $startVersionExit = $LASTEXITCODE
+        } finally {
+          Pop-Location
+        }
+        $startVersion
+        if ($startVersionExit -ne 0) { throw "start.cmd rebuild/version test exited $startVersionExit" }
+        if (($startVersion -join "`n") -notmatch '(?m)^atc ') { throw 'start.cmd rebuild/version test produced no version' }
+
         $env:ATC_SKIP_BUILD = '1'
-        $output = & ./start.cmd -c "$env:RUNNER_TEMP/echo.json" -C "$env:RUNNER_TEMP" -p 'run: println("ci"); 21 * 2'
-        $output
-        if ($output -notmatch 'val res1: Int = 42') { throw 'Windows smoke test did not produce 42' }
+        $envFile = Join-Path $smokeDir 'start env ü.env'
+        "ATC_CONFIG=$config`nATC_CWD=$smokeDir`nATC_MODEL=echo" | Set-Content -Encoding utf8 $envFile
+        $env:ATC_ENV_FILE = $envFile
+        Push-Location $smokeDir
+        try {
+          $startOutput = & "$repo/start.cmd" -p 'run: println("ci"); 21 * 2'
+          $startExit = $LASTEXITCODE
+        } finally {
+          Pop-Location
+          Remove-Item Env:ATC_ENV_FILE -ErrorAction SilentlyContinue
+        }
+        $startOutput
+        if ($startExit -ne 0) { throw "start.cmd smoke test exited $startExit" }
+        if (($startOutput -join "`n") -notmatch 'val res1: Int = 42') { throw 'start.cmd smoke test did not produce 42' }
+    - name: Run tests
+      if: ${{ !cancelled() && runner.os != 'Windows' }}
+      shell: bash
+      run: ./mill app.test
+    - name: Run tests (Windows, serial)
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: pwsh
+      run: ./mill.bat app.test
 
   # Publishing a GitHub release (tag vX.Y.Z) builds the distribution and
   # attaches both jars and the Windows launcher; the Unix `atc` wrapper downloads

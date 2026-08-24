@@ -24,10 +24,13 @@ import atc.sandbox.*
 class ModeSuite extends munit.FunSuite, ReplAssertions:
   override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
 
+  private val echoCommand = ProcessFixture.command("echo")
+  private val echoPattern = ProcessFixture.pattern("echo")
+
   /** One host + one session for a mode, created on first use. */
   private final class ModeEnv(val mode: Mode):
     val env: TestEnv =
-      TestEnv(commands = List("echo"), hosts = List("example.com"), prefix = s"atc-mode-${mode.label}")
+      TestEnv(commands = List(echoPattern), hosts = List("example.com"), prefix = s"atc-mode-${mode.label}")
     env.file("a.txt", "hello")
     env.decisions = List.fill(20)(Decision.AllowOnce)
     lazy val session: ReplSession = env.newSession(mode = mode)
@@ -100,14 +103,18 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
 
   test("running commands compiles only in local and full mode"):
     val canExec = Set(Mode.Local, Mode.Full)
-    onlyIn(canExec, """exec("echo", List("hi")).exitCode""")
-    onlyIn(canExec, """execOutput("echo").length""")
-    onlyIn(canExec, """exec("echo hi there").stdout""") // split like a shell line
-    onlyIn(canExec, """val p: Process^{ex} = spawn("echo spawned"); p.readUntil("spawned", 5000).length""")
+    val echo = ujson.write(echoCommand)
+    val echoLine = ujson.write(ProcessFixture.command("echo", "hi", "there"))
+    val spawned = ujson.write(ProcessFixture.command("echo", "spawned"))
+    val pattern = ujson.write(echoPattern)
+    onlyIn(canExec, s"""exec($echo, List("hi")).exitCode""")
+    onlyIn(canExec, s"""execOutput($echo).length""")
+    onlyIn(canExec, s"""exec($echoLine).stdout""") // split like a shell line
+    onlyIn(canExec, s"""val p: Process^{ex} = spawn($spawned); p.readUntil("spawned", 5000).length""")
     onlyIn(canExec, """runningProcesses.size""")
-    onlyIn(canExec, """exec("echo", Seq("a"), ExecOptions(stdin = "")).exitCode""")
-    onlyIn(canExec, """requestExec(List("echo")) { exec("echo", Vector("x")).exitCode }""") // Iterable / Seq
-    onlyIn(canExec, """requestExec(Set("echo")) { exec("echo", List("x")).exitCode }""")
+    onlyIn(canExec, s"""exec($echo, Seq("a"), ExecOptions(stdin = "")).exitCode""")
+    onlyIn(canExec, s"""requestExec(List($pattern)) { exec($echo, Vector("x")).exitCode }""") // Iterable / Seq
+    onlyIn(canExec, s"""requestExec(Set($pattern)) { exec($echo, List("x")).exitCode }""")
 
   test("read-only mode: there is no Exec capability, and the derivation is out of reach"):
     assertFails(readOnly.run("""val x: Exec^ = ex; 1"""))
@@ -142,7 +149,9 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
   test("read-only mode: requestFiles can still ask for more read access"):
     val outside = TestEnv.outsideDir("outside-secret")
     readOnly.env.decisions = List(Decision.AllowOnce)
-    val r = assertOk(readOnly.run(s"""requestFiles("$outside") { read("$outside/o.txt") }"""))
+    val r = assertOk(readOnly.run(
+      s"requestFiles(${readOnly.env.scalaString(outside)}) { read(${readOnly.env.scalaString(outside.resolve("o.txt"))}) }"
+    ))
     assert(r.output.contains("outside-secret"), r.output)
 
   // ── The policy enforces the mode at run time too ────────────────

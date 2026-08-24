@@ -590,7 +590,9 @@ object App:
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =
     val home = Paths.get(Properties.userHome)
-    if p == home then "~" else if p.startsWith(home) then "~/" + home.relativize(p) else p.toString
+    if p == home then "~"
+    else if p.startsWith(home) then "~/" + Host.portablePath(home.relativize(p))
+    else Host.portablePath(p)
 
   /** The configured file rules, in layer order. Nothing is granted here or
     * anywhere else in the program: a path is reachable only because a config

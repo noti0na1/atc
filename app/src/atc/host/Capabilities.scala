@@ -44,7 +44,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
       op
     })
 
-  def path: String = p.toString
+  def path: String = Host.portablePath(p)
 
   def name: String = Option(p.getFileName).map(_.toString).getOrElse(p.toString)
 
@@ -117,10 +117,10 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     asClassified("readClassified")(Files.readString(p, UTF_8).nn)
 
   def childrenClassified: Classified[List[String]] =
-    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(_.toString))
+    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(Host.portablePath))
 
   def walkClassified(): Classified[List[String]] =
-    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(_.toString))
+    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(Host.portablePath))
 
   def writeClassified(content: Classified[String]): Unit =
     // Hand the raw `Try` to the host: it runs the permission/target checks before

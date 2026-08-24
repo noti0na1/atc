@@ -3,6 +3,7 @@ package atc.host
 import atc.lib.*
 import atc.perms.{GitIgnore, GlobMatcher, Policy, ScopeId}
 
+import java.io.File
 import java.nio.file.Path
 
 /** Stable façade for the agent-facing API. Cohesive implementation modules
@@ -41,6 +42,33 @@ final class Host(
   def network(using IOCap): Network = NetworkImpl(ScopeId.Base)
 
 object Host:
+  private[atc] val Windows: Boolean = File.separatorChar == '\\'
+
+  /** Stable path text given to agent code. Windows accepts forward slashes,
+    * and they can be copied into ordinary Scala string literals safely. */
+  private[atc] def portablePath(path: Path): String = atc.perms.PathPattern.portable(path)
+
+  /** Quote generated Scala source (permission hints and test snippets). */
+  private[atc] def scalaString(value: String): String =
+    val result = StringBuilder("\"")
+    value.foreach:
+      case '"' => result.append("\\\"")
+      case '\\' => result.append("\\\\")
+      case '\n' => result.append("\\n")
+      case '\r' => result.append("\\r")
+      case '\t' => result.append("\\t")
+      case '\b' => result.append("\\b")
+      case '\f' => result.append("\\f")
+      case char if Character.isISOControl(char) => result.append(f"\\u${char.toInt}%04x")
+      case char => result.append(char)
+    result.append('"').toString
+
+  /** Why a Win32 path is unsafe to pass to the file APIs. DOS device names
+    * resolve in every directory, and trailing dots/spaces alias another name;
+    * either could make a lexical in-project path reach something else. */
+  private[atc] def invalidWindowsPath(value: String): Option[String] =
+    atc.perms.PathPattern.invalidWindowsPath(value)
+
   /** `cat(path)` shows at most this many lines, then says how to see the rest. */
   val CatMaxLines: Int = 400
   /** `cat` cuts a line beyond this many characters (minified files) with a marker. */
@@ -106,7 +134,7 @@ object Host:
           case other => result.append(java.util.regex.Pattern.quote(other.toString))
         index += 1
     result.append('$')
-    result.toString.r
+    ((if Windows then "(?i)" else "") + result.toString).r
 
   /** Split file content on LF, CRLF, or bare CR while retaining a stable output
     * separator (the first one present) and trailing-newline state. Mixed-newline

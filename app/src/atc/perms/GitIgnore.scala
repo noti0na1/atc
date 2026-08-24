@@ -15,6 +15,7 @@ trait GitIgnore:
   def ignores(p: Path): Boolean
 
 object GitIgnore:
+  private val Windows = java.io.File.separatorChar == '\\'
   /** Ignores nothing (`"respectGitignore": false`). */
   val Disabled: GitIgnore = _ => false
 
@@ -61,7 +62,9 @@ object GitIgnore:
         var ignored = false
         var i = 0
         while i < n && !ignored do
-          if rel.getName(i).nn.toString == ".git" then ignored = true
+          if if Windows then rel.getName(i).nn.toString.equalsIgnoreCase(".git")
+            else rel.getName(i).nn.toString == ".git"
+          then ignored = true
           else
             val isDir = i < n - 1 || Files.isDirectory(root.resolve(rel.subpath(0, i + 1)))
             var j = 0
@@ -97,7 +100,7 @@ object GitIgnore:
           val core = pattern.stripPrefix("/")
           val anchored = pattern.startsWith("/") || core.contains('/')
           val prefix = if anchored then "" else "(?:.*/)?"
-          Some(Rule(negated, dirOnly, Regex(prefix + toRegex(core))))
+          Some(Rule(negated, dirOnly, Regex((if Windows then "(?i)" else "") + prefix + toRegex(core))))
 
     /** Trailing spaces are not part of the pattern unless backslash-escaped. */
     private def trimTrailing(line: String): String =

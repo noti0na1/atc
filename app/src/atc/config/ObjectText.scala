@@ -8,8 +8,11 @@ private[config] case class ObjectText(text: String, open: Int, close: Int, membe
     members.headOption match
       case Some(first) =>
         val nl = text.lastIndexOf('\n', first.keyStart)
-        if nl > open then text.substring(nl, first.keyStart) else " "
-      case None => "\n  "
+        if nl > open then
+          val start = if nl > 0 && text.charAt(nl - 1) == '\r' then nl - 1 else nl
+          text.substring(start, first.keyStart)
+        else " "
+      case None => (if text.substring(open + 1, close).contains("\r\n") then "\r\n" else "\n") + "  "
 
 private[config] object ObjectText:
   /** A member: `keyStart` is its opening quote, `valueStart`/`valueEnd` bound
@@ -20,7 +23,7 @@ private[config] object ObjectText:
     * known to be a well-formed JSON object. */
   def scan(text: String): ObjectText =
     var i = 0
-    def skipSpace(): Unit = while i < text.length && text(i).isWhitespace do i += 1
+    def skipSpace(): Unit = while i < text.length && (text(i).isWhitespace || (i == 0 && text(i) == '\uFEFF')) do i += 1
     /** From an opening quote at `i` to just past the closing one. */
     def skipString(): Unit =
       i += 1

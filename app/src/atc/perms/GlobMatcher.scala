@@ -7,6 +7,8 @@ import scala.util.Try
 /** Simple glob matching for command lines and host names: `*` matches any
   * sequence of characters, everything else is literal. Adapted from TACIT. */
 object GlobMatcher:
+  private val Windows = java.io.File.separatorChar == '\\'
+
   /** `*` becomes `.*`; every other segment is quoted, so it stays literal. */
   private def compile(pattern: String): Regex =
     Regex(pattern.split("\\*", -1).map(Regex.quote).mkString(".*"))
@@ -19,10 +21,35 @@ object GlobMatcher:
     * or is a word-prefix of it: `"ls"` permits `ls -la`, `"git status"`
     * permits `git status --short`, `"git diff*"` also permits `git difftool`. */
   def matchesCommand(commandLine: String, pattern: String): Boolean =
-    val p = pattern.trim
+    val command = normalizeCommand(commandLine.trim)
+    val p = normalizeCommand(pattern.trim)
     if p.isEmpty then false
-    else if p.contains('*') then matches(commandLine, p)
-    else commandLine == p || commandLine.startsWith(p + " ")
+    else if p.contains('*') then matches(command, p)
+    else command == p || command.startsWith(p + " ")
+
+  /** Win32 command names and extensions are case-insensitive. Treat the
+    * standard executable/script suffixes as spelling details too, so a deny on
+    * `git push*` cannot be bypassed as `GIT.EXE push`. Explicit paths stay
+    * explicit and must still be granted as such. */
+  private def normalizeCommand(value: String): String =
+    if !Windows then value
+    else
+      val boundary =
+        if value.startsWith("\"") then
+          value.indexOf('"', 1) match
+            case -1 => value.length
+            case n => n + 1
+        else
+          value.indexOf(' ') match
+            case -1 => value.length
+            case n => n
+      val command = value.substring(0, boundary).toLowerCase(Locale.ROOT).replace('\\', '/')
+      val suffix = value.substring(boundary)
+      val plainName = !command.exists(c => c == '/' || c == '\\' || c == '*' || c == '?')
+      val normalized =
+        if plainName then command.replaceFirst("(?i)\\.(?:exe|com|cmd|bat)$", "")
+        else command
+      normalized + suffix
 
   /** Normalize a concrete host or host pattern without resolving ordinary DNS
     * names. Exact numeric literals are canonicalized; globs retain their shape.
