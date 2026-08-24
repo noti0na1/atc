@@ -51,6 +51,8 @@ bash tests/atc_test.sh                            # tests of the `atc` wrapper s
 source file is newer than the jar, sources a `.env` (`cp .env.example .env`; API keys and
 the `ATC_*` variables below, without overriding what the shell already exported) and passes
 its flags through to `atc`. Without the script: `./mill dist`, then `out/dist.dest/atc`.
+On Windows, `start.cmd` provides the same flow. Its build step uses the portable Mill JVM
+launcher through Git for Windows' Bash; once built, it launches ATC directly with Java.
 
 To run a local build through the *installed* `atc` wrapper instead, `atc dev <checkout>`
 copies the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release; see

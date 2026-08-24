@@ -1,5 +1,6 @@
 package atc.perms
 
+import java.io.File
 import java.nio.file.{FileSystems, Files, Path, PathMatcher, Paths}
 
 /** A path pattern from the configuration, gitignore-flavoured (as in TACIT):
@@ -39,10 +40,10 @@ object PathPattern:
   private val EmptyPath = Paths.get("")
 
   def apply(pattern: String, base: Path): PathPattern =
-    val expanded = expandHome(pattern.trim).stripSuffix("/")
+    val expanded = expandHome(pattern.trim).stripSuffix("/").stripSuffix("\\")
     val stripped = if expanded.isEmpty then "." else expanded
     if stripped == "." then new PathPattern(pattern, Kind.Exact(canonical(base)))
-    else if !stripped.contains('/') then
+    else if !stripped.exists(c => c == '/' || c == '\\') then
       new PathPattern(pattern, Kind.Component(FileSystems.getDefault.getPathMatcher(s"glob:$stripped")))
     else
       val abs = Paths.get(stripped)
@@ -54,7 +55,11 @@ object PathPattern:
 
   /** `~` / `~/x` resolved against the home directory (also used by `Host` for agent-supplied paths). */
   def expandHome(p: String): String =
-    if p == "~" || p.startsWith("~/") then scala.util.Properties.userHome + p.drop(1) else p
+    if p == "~" then scala.util.Properties.userHome
+    else if p.startsWith("~/") || p.startsWith("~\\") then
+      val relative = p.drop(2).map(c => if c == '/' || c == '\\' then File.separatorChar else c)
+      Paths.get(scala.util.Properties.userHome).resolve(relative).toString
+    else p
 
   /** Split an absolute path into its longest glob-free prefix and the rest. */
   private def splitGlob(abs: Path): (Path, String) =
