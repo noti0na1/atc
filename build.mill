@@ -85,5 +85,12 @@ def dist = Task {
        |exec java -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
        |""".stripMargin
   os.write.over(Task.dest / "atc", script, perms = "rwxr-xr-x")
+  val windowsScript =
+    """@echo off
+      |setlocal
+      |set "ATC_DIST_DIR=%~dp0"
+      |java "-Datc.lib.classpath=%ATC_DIST_DIR%atc-lib.jar" -jar "%ATC_DIST_DIR%atc.jar" %*
+      |""".stripMargin
+  os.write.over(Task.dest / "atc.cmd", windowsScript)
   PathRef(Task.dest)
 }

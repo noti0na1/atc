@@ -1,6 +1,7 @@
 package atc
 
 import atc.perms.{Decision, ExecRequest, Mode}
+import java.nio.file.Paths
 
 /** The CLI argument parser (Main.parseArgs). */
 class MainSuite extends munit.FunSuite:
@@ -11,14 +12,14 @@ class MainSuite extends munit.FunSuite:
     assert(d.config.isEmpty && d.model.isEmpty && d.prompt.isEmpty && d.mode.isEmpty)
     assert(!d.approveAll && !d.init && !d.initGlobal && !d.help && !d.version)
     val a = parse("-C", "/work", "-m", "gpt", "-p", "hi", "--mode", "local", "--approve-all")
-    assertEquals(a.cwd.toString, "/work")
+    assertEquals(a.cwd, Paths.get("/work").toAbsolutePath.normalize)
     assertEquals(a.model, Some("gpt"))
     assertEquals(a.prompt, Some("hi"))
     assertEquals(a.mode, Some(Mode.Local))
     assert(a.approveAll)
     val b = parse("--cwd", "/w2", "--config", "/c.json", "--prompt", "x")
-    assertEquals(b.cwd.toString, "/w2")
-    assertEquals(b.config.map(_.toString), Some("/c.json"))
+    assertEquals(b.cwd, Paths.get("/w2").toAbsolutePath.normalize)
+    assertEquals(b.config, Some(Paths.get("/c.json")))
     assert(parse("--init").init)
     assert(parse("--init-global").initGlobal)
     assert(parse("--help").help && parse("-h").help)

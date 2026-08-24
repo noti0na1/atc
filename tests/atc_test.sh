@@ -626,7 +626,7 @@ assert_succeeds "the refused update kept the original" cmp -s "$WRAPPER" "$TEST_
 assert_eq "no temp file left" "" "$(ls "$TEST_TMP/selfbin"/atc.self-update.* 2>/dev/null || true)"
 assert_succeeds "a changed script replaces the wrapper" self_update_case changed
 assert_contains "the copy was replaced" "# newer" "$(cat "$TEST_TMP/selfbin/atc")"
-self_perms="$(stat -f %Lp "$TEST_TMP/selfbin/atc" 2>/dev/null || stat -c %a "$TEST_TMP/selfbin/atc")"
+self_perms="$(stat -c %a "$TEST_TMP/selfbin/atc" 2>/dev/null || stat -f %Lp "$TEST_TMP/selfbin/atc")"
 assert_eq "the installed wrapper is world-readable +x" "755" "$self_perms"
 assert_eq "no temp file left after replacement" "" "$(ls "$TEST_TMP/selfbin"/atc.self-update.* 2>/dev/null || true)"
 

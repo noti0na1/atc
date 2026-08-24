@@ -13,12 +13,19 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v7
-    - name: Test the atc wrapper script
+    - name: Test the Unix wrapper script
+      if: runner.os != 'Windows'
+      shell: bash
       run: bash tests/atc_test.sh
     - name: Set up JDK 17
       uses: actions/setup-java@v5
@@ -28,23 +35,39 @@ jobs:
     - name: Cache Mill and Coursier
       uses: coursier/cache-action@v8
     - name: Check formatting
+      if: runner.os == 'Linux'
+      shell: bash
       run: ./mill __.checkFormat
     - name: Compile
+      shell: bash
       run: ./mill __.compile
     - name: Run tests
+      shell: bash
       run: ./mill app.test
     - name: Build distribution
+      shell: bash
       run: ./mill dist
-    - name: Smoke-test the distribution (key-less echo model, one non-interactive turn)
+    - name: Smoke-test the Unix distribution
+      if: runner.os != 'Windows'
+      shell: bash
       run: |
-        echo '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' > /tmp/echo.json
+        echo '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' > "$RUNNER_TEMP/echo.json"
         out/dist.dest/atc --version
-        out/dist.dest/atc -c /tmp/echo.json -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee /tmp/smoke.log
-        grep -q 'val res1: Int = 42' /tmp/smoke.log
+        out/dist.dest/atc -c "$RUNNER_TEMP/echo.json" -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee "$RUNNER_TEMP/smoke.log"
+        grep -q 'val res1: Int = 42' "$RUNNER_TEMP/smoke.log"
+    - name: Smoke-test the Windows launcher
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        & out/dist.dest/atc.cmd --version
+        '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/echo.json"
+        $output = & out/dist.dest/atc.cmd -c "$env:RUNNER_TEMP/echo.json" -C "$env:RUNNER_TEMP" -p 'run: println("ci"); 21 * 2'
+        $output
+        if ($output -notmatch 'val res1: Int = 42') { throw 'Windows smoke test did not produce 42' }
 
   # Publishing a GitHub release (tag vX.Y.Z) builds the distribution and
-  # attaches atc.jar + atc-lib.jar to it; the `atc` wrapper script downloads
-  # those two assets and checks them against the digests GitHub records.
+  # attaches both jars and the Windows launcher; the Unix `atc` wrapper downloads
+  # the two jars and checks them against the digests GitHub records.
   publish-release:
     if: github.event_name == 'release'
     needs: build
@@ -81,5 +104,5 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name }}
       run: |
-        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar --clobber
+        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar out/dist.dest/atc.cmd --clobber
         gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

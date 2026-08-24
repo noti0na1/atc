@@ -2,11 +2,13 @@ package atc.host
 
 import atc.lib.ProcessResult
 
+import java.io.File
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 /** Running external processes with bounded, deadlock-free output capture */
 object Processes:
+  private val Windows = File.separatorChar == '\\'
   private val MaxStreamChars = 8 * 1024 * 1024
   private val TruncationMarker = "\n...[truncated: output exceeded 8 MiB cap]..."
   /** A command still running after this long has its output shown live from then on. */
@@ -127,6 +129,12 @@ object Processes:
             else
               cur.append(d)
               i += 1
+        case '\\' if Windows =>
+          // A backslash is a path separator on Windows, not shell syntax.
+          // Quoting remains available for executable paths and arguments with spaces.
+          cur.append('\\')
+          inWord = true
+          i += 1
         case '\\' if i + 1 < line.length =>
           cur.append(line.charAt(i + 1))
           inWord = true

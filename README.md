@@ -117,6 +117,11 @@ From then on `atc` runs ATC in the current directory, `atc update` fetches a new
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
 (To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
+On Windows, place the release assets `atc.cmd`, `atc.jar`, and `atc-lib.jar` in
+the same directory, add that directory to `PATH`, and run `atc`. The JVM agent
+uses native Windows paths and does not require Bash; only the Unix installer
+script above does.
+
 **1. Start it.** Change to the project you want to work on, then run `atc`:
 
 ```bash
