@@ -1,6 +1,7 @@
 # Start ATC from a Windows checkout. Loads .env, rebuilds stale jars, then runs them.
 $ErrorActionPreference = 'Stop'
 $AtcArgs = [string[]]$args
+$launchCwd = (Get-Location).Path
 $root = $PSScriptRoot
 $envFile = if ($env:ATC_ENV_FILE) { $env:ATC_ENV_FILE } else { Join-Path $root '.env' }
 
@@ -56,9 +57,8 @@ if ($env:ATC_JAVA_OPTS) {
   foreach ($option in ($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })) { $javaArgs.Add($option) }
 }
 $javaArgs.Add('-Dfile.encoding=UTF-8')
-$javaArgs.Add("-Datc.lib.classpath=$libJar")
 $javaArgs.Add('-jar')
-$javaArgs.Add($jar)
+$javaArgs.Add('atc.jar')
 $javaArgs.AddRange($argsList)
 
 $java = if ($env:JAVA_HOME -and (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin\java.exe') -PathType Leaf)) {
@@ -87,5 +87,17 @@ $major = [int]$Matches.major
 if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
 if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
 
-& $java @javaArgs
-exit $LASTEXITCODE
+$savedLaunchCwd = $env:ATC_INTERNAL_LAUNCH_CWD
+$savedLibClasspath = $env:ATC_INTERNAL_LIB_CLASSPATH
+$env:ATC_INTERNAL_LAUNCH_CWD = $launchCwd
+$env:ATC_INTERNAL_LIB_CLASSPATH = $libJar
+Push-Location -LiteralPath $dist
+try {
+  & $java @javaArgs
+  $javaExit = $LASTEXITCODE
+} finally {
+  Pop-Location
+  $env:ATC_INTERNAL_LAUNCH_CWD = $savedLaunchCwd
+  $env:ATC_INTERNAL_LIB_CLASSPATH = $savedLibClasspath
+}
+exit $javaExit

@@ -96,11 +96,18 @@ jobs:
           Remove-Item Env:JAVA_TOOL_OPTIONS -ErrorAction SilentlyContinue
         }
         if ($distVersionExit -ne 0) { throw "atc.cmd --version exited $distVersionExit" }
-        $distOutput = & $distLauncher -c $config -C $smokeDir -p 'run: println("ci"); 21 * 2'
-        $distExit = $LASTEXITCODE
+        Push-Location $smokeDir
+        try {
+          $distOutput = & $distLauncher -c $config -p 'run: println(access(".").path); 21 * 2'
+          $distExit = $LASTEXITCODE
+        } finally {
+          Pop-Location
+        }
         $distOutput
         if ($distExit -ne 0) { throw "atc.cmd smoke test exited $distExit" }
         if (($distOutput -join "`n") -notmatch 'val res1: Int = 42') { throw 'atc.cmd smoke test did not produce 42' }
+        $expectedCwd = $smokeDir -replace '\\', '/'
+        if (($distOutput -join "`n") -notmatch [regex]::Escape($expectedCwd)) { throw 'atc.cmd did not preserve its caller cwd' }
 
         $installedLib = Join-Path $installDir 'atc-lib.jar'
         $hiddenLib = "$installedLib.hidden"

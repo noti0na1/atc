@@ -113,8 +113,17 @@ def dist = Task {
       |)
       |call :atc_check_java
       |if errorlevel 1 exit /b 1
-      |"%ATC_JAVA%" "-Dfile.encoding=UTF-8" "-Datc.lib.classpath=%ATC_DIST_DIR%atc-lib.jar" -jar "%ATC_DIST_DIR%atc.jar" %*
-      |exit /b %errorlevel%
+      |set "ATC_INTERNAL_LAUNCH_CWD=%CD%"
+      |set "ATC_INTERNAL_LIB_CLASSPATH=%ATC_DIST_DIR%atc-lib.jar"
+      |pushd "%ATC_DIST_DIR%" >nul
+      |if errorlevel 1 (
+      |  echo atc: unable to enter the installation directory "%ATC_DIST_DIR%". 1>&2
+      |  exit /b 1
+      |)
+      |"%ATC_JAVA%" "-Dfile.encoding=UTF-8" -jar "atc.jar" %*
+      |set "ATC_EXIT=%errorlevel%"
+      |popd
+      |exit /b %ATC_EXIT%
       |
       |:atc_check_java
       |set "ATC_JAVA_VERSION="

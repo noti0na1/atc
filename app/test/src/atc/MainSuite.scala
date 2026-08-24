@@ -25,6 +25,12 @@ class MainSuite extends munit.FunSuite:
     assert(parse("--help").help && parse("-h").help)
     assert(parse("--version").version && parse("-v").version)
 
+  test("relative cwd and config paths resolve from the launch directory"):
+    val base = Files.createTempDirectory("atc-main-base").nn.toAbsolutePath.nn.normalize.nn
+    val parsed = Main.parseArgs(List("--cwd", "project", "--config", "extra.json"), Main.Args(cwd = base))
+    assertEquals(parsed.cwd, base.resolve("project").nn)
+    assertEquals(parsed.config, Some(base.resolve("project/extra.json").nn))
+
   test("unknown arguments and a bad mode are clear errors"):
     val e = intercept[IllegalArgumentException](parse("--bogus"))
     assert(e.getMessage.nn.contains("Unknown argument"), e.getMessage)

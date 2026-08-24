@@ -11,9 +11,18 @@ object Main:
   /** Written by the build (`Versions.atc` in `build.mill`) into `atc/version.txt`. */
   lazy val Version: String = Resources.text("/atc/version.txt").map(_.trim).getOrElse("dev")
 
+  /** The release batch launcher enters its installation directory so Java can
+    * open jars there even when that path contains characters outside the
+    * machine's legacy ANSI code page. It carries the user's real cwd through
+    * the Unicode Windows environment instead of Java's command line. */
+  private def launchCwd: Path =
+    Option(System.getenv("ATC_INTERNAL_LAUNCH_CWD"))
+      .map(value => Paths.get(value).nn.toAbsolutePath.nn.normalize.nn)
+      .getOrElse(Paths.get("").nn.toAbsolutePath.nn.normalize)
+
   case class Args(
     config: Option[Path] = None,
-    cwd: Path = Paths.get("").toAbsolutePath,
+    cwd: Path = launchCwd,
     model: Option[String] = None,
     mode: Option[Mode] = None,
     prompt: Option[String] = None,
@@ -26,8 +35,15 @@ object Main:
 
   def parseArgs(args: List[String], acc: Args = Args()): Args = args match
     case Nil => acc
-    case ("-c" | "--config") :: p :: rest => parseArgs(rest, acc.copy(config = Some(path(p))))
-    case ("-C" | "--cwd") :: p :: rest => parseArgs(rest, acc.copy(cwd = path(p).toAbsolutePath.normalize))
+    case ("-c" | "--config") :: p :: rest =>
+      val config = path(p)
+      parseArgs(
+        rest,
+        acc.copy(config = Some(if config.isAbsolute then config else acc.cwd.resolve(config).nn.normalize))
+      )
+    case ("-C" | "--cwd") :: p :: rest =>
+      val cwd = path(p)
+      parseArgs(rest, acc.copy(cwd = (if cwd.isAbsolute then cwd else acc.cwd.resolve(cwd).nn).normalize))
     case ("-m" | "--model") :: m :: rest => parseArgs(rest, acc.copy(model = Some(m)))
     case ("-p" | "--prompt") :: p :: rest => parseArgs(rest, acc.copy(prompt = Some(p)))
     case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
