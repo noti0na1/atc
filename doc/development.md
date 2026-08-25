@@ -55,17 +55,18 @@ The native PowerShell equivalents are:
 .\mill.bat app.compile
 .\mill.bat __.checkFormat
 .\mill.bat dist
-.\start.cmd -C "$HOME\some\project"
-$env:ATC_SKIP_BUILD = '1'; .\start.cmd --version
+.\start.ps1 -C "$HOME\some\project"
+$env:ATC_SKIP_BUILD = '1'; .\start.ps1 --version
 ```
 
 `start.sh` is the Unix developer path: it rebuilds `out/dist.dest/` with `./mill dist` when a
 source file is newer than the jar, sources a `.env` (`cp .env.example .env`; API keys and
 the `ATC_*` variables below, without overriding what the shell already exported) and passes
 its flags through to ATC. Without the script: `./mill dist`, then `out/dist.dest/atc`.
-On Windows, `start.cmd` provides the same flow through `start.ps1` and the included native
-`mill.bat`; it does not require Bash. The build temporarily runs at the checkout root, while
-ATC itself retains the directory from which `start.cmd` was invoked unless `-C` overrides it.
+On Windows, `start.ps1` provides the same flow through the included native `mill.bat`; it
+does not require Bash. `start.cmd` is the execution-policy compatibility entrypoint and,
+like any batch file, is subject to `cmd.exe` argument parsing. The build temporarily runs at
+the checkout root, while ATC itself retains the launch directory unless `-C` overrides it.
 
 On Unix, `atc dev <checkout>` runs a local build through the *installed* wrapper: it copies
 the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release; see
@@ -74,7 +75,7 @@ the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release
 Environment variables: `ATC_DEBUG=1` (`atc.Debug`) prints stack traces and terminal/stream
 diagnostics; `ATC_ASCII=1` draws the TUI with ASCII glyphs; `ATC_JAVA_OPTS` adds JVM flags
 through the Unix wrapper and the two start launchers; `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD`
-are `start.sh`/`start.cmd` shorthands for `-m`, `-c`,
+are `start.sh`/`start.ps1` shorthands for `-m`, `-c`,
 `-C`; `ATC_ENV_FILE` selects another environment file and `ATC_SKIP_BUILD=1` skips the
 staleness check. A provider with `"api": "echo"` is a key-less model (`run: <code>` in the
 request becomes a `run_scala` call with that code, anything else is echoed back) for smoke
@@ -1124,16 +1125,12 @@ the environment of every tool process it starts.
 ## Releases and CI
 
 CI (`.github/workflows/scala.yml`, modelled on TACIT's) runs on Linux, macOS, and Windows.
-Unix jobs use `./mill`; Windows uses `mill.bat` and serial tests. The launcher smoke runs
-before the full test suite so a unit-test failure does not hide packaging regressions, and
-the test steps use `!cancelled()` so a launcher failure does not hide test results either.
-The distribution, launcher-diagnostic, and checkout-launcher checks are separate, so one
-failure does not hide the others. The Windows smoke exercises `atc.ps1`, `atc.cmd`, and
-`start.cmd` from paths and arguments containing spaces and text outside the legacy Windows
-code page; the PowerShell-native check also includes `cmd.exe` metacharacters.
-Linux also checks formatting, and non-Windows jobs test the Bash wrapper.
-Every platform runs a key-less echo-model turn (`-p 'run: println("ci"); 21 * 2'`) and checks
-the echoed result; keep that expectation in sync if the tool-result format changes.
+Unix jobs use `./mill`; Windows uses `mill.bat` and serial tests. Every platform builds the
+distribution and runs the application test suite; the test step also runs after a packaging
+failure so both results are visible. Linux checks formatting, and non-Windows jobs run the
+deterministic Bash-wrapper test suite. CI deliberately does not run end-to-end launcher
+smoke scenarios: they couple shell parsing, packaging, terminal setup, configuration and the
+Scala REPL while duplicating behavior covered by the focused tests.
 
 Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`; the bare version
 is accepted too) makes the `publish-release` job (needs `build`) check the tag against the

@@ -1,27 +1,6 @@
 # Start ATC from a Windows checkout. Loads .env, rebuilds stale jars, then runs them.
 $ErrorActionPreference = 'Stop'
-$capturedCountText = $env:ATC_INTERNAL_START_ARG_COUNT
-if ($null -ne $capturedCountText) {
-  try { $capturedCount = [int]$capturedCountText }
-  catch { throw "Invalid internal start.cmd argument count: $capturedCountText" }
-  if ($capturedCount -lt 0 -or $capturedCount -gt 10000) {
-    throw "Invalid internal start.cmd argument count: $capturedCountText"
-  }
-  $captured = [Collections.Generic.List[string]]::new()
-  for ($index = 0; $index -lt $capturedCount; $index++) {
-    $name = "ATC_INTERNAL_START_ARG_$index"
-    $encoded = [Environment]::GetEnvironmentVariable($name, 'Process')
-    if ($null -eq $encoded -or -not $encoded.StartsWith('x')) {
-      throw "start.cmd did not provide argument $index of $capturedCount"
-    }
-    $captured.Add($encoded.Substring(1))
-    [Environment]::SetEnvironmentVariable($name, $null, 'Process')
-  }
-  [Environment]::SetEnvironmentVariable('ATC_INTERNAL_START_ARG_COUNT', $null, 'Process')
-  $AtcArgs = $captured.ToArray()
-} else {
-  $AtcArgs = [string[]]$args
-}
+$AtcArgs = [string[]]$args
 $launchCwd = (Get-Location).Path
 $root = $PSScriptRoot
 $envFile = if ($env:ATC_ENV_FILE) { $env:ATC_ENV_FILE } else { Join-Path $root '.env' }

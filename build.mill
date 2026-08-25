@@ -101,74 +101,18 @@ def dist = Task {
   val windowsScript =
     """@echo off
       |setlocal DisableDelayedExpansion
-      |set "ATC_DIST_DIR=%~dp0"
-      |if not exist "%ATC_DIST_DIR%atc.jar" (
-      |  echo atc: atc.jar is missing beside "%~f0". Download atc.cmd, atc.jar, and atc-lib.jar into the same directory. 1>&2
+      |set "ATC_POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+      |if not exist "%ATC_POWERSHELL%" (
+      |  echo atc: Windows PowerShell was not found at "%ATC_POWERSHELL%". 1>&2
       |  exit /b 1
       |)
-      |if not exist "%ATC_DIST_DIR%atc-lib.jar" (
-      |  echo atc: atc-lib.jar is missing beside "%~f0". Download atc.cmd, atc.jar, and atc-lib.jar into the same directory. 1>&2
+      |if not exist "%~dp0atc.ps1" (
+      |  echo atc: atc.ps1 is missing beside "%~f0". Download atc.ps1, atc.cmd, atc.jar, and atc-lib.jar into the same directory. 1>&2
       |  exit /b 1
       |)
-      |set "ATC_JAVA="
-      |if defined JAVA_HOME if exist "%JAVA_HOME%\bin\java.exe" set "ATC_JAVA=%JAVA_HOME%\bin\java.exe"
-      |if not defined ATC_JAVA for %%J in (java.exe) do set "ATC_JAVA=%%~$PATH:J"
-      |if not defined ATC_JAVA (
-      |  echo atc: Java 17 or newer is required, but java.exe was not found in JAVA_HOME or PATH. 1>&2
-      |  exit /b 1
-      |)
-      |call :atc_check_java
-      |if errorlevel 1 exit /b 1
-      |rem Keep application arguments off java.exe's legacy ANSI command line.
-      |rem The x prefix keeps an explicitly empty value present in the environment.
-      |set "ATC_INTERNAL_ARG_COUNT=0"
-      |:atc_capture_args
-      |if "%~1"=="" if [%1]==[] goto atc_args_captured
-      |set "ATC_INTERNAL_ARG_%ATC_INTERNAL_ARG_COUNT%=x%~1"
-      |set /a ATC_INTERNAL_ARG_COUNT+=1 >nul
-      |shift
-      |goto atc_capture_args
-      |:atc_args_captured
-      |set "ATC_INTERNAL_LAUNCH_CWD=%CD%"
-      |set "ATC_INTERNAL_LIB_CLASSPATH=%ATC_DIST_DIR%atc-lib.jar"
-      |pushd "%ATC_DIST_DIR%" >nul
-      |if errorlevel 1 (
-      |  echo atc: unable to enter the installation directory "%ATC_DIST_DIR%". 1>&2
-      |  exit /b 1
-      |)
-      |"%ATC_JAVA%" "-Dfile.encoding=UTF-8" "-Datc.version=@ATC_VERSION@" -jar "atc.jar"
-      |set "ATC_EXIT=%errorlevel%"
-      |popd
-      |exit /b %ATC_EXIT%
-      |
-      |:atc_check_java
-      |set "ATC_JAVA_VERSION="
-      |for /f "tokens=1,2,3" %%T in ('"%ATC_JAVA%" -version 2^>^&1') do if /i "%%U"=="version" if not defined ATC_JAVA_VERSION set "ATC_JAVA_VERSION=%%~V"
-      |if not defined ATC_JAVA_VERSION (
-      |  echo atc: unable to determine the Java version from "%ATC_JAVA%". Java 17 or newer is required. 1>&2
-      |  exit /b 1
-      |)
-      |set "ATC_JAVA_MAJOR="
-      |for /f "tokens=1,2 delims=.-+" %%A in ("%ATC_JAVA_VERSION%") do (
-      |  set "ATC_JAVA_MAJOR=%%A"
-      |  if "%%A"=="1" set "ATC_JAVA_MAJOR=%%B"
-      |)
-      |if not defined ATC_JAVA_MAJOR (
-      |  echo atc: unable to understand Java version "%ATC_JAVA_VERSION%" from "%ATC_JAVA%". Java 17 or newer is required. 1>&2
-      |  exit /b 1
-      |)
-      |set "ATC_JAVA_INVALID="
-      |for /f "delims=0123456789" %%N in ("%ATC_JAVA_MAJOR%") do set "ATC_JAVA_INVALID=1"
-      |if defined ATC_JAVA_INVALID (
-      |  echo atc: unable to understand Java version "%ATC_JAVA_VERSION%" from "%ATC_JAVA%". Java 17 or newer is required. 1>&2
-      |  exit /b 1
-      |)
-      |if %ATC_JAVA_MAJOR% LSS 17 (
-      |  echo atc: Java 17 or newer is required, but "%ATC_JAVA%" reports version %ATC_JAVA_VERSION%. 1>&2
-      |  exit /b 1
-      |)
-      |exit /b 0
-      |""".stripMargin.replace("@ATC_VERSION@", Versions.atc).replace("\n", "\r\n")
+      |"%ATC_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0atc.ps1" %*
+      |exit /b %errorlevel%
+      |""".stripMargin.replace("\n", "\r\n")
   os.write.over(Task.dest / "atc.cmd", windowsScript)
   PathRef(Task.dest)
 }
