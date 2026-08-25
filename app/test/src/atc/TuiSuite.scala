@@ -1,11 +1,29 @@
 package atc
 
-import atc.ui.{Ansi, Tui}
+import atc.ui.{Ansi, Glyphs, Tui}
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
+
+  test("glyphs fall back to ASCII when a dumb terminal has no encoding"):
+    assertEquals(Tui.glyphs(null, forceAscii = false), Glyphs.ascii)
+    assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = false), Glyphs.unicode)
+    assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = true), Glyphs.ascii)
+
+  test("non-interactive terminals are explicitly dumb UTF-8 terminals"):
+    val terminal = Tui.openTerminal(
+      nonInteractive = true,
+      input = ByteArrayInputStream(Array.emptyByteArray),
+      output = ByteArrayOutputStream(),
+    )
+    try
+      assertEquals(terminal.getType, org.jline.terminal.Terminal.TYPE_DUMB)
+      assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
+    finally terminal.close()
 
   test("withoutPrinted removes the live-shown prints and keeps diagnostics and echoes"):
     val printed = "  leading spaces\nstaged:\nA  file\n"

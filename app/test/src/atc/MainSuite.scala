@@ -17,19 +17,26 @@ class MainSuite extends munit.FunSuite:
     assertEquals(a.prompt, Some("hi"))
     assertEquals(a.mode, Some(Mode.Local))
     assert(a.approveAll)
-    val b = parse("--cwd", "/w2", "--config", "/c.json", "--prompt", "x")
-    assertEquals(b.cwd, Paths.get("/w2").toAbsolutePath.normalize)
-    assertEquals(b.config, Some(Paths.get("/c.json")))
+    val absoluteCwd = Files.createTempDirectory("atc-main-absolute").nn.toAbsolutePath.nn.normalize.nn
+    val absoluteConfig = absoluteCwd.resolve("c.json").nn
+    val b = parse("--cwd", absoluteCwd.toString, "--config", absoluteConfig.toString, "--prompt", "x")
+    assertEquals(b.cwd, absoluteCwd)
+    assertEquals(b.config, Some(absoluteConfig))
     assert(parse("--init").init)
     assert(parse("--init-global").initGlobal)
     assert(parse("--help").help && parse("-h").help)
     assert(parse("--version").version && parse("-v").version)
 
-  test("relative cwd and config paths resolve from the launch directory"):
+  test("relative cwd and config resolve consistently regardless of flag order"):
     val base = Files.createTempDirectory("atc-main-base").nn.toAbsolutePath.nn.normalize.nn
-    val parsed = Main.parseArgs(List("--cwd", "project", "--config", "extra.json"), Main.Args(cwd = base))
-    assertEquals(parsed.cwd, base.resolve("project").nn)
-    assertEquals(parsed.config, Some(base.resolve("project/extra.json").nn))
+    val expectedCwd = base.resolve("project").nn
+    val expectedConfig = Some(base.resolve("project/extra.json").nn)
+    val cwdFirst = Main.parseArgs(List("--cwd", "project", "--config", "extra.json"), Main.Args(cwd = base))
+    val configFirst = Main.parseArgs(List("--config", "extra.json", "--cwd", "project"), Main.Args(cwd = base))
+    assertEquals(cwdFirst.cwd, expectedCwd)
+    assertEquals(cwdFirst.config, expectedConfig)
+    assertEquals(configFirst.cwd, expectedCwd)
+    assertEquals(configFirst.config, expectedConfig)
 
   test("unknown arguments and a bad mode are clear errors"):
     val e = intercept[IllegalArgumentException](parse("--bogus"))
@@ -37,6 +44,16 @@ class MainSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](parse("--mode", "bogus"))
     val missing = intercept[IllegalArgumentException](parse("-p"))
     assert(missing.getMessage.nn.contains("requires a value"), missing.getMessage)
+
+  test("the internal Windows argument protocol restores Unicode, quotes, and empty values"):
+    val values = List("-C", "C:\\仕事 dir", "-p", "run: println(\"Ω !\")", "")
+    val environment =
+      (Map("ATC_INTERNAL_ARG_COUNT" -> values.length.toString) ++
+        values.zipWithIndex.map((value, index) => s"ATC_INTERNAL_ARG_$index" -> s"x$value")).get
+    assertEquals(Main.launchArgs(List("ignored"), environment), values)
+    assertEquals(Main.launchArgs(List("direct"), _ => None), List("direct"))
+    intercept[IllegalArgumentException](Main.launchArgs(Nil, Map("ATC_INTERNAL_ARG_COUNT" -> "1").get))
+    assert(Main.isInternalEnvironment("atc_Internal_Arg_0"))
 
   test("Windows-friendly path syntax expands home and validates paths before running"):
     assertEquals(parse("-C", "~").cwd, Paths.get(scala.util.Properties.userHome).toAbsolutePath.normalize)

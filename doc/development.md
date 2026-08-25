@@ -38,7 +38,7 @@ one known-good build rather than a release.
 ./mill app.test.testOnly atc.ReplSessionSuite -- '*timeout*'   # tests matching a glob
 ./mill app.compile                                # compile app (+ lib)
 ./mill __.checkFormat                             # scalafmt check; ./mill __.reformat fixes
-./mill dist                                       # out/dist.dest/{atc,atc.cmd,atc.jar,atc-lib.jar}
+./mill dist                                       # out/dist.dest/{atc,atc.ps1,atc.cmd,atc.jar,atc-lib.jar,version.txt}
 ./start.sh -C ~/some/project                      # sources .env, rebuilds dist if sources changed, runs the TUI
 ./start.sh -c cfg.json -p 'run: 1 + 1'            # one non-interactive turn (plain mode)
 ./mill -i app.run -C /some/project                # dev run without dist (-i keeps the terminal attached)
@@ -1109,12 +1109,17 @@ release-metadata parsing (both parsers), checksum verification, the cache checks
 snippet, locations, command dispatch with a mock `java`, the dev mode, and the download flow
 against a stubbed GitHub; no network or Java needed.
 
-Windows releases instead put `atc.cmd`, `atc.jar`, and `atc-lib.jar` together. `atc.cmd`
-launches the JVM application directly and therefore accepts application flags such as
-`atc --help`, not the Unix wrapper's `setup`/`update`/`self`/`dev` commands. Updating is
-currently a manual replacement of all three assets from one release. For a checkout,
+Windows releases instead put `atc.ps1`, `atc.cmd`, `atc.jar`, and `atc-lib.jar` together.
+The PowerShell-native `atc.ps1` is the lossless application launcher; `atc.cmd` is retained
+for Command Prompt compatibility but necessarily has batch-file argument parsing. Both
+accept application flags such as `atc.ps1 --help`, not the Unix wrapper's
+`setup`/`update`/`self`/`dev` commands. Updating is currently a manual replacement of all
+four assets from one release. For a checkout,
 `start.cmd`/`start.ps1` load `.env`, rebuild through `mill.bat` when stale, and then launch
-the local distribution without requiring Bash.
+the local distribution without requiring Bash. Both Windows launch paths carry application
+arguments through private child-environment entries because `java.exe` otherwise converts
+its UTF-16 command line through the legacy ANSI code page. ATC removes those entries from
+the environment of every tool process it starts.
 
 ## Releases and CI
 
@@ -1122,13 +1127,17 @@ CI (`.github/workflows/scala.yml`, modelled on TACIT's) runs on Linux, macOS, an
 Unix jobs use `./mill`; Windows uses `mill.bat` and serial tests. The launcher smoke runs
 before the full test suite so a unit-test failure does not hide packaging regressions, and
 the test steps use `!cancelled()` so a launcher failure does not hide test results either.
-the Windows smoke exercises both `atc.cmd` and `start.cmd` from a path containing spaces and
-non-ASCII text. Linux also checks formatting, and non-Windows jobs test the Bash wrapper.
+The distribution, launcher-diagnostic, and checkout-launcher checks are separate, so one
+failure does not hide the others. The Windows smoke exercises `atc.ps1`, `atc.cmd`, and
+`start.cmd` from paths and arguments containing spaces and text outside the legacy Windows
+code page; the PowerShell-native check also includes `cmd.exe` metacharacters.
+Linux also checks formatting, and non-Windows jobs test the Bash wrapper.
 Every platform runs a key-less echo-model turn (`-p 'run: println("ci"); 21 * 2'`) and checks
 the echoed result; keep that expectation in sync if the tool-result format changes.
 
 Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`; the bare version
 is accepted too) makes the `publish-release` job (needs `build`) check the tag against the
-version, run `./mill dist`, and upload `atc.jar`, `atc-lib.jar`, and `atc.cmd`. The two jar
-names are the exact assets the Unix wrapper looks for; Windows users download all three.
+version, run `./mill dist`, and upload `atc.jar`, `atc-lib.jar`, `atc.ps1`, and `atc.cmd`.
+The two jar names are the exact assets the Unix wrapper looks for; Windows users download
+all four assets.
 A mismatching tag fails the job with a message saying which side to fix.

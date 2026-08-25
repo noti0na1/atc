@@ -8,10 +8,23 @@ import java.nio.file.{Files, Path, Paths}
 
 /** Command line entry point: parses the flags and starts [[App]]. */
 object Main:
-  /** Written by the build (`Versions.atc` in `build.mill`) into `atc/version.txt`. */
-  lazy val Version: String = Resources.text("/atc/version.txt").map(_.trim).getOrElse("dev")
+  /** Launchers use this namespace for values that must cross Windows' legacy
+    * command-line encoding boundary. Never inherit them into tool processes. */
+  private[atc] val InternalEnvironmentPrefix = "ATC_INTERNAL_"
+  private val ArgCountEnvironment = InternalEnvironmentPrefix + "ARG_COUNT"
+  private val ArgEnvironmentPrefix = InternalEnvironmentPrefix + "ARG_"
+  private val EncodedArgSentinel = "x"
 
-  /** The release batch launcher enters its installation directory so Java can
+  private[atc] def isInternalEnvironment(name: String): Boolean =
+    name.regionMatches(true, 0, InternalEnvironmentPrefix, 0, InternalEnvironmentPrefix.length)
+
+  /** Written by the build (`Versions.atc` in `build.mill`) into `atc/version.txt`. */
+  lazy val Version: String =
+    sys.props.get("atc.version").map(_.trim).filter(_.nonEmpty)
+      .orElse(Resources.text("/atc/version.txt").map(_.trim).filter(_.nonEmpty))
+      .getOrElse("dev")
+
+  /** The Windows release launchers enter their installation directory so Java can
     * open jars there even when that path contains characters outside the
     * machine's legacy ANSI code page. It carries the user's real cwd through
     * the Unicode Windows environment instead of Java's command line. */
@@ -33,28 +46,34 @@ object Main:
     version: Boolean = false,
   )
 
-  def parseArgs(args: List[String], acc: Args = Args()): Args = args match
+  /** Parse first, then resolve paths once. In particular, `-c extra.json -C
+    * project` and `-C project -c extra.json` must mean the same thing. */
+  def parseArgs(args: List[String], acc: Args = Args()): Args =
+    val raw = parseRawArgs(args, acc)
+    val base = acc.cwd.toAbsolutePath.nn.normalize.nn
+    val cwd = resolve(base, raw.cwd)
+    raw.copy(cwd = cwd, config = raw.config.map(resolve(cwd, _)))
+
+  private def parseRawArgs(args: List[String], acc: Args): Args = args match
     case Nil => acc
     case ("-c" | "--config") :: p :: rest =>
-      val config = path(p)
-      parseArgs(
-        rest,
-        acc.copy(config = Some(if config.isAbsolute then config else acc.cwd.resolve(config).nn.normalize))
-      )
+      parseRawArgs(rest, acc.copy(config = Some(path(p))))
     case ("-C" | "--cwd") :: p :: rest =>
-      val cwd = path(p)
-      parseArgs(rest, acc.copy(cwd = (if cwd.isAbsolute then cwd else acc.cwd.resolve(cwd).nn).normalize))
-    case ("-m" | "--model") :: m :: rest => parseArgs(rest, acc.copy(model = Some(m)))
-    case ("-p" | "--prompt") :: p :: rest => parseArgs(rest, acc.copy(prompt = Some(p)))
-    case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
-    case "--approve-all" :: rest => parseArgs(rest, acc.copy(approveAll = true))
-    case "--init" :: rest => parseArgs(rest, acc.copy(init = true))
-    case "--init-global" :: rest => parseArgs(rest, acc.copy(initGlobal = true))
-    case ("-h" | "--help") :: rest => parseArgs(rest, acc.copy(help = true))
-    case ("-v" | "--version") :: rest => parseArgs(rest, acc.copy(version = true))
+      parseRawArgs(rest, acc.copy(cwd = path(p)))
+    case ("-m" | "--model") :: m :: rest => parseRawArgs(rest, acc.copy(model = Some(m)))
+    case ("-p" | "--prompt") :: p :: rest => parseRawArgs(rest, acc.copy(prompt = Some(p)))
+    case "--mode" :: m :: rest => parseRawArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
+    case "--approve-all" :: rest => parseRawArgs(rest, acc.copy(approveAll = true))
+    case "--init" :: rest => parseRawArgs(rest, acc.copy(init = true))
+    case "--init-global" :: rest => parseRawArgs(rest, acc.copy(initGlobal = true))
+    case ("-h" | "--help") :: rest => parseRawArgs(rest, acc.copy(help = true))
+    case ("-v" | "--version") :: rest => parseRawArgs(rest, acc.copy(version = true))
     case flag :: Nil if Set("-c", "--config", "-C", "--cwd", "-m", "--model", "-p", "--prompt", "--mode")(flag) =>
       throw IllegalArgumentException(s"$flag requires a value (try --help)")
     case other :: _ => throw IllegalArgumentException(s"Unknown argument: $other (try --help)")
+
+  private def resolve(base: Path, value: Path): Path =
+    (if value.isAbsolute then value else base.resolve(value).nn).normalize.nn
 
   private def path(value: String): Path =
     val expanded = PathPattern.expandHome(value)
@@ -63,6 +82,26 @@ object Main:
         throw IllegalArgumentException(s"Invalid Windows path ${atc.host.Host.scalaString(value)}: $reason")
       )
     Paths.get(expanded).nn
+
+  /** Windows' Java launcher first converts its UTF-16 command line through the
+    * machine ANSI code page. The batch and PowerShell launchers therefore pass
+    * application arguments through the Unicode child environment and give
+    * java.exe only fixed ASCII arguments. */
+  private[atc] def launchArgs(argv: List[String], environment: String => Option[String]): List[String] =
+    environment(ArgCountEnvironment) match
+      case None => argv
+      case Some(rawCount) =>
+        val count = rawCount.toIntOption.filter(n => n >= 0 && n <= 10_000).getOrElse(
+          throw IllegalArgumentException(s"Invalid internal launcher argument count: $rawCount")
+        )
+        List.tabulate(count) { index =>
+          val encoded = environment(ArgEnvironmentPrefix + index).getOrElse(
+            throw IllegalArgumentException(s"Windows launcher did not provide argument $index of $count")
+          )
+          if !encoded.startsWith(EncodedArgSentinel) then
+            throw IllegalArgumentException(s"Windows launcher provided an invalid argument $index of $count")
+          encoded.drop(EncodedArgSentinel.length)
+        }
 
   /** Validate paths only for actions that use them, so `atc --help` and
     * `--version` remain available from a deleted working directory. */
@@ -98,7 +137,9 @@ object Main:
 
   def main(argv: Array[String]): Unit =
     val args: Args =
-      try validateArgs(parseArgs(argv.toList))
+      try
+        val launched = launchArgs(argv.toList, name => Option(System.getenv(name)))
+        validateArgs(parseArgs(launched))
       catch
         case e: IllegalArgumentException =>
           System.err.println(Ansi.sanitize(Option(e.getMessage).getOrElse(e.getClass.getSimpleName)))

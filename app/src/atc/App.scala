@@ -20,7 +20,7 @@ import scala.util.Properties
   * slash commands. */
 final class App(args: Main.Args):
   val cwd: Path = args.cwd
-  val tui = Tui(Paths.get(Properties.userHome, ".atc", "history"))
+  val tui = Tui(Paths.get(Properties.userHome, ".atc", "history"), nonInteractive = args.prompt.nonEmpty)
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
     * first-run offers of [[App.setup]] (which may end the program instead). */

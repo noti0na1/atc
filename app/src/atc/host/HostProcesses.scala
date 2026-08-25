@@ -1,5 +1,6 @@
 package atc.host
 
+import atc.Main
 import atc.lib.*
 import atc.perms.ScopeId
 
@@ -84,6 +85,9 @@ private[host] trait HostProcesses:
     pipeline.stages.map { stage =>
       val argv = Processes.executableArgv(stage.argv, dir)
       val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
+      // Windows launchers may carry the original CLI (including a prompt) in
+      // these variables. It belongs to ATC, not commands the agent starts.
+      builder.environment().nn.keySet().nn.removeIf(Main.isInternalEnvironment)
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
     }

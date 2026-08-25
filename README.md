@@ -119,7 +119,7 @@ From then on `atc` runs ATC in the current directory, `atc update` fetches a new
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
 (To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
-**Windows (PowerShell).** Download `atc.cmd`, `atc.jar`, and `atc-lib.jar` from the
+**Windows (PowerShell).** Download `atc.ps1`, `atc.cmd`, `atc.jar`, and `atc-lib.jar` from the
 same Windows-capable release (0.1.2 or later), keep them together, and put that directory
 on your user `PATH`:
 
@@ -127,22 +127,31 @@ on your user `PATH`:
 $atcDir = Join-Path $env:LOCALAPPDATA 'Programs\atc'
 New-Item -ItemType Directory -Force -Path $atcDir | Out-Null
 $assets = 'https://github.com/noti0na1/atc/releases/latest/download'
-'atc.cmd', 'atc.jar', 'atc-lib.jar' | ForEach-Object {
+'atc.ps1', 'atc.cmd', 'atc.jar', 'atc-lib.jar' | ForEach-Object {
   Invoke-WebRequest -UseBasicParsing "$assets/$_" -OutFile (Join-Path $atcDir $_)
 }
+Unblock-File (Join-Path $atcDir 'atc.ps1')
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $entries = @($userPath -split ';' | Where-Object { $_ })
 if ($entries -notcontains $atcDir) {
   [Environment]::SetEnvironmentVariable('Path', (($entries + $atcDir) -join ';'), 'User')
 }
 $env:Path = "$atcDir;$env:Path"
-atc --version
+atc.ps1 --version
 ```
 
-The Windows launcher needs no Bash. It runs the three local assets directly; it does not
-implement the Unix wrapper's `setup`, `update`, `self`, or `dev` commands and does not verify
-downloads automatically. To update, download all three files again from the same release.
-To run it, use `Set-Location 'C:\path\to\your-project'` and then `atc`.
+The PowerShell launcher needs no Bash. It runs the local jars directly and preserves
+Unicode, quotes, empty values, and shell metacharacters in application arguments. Use
+`atc.ps1` from PowerShell, especially for scripted `-p` prompts. `atc.cmd` remains a
+compatibility entrypoint for Command Prompt and simple interactive launches; like every
+batch file, `cmd.exe` may expand or reinterpret complex arguments before ATC receives them.
+Neither launcher implements the Unix wrapper's `setup`, `update`, `self`, or `dev` commands
+or verifies downloads automatically. To update, download all four files again from the same
+release. To run it, use `Set-Location 'C:\path\to\your-project'` and then `atc.ps1`.
+If Windows PowerShell blocks scripts under its `Restricted` policy, and your organization
+allows local scripts, enable them once with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`; otherwise use `atc.cmd` for the
+compatibility path. `Unblock-File` alone does not override an execution policy.
 
 **1. Start it.** Change to the project you want to work on, then run `atc`:
 

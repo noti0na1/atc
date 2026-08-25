@@ -79,19 +79,25 @@ object app extends AtcScalaModule:
     // Avoid Windows' command-line length limit for the forked test JVM.
     def testUseArgsFile = scala.util.Properties.isWin
 
+def windowsPowerShellSource = Task.Source("windows/atc.ps1")
+
 /** Build a self-contained distribution under `out/dist.dest/`. */
 def dist = Task {
   val libJar = lib.assembly().path
   val appJar = app.assembly().path
   os.copy(libJar, Task.dest / "atc-lib.jar", replaceExisting = true)
   os.copy(appJar, Task.dest / "atc.jar", replaceExisting = true)
+  os.write.over(Task.dest / "version.txt", Versions.atc)
   val script =
     s"""#!/usr/bin/env sh
        |DIR=$$(cd "$$(dirname "$$0")" && pwd)
-       |exec java -Dfile.encoding=UTF-8 -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
+       |exec java -Dfile.encoding=UTF-8 -Datc.version=${Versions.atc} -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
        |""".stripMargin
   if scala.util.Properties.isWin then os.write.over(Task.dest / "atc", script)
   else os.write.over(Task.dest / "atc", script, perms = "rwxr-xr-x")
+  val windowsPowerShell =
+    os.read(windowsPowerShellSource().path).replace("@ATC_VERSION@", Versions.atc)
+  os.write.over(Task.dest / "atc.ps1", windowsPowerShell)
   val windowsScript =
     """@echo off
       |setlocal DisableDelayedExpansion
@@ -113,6 +119,16 @@ def dist = Task {
       |)
       |call :atc_check_java
       |if errorlevel 1 exit /b 1
+      |rem Keep application arguments off java.exe's legacy ANSI command line.
+      |rem The x prefix keeps an explicitly empty value present in the environment.
+      |set "ATC_INTERNAL_ARG_COUNT=0"
+      |:atc_capture_args
+      |if "%~1"=="" if [%1]==[] goto atc_args_captured
+      |set "ATC_INTERNAL_ARG_%ATC_INTERNAL_ARG_COUNT%=x%~1"
+      |set /a ATC_INTERNAL_ARG_COUNT+=1 >nul
+      |shift
+      |goto atc_capture_args
+      |:atc_args_captured
       |set "ATC_INTERNAL_LAUNCH_CWD=%CD%"
       |set "ATC_INTERNAL_LIB_CLASSPATH=%ATC_DIST_DIR%atc-lib.jar"
       |pushd "%ATC_DIST_DIR%" >nul
@@ -120,7 +136,7 @@ def dist = Task {
       |  echo atc: unable to enter the installation directory "%ATC_DIST_DIR%". 1>&2
       |  exit /b 1
       |)
-      |"%ATC_JAVA%" "-Dfile.encoding=UTF-8" -jar "atc.jar" %*
+      |"%ATC_JAVA%" "-Dfile.encoding=UTF-8" "-Datc.version=@ATC_VERSION@" -jar "atc.jar"
       |set "ATC_EXIT=%errorlevel%"
       |popd
       |exit /b %ATC_EXIT%
@@ -152,7 +168,7 @@ def dist = Task {
       |  exit /b 1
       |)
       |exit /b 0
-      |""".stripMargin.replace("\n", "\r\n")
+      |""".stripMargin.replace("@ATC_VERSION@", Versions.atc).replace("\n", "\r\n")
   os.write.over(Task.dest / "atc.cmd", windowsScript)
   PathRef(Task.dest)
 }
