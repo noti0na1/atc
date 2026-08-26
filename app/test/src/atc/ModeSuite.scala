@@ -210,11 +210,11 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     assert(e.getMessage.nn.contains("sideways"), e.getMessage)
 
   test("--mode selects the sandbox mode on the command line"):
-    assertEquals(Main.parseArgs(Nil).mode, None)
-    assertEquals(Main.parseArgs(List("--mode", "readonly")).mode, Some(Mode.ReadOnly))
-    assertEquals(Main.parseArgs(List("--mode", "local")).mode, Some(Mode.Local))
-    assertEquals(Main.parseArgs(List("--mode", "full")).mode, Some(Mode.Full))
-    intercept[IllegalArgumentException](Main.parseArgs(List("--mode", "sideways")))
+    assertEquals(Cli.parse(Nil).mode, None)
+    assertEquals(Cli.parse(List("--mode", "readonly")).mode, Some(Mode.ReadOnly))
+    assertEquals(Cli.parse(List("--mode", "local")).mode, Some(Mode.Local))
+    assertEquals(Cli.parse(List("--mode", "full")).mode, Some(Mode.Full))
+    intercept[IllegalArgumentException](Cli.parse(List("--mode", "sideways")))
 
   test("every mode has a human-readable description naming it"):
     for m <- allModes do

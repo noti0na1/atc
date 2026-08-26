@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
+import atc.platform.PlatformPath
 import atc.sandbox.{ReplSession, SandboxConfig}
 
 import java.nio.file.{Files, Path}
@@ -113,10 +114,10 @@ final class TestEnv(
   /** Relative to the root; listings already come relative when inside the root. */
   def rel(p: String): String =
     val path = Path.of(p)
-    if path.isAbsolute then Host.portablePath(root.relativize(path)) else p.replace('\\', '/')
+    if path.isAbsolute then PlatformPath.portable(root.relativize(path)) else p.replace('\\', '/')
 
   /** A value quoted for interpolation into a sandbox Scala snippet. */
-  def scalaString(value: Any): String = Host.scalaString(String.valueOf(value))
+  def scalaString(value: Any): String = ScalaSource.stringLiteral(String.valueOf(value))
 
   def clearOutput(): Unit =
     agentOut.clear(); userOut.clear()

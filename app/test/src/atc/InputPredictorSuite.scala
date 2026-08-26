@@ -16,7 +16,7 @@ class InputPredictorSuite extends munit.FunSuite:
     val prompts: ListBuffer[String] = ListBuffer()
     val entered = CountDownLatch(1)
     def complete(s: SystemPrompt, h: List[Msg], t: List[ToolSpec], sink: StreamSink, c: () => Boolean): Completion =
-      Completion("", Nil, None, TokenUsage(), "end_turn")
+      Completion("", Nil, None, TokenUsage(), "end_turn", CompletionStop.Complete)
     val thinkingAsked: ListBuffer[Boolean] = ListBuffer()
     def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
       prompts += prompt
@@ -108,7 +108,7 @@ class InputPredictorSuite extends munit.FunSuite:
       val releaseFirst = CountDownLatch(1)
       val prompts = ListBuffer[String]()
       def complete(s: SystemPrompt, h: List[Msg], t: List[ToolSpec], sink: StreamSink, c: () => Boolean): Completion =
-        Completion("", Nil, None, TokenUsage(), "end_turn")
+        Completion("", Nil, None, TokenUsage(), "end_turn", CompletionStop.Complete)
       def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
         val call = calls.incrementAndGet()
         val now = active.incrementAndGet()

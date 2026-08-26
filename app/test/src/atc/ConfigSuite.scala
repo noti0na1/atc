@@ -414,6 +414,15 @@ class ConfigSuite extends munit.FunSuite:
     val empty = Config.withTopLevel("{\r\n}\r\n", "model", ujson.Str("gpt"))
     assertEquals(empty, "{\r\n  \"model\": \"gpt\"\r\n}\r\n")
 
+  test("withTopLevel preserves bare CR and a BOM when it inserts a key"):
+    val text = "\uFEFF{\r    \"files\": [],\r    \"safeMode\": true\r}\r"
+    val after = Config.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
+    assertEquals(
+      after,
+      "\uFEFF{\r    \"files\": [],\r    \"model\": \"gpt\",\r    \"safeMode\": true\r}\r",
+    )
+    assertEquals(Config.withTopLevel("\uFEFF{\r}\r", "model", ujson.Str("gpt")), "\uFEFF{\r  \"model\": \"gpt\"\r}\r")
+
   test("withTopLevel only touches the top level: nested keys, strings and brackets do not confuse it"):
     val text =
       """{
@@ -498,6 +507,11 @@ class ConfigSuite extends munit.FunSuite:
     Files.writeString(dir5.resolve(".atc/.gitignore"), "")
     Config.initProject(dir5)
     assertEquals(Files.readString(dir5.resolve(".atc/.gitignore")).nn, "keys.properties\n")
+    val dir6 = Files.createTempDirectory("atc-initproj6").nn
+    Files.createDirectories(dir6.resolve(".atc"))
+    Files.writeString(dir6.resolve(".atc/.gitignore"), "\uFEFFtarget\r")
+    Config.initProject(dir6)
+    assertEquals(Files.readString(dir6.resolve(".atc/.gitignore")).nn, "\uFEFFtarget\rkeys.properties\r")
 
   test("an invalid reasoning effort or summary is a config error, not a per-turn crash"):
     def withModel(model: String): IllegalArgumentException =

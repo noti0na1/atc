@@ -1,5 +1,7 @@
 package atc.perms
 
+import atc.platform.PlatformPath
+
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
@@ -42,7 +44,7 @@ case class FileRule(
       Option.when(locked)("locked"),
     ).flatten
     val note = why.orElse(grantsWithin.map(root =>
-      s"from the project config, granting only inside ${PathPattern.portable(root)}"
+      s"from the project config, granting only inside ${PlatformPath.portable(root)}"
     ))
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(" — " + _)}"
 
@@ -172,7 +174,7 @@ final class Policy(
 
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
     val parent = scope(parentId)
-    val shown = PathPattern.portable(p)
+    val shown = PlatformPath.portable(p)
     if access == Access.Write && !mode.allowsWrite then
       throw SecurityException(
         s"Access denied: the sandbox is in ${mode.label} mode; writing '$shown' cannot be granted"

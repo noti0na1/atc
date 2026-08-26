@@ -1,5 +1,7 @@
 package atc.perms
 
+import atc.platform.{Platform, PlatformPath}
+
 import java.nio.file.{Files, Path}
 import scala.util.matching.Regex
 import scala.collection.concurrent.TrieMap
@@ -15,7 +17,6 @@ trait GitIgnore:
   def ignores(p: Path): Boolean
 
 object GitIgnore:
-  private val Windows = java.io.File.separatorChar == '\\'
   /** Ignores nothing (`"respectGitignore": false`). */
   val Disabled: GitIgnore = _ => false
 
@@ -62,9 +63,7 @@ object GitIgnore:
         var ignored = false
         var i = 0
         while i < n && !ignored do
-          if if Windows then rel.getName(i).nn.toString.equalsIgnoreCase(".git")
-            else rel.getName(i).nn.toString == ".git"
-          then ignored = true
+          if Platform.samePathName(rel.getName(i).nn.toString, ".git") then ignored = true
           else
             val isDir = i < n - 1 || Files.isDirectory(root.resolve(rel.subpath(0, i + 1)))
             var j = 0
@@ -76,7 +75,7 @@ object GitIgnore:
           i += 1
         ignored
 
-    private def slashes(p: Path): String = p.toString.replace(java.io.File.separatorChar, '/').nn
+    private def slashes(p: Path): String = PlatformPath.portable(p)
 
   /** One `.gitignore` line, compiled against paths relative to its own directory. */
   private final class Rule(val negated: Boolean, dirOnly: Boolean, regex: Regex):
@@ -100,7 +99,7 @@ object GitIgnore:
           val core = pattern.stripPrefix("/")
           val anchored = pattern.startsWith("/") || core.contains('/')
           val prefix = if anchored then "" else "(?:.*/)?"
-          Some(Rule(negated, dirOnly, Regex((if Windows then "(?i)" else "") + prefix + toRegex(core))))
+          Some(Rule(negated, dirOnly, Regex((if Platform.isWindows then "(?i)" else "") + prefix + toRegex(core))))
 
     /** Trailing spaces are not part of the pattern unless backslash-escaped. */
     private def trimTrailing(line: String): String =

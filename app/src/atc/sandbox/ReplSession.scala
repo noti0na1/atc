@@ -2,6 +2,7 @@ package atc.sandbox
 
 import atc.lib.{Derivations, Interface}
 import atc.perms.Mode
+import atc.platform.Platform
 
 import dotty.tools.repl.*
 import dotty.tools.dotc.reporting.Diagnostic
@@ -154,7 +155,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
   val printStream: PrintStream = PrintStream(outputCapture, true, StandardCharsets.UTF_8)
   val clock: ExecutionClock = ExecutionClock()
 
-  private val classpath = Sandbox.libraryClasspath.map(_.toString).mkString(java.io.File.pathSeparator)
+  private val classpath = Sandbox.libraryClasspath.map(_.toString).mkString(Platform.pathListSeparator)
   private val driver =
     OpenReplDriver(compilerArgs(classpath), printStream, Some(Sandbox.newLoader()), config.maxEchoChars)
   private var state: State = driver.initialState
@@ -183,7 +184,8 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       state = driver.run(code)(using state)
     }
     thrown.foreach(throw _)
-    if out.toLowerCase.contains("error") then throw IllegalStateException(s"$what failed to compile:\n$out")
+    if out.toLowerCase(java.util.Locale.ROOT).contains("error") then
+      throw IllegalStateException(s"$what failed to compile:\n$out")
 
   /** End the session: stop a running evaluation (best effort) and refuse
     * further runs. The compiler and its class loader are not released here:

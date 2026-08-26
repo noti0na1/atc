@@ -36,30 +36,41 @@ enum Msg:
 case class TokenUsage(input: Long = 0, output: Long = 0, cacheRead: Long = 0):
   def +(o: TokenUsage): TokenUsage = TokenUsage(input + o.input, output + o.output, cacheRead + o.cacheRead)
 
-/** `unfinished`: the provider stopped the response mid-work (e.g. after a
-  * server-side tool call, Anthropic `pause_turn`); the agent should re-send
-  * the history so the model resumes. */
+/** Why a provider stopped producing the current assistant turn.
+  *
+  * Tool calls are orthogonal: a [[Complete]] response may contain calls for the
+  * agent to run. [[Resume]] means the provider paused after server-side work;
+  * [[Truncated]] means an output limit cut the response and a user-role bridge
+  * is needed before resuming. Calls on resumable or blocked responses are not
+  * safe to execute. */
+enum CompletionStop:
+  case Complete
+  case Resume
+  case Truncated
+  case Blocked
+
+object CompletionStop:
+  private val ResumeReasons = Set("pause_turn")
+  private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens")
+  private val BlockedReasons = Set("content_filter", "refusal")
+
+  /** Normalize a provider's raw reason at the adapter boundary. Adapters may
+    * additionally identify a server-side pause from the response's shape. */
+  def fromReason(reason: String): CompletionStop =
+    val normalized = reason.trim.toLowerCase(java.util.Locale.ROOT).replace('-', '_')
+    if ResumeReasons.contains(normalized) then CompletionStop.Resume
+    else if TruncatedReasons.contains(normalized) then CompletionStop.Truncated
+    else if BlockedReasons.contains(normalized) then CompletionStop.Blocked
+    else CompletionStop.Complete
+
 case class Completion(
   text: String,
   toolCalls: List[ToolCall],
   native: Option[NativeTurn],
   usage: TokenUsage,
   stopReason: String,
-  unfinished: Boolean = false
+  stop: CompletionStop,
 )
-
-object Completion:
-  /** Provider stop reasons that mean the generated response was cut short and
-    * can be continued by replaying it. */
-  private val TruncatedStops = Set("length", "max_tokens", "max_output_tokens")
-  /** Provider safety stops. Any tool calls accompanying one are partial or
-    * contradictory and must never be executed. */
-  private val BlockedStops = Set("content_filter", "refusal")
-
-  private def normalized(reason: String): String = reason.trim.toLowerCase.replace('-', '_')
-
-  def isTruncatedStop(reason: String): Boolean = TruncatedStops.contains(normalized(reason))
-  def isBlockedStop(reason: String): Boolean = BlockedStops.contains(normalized(reason))
 
 /** The system prompt of a request. It is one text on purpose: configuration
   * and mode changes rebuild it, as does an explicit classified-model switch;
@@ -142,7 +153,7 @@ trait ChatModel:
 object ChatModel:
   /** The client for one configured model, chosen by its provider's `api`. */
   def create(spec: ModelSpec): ChatModel =
-    spec.api.trim.toLowerCase match
+    spec.api.trim.toLowerCase(java.util.Locale.ROOT) match
       case "anthropic" | "claude" => AnthropicModel(spec)
       case "openai-responses" | "responses" => OpenAIResponsesModel(spec)
       case "openai" | "openai-chat" | "chat" => OpenAIChatModel(spec)

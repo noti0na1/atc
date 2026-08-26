@@ -11,7 +11,7 @@ enum Access(val level: Int, val label: String):
   def max(that: Access): Access = if level >= that.level then this else that
 
 object Access:
-  def parse(s: String): Access = s.trim.toLowerCase match
+  def parse(s: String): Access = s.trim.toLowerCase(java.util.Locale.ROOT) match
     case "none" | "deny" | "no" => None
     case "read" | "r" | "ro" => Read
     case "write" | "w" | "rw" | "readwrite" | "read-write" => Write

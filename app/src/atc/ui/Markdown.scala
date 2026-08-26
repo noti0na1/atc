@@ -121,7 +121,7 @@ class MarkdownStream(glyphs: MarkdownStream.Glyphs, highlight: String => List[St
     dropLine = false
     line match
       case FenceRe(lang0) =>
-        val lang = lang0.nn.toLowerCase
+        val lang = lang0.nn.toLowerCase(java.util.Locale.ROOT)
         restStart = line.length
         // Models like to wrap a whole answer in ```markdown: render its content, drop the fence.
         if lang == "markdown" || lang == "md" then { dropLine = true; "" }

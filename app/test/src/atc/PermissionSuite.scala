@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{Classified, Exec, ExecOptions, FileSystem, Network}
 import atc.perms.*
+import atc.platform.{Platform, PlatformPath}
 import atc.sandbox.ReplSession
 
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
@@ -128,7 +129,7 @@ class PermissionSuite extends munit.FunSuite:
     val secrets = env.root.resolve("secrets").toString
     val e = intercept[SecurityException](env.host.exec(fixture("pwd"), Nil, secrets))
     assert(e.getMessage.nn.contains("classified"), e.getMessage)
-    assert(e.getMessage.nn.contains(Host.portablePath(Path.of(secrets))), e.getMessage) // the path, not "$dir"
+    assert(e.getMessage.nn.contains(PlatformPath.portable(Path.of(secrets))), e.getMessage) // the path, not "$dir"
 
   test("exec's working-directory check honours a requestFiles grant (allow once)"):
     val env = TestEnv(commands = permits("pwd"))
@@ -317,7 +318,7 @@ class PermissionSuite extends munit.FunSuite:
     val cat = fixture("cat")
     assertEquals(env.host.exec(s"$echo hello   world").stdout.trim, "hello world")
     val quoted = env.host.exec(echo + """ 'a b' "c \"d\" e" f\ g""").stdout.trim
-    val expectedQuoted = if ProcessFixture.Windows then "a b c \"d\" e f\\ g" else "a b c \"d\" e f g"
+    val expectedQuoted = if Platform.isWindows then "a b c \"d\" e f\\ g" else "a b c \"d\" e f g"
     assertEquals(quoted, expectedQuoted)
     assertEquals(env.host.exec(echo, List("x", "y z")).stdout.trim, "x y z") // args stay verbatim
     assertEquals(env.host.exec(s"$echo a | $cat").stdout.trim, "a") // a pipe is part of the grammar
@@ -339,7 +340,7 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(env.host.exec(s"${fixture("unsorted")} | $sort | $cat").stdout, "a\nb\nc\n")
     assertEquals(env.host.exec(s"${fixture("fail", "1")} | $cat").exitCode, 1) // pipefail: the failing stage wins
     val failing = fixture("fail", "7", "definitely missing")
-    val failingLine = Processes.parsePipeline(failing).stages.head.line
+    val failingLine = CommandLine.parsePipeline(failing).stages.head.line
     val err = env.host.exec(s"$failing | $cat")
     assertEquals(err.exitCode, 7)
     assert(err.stderr.startsWith(s"[stage 1: $failingLine]\n"), err.stderr)
@@ -399,7 +400,7 @@ class PermissionSuite extends munit.FunSuite:
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     val catLine = fixture("cat")
-    val catShown = Processes.parsePipeline(catLine).stages.head.line
+    val catShown = CommandLine.parsePipeline(catLine).stages.head.line
     val cat = env.host.spawn(catLine)
     assert(cat.isAlive && cat.exitCode.isEmpty)
     assertEquals(cat.read(), "") // nothing yet, and read never blocks

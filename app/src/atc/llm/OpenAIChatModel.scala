@@ -19,7 +19,9 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   /** The effort for a call: as configured, or the lowest the model takes for a
     * non-thinking one (not needed when the model has a thinking switch). */
   private def effort(thinking: Boolean): Option[ReasoningEffort] =
-    (if thinking then cfg.reasoning else lowestEffort).map(x => ReasoningEffort.of(x.toLowerCase))
+    (if thinking then cfg.reasoning else lowestEffort).map(x =>
+      ReasoningEffort.of(x.toLowerCase(java.util.Locale.ROOT))
+    )
 
   private def functionTool(t: ToolSpec): ChatCompletionFunctionTool =
     val schema = ujson.read(t.parametersJson)
@@ -70,14 +72,15 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
       tc.function().toScala.map(f => ToolCall(f.id(), f.function().name(), f.function().arguments()))
     }
     val usage = usageOf(c)
-    val stop = choice.map(_.finishReason().toString.toLowerCase).getOrElse("stop")
+    val stop = choice.map(_.finishReason().toString.toLowerCase(java.util.Locale.ROOT)).getOrElse("stop")
+    val status = CompletionStop.fromReason(stop)
     Completion(
       text,
       calls,
       msg.map(m => NativeTurn(providerKey, ref, m.toParam())),
       usage,
       stop,
-      unfinished = Completion.isTruncatedStop(stop)
+      status,
     )
 
   def complete(

@@ -1,26 +1,26 @@
 package atc
 
 import atc.SlashCommand as Cmd
-import atc.agent.{Agent, InputPredictor, Prompts}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.{ChatModel, TokenUsage}
 import atc.perms.*
+import atc.platform.PlatformPath
 import atc.sandbox.{ReplSession, SandboxConfig}
 import atc.ui.{Ansi, Tui}
 
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Files, Path}
 import scala.collection.mutable
-import scala.util.Properties
 
 /** The running application: wires configuration, models, permission policy,
   * host, sandbox session, agent loop and terminal UI together, then runs
   * either one non-interactive turn (`-p`) or the interactive loop with its
   * slash commands. */
-final class App(args: Main.Args):
+final class App(args: Cli.Args):
   val cwd: Path = args.cwd
-  val tui = Tui(Paths.get(Properties.userHome, ".atc", "history"), nonInteractive = args.prompt.nonEmpty)
+  val tui = Tui(PlatformPath.userHome.resolve(".atc").nn.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
     * first-run offers of [[App.setup]] (which may end the program instead). */
@@ -113,7 +113,15 @@ final class App(args: Main.Args):
 
   // ── agent ─────────────────────────────────────────────────────────
 
-  val agent = Agent(config, cwd, policy, tui, initialModel, initialClassified, config.instructions)
+  val agent = Agent(
+    config,
+    AgentEnvironment.current(cwd),
+    policy,
+    tui,
+    initialModel,
+    initialClassified,
+    config.instructions,
+  )
 
   // ── running ───────────────────────────────────────────────────────
 
@@ -169,7 +177,7 @@ final class App(args: Main.Args):
     try
       // A directory no config covers is unreachable; say so rather than let the
       // agent discover it one denial at a time.
-      if !policy.effective(ScopeId.Base, PathPattern.canonical(cwd)).canRead then
+      if !policy.effective(ScopeId.Base, PlatformPath.canonical(cwd)).canRead then
         tui.info(
           s"No configuration grants access to $cwd, so the agent has to ask for every file. " +
             "Run `atc --init` to give this project a config, or add a rule to ~/.atc/config.json."
@@ -271,7 +279,7 @@ final class App(args: Main.Args):
           running = false
         case Some(line) if line.trim.isEmpty => ()
         // What people type out of habit; not listed in /help.
-        case Some(line) if App.QuitWords.contains(line.trim.toLowerCase) => running = false
+        case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(java.util.Locale.ROOT)) => running = false
         case Some(line) if line.trim.startsWith("/") => running = command(line.trim)
         case Some(line) => runTurn(line)
 
@@ -420,7 +428,7 @@ final class App(args: Main.Args):
 
   /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   private def switchClassifiedModel(arg: String): Unit =
-    if arg.trim.toLowerCase == "off" || arg.trim.toLowerCase == "none" then
+    if Set("off", "none").contains(arg.trim.toLowerCase(java.util.Locale.ROOT)) then
       agent.classifiedModel = None
       refreshPrediction()
       tui.success(
@@ -511,7 +519,7 @@ object App:
   /** A scripted turn has nobody to answer permission pop-ups. Fail closed
     * without reading stdin unless the caller explicitly chose `--approve-all`. */
   private[atc] def permissionPrompter(
-    args: Main.Args,
+    args: Cli.Args,
     interactive: PermissionRequest => Decision
   ): PermissionPrompter =
     if args.approveAll then _ => Decision.AllowSession
@@ -535,7 +543,7 @@ object App:
     *
     * When the global config was written the program then stops (via [[Exit]]),
     * so the user can fill in the keys or export them and start again. */
-  def setup(args: Main.Args, tui: Tui): Configuration =
+  def setup(args: Cli.Args, tui: Tui): Configuration =
     val interactive = args.prompt.isEmpty
     val global = Config.globalPath
     val globalMissing = !Files.isRegularFile(global)
@@ -551,7 +559,7 @@ object App:
 
     def cwdReadable(c: Configuration): Boolean =
       Policy(fileRules(c, args.cwd), Nil, Nil, _ => Decision.Deny)
-        .effective(ScopeId.Base, PathPattern.canonical(args.cwd)).canRead
+        .effective(ScopeId.Base, PlatformPath.canonical(args.cwd)).canRead
 
     def offerProjectConfig(current: Configuration): Configuration =
       val project = Config.projectPath(args.cwd)
@@ -589,10 +597,10 @@ object App:
 
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =
-    val home = Paths.get(Properties.userHome)
+    val home = PlatformPath.userHome
     if p == home then "~"
-    else if p.startsWith(home) then "~/" + Host.portablePath(home.relativize(p))
-    else Host.portablePath(p)
+    else if p.startsWith(home) then "~/" + PlatformPath.portable(home.relativize(p))
+    else PlatformPath.portable(p)
 
   /** The configured file rules, in layer order. Nothing is granted here or
     * anywhere else in the program: a path is reachable only because a config

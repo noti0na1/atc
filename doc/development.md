@@ -99,12 +99,15 @@ Two Mill modules:
 lib/src/atc/lib/   Interface.scala: the agent-facing API (capabilities, data types, Interface)
                    Runtime.scala: the sandbox's injection point (@rejectSafe, not part of the API)
 app/src/atc/
-  (root)           Main → App: command line, wiring, the interactive loop and its slash commands
-  agent/           the loop (model ⇄ run_scala), the system prompt and tool spec, next-input prediction
+  (root)           LauncherEnvironment → Cli → Main → App; shared TextFiles/ScalaSource boundaries
+  agent/           the small loop state machine; typed completion policy, transcript/context bookkeeping,
+                   run_scala adapter and output rendering; system prompt and next-input prediction
   config/          the JSON config model: layers, merging, validation, keys, model catalog, templates
-  host/            the Interface implementation: policy checks, file/process/network effects, Classified
+  host/            the Interface implementation: file/network effects; typed command grammar, Windows
+                   executable resolution, and process lifecycle in separate components
   llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
   perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
+  platform/        the only OS/path-trait checks, portable paths, Win32 validation, slash-based globs
   sandbox/         the in-process REPL: preamble, diagnostic preflight, class-loader isolation, timeouts, interrupts
   ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
 app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
@@ -121,11 +124,11 @@ capture-checking-bug/  a runnable repro of an upstream separate-compilation bug 
 `App` (wiring) → `Agent.turn` → `ChatModel.complete` → tool call `run_scala` →
 `ReplSession.run(code)` → `CodeValidator` (fast diagnostic preflight) → compiler safe-mode
 check → REPL eval with the
-`Host` installed as the API implementation → `ExecutionResult` → `Agent.renderForModel`
+`Host` installed as the API implementation → `ExecutionResult` → `ToolOutput.renderForModel`
 (bounded, hint-annotated) back into `Msg.ToolResults` → the model again, until it answers.
 
 `ChatModel.complete` takes one `SystemPrompt(text)` built by `Prompts.system` from the
-configuration, the working directory and the mode, the configured permissions included;
+configuration, an injected `AgentEnvironment` and the mode, the configured permissions included;
 permission grants do not change it (a mode switch restarts the sandbox, while an explicit
 `/classifiedmodel` switch rebuilds the prefix once). A permission the user grants for the
 session is reported in the tool result of the call that asked. Between explicit switches,
@@ -166,8 +169,8 @@ literal text goes through the pure helpers `quote`/`quoteReplacement`
 `TODO(safe-mode)`, for `scala.util.matching.Regex.quote`/`quoteReplacement`, which safe mode
 refuses until the stdlib is tagged)); `replaceLines(path, from, to, text)` /
 `insertLines(path, before, text)` edit by the line numbers `cat` shows (`replaceLines`
-returns the old text so a stale range is visible; `Host.splitLines`/`joinLines` keep the
-file's newline style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
+returns the old text so a stale range is visible; `TextFiles` keeps the file's newline
+style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
 are the binary pair, and `move`/`copy` are composed of the checked read/write/delete
 primitives (so a classified file cannot be moved or copied out). Viewing: `cat(path)` /
 `cat(path, from, to)` print `cat -n`-numbered lines through the `println` path (capped at
@@ -177,9 +180,9 @@ big files and can quote line numbers; `read` stays raw for code. Listings
 (`ls`/`walk`/`find`/`GrepMatch.file`) show paths relative to the working directory when
 inside it (`Host.display`), absolute outside, and turn Windows separators into `/`;
 `find`/`grepRecursive` globs match the file name, or the
-path relative to `dir` when the glob contains `/` or `**` (`Host.globRegex`,
+path relative to `dir` when the glob contains `/` or `**` (`PathGlob`,
 gitignore-flavoured: `**` spans directories, a leading `**` + `/` also matches none).
-**Commands.** `exec(command)` uses the small grammar in `Processes.parsePipeline`: quoted
+**Commands.** `exec(command)` uses the small grammar in `CommandLine.parsePipeline`: quoted
 words, `|` between stages, `< f`, `> f`, `>> f`, and `2>&1`. There is no shell, so `&&`,
 `;`, `||`, `&`, `2>`, backticks, and `$(` are rejected. `ProcessBuilder.startPipeline`
 runs the stages with real pipes. Each stage is checked independently against the allowed
@@ -505,7 +508,7 @@ Configuration uses `/` separators on every OS. A Windows absolute path should be
 (`"C:\\Users\\alice\\project"`). Path-taking API calls accept native Windows input too.
 
 **Every path returned by the host is canonical, with Windows separators rendered as `/`**
-(`Host.canonical` for named paths, `Host.portablePath` for API text, and `visibleEntries`
+(`Host.canonical` for named paths, `PlatformPath.portable` for API text, and `visibleEntries`
 for listings). Returned strings should be passed as values; code generators must still
 quote legal filename characters such as quotes or a literal Unix backslash. A symlink
 is listed and evaluated as its target, so an entry returned by `children` or `walk` receives
@@ -813,7 +816,8 @@ grant later dropped by the context cut or forgotten by `/clear` costs at most a 
 resets grants and history together.
 
 **The history** (`llm.Msg`, provider-neutral; `Agent.history`) holds exactly what was
-said and done, never the terminal's rendering:
+said and done, never the terminal's rendering. `Conversation` owns its mutation and
+role-repair invariants; `AgentMessages` owns the control text inserted into it:
 
 * `Msg.User(text)`: the user's request. *Pending notes* are prepended to it, each on its
   own paragraph, so the transcript never has two user messages in a row: `[sandbox notice]`
@@ -832,10 +836,10 @@ said and done, never the terminal's rendering:
   the provider to continue the truncated assistant response without pretending to be a new
   real user turn; prediction and context-cut boundaries therefore ignore it.
 * `Msg.ToolResults(results)`: one `ToolResult(callId, output, isError)` per call, where
-  `output` is `Agent.renderForModel(result, config.maxToolOutputChars)`:
+  `output` is `ToolOutput.renderForModel(result, config.maxToolOutputChars)`:
   `ExecutionResult.render` (the captured REPL output with host stack frames trimmed, then
   `ERROR: <message>` for a compile/validation/timeout error, or `(no output)` /
-  `(failed, no output)`), a `Hint:` line when `Agent.hints` recognises the error (read-only
+  `(failed, no output)`), a `Hint:` line when `ToolOutput` recognises the error (read-only
   capture / missing `Exec` or `Network` → "switch mode" advice), the whole thing cut in
   the middle with `… [N characters omitted] …` beyond `maxToolOutputChars`, then the
   `[permissions: …]` note when a prompt was answered during the call (uncut, last);
@@ -855,11 +859,11 @@ thinking blocks, Responses reasoning items) when the exact same model reference 
 the neutral history, and so any other model, has only the text and the calls.
 
 **Fitting the window.** Before every model call, when the model has a `contextWindow`,
-`Turn.fitHistoryToContext` estimates the request (`fixedTokens` = system prompt + tool
-schema, plus `Agent.estimateTokens` of every message, chars/4 scaled by the calibration
+`ContextManager.prepare` estimates the request (`fixedTokens` = system prompt + tool
+schema, plus its estimate of every message, chars/4 scaled by the calibration
 from the provider's last prompt count) after reserving the larger of `window/8` and the
 adapter's configured maximum output tokens, and drops whole
-exchanges from the front (`Agent.fitToContext`: cuts only at `Msg.User` boundaries so no
+exchanges from the front (`ContextManager.fitToContext`: cuts only at `Msg.User` boundaries so no
 tool result loses its call, and always keeps the last user message); `contextDropped`
 accumulates so the notice states the total. The same estimate is `Agent.contextUsage`,
 shown after each turn and by `/cost`. If the fixed prompt or latest exchange cannot fit,
@@ -877,12 +881,16 @@ is in force. All of them are recorded under their own purpose in `/cost`.
 
 ## The agent loop
 
-`Agent.turn` is a loop of *rounds*. Each `Turn.round` asks the model and then runs tools,
-resumes, or stops. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
+`Agent.turn` binds a `ScalaToolRunner`, then the core loop runs *rounds*. Each
+`Turn.round` asks the model and follows the typed `CompletionPolicy` decision: run tools,
+resume, or finish. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
 
-- Tool calls run one at a time through `run_scala`; their results are appended before the
-  model is asked again.
-- If the provider returns `unfinished` after a server-side tool such as web search
+- Provider adapters map wire-specific stop strings once into `CompletionStop`; the loop
+  branches on that typed value through `CompletionPolicy`.
+- Tool calls run one at a time through `ToolRunner`; `ScalaToolRunner` owns `run_scala`
+  argument decoding, REPL execution, timing and result rendering. Results are appended
+  before the model is asked again.
+- If the provider returns a resumable stop after a server-side tool such as web search
   (Anthropic `pause_turn`), the model is asked to resume, up to `MaxResumes` times.
 - Output-limit stops (`length`, `max_tokens`, `max_output_tokens`) append a
   `Msg.Continuation` and resume. Tool calls accompanying a truncated or safety-blocked
@@ -1016,15 +1024,17 @@ the context part (`context ~45.2k` without a window).
 All tests are munit, under `app/test/src/atc/`; compiler-heavy timings vary by platform. They
 share `TestEnv.scala` (temp root, scripted permission decisions, recording host output, live
 command output, `newSession`, `activate()`) and `ReplAssertions.scala` (`assertOk`/
-`assertFails` for REPL snippets); `AgentLoopSuite` drives the loop with `ScriptedModel`/
-`RecordingUI` without a network. `AgentUI`, `HostOutput`/`HostLlm`/`HostUi`, `ChatModel`
+`assertFails` for REPL snippets). `AgentCoreLoopSuite` uses an in-memory `ToolRunner` and
+needs no filesystem or compiler; `AgentLoopSuite` adds the real REPL boundary with
+`ScriptedModel`/`RecordingUI`, still without a network. `AgentUI`, `HostOutput`/`HostLlm`/`HostUi`, `ChatModel`
 and `StreamSink` all have test doubles; changing those traits means updating them (the
 two `HostOutput` live-output methods have no-op defaults for that reason).
 
 Keep semantic tests independent of the host shell: use `ProcessFixture` for pipeline and
-process behavior, and reserve platform commands for `PlatformProcessSuite`. Paths inserted
-into generated Scala/JSON must go through the shared literal helpers; returned API paths use
-`/` on every OS. Source fixtures use LF, while assertions about native process output must
+process behavior, and reserve platform commands for `PlatformProcessSuite`. Text-file
+format guarantees belong in `TextFilesSuite`; paths and OS decisions use `PlatformPath` /
+`Platform`, while generated Scala literals use `ScalaSource`. Returned API paths use `/`
+on every OS. Source fixtures use LF, while assertions about native process output must
 account for the platform newline. Windows runs test classes serially because parallel Mill
 workers can duplicate the compiler-heavy first suite.
 

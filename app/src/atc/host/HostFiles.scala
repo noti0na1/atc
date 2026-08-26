@@ -1,7 +1,9 @@
 package atc.host
 
+import atc.{ScalaSource, TextFiles}
 import atc.lib.*
-import atc.perms.{PathPattern, Perm, ScopeId}
+import atc.perms.{Perm, ScopeId}
+import atc.platform.{PathGlob, PlatformPath}
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.BasicFileAttributes
@@ -18,16 +20,15 @@ private[host] trait HostFiles:
   /** Resolve a path against the host working directory and canonicalize it for
     * policy evaluation, including symlinks and dangling write targets. */
   private[atc] def canonical(path: String): Path =
-    val expanded = PathPattern.expandHome(path)
-    if Host.Windows then
-      Host.invalidWindowsPath(expanded).foreach(reason =>
-        throw IllegalArgumentException(s"Invalid Windows path ${Host.scalaString(path)}: $reason")
-      )
-    val raw = Paths.get(expanded).nn
-    PathPattern.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
+    val expanded = PlatformPath.expandHome(path)
+    PlatformPath.validationError(expanded).foreach(reason =>
+      throw IllegalArgumentException(s"Invalid Windows path ${ScalaSource.stringLiteral(path)}: $reason")
+    )
+    val raw = Paths.get(PlatformPath.native(expanded)).nn
+    PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
 
   private def denied(path: Path, operation: String, permission: Perm, hint: String): SecurityException =
-    val shown = Host.portablePath(path)
+    val shown = PlatformPath.portable(path)
     SecurityException(
       s"Access denied: $operation on '$shown' is not permitted (current permission: ${permission.describe}). $hint"
     )
@@ -35,24 +36,24 @@ private[host] trait HostFiles:
   private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = policy.effective(scope, path)
     if !permission.canRead then
-      val shown = Host.portablePath(path)
+      val shown = PlatformPath.portable(path)
       throw denied(
         path,
         operation,
         permission,
-        s"Use requestFiles(${Host.scalaString(shown)}, Access.Read, reason) { ... } to ask the user."
+        s"Use requestFiles(${ScalaSource.stringLiteral(shown)}, Access.Read, reason) { ... } to ask the user."
       )
     permission
 
   private[atc] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = policy.effective(scope, path)
     if !permission.canWrite then
-      val shown = Host.portablePath(path)
+      val shown = PlatformPath.portable(path)
       throw denied(
         path,
         operation,
         permission,
-        s"Use requestFiles(${Host.scalaString(shown)}, Access.Write, reason) { ... } to ask the user."
+        s"Use requestFiles(${ScalaSource.stringLiteral(shown)}, Access.Write, reason) { ... } to ask the user."
       )
     permission
 
@@ -64,7 +65,7 @@ private[host] trait HostFiles:
   ): Unit =
     if permission.classified then
       throw SecurityException(
-        s"Access denied: '${Host.portablePath(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
+        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
       )
 
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
@@ -96,7 +97,7 @@ private[host] trait HostFiles:
     val permission = requireWrite(scope, path, "writeClassified")
     if !permission.classified then
       throw SecurityException(
-        s"Access denied: '${Host.portablePath(path)}' is not a classified path; writing classified content there would declassify it."
+        s"Access denied: '${PlatformPath.portable(path)}' is not a classified path; writing classified content there would declassify it."
       )
     ensureParent(path)
     content match
@@ -127,7 +128,7 @@ private[host] trait HostFiles:
           // `isOther`. Keep every final reparse point out of recursive traversal
           // and evaluate policy on what it actually reaches.
           val lexical = entry.toAbsolutePath.nn.normalize.nn
-          val path = PathPattern.canonical(lexical)
+          val path = PlatformPath.canonical(lexical)
           val attributes = Files.readAttributes(entry, classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS).nn
           val isLinkLike = attributes.isSymbolicLink || attributes.isOther
           Option.when(!gitIgnore.ignores(entry) && policy.effective(scope, path).canRead)((path, isLinkLike))
@@ -187,7 +188,7 @@ private[host] trait HostFiles:
         if lineCount <= Host.CatMaxLines then body
         else
           val next = math.min(lineCount, 2 * Host.CatMaxLines)
-          body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${Host.scalaString(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
+          body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
     output.print(text, text)
 
   /** Print an inclusive, one-based range with line numbers. */
@@ -278,27 +279,29 @@ private[host] trait HostFiles:
 
   def replaceLines(path: String, from: Int, to: Int, text: String)(using fs: FileSystem): String =
     val entry = fs.access(path)
-    val (lines, separator, trailing) = Host.splitLines(entry.read())
+    val document = TextFiles.splitLines(entry.read())
+    val lines = document.lines
     val lineCount = lines.length
     if from < 1 || to < from || to > lineCount then
       throw IllegalArgumentException(
         s"replaceLines: the range must satisfy 1 <= from <= to <= $lineCount (the file has $lineCount lines), got $from..$to; cat the file again, line numbers shift after an edit"
       )
     val old = lines.slice(from - 1, to)
-    val updated = lines.take(from - 1) ++ Host.textLines(text) ++ lines.drop(to)
-    entry.write(Host.joinLines(updated, separator, trailing))
-    old.mkString(separator)
+    val updated = lines.take(from - 1) ++ TextFiles.splitLines(text).lines ++ lines.drop(to)
+    entry.write(document.copy(lines = updated).join)
+    old.mkString(document.lineEnding)
 
   def insertLines(path: String, before: Int, text: String)(using fs: FileSystem): Unit =
     val entry = fs.access(path)
-    val (lines, separator, trailing) = Host.splitLines(entry.read())
+    val document = TextFiles.splitLines(entry.read())
+    val lines = document.lines
     val lineCount = lines.length
     if before < 1 || before > lineCount + 1 then
       throw IllegalArgumentException(
         s"insertLines: `before` must be between 1 and ${lineCount + 1} (the file has $lineCount lines), got $before"
       )
-    val updated = lines.take(before - 1) ++ Host.textLines(text) ++ lines.drop(before - 1)
-    entry.write(Host.joinLines(updated, separator, trailing))
+    val updated = lines.take(before - 1) ++ TextFiles.splitLines(text).lines ++ lines.drop(before - 1)
+    entry.write(document.copy(lines = updated).join)
 
   def append(path: String, content: String)(using fs: FileSystem): Unit = fs.access(path).append(content)
 
@@ -319,8 +322,8 @@ private[host] trait HostFiles:
   private def display(absolute: String): String =
     val path = Paths.get(absolute).nn
     if path == canonicalCwd then "."
-    else if path.startsWith(canonicalCwd) then Host.portablePath(canonicalCwd.relativize(path).nn)
-    else Host.portablePath(path)
+    else if path.startsWith(canonicalCwd) then PlatformPath.portable(canonicalCwd.relativize(path).nn)
+    else PlatformPath.portable(path)
 
   private def grepEntry(entry: FileEntry, regex: scala.util.matching.Regex): List[GrepMatch] =
     val matches = collection.mutable.ListBuffer[GrepMatch]()
@@ -348,8 +351,8 @@ private[host] trait HostFiles:
     val files = fs.access(dir).walk().filterNot(_.isDirectory)
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)
-      val regex = Host.globRegex(glob)
-      files.filter(entry => regex.matches(Host.portablePath(base.relativize(Paths.get(entry.path)).nn)))
+      val regex = PathGlob.regex(glob)
+      files.filter(entry => regex.matches(PlatformPath.portable(base.relativize(Paths.get(entry.path)).nn)))
     else
       val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
       files.filter(entry => matcher.matches(Paths.get(entry.path).nn.getFileName))

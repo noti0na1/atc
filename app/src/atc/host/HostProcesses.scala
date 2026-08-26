@@ -1,6 +1,6 @@
 package atc.host
 
-import atc.Main
+import atc.{LauncherEnvironment, ScalaSource}
 import atc.lib.*
 import atc.perms.ScopeId
 
@@ -30,8 +30,8 @@ private[host] trait HostProcesses:
     * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
   private final case class Prepared(pbs: List[ProcessBuilder], stageLines: List[String], line: String)
 
-  private def withArgs(command: String, args: Seq[String]): Processes.Pipeline =
-    val pipeline = Processes.parsePipeline(command)
+  private def withArgs(command: String, args: Seq[String]): CommandLine.Pipeline =
+    val pipeline = CommandLine.parsePipeline(command)
     if args.isEmpty then pipeline
     else if pipeline.isSimple then
       val stage = pipeline.stages.head
@@ -41,7 +41,7 @@ private[host] trait HostProcesses:
         "exec(command, args, ...): `command` must be one program when args are given; write a pipeline or redirection in the one-line form exec(\"...\")"
       )
 
-  private def authorizeCommands(pipeline: Processes.Pipeline, scope: ScopeId): Unit =
+  private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId): Unit =
     pipeline.stages.foreach { stage =>
       policy.commandDenied(stage.line).foreach { pattern =>
         throw SecurityException(
@@ -57,7 +57,7 @@ private[host] trait HostProcesses:
         else
           val stages = missing.map(stage => s"'${stage.line}'").mkString(", ")
           s"stage${if missing.lengthIs > 1 then "s" else ""} $stages of the pipeline"
-      val patterns = missing.map(stage => Host.scalaString(stage.line)).mkString(", ")
+      val patterns = missing.map(stage => ScalaSource.stringLiteral(stage.line)).mkString(", ")
       throw SecurityException(
         s"Access denied: $target matches no permitted pattern. Use requestExec(Set($patterns), reason) { ... } to ask the user."
       )
@@ -81,13 +81,13 @@ private[host] trait HostProcesses:
     ensureParent(target)
     target
 
-  private def processBuilders(pipeline: Processes.Pipeline, dir: Path): List[ProcessBuilder] =
+  private def processBuilders(pipeline: CommandLine.Pipeline, dir: Path): List[ProcessBuilder] =
     pipeline.stages.map { stage =>
-      val argv = Processes.executableArgv(stage.argv, dir)
+      val argv = WindowsExecutable.resolve(stage.argv, dir)
       val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
       // Windows launchers may carry the original CLI (including a prompt) in
       // these variables. It belongs to ATC, not commands the agent starts.
-      builder.environment().nn.keySet().nn.removeIf(Main.isInternalEnvironment)
+      builder.environment().nn.keySet().nn.removeIf(LauncherEnvironment.isInternal)
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
     }
@@ -190,7 +190,7 @@ private[host] trait HostProcesses:
   /** `/kill`: `p3`, `3`, or `all`; returns a user-facing result. */
   private[atc] def killProcess(ref: String): String = spawned.synchronized:
     reapProcesses()
-    ref.trim.toLowerCase match
+    ref.trim.toLowerCase(java.util.Locale.ROOT) match
       case "" | "all" =>
         val count = spawned.size
         killProcesses()

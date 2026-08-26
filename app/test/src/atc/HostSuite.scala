@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
+import atc.platform.{PathGlob, Platform, PlatformPath}
 import java.nio.file.{Files, LinkOption, Path}
 
 /** The host's `Interface` implementation under the policy, called directly. */
@@ -63,7 +64,7 @@ class HostSuite extends munit.FunSuite:
 
   private def rel(p: String) =
     val path = Path.of(p)
-    if path.isAbsolute then Host.portablePath(root.relativize(path)) else p
+    if path.isAbsolute then PlatformPath.portable(root.relativize(path)) else p
 
   test("plain read/write within cwd, relative paths"):
     assertEquals(read("src/A.scala"), "object A")
@@ -163,7 +164,10 @@ class HostSuite extends munit.FunSuite:
     Files.writeString(outside.resolve("o.txt"), "x")
     decisions = List(Decision.AllowSession)
     requestFiles(outside.toString, atc.lib.Access.Read, "look outside") {
-      assertEquals(ls(outside.toString), List(Host.portablePath(outside.resolve("o.txt")))) // absolute: not under cwd
+      assertEquals(
+        ls(outside.toString),
+        List(PlatformPath.portable(outside.resolve("o.txt")))
+      ) // absolute: not under cwd
     }
 
   test("find matches the name for a plain glob and the relative path for one with / or **"):
@@ -224,22 +228,22 @@ class HostSuite extends munit.FunSuite:
     assertEquals(Files.readString(root.resolve("empty2.txt")), "first\n")
 
   test("parseCommandLine, globRegex and splitLines (pure helpers)"):
-    val escapedTail = if ProcessFixture.Windows then List("e\\", "f") else List("e f")
+    val escapedTail = if Platform.isWindows then List("e\\", "f") else List("e f")
     assertEquals(
-      Processes.parseCommandLine("""git commit -m 'a b' --x="c d" e\ f"""),
+      CommandLine.parseCommandLine("""git commit -m 'a b' --x="c d" e\ f"""),
       List("git", "commit", "-m", "a b", "--x=c d") ++ escapedTail
     )
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a > b")) // one program only
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a | b"))
-    val p = Processes.parsePipeline("cat < in.txt | sort -u 2>&1 | head -3 >> out.txt")
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a > b")) // one program only
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a | b"))
+    val p = CommandLine.parsePipeline("cat < in.txt | sort -u 2>&1 | head -3 >> out.txt")
     assertEquals(p.stages.map(_.argv), List(List("cat"), List("sort", "-u"), List("head", "-3")))
     assertEquals(p.stages.map(_.mergeErr), List(false, true, false))
     assertEquals((p.stdinFile, p.stdoutFile, p.append), (Some("in.txt"), Some("out.txt"), true))
     assertEquals(p.line, "cat | sort -u 2>&1 | head -3 < in.txt >> out.txt")
-    val q = Processes.parsePipeline("echo 'a | b' >out.txt")
+    val q = CommandLine.parsePipeline("echo 'a | b' >out.txt")
     assertEquals((q.stages.head.argv, q.stdoutFile, q.append), (List("echo", "a | b"), Some("out.txt"), false))
     assertEquals(
-      Processes.parsePipeline("printf 2 > two.txt").stages.head.argv,
+      CommandLine.parsePipeline("printf 2 > two.txt").stages.head.argv,
       List("printf", "2")
     ) // a bare 2 before > is a word...
     for bad <- List(
@@ -260,32 +264,26 @@ class HostSuite extends munit.FunSuite:
         "a > x > y"
       )
     do
-      intercept[IllegalArgumentException](Processes.parsePipeline(bad))
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a 'unterminated"))
-    assertEquals(Processes.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
-    assertEquals(Processes.Stage(List("echo", "a b", "")).line, "echo \"a b\" \"\"")
+      intercept[IllegalArgumentException](CommandLine.parsePipeline(bad))
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a 'unterminated"))
+    assertEquals(CommandLine.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
+    assertEquals(CommandLine.Stage(List("echo", "a b", "")).line, "echo \"a b\" \"\"")
     intercept[IllegalArgumentException](
-      Processes.parsePipeline(List.fill(Processes.MaxPipelineStages + 1)("echo").mkString(" | "))
+      CommandLine.parsePipeline(List.fill(CommandLine.MaxPipelineStages + 1)("echo").mkString(" | "))
     )
-    val r = Host.globRegex("src/**/*.scala")
+    val r = PathGlob.regex("src/**/*.scala")
     assert(
       r.matches("src/X.scala") && r.matches("src/a/b/X.scala") && !r.matches("lib/X.scala") && !r.matches("src/X.java")
     )
     assert(
-      Host.globRegex("**/test/*.py").matches("test/a.py") && Host.globRegex("**/test/*.py").matches("x/y/test/a.py")
+      PathGlob.regex("**/test/*.py").matches("test/a.py") && PathGlob.regex("**/test/*.py").matches("x/y/test/a.py")
     )
     assert(
-      Host.globRegex("a/[!x]*.{md,txt}").matches("a/b.md") && !Host.globRegex("a/[!x]*.{md,txt}").matches("a/x.md")
+      PathGlob.regex("a/[!x]*.{md,txt}").matches("a/b.md") &&
+        !PathGlob.regex("a/[!x]*.{md,txt}").matches("a/x.md")
     )
-    assert(!Host.globRegex("a/*.md").matches("a/b/c.md"))
-    if Host.Windows then assert(Host.globRegex("SRC/**/*.SCALA").matches("src/main/A.scala"))
-    assertEquals(Host.splitLines("a\nb\n"), (List("a", "b"), "\n", true))
-    assertEquals(Host.splitLines("a\r\nb"), (List("a", "b"), "\r\n", false))
-    assertEquals(Host.splitLines("a\r\nb\nc\rd"), (List("a", "b", "c", "d"), "\r\n", false))
-    assertEquals(Host.splitLines("a\rb\r"), (List("a", "b"), "\r", true))
-    assertEquals(Host.textLines("a\r\nb\n"), List("a", "b"))
-    assertEquals(Host.splitLines(""), (Nil, "\n", true))
-    assertEquals(Host.splitLines("\n"), (List(""), "\n", true))
+    assert(!PathGlob.regex("a/*.md").matches("a/b/c.md"))
+    if Platform.isWindows then assert(PathGlob.regex("SRC/**/*.SCALA").matches("src/main/A.scala"))
 
   test("Windows path validation rejects device aliases and ambiguous components"):
     for path <- List(
@@ -303,9 +301,13 @@ class HostSuite extends munit.FunSuite:
         "C:/work/file.txt:stream",
       )
     do
-      assert(Host.invalidWindowsPath(path).nonEmpty, path)
-    for path <- List("C:/work/file.txt", ".env") do assertEquals(Host.invalidWindowsPath(path), None, path)
-    assertEquals(Host.scalaString("C:\\Users\\alice\nnotes\".txt"), "\"C:\\\\Users\\\\alice\\nnotes\\\".txt\"")
+      assert(PlatformPath.windowsValidationError(path).nonEmpty, path)
+    for path <- List("C:/work/file.txt", ".env") do
+      assertEquals(PlatformPath.windowsValidationError(path), None, path)
+    assertEquals(
+      ScalaSource.stringLiteral("C:\\Users\\alice\nnotes\".txt"),
+      "\"C:\\\\Users\\\\alice\\nnotes\\\".txt\"",
+    )
 
   test("readBytes/writeBytes round-trip a binary file byte for byte"):
     val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
@@ -315,7 +317,7 @@ class HostSuite extends munit.FunSuite:
     assert(Files.readAllBytes(root.resolve("copy.dat")).nn.sameElements(bytes))
 
   test("a literal Unix backslash in a filename survives an API round-trip"):
-    assume(!Host.Windows)
+    assume(!Platform.isWindows)
     val name = "back\\slash.txt"
     write(name, "content")
     val returned = access(name).path
@@ -401,13 +403,13 @@ class HostSuite extends munit.FunSuite:
     assertEquals(exec(pwd, Nil, root.toString).exitCode, 0) // session grant persists
 
   test("a denied executable path gets a copyable requestExec hint"):
-    val executable = if Host.Windows then "C:\\Program Files\\Example\\tool.exe" else "/opt/Example Tools/tool"
+    val executable = if Platform.isWindows then "C:\\Program Files\\Example\\tool.exe" else "/opt/Example Tools/tool"
     val error = intercept[SecurityException](exec(s"'$executable' --status"))
-    val literal = Host.scalaString(Processes.Stage(List(executable, "--status")).line)
+    val literal = ScalaSource.stringLiteral(CommandLine.Stage(List(executable, "--status")).line)
     assert(error.getMessage.nn.contains(s"requestExec(Set($literal)"), error.getMessage)
 
   test("a command that runs long is shown live after Processes.LiveAfterMs, a quick one is not"):
-    assume(!ProcessFixture.Windows) // intentional integration with the real POSIX shell
+    assume(!Platform.isWindows) // intentional integration with the real POSIX shell
     import scala.collection.mutable.ListBuffer
     val begun = ListBuffer[Long]()
     val seen = StringBuilder()
@@ -514,7 +516,7 @@ class HostSuite extends munit.FunSuite:
       TestEnv.trySymbolicLink(env.root.resolve("pub/link.txt"), env.root.resolve("secrets/key.txt")),
       "symbolic links are unavailable for this account",
     )
-    val target = Host.portablePath(env.root.resolve("secrets/key.txt"))
+    val target = PlatformPath.portable(env.root.resolve("secrets/key.txt"))
     intercept[SecurityException](env.host.read("pub/link.txt"))
     val listed = env.host.access("pub").children
     assertEquals(listed.map(_.path), List(target), "a link is listed as its target")
@@ -535,7 +537,7 @@ class HostSuite extends munit.FunSuite:
     assert(!top.contains("link"), top.toString)
 
   test("a Windows directory junction escaping cwd is judged by its target"):
-    assume(Host.Windows, "Windows junction integration test")
+    assume(Platform.isWindows, "Windows junction integration test")
     val outside = Files.createTempDirectory("atc-junction-target").nn.toRealPath().nn
     Files.writeString(outside.resolve("secret.txt"), "outside")
     val junction = root.resolve("junction-out").nn
@@ -585,7 +587,7 @@ class HostSuite extends munit.FunSuite:
     assertEquals(walked.count(_ == "real/sub/f.txt"), 1, walked.toString)
     // Evaluate access through the link at its target.
     assertEquals(read("dirlink/sub/f.txt"), "f")
-    assertEquals(access("dirlink/sub/f.txt").path, Host.portablePath(root.resolve("real/sub/f.txt")))
+    assertEquals(access("dirlink/sub/f.txt").path, PlatformPath.portable(root.resolve("real/sub/f.txt")))
 
   test("move of a file onto itself is a no-op"):
     write("self.txt", "data")

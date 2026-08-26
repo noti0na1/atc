@@ -52,6 +52,6 @@ object SlashCommand:
     * the rest of the line, trimmed. `Left(typed)` when nothing answers to it. */
   def parse(line: String): Either[String, (SlashCommand, String)] =
     val parts = line.trim.split("\\s+", 2)
-    val typed = parts(0).toLowerCase
+    val typed = parts(0).toLowerCase(java.util.Locale.ROOT)
     val arg = if parts.length > 1 then parts(1).trim else ""
     values.find(_.answersTo(typed)).toRight(typed).map(_ -> arg)

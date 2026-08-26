@@ -1,10 +1,7 @@
 package atc.agent
 
 import atc.llm.SystemPrompt
-import atc.host.Host
 import atc.perms.{Mode, Policy}
-
-import java.nio.file.Path
 
 object Prompts:
   val ToolName = "run_scala"
@@ -48,14 +45,13 @@ object Prompts:
     * tool results). An explicit mode or classified-model switch can rebuild
     * the prefix; between such switches it remains stable (see [[SystemPrompt]]). */
   def system(
-    cwd: Path,
+    environment: AgentEnvironment,
     policy: Policy,
     classifiedModelConfigured: Boolean,
     safeMode: Boolean,
     respectGitignore: Boolean,
     extra: Option[String],
   ): SystemPrompt =
-    val os = s"${System.getProperty("os.name")} ${System.getProperty("os.arch")}"
     // Dynamic strings can contain newlines or instruction-looking text. JSON
     // quoting keeps scalar values on one structural line; multi-line blocks
     // are visibly data-prefixed below.
@@ -89,8 +85,8 @@ object Prompts:
        |capabilities cannot escape their scope, and the host enforces the user's permission policy at runtime.
        |
        |Environment
-       |- working directory: ${quoted(Host.portablePath(cwd))}
-       |- OS: ${quoted(os)}
+       |- working directory: ${quoted(environment.workingDirectory)}
+       |- OS: ${quoted(environment.operatingSystem)}
        |- REPL: $replDescription
        |- classified model (trusted isolated model used by `classifiedChat`): ${
         if classifiedModelConfigured then "configured" else "none configured, so `classifiedChat` fails"

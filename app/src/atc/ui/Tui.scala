@@ -1,6 +1,6 @@
 package atc.ui
 
-import atc.Debug
+import atc.{Debug, ProcessEnvironment}
 import atc.agent.AgentUI
 import atc.lib.{Todo, TodoStatus}
 import atc.perms.*
@@ -197,7 +197,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       // on), as xterm's modifyOtherKeys, and Alt/Option+Enter as ESC CR.
       keyMap.bind(Reference("atc-newline"), "\u001b[13;2u", "\u001b[27;2;13~", "\u001b\r")
   private val g: Glyphs =
-    Tui.glyphs(terminal.encoding(), System.getenv("ATC_ASCII") != null)
+    Tui.glyphs(terminal.encoding(), ProcessEnvironment.contains("ATC_ASCII"))
 
   // ── styles (by role, see `Ansi`) ──────────────────────────────────
 
@@ -858,7 +858,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     val decision =
       if plain then
         // No menus without a terminal: a one-letter answer on a line.
-        freeText(styled("Allow? [y]es once / [s]ession / [n]o: ", Yellow)).map(_.toLowerCase) match
+        freeText(styled("Allow? [y]es once / [s]ession / [n]o: ", Yellow))
+          .map(_.toLowerCase(java.util.Locale.ROOT)) match
           case Some(a) if a.startsWith("y") => Decision.AllowOnce
           case Some(a) if a.startsWith("s") => Decision.AllowSession
           case _ => Decision.Deny
@@ -881,7 +882,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def confirm(question: String): Boolean = popupBlock:
     write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
     val yes =
-      if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase.startsWith("y"))
+      if plain then
+        freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase(java.util.Locale.ROOT).startsWith("y"))
       else menu("Choose", List(Tui.YesLabel, Tui.NoLabel)).contains(Tui.YesLabel)
     if plain then
       write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
@@ -1025,7 +1027,8 @@ object Tui:
   /** Choose safe layout characters. Dumb/non-interactive terminals may report
     * no encoding at all, in which case ASCII is the only sound default. */
   private[atc] def glyphs(encoding: java.nio.charset.Charset | Null, forceAscii: Boolean): Glyphs =
-    if !forceAscii && Option(encoding).exists(_.name.nn.toUpperCase.contains("UTF")) then Glyphs.unicode
+    if !forceAscii && Option(encoding).exists(_.name.nn.toUpperCase(java.util.Locale.ROOT).contains("UTF")) then
+      Glyphs.unicode
     else Glyphs.ascii
 
   /** Prepare the prompt-history file without following a final symlink and

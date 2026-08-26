@@ -2,10 +2,11 @@ package atc.config
 
 import upickle.default.*
 
+import atc.TextFiles
 import atc.perms.{Access, Mode, PathPattern}
+import atc.platform.PlatformPath
 
 import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, Paths, StandardCopyOption}
-import scala.util.Properties
 
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
@@ -118,7 +119,7 @@ case class Config(
 object Config:
   /** `~/.atc/config.json`: the base of the whole policy. Nothing is permitted
     * behind it, so it is also where every grant has to be written. */
-  def globalPath: Path = Paths.get(Properties.userHome, ".atc", "config.json").nn
+  def globalPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("config.json").nn
 
   /** `<dir>/.atc/config.json`, the project config of `dir`. */
   def projectPath(dir: Path): Path = dir.resolve(".atc").resolve("config.json")
@@ -187,21 +188,11 @@ object Config:
     val current = Option.when(Files.exists(path))(Files.readString(path).nn)
     // Git uses the last matching rule; an earlier exclusion followed by
     // `!keys.properties` does not actually protect the key file.
-    val lastRule = current.toList.flatMap(_.linesIterator)
+    val lastRule = current.toList.flatMap(text => TextFiles.splitLines(TextFiles.stripBom(text)).lines)
       .map(_.trim).filter(line => line == entry || line == s"!$entry").lastOption
     if lastRule.contains(entry) then false
     else
-      val newline = current.flatMap { text =>
-        val index = text.indexWhere(c => c == '\r' || c == '\n')
-        Option.when(index >= 0) {
-          if text.charAt(index) == '\r' && index + 1 < text.length && text.charAt(index + 1) == '\n' then "\r\n"
-          else text.charAt(index).toString
-        }
-      }.getOrElse("\n")
-      val prefix = current.fold("") { text =>
-        if text.isEmpty then "" else text.stripSuffix("\r\n").stripSuffix("\n").stripSuffix("\r") + newline
-      }
-      Files.writeString(path, s"$prefix$entry$newline")
+      Files.writeString(path, TextFiles.appendLine(current.getOrElse(""), entry))
       true
 
   // ── layers ────────────────────────────────────────────────────────
@@ -252,12 +243,12 @@ object Config:
     // `.atc` sits in; every other layer reads them against the working directory.
     // The policy evaluates canonical paths, so canonicalize the base as well.
     // Otherwise, a project reached through a symlink would never grant access.
-    val base = Option.when(origin == Origin.Project)(PathPattern.canonical(path.getParent.nn.getParent.nn))
+    val base = Option.when(origin == Origin.Project)(PlatformPath.canonical(path.getParent.nn.getParent.nn))
     ConfigLayer(origin, Some(path), readObj(text, path.toString), parse(text, path.toString), base)
 
   private def readObj(text: String, where: String): ujson.Obj =
     val parsed =
-      try ujson.read(text.stripPrefix("\uFEFF"))
+      try ujson.read(TextFiles.stripBom(text))
       catch case e: Exception => throw IllegalArgumentException(s"Cannot parse config $where: ${e.getMessage}")
     parsed match
       case o: ujson.Obj => o
@@ -393,7 +384,7 @@ object Config:
   private def validateChoice(where: String, value: String, allowed: Set[String]): Unit =
     requireValid(value == value.trim, s"$where must not start or end with whitespace (was '$value')")
     requireValid(
-      allowed.contains(value.trim.toLowerCase),
+      allowed.contains(value.trim.toLowerCase(java.util.Locale.ROOT)),
       s"$where must be one of ${allowed.mkString("|")} (was '$value')"
     )
 
@@ -434,7 +425,8 @@ object Config:
     // Fail here rather than at the first request: a typo in `model` is a
     // config error, and the catalog message lists what is configured.
     val catalog = ModelCatalog.from(config)
-    val duplicateRefs = catalog.models.groupBy(_.ref.toLowerCase).values.filter(_.size > 1).toList
+    val duplicateRefs =
+      catalog.models.groupBy(_.ref.toLowerCase(java.util.Locale.ROOT)).values.filter(_.size > 1).toList
     requireValid(
       duplicateRefs.isEmpty,
       s"model references must be unique ignoring case: ${duplicateRefs.flatten.map(_.ref).sorted.mkString(", ")}"
@@ -547,7 +539,7 @@ object Config:
             text.substring(0, prev.valueEnd) + s",${obj.separator}$entry" + text.substring(prev.valueEnd)
           case None if obj.members.isEmpty =>
             val separator = obj.separator
-            val newline = if separator.startsWith("\r\n") then "\r\n" else "\n"
+            val newline = TextFiles.firstLineEnding(separator).fold(TextFiles.DefaultLineEnding)(_.text)
             text.substring(0, obj.open + 1) + separator + entry + newline + text.substring(obj.close)
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)

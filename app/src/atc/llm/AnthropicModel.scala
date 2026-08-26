@@ -112,13 +112,17 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       }
     }
     val usage = usageOf(m)
-    val stop = m.stopReason().toScala.map(_.toString).getOrElse("end_turn").toLowerCase
+    val stop = m.stopReason().toScala.map(_.toString).getOrElse("end_turn").toLowerCase(java.util.Locale.ROOT)
+    val toolCalls = calls.result()
     val lastBlock = m.content().asScala.lastOption
-    val unfinished = stop == "pause_turn" || Completion.isTruncatedStop(stop) ||
-      (calls.result().isEmpty && lastBlock.exists(b =>
+    val paused = stop == "pause_turn" ||
+      (toolCalls.isEmpty && lastBlock.exists(b =>
         b.serverToolUse().isPresent || b.webSearchToolResult().isPresent
       ))
-    Completion(text.toString, calls.result(), Some(NativeTurn(providerKey, ref, m.toParam())), usage, stop, unfinished)
+    val status = CompletionStop.fromReason(stop) match
+      case CompletionStop.Complete if paused => CompletionStop.Resume
+      case other => other
+    Completion(text.toString, toolCalls, Some(NativeTurn(providerKey, ref, m.toParam())), usage, stop, status)
 
   def complete(
     system: SystemPrompt,
@@ -153,7 +157,9 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   private def configuredThinking(b: MessageCreateParams.Builder): Unit =
     if cfg.thinking.getOrElse(true) then b.thinking(ThinkingConfigAdaptive.builder().build())
     cfg.reasoning.foreach(e =>
-      b.outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase)).build())
+      b.outputConfig(
+        OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase(java.util.Locale.ROOT))).build()
+      )
     )
 
   /** `input` is the whole prompt (Anthropic reports the uncached part, the

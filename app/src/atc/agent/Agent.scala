@@ -5,26 +5,6 @@ import atc.llm.*
 import atc.perms.{Decision, Policy}
 import atc.sandbox.{ExecutionResult, ReplSession}
 
-import java.nio.file.Path
-
-/** What the agent reports to the terminal. */
-trait AgentUI:
-  def assistantDelta(text: String): Unit
-  /** Out-of-band note during streaming ("web search"); empty = paragraph break. */
-  def assistantNote(text: String): Unit
-  def assistantEnd(): Unit
-  /** A piece of the model's reasoning, when the provider streams it. */
-  def thinkingDelta(text: String): Unit
-  def toolStart(code: String): Unit
-  /** `millis` is execution time excluding the time spent waiting for the user. */
-  def toolEnd(result: ExecutionResult, millis: Long): Unit
-  def status(text: String): Unit
-  def warn(text: String): Unit
-  /** The turn has used its tool budget (`used` calls; `budget` = `config.maxToolCalls`):
-    * may it go on for another `budget`? An interactive UI asks the human; the
-    * default (test doubles, non-interactive runs) declines, and the turn is stopped. */
-  def confirmMoreToolCalls(used: Int, budget: Int): Boolean = false
-
 /** The agent loop: user message → (model → tool calls)* → final answer.
   *
   * A *turn* handles one user message as a sequence of *rounds*. Each round
@@ -32,8 +12,8 @@ trait AgentUI:
   *
   *  - tool calls → run them (`run_scala`, one at a time), append the results
   *    and ask again;
-  *  - `unfinished` (the provider paused after a server-side tool such as web
-  *    search) → ask again so the model resumes;
+  *  - a resumable completion (the provider paused after a server-side tool or
+  *    hit an output limit) → ask again so the model resumes;
   *  - anything else is the final answer: the turn is over (the system prompt
   *    tells the model that ending without a tool call means "finished"; the loop
   *    does not second-guess its prose).
@@ -46,7 +26,7 @@ trait AgentUI:
   * the history stays well-formed. */
 final class Agent(
   config: Config,
-  cwd: Path,
+  environment: AgentEnvironment,
   policy: Policy,
   ui: AgentUI,
   initialModel: ChatModel,
@@ -61,21 +41,17 @@ final class Agent(
     * model so it cannot make the new model cut too much or overflow its window. */
   def model_=(next: ChatModel): Unit =
     currentModel = next
-    tokenCalibration = 1.0
+    context.modelChanged()
 
-  var history: List[Msg] = Nil
+  private val conversation = Conversation()
+  def history: List[Msg] = conversation.history
   /** Every model call since the last `clear()`, grouped by purpose
     * ([[Agent.Turns]], [[Agent.Chat]], ...) in order of first use. Access is
     * synchronized because next-input prediction records usage on another thread. */
   private val usageBy = scala.collection.mutable.LinkedHashMap[String, TokenUsage]()
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
-  /** Observed prompt tokens per estimated one, from the last completion: the
-    * chars-per-token guess is off for code and for CJK text, and the provider's
-    * own count for the request we just sent puts it right. */
-  private var tokenCalibration: Double = 1.0
-  /** Messages cut from the front of the history so far (the notice tells the model the total). */
-  private var contextDropped: Int = 0
+  private val context = ContextManager()
 
   /** Everything spent on the model(s) since the last `clear()`. */
   def usage: TokenUsage = synchronized(usageBy.values.foldLeft(TokenUsage())(_ + _))
@@ -86,16 +62,23 @@ final class Agent(
     synchronized { usageBy.update(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
 
   /** The one and only native tool: everything else is a Scala function. */
-  private val tools = List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))
+  private var tools = ScalaToolRunner.tools
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
   def systemPrompt: SystemPrompt =
-    Prompts.system(cwd, policy, classifiedModel.isDefined, config.safeMode, config.respectGitignore, extraInstructions)
+    Prompts.system(
+      environment,
+      policy,
+      classifiedModel.isDefined,
+      config.safeMode,
+      config.respectGitignore,
+      extraInstructions,
+    )
 
   /** Tokens of every request besides the history: the system prompt and the tool schema. */
   private def fixedTokens: Long =
-    Agent.estimateTokens(systemPrompt.text) + tools.map(t =>
-      Agent.estimateTokens(t.description + t.parametersJson)
+    ContextManager.estimateTokens(systemPrompt.text) + tools.map(t =>
+      ContextManager.estimateTokens(t.description + t.parametersJson)
     ).sum
 
   /** How full the model's context is: the estimated tokens of the next request
@@ -103,49 +86,40 @@ final class Agent(
     * against the provider's count for the last one) and the model's window,
     * when the config states it. What the TUI shows after each turn. */
   def contextUsage: (tokens: Long, window: Option[Int]) =
-    val estimate = fixedTokens + history.map(estimateForCurrentModel).sum
-    (tokens = (estimate * tokenCalibration).round, window = model.contextWindow)
-
-  /** A foreign model cannot replay provider-native reasoning/items; it sends
-    * only the neutral text and tool calls. Do not count payload it will omit. */
-  private def estimateForCurrentModel(msg: Msg): Long =
-    Agent.estimateTokens(msg, model.providerKey, model.ref)
-
-  /** Notes prepended to the next user message, in order: that the sandbox was
-    * restarted, code the user ran themselves. They are carried this way rather
-    * than appended to the history on their own so the transcript never holds
-    * two user messages in a row. */
-  private var pendingNotes: List[String] = Nil
+    val usage = context.contextUsage(fixedTokens, history, model)
+    (tokens = usage.tokens, window = usage.window)
 
   /** Tell the model that its REPL was replaced, so it does not conclude that
     * the documented "definitions persist between calls" guarantee is false when
     * its earlier `val`s and `def`s have vanished. */
   def noteSandboxRestarted(reason: String): Unit =
-    pendingNotes :+=
-      s"[sandbox notice] The Scala REPL was restarted ($reason). Every `val`, `def` and `import` " +
-        "you defined earlier is gone, so re-create anything you still need. The conversation itself is unchanged."
+    conversation.queueNote(AgentMessages.sandboxRestarted(reason))
 
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
     * continues in, and the result may be what the next request is about. */
   def noteUserRan(code: String, result: ExecutionResult, decisions: List[(Decision, String)] = Nil): Unit =
-    pendingNotes :+=
-      s"[user ran code] The user ran this in the sandbox REPL themselves (its definitions persist for you too):\n" +
-        s"```scala\n$code\n```\nResult:\n${Agent.renderForModel(result, config.maxToolOutputChars, decisions)}"
+    conversation.queueNote(AgentMessages.userRan(
+      code,
+      ToolOutput.renderForModel(result, config.maxToolOutputChars, decisions),
+    ))
 
   def clear(): Unit =
-    history = Nil
+    conversation.clear()
     synchronized { usageBy.clear() }
     toolCalls = 0
-    tokenCalibration = 1.0
-    contextDropped = 0
-    pendingNotes = Nil
+    context.reset()
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
   def turn(session: ReplSession, input: String, cancelled: () => Boolean): Unit =
-    history :+= Msg.User((pendingNotes :+ input).mkString("\n\n"))
-    pendingNotes = Nil
-    Turn(session, cancelled).run()
+    runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars), input, cancelled)
+
+  /** Core entry point, with concrete tool execution supplied by the host adapter. */
+  private[atc] def runTurn(runner: ToolRunner, input: String, cancelled: () => Boolean): Unit =
+    tools = runner.tools
+    conversation.beginTurn(input)
+    context.beginTurn()
+    Turn(runner, cancelled).run()
 
   private enum Outcome:
     /** Something was appended to the history; ask the model again. */
@@ -153,13 +127,12 @@ final class Agent(
     case Done
 
   /** One turn: the round loop plus the counters the bounds are checked against. */
-  private final class Turn(session: ReplSession, cancelled: () => Boolean):
+  private final class Turn(runner: ToolRunner, cancelled: () => Boolean):
     import Outcome.*
     private var used = 0 // tool calls run this turn
     private var budget = config.maxToolCalls // grows by `maxToolCalls` each time the user says "continue"
     private var resumes = 0
     private var budgetRejections = 0
-    private var contextOverflowWarned = false
 
     def run(): Unit =
       var outcome = Continue
@@ -174,65 +147,38 @@ final class Agent(
         //  - Otherwise, the history already ends with an assistant message or tool
         //    result and needs no repair; another assistant marker would be invalid.
         case e if scala.util.control.NonFatal(e) =>
-          repairHistoryAfter(e)
+          conversation.repairAfter(e)
           throw e
-
-    private def repairHistoryAfter(error: Throwable): Unit =
-      val detail = Option(error.getMessage).getOrElse(error.toString)
-      val marker = s"[turn failed: $detail]"
-      history.lastOption match
-        case Some(Msg.Assistant(_, calls, _)) if calls.nonEmpty =>
-          history :+= Msg.ToolResults(calls.map(c => ToolResult(c.id, marker, isError = true)))
-        case Some(Msg.User(_) | Msg.Continuation(_)) =>
-          history :+= Msg.Assistant(marker, Nil, None)
-        case _ => ()
 
     /** Ask the model once, record its answer, then act on it. */
     private def round(): Outcome =
       if cancelled() then interrupted()
       else
-        fitHistoryToContext()
-        val estimated = fixedTokens + history.map(estimateForCurrentModel).sum
-        ui.status(s"${model.alias} is thinking")
+        val prepared = context.prepare(fixedTokens, history, model)
+        conversation.useHistory(prepared.history)
+        prepared.warnings.foreach(ui.warn)
+        ui.status(AgentMessages.thinkingStatus(model.alias))
         completeRound() match
           case None => interrupted()
           case Some(raw) =>
             recordUsage(Agent.Turns, raw.usage)
-            calibrateTokenEstimate(raw, estimated)
+            context.calibrate(raw, prepared.estimatedInput)
 
-            // A provider safety stop or truncated response must not be allowed
-            // to smuggle a partial/contradictory tool call into execution.
-            val blocked = Completion.isBlockedStop(raw.stopReason)
-            val truncated = raw.unfinished || Completion.isTruncatedStop(raw.stopReason)
-            val unsafeCalls = raw.toolCalls.nonEmpty && (blocked || truncated)
-            val completion =
-              if unsafeCalls then
-                val safeText = Option.when(raw.text.trim.nonEmpty)(raw.text).getOrElse(
-                  s"[${raw.stopReason} model response; tool calls were not executed]"
-                )
-                raw.copy(text = safeText, toolCalls = Nil, native = None, unfinished = truncated)
-              else if raw.text.trim.isEmpty && raw.toolCalls.isEmpty && !truncated then
-                raw.copy(text = s"[model returned no response; stop_reason=${raw.stopReason}]", native = None)
-              else raw.copy(unfinished = truncated)
-            history :+= Msg.Assistant(completion.text, completion.toolCalls, completion.native)
-
-            if unsafeCalls then
-              ui.warn(s"ignored ${raw.toolCalls.size} tool call(s) from a ${raw.stopReason} response")
-            if blocked then
-              ui.warn(s"The model blocked this request (stop_reason=${raw.stopReason}).")
-              Done
-            else if completion.toolCalls.nonEmpty then runTools(completion.toolCalls)
-            else if cancelled() then interrupted()
-            else if completion.unfinished && resumes < Agent.MaxResumes then
-              if Completion.isTruncatedStop(raw.stopReason) then
-                history :+= Msg.Continuation(Agent.TruncationContinuation)
-              resume()
-            else if completion.unfinished then
-              ui.warn(s"${model.alias} remained unfinished after ${Agent.MaxResumes} resume attempts")
-              Done
-            else
-              if raw.text.trim.isEmpty then ui.warn("The model returned no response.")
-              Done
+            val accepted = CompletionPolicy(raw)
+            conversation.append(accepted.message)
+            accepted.warnings.foreach(ui.warn)
+            accepted.next match
+              case CompletionPolicy.Next.RunTools(calls) => runTools(calls)
+              case CompletionPolicy.Next.Blocked => Done
+              case CompletionPolicy.Next.Finish => if cancelled() then interrupted() else Done
+              case CompletionPolicy.Next.Resume(needsContinuation) =>
+                if cancelled() then interrupted()
+                else if resumes < Agent.MaxResumes then
+                  if needsContinuation then conversation.append(Msg.Continuation(AgentMessages.truncationContinuation))
+                  resume()
+                else
+                  ui.warn(AgentMessages.resumeExhaustedWarning(model.alias, Agent.MaxResumes))
+                  Done
 
     private def completeRound(): Option[Completion] =
       try Some(model.complete(systemPrompt, history, tools, sink, cancelled))
@@ -240,69 +186,24 @@ final class Agent(
         case _: CancelledException => None
       finally ui.assistantEnd()
 
-    private def calibrateTokenEstimate(completion: Completion, estimated: Long): Unit =
-      if completion.usage.input >= Agent.CalibrationMinTokens && estimated > 0 then
-        tokenCalibration = (completion.usage.input.toDouble / estimated).max(0.25).min(8.0)
-
-    /** When the model has a `contextWindow`, drop the oldest exchanges from the
-      * history until the next request should fit it, leaving room for the
-      * configured maximum answer (or one eighth of the window as slack). What
-      * was dropped stays in the terminal's scrollback, and the
-      * model is told what happened. TODO: compact instead of cut (summarise the
-      * dropped exchanges into one message) once the estimator has been proven
-      * in use. */
-    private def fitHistoryToContext(): Unit =
-      model.contextWindow.foreach { window =>
-        // Leave both estimation slack and, when configured, the full output
-        // allowance. A maxTokens larger than the window intentionally leaves
-        // no room and triggers the actionable warning below.
-        val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
-        val availableInput = window.toLong - reserve
-        val room = (availableInput / tokenCalibration).toLong - fixedTokens
-        val (kept, dropped) = Agent.fitToContext(history, room, estimateForCurrentModel)
-        if dropped > 0 then
-          contextDropped += dropped
-          history = kept match
-            case Msg.User(t) :: rest => Msg.User(s"${Agent.contextCutNotice(contextDropped)}\n\n$t") :: rest
-            case other => other
-          ui.warn(
-            s"context window of ${model.alias} (${window} tokens): the oldest $dropped messages were dropped from what the model sees"
-          )
-        val estimatedInput = ((fixedTokens + history.map(estimateForCurrentModel).sum) * tokenCalibration).round
-        if estimatedInput > availableInput && !contextOverflowWarned then
-          contextOverflowWarned = true
-          val fixedInput = (fixedTokens * tokenCalibration).round
-          val cause =
-            if fixedInput > availableInput then "the system prompt and tool schema alone"
-            else "the latest retained exchange (which cannot be dropped)"
-          val reserveWhy = model.maxOutputTokens match
-            case Some(n) if n.toLong >= window.toLong / 8 => s"$reserve tokens reserved for configured maxTokens=$n"
-            case _ => s"$reserve tokens reserved for the answer and estimation slack"
-          ui.warn(
-            s"context window of ${model.alias} ($window tokens): $cause needs an estimated $estimatedInput input tokens, " +
-              s"but only ${availableInput.max(0L)} remain with $reserveWhy; the provider may reject this request. " +
-              "Shorten the request or configure a larger contextWindow/maxTokens combination."
-          )
-      }
-
     /** Run the requested tools in order, honouring cancellation and the per-turn budget. */
     private def runTools(calls: List[ToolCall]): Outcome =
       var overBudget = false
       val results = calls.map { call =>
-        if cancelled() then ToolResult(call.id, "Cancelled by the user before execution.", isError = true)
+        if cancelled() then ToolResult(call.id, AgentMessages.cancelledBeforeExecution, isError = true)
         else if used >= budget && !extendBudget() then
           overBudget = true
           ToolResult(
             call.id,
-            s"Tool budget of ${config.maxToolCalls} calls per turn exhausted; answer the user now.",
+            AgentMessages.toolBudgetExhausted(config.maxToolCalls),
             isError = true
           )
         else
           used += 1
           toolCalls += 1
-          runTool(call)
+          runner.run(call)
       }
-      history :+= Msg.ToolResults(results)
+      conversation.append(Msg.ToolResults(results))
       if cancelled() then interrupted()
       else if !overBudget then Continue
       else
@@ -310,7 +211,7 @@ final class Agent(
         budgetRejections += 1
         if budgetRejections < Agent.MaxBudgetRejections then Continue
         else
-          ui.warn("model kept requesting tools after exhausting the tool budget; stopping this turn")
+          ui.warn(AgentMessages.toolBudgetLoopWarning)
           Done
 
     /** Treat the budget as a checkpoint by asking the user for another
@@ -330,40 +231,16 @@ final class Agent(
     /** The provider cut the response after a server-side tool call: re-send the history. */
     private def resume(): Outcome =
       resumes += 1
-      ui.status("resuming")
+      ui.status(AgentMessages.resumingStatus)
       Continue
 
     private def interrupted(): Outcome =
-      // An unfinished/resumed round already ends in an assistant message. Do
+      // A paused/resumed round already ends in an assistant message. Do
       // not append a second one: neutral provider replays require valid role
       // alternation. User/tool-result endings do need a closing assistant.
-      if !history.lastOption.exists(_.isInstanceOf[Msg.Assistant]) then
-        history :+= Msg.Assistant("[interrupted by user]", Nil, None)
-      ui.warn("interrupted")
+      conversation.interrupt()
+      ui.warn(AgentMessages.interruptedWarning)
       Done
-
-    private def runTool(call: ToolCall): ToolResult = call.name match
-      case Prompts.ToolName => runScala(call)
-      case other =>
-        ToolResult(
-          call.id,
-          s"Unknown tool '$other'. Only ${Prompts.ToolName} is available; everything else is a Scala function.",
-          isError = true
-        )
-
-    private def runScala(call: ToolCall): ToolResult =
-      val code = Json.parseObject(call.arguments).value.get("code").flatMap(_.strOpt).getOrElse("")
-      if code.trim.isEmpty then ToolResult(call.id, "Missing 'code' argument.", isError = true)
-      else
-        ui.toolStart(code)
-        val start = System.nanoTime()
-        val decisionsBefore = policy.decisionCount
-        val result = session.run(code)
-        // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
-        val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
-        ui.toolEnd(result, millis)
-        val rendered = Agent.renderForModel(result, config.maxToolOutputChars, policy.decisionsSince(decisionsBefore))
-        ToolResult(call.id, rendered, isError = !result.success)
 
 object Agent:
   /** Purposes a model call is recorded under (`/cost`). */
@@ -372,146 +249,7 @@ object Agent:
   val ClassifiedChat = "classifiedChat()"
   val Prediction = "next-input prediction"
 
-  /** Below this many prompt tokens a completion is not used to calibrate the estimator. */
-  val CalibrationMinTokens = 200L
-
-  /** A rough token count: about four characters per token, corrected at run
-    * time by [[Agent]]'s calibration against the provider's own numbers. */
-  def estimateTokens(text: String): Long = (text.length + 3) / 4
-
-  /** Estimate a message's contribution to a request, including per-message
-    * framing. Provider-native replay payloads, such as Anthropic thinking blocks
-    * and Responses reasoning items, are resent in full. Their rendered size must
-    * therefore be included to avoid undercounting reasoning-heavy histories. */
-  def estimateTokens(msg: Msg): Long = msg match
-    case Msg.User(t) => estimateTokens(t) + 4
-    case Msg.Continuation(t) => estimateTokens(t) + 4
-    case Msg.Assistant(t, calls, native) => estimateAssistantTokens(t, calls, native)
-    case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
-
-  /** Model-aware variant: provider-native data from another model is not put
-    * on the wire, so only the neutral assistant fields count. */
-  private[atc] def estimateTokens(msg: Msg, providerKey: String, modelRef: String): Long = msg match
-    case Msg.User(t) => estimateTokens(t) + 4
-    case Msg.Continuation(t) => estimateTokens(t) + 4
-    case Msg.Assistant(t, calls, native) =>
-      estimateAssistantTokens(t, calls, native.filter(_.isFor(providerKey, modelRef)))
-    case Msg.ToolResults(rs) => rs.map(r => estimateTokens(r.output) + 12).sum + 4
-
-  private def estimateAssistantTokens(t: String, calls: List[ToolCall], native: Option[NativeTurn]): Long =
-    val neutral = estimateTokens(t) + calls.map(c => estimateTokens(c.arguments) + 12).sum
-    // A request contains either the exact native payload or the neutral
-    // text/calls, never both. The larger estimate is conservative without
-    // double-counting every assistant turn.
-    neutral.max(native.map(n => (n.payloadChars + 3L) / 4).getOrElse(0L)) + 4
-
-  /** `history` cut to an estimated `budget` tokens by dropping whole exchanges
-    * from the front: a cut always starts at a user message, so no tool result
-    * is left without the call it answers, and the last user message and what
-    * follows it are always kept (even when they alone exceed the budget: there
-    * is nothing better to send). Returns the kept history and how many
-    * messages were dropped. */
-  def fitToContext(
-    history: List[Msg],
-    budget: Long,
-    estimate: Msg => Long = Agent.estimateTokens
-  ): (List[Msg], Int) =
-    val lastUser = history.lastIndexWhere(_.isInstanceOf[Msg.User])
-    var start = 0
-    var total = history.map(estimate).sum
-    while total > budget && start < lastUser do
-      // drop up to (excluding) the next user message
-      val next = history.indexWhere(_.isInstanceOf[Msg.User], start + 1)
-      val cut = if next < 0 || next > lastUser then lastUser else next
-      total -= history.slice(start, cut).map(estimate).sum
-      start = cut
-    (history.drop(start), start)
-
-  def contextCutNotice(dropped: Int): String =
-    s"[context notice] The $dropped oldest messages of this conversation were dropped to fit your context window; " +
-      "if you need something from them, ask the user or read it again."
-
   /** Server-side tool pauses (web search) per turn; a research turn can take many. */
   val MaxResumes = 20
-  /** User-role bridge after an output-limit stop. Provider APIs generally
-    * require the next completion request to end in a user/tool-result role;
-    * replaying a truncated assistant as the final message is not portable and
-    * is invalid for some thinking modes. */
-  val TruncationContinuation =
-    "[continuation request] Continue exactly where the previous response was truncated. " +
-      "Do not repeat completed work; finish the user's original request."
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */
   val MaxBudgetRejections = 2
-  /** A hint appended to tool output for a common capture-checking / safe-mode stumble. */
-  private case class Hint(applies: String => Boolean, text: String)
-  private val hints = List(
-    Hint(
-      out => out.contains("Cannot refer to object StringBuilder") && out.contains("from safe code"),
-      "safe mode rejects the `StringBuilder()` companion call, but construction works: use `new StringBuilder()`; a top-level binding needs `val b: StringBuilder = new StringBuilder()`."
-    ),
-    Hint(
-      _.contains("needs an explicit type because the inferred type does not conform"),
-      "top-level vals that hold capabilities (FileEntry, closures using println/fs) need an explicit type, e.g. `val e: FileEntry^{fs} = access(...)`, or use a `def` / inline expression."
-    ),
-    Hint(
-      out => out.contains("Mutable variable") && out.contains("does not extend") && out.contains("Stateful"),
-      "safe mode rejects top-level `var`s; put the `var` inside a `def`, block or lambda and return the immutable result."
-    ),
-    Hint(
-      out => out.contains("Cannot refer to") && out.contains("from safe code"),
-      "that API is not available in safe mode (only the sandbox API, immutable collections and plain JDK utilities are); e.g. `throw RuntimeException(...)` instead of sys.error, and a local `var` over an immutable `List`/`Vector`/`Map` instead of `ListBuffer`/`mutable.Map`."
-    ),
-    Hint(
-      _.contains("Cannot run program"),
-      "that program is not on the PATH (or is misspelt). Note that exec runs no shell: `exec(\"git status\")` is split into words for you, pipes and `<`/`>`/`>>`/`2>&1` work, but `&&`, `;`, globs and `$VAR` do not; run steps one by one and combine in Scala.",
-    ),
-    Hint(
-      out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),
-      "do not define your own `given FileSystem`; use requestFiles(...) { ... } blocks."
-    ),
-    Hint(
-      out => out.contains("cannot subsume a read-only capture set") || out.contains("Cannot call update method"),
-      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write, run commands or use the network. Say so and let the user switch modes (/mode) instead of working around it."
-    ),
-    Hint(
-      out =>
-        out.contains("No given instance of type atc.lib.Network") || out.contains(
-          "No given instance of type atc.lib.Exec"
-        ),
-      "that capability does not exist in the current sandbox mode (local: no network; read-only: no commands, no network); tell the user which mode the task needs (/mode local, /mode full)."
-    ),
-  )
-
-  /** Tool output as the model sees it: hint-annotated and bounded (cut in the
-    * middle so both the first diagnostics and the tail survive). */
-  def renderForModel(r: ExecutionResult, maxChars: Int): String = renderForModel(r, maxChars, Nil)
-
-  /** The result as the model sees it: the rendered output with a hint for the
-    * usual stumbles, cut in the middle beyond `maxChars`, then a note for every
-    * decision the user made at a permission prompt during the run. The note
-    * comes last and uncut: the model cannot see the pop-ups, so this is how it
-    * learns whether a grant was for this call or for the session (and the
-    * system prompt never changes with one). */
-  def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)]): String =
-    val base = r.render
-    val hinted = hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
-    val bounded =
-      if hinted.length <= maxChars then hinted
-      else
-        val head = hinted.take(maxChars * 2 / 3)
-        val tail = hinted.takeRight(maxChars / 3)
-        s"$head\n... [${hinted.length - maxChars} characters omitted] ...\n$tail"
-    if decisions.isEmpty then bounded else s"$bounded\n${decisionNote(decisions)}"
-
-  /** What the user decided at the prompts of one call, for the model:
-    * `[permissions: the user allowed commands npm * once (this call only; a
-    * later call must ask again); the user allowed read on '/x' for the rest of
-    * this session (no request needed from now on)]`. */
-  def decisionNote(decisions: List[(Decision, String)]): String =
-    val parts = decisions.map {
-      case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
-      case (Decision.AllowSession, what) =>
-        s"the user allowed $what for the rest of this session (no request needed from now on)"
-      case (Decision.Deny, what) => s"the user denied $what (do not ask again for the same thing)"
-    }
-    s"[permissions: ${parts.mkString("; ")}]"

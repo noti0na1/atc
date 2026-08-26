@@ -1,11 +1,12 @@
 package atc
 
 import atc.perms.{Decision, ExecRequest, Mode}
+import atc.platform.Platform
 import java.nio.file.{Files, Paths}
 
-/** The CLI argument parser (Main.parseArgs). */
+/** CLI parsing, launcher transport, and argument validation. */
 class MainSuite extends munit.FunSuite:
-  private def parse(args: String*): atc.Main.Args = atc.Main.parseArgs(args.toList)
+  private def parse(args: String*): Cli.Args = Cli.parse(args.toList)
 
   test("defaults and the long/short flag forms"):
     val d = parse()
@@ -31,8 +32,8 @@ class MainSuite extends munit.FunSuite:
     val base = Files.createTempDirectory("atc-main-base").nn.toAbsolutePath.nn.normalize.nn
     val expectedCwd = base.resolve("project").nn
     val expectedConfig = Some(base.resolve("project/extra.json").nn)
-    val cwdFirst = Main.parseArgs(List("--cwd", "project", "--config", "extra.json"), Main.Args(cwd = base))
-    val configFirst = Main.parseArgs(List("--config", "extra.json", "--cwd", "project"), Main.Args(cwd = base))
+    val cwdFirst = Cli.parse(List("--cwd", "project", "--config", "extra.json"), Cli.Args(cwd = base))
+    val configFirst = Cli.parse(List("--config", "extra.json", "--cwd", "project"), Cli.Args(cwd = base))
     assertEquals(cwdFirst.cwd, expectedCwd)
     assertEquals(cwdFirst.config, expectedConfig)
     assertEquals(configFirst.cwd, expectedCwd)
@@ -50,27 +51,41 @@ class MainSuite extends munit.FunSuite:
     val environment =
       (Map("ATC_INTERNAL_ARG_COUNT" -> values.length.toString) ++
         values.zipWithIndex.map((value, index) => s"ATC_INTERNAL_ARG_$index" -> s"x$value")).get
-    assertEquals(Main.launchArgs(List("ignored"), environment), values)
-    assertEquals(Main.launchArgs(List("direct"), _ => None), List("direct"))
-    intercept[IllegalArgumentException](Main.launchArgs(Nil, Map("ATC_INTERNAL_ARG_COUNT" -> "1").get))
-    assert(Main.isInternalEnvironment("atc_Internal_Arg_0"))
+    assertEquals(LauncherEnvironment.arguments(List("ignored"), environment), values)
+    assertEquals(LauncherEnvironment.arguments(List("direct"), _ => None), List("direct"))
+    intercept[IllegalArgumentException](
+      LauncherEnvironment.arguments(Nil, Map("ATC_INTERNAL_ARG_COUNT" -> "1").get)
+    )
+    intercept[IllegalArgumentException](
+      LauncherEnvironment.arguments(
+        Nil,
+        Map("ATC_INTERNAL_ARG_COUNT" -> "1", "ATC_INTERNAL_ARG_0" -> "missing-sentinel").get,
+      )
+    )
+    assert(LauncherEnvironment.isInternal("atc_Internal_Arg_0"))
+
+    val cwd = Files.createTempDirectory("atc-launch-cwd").nn.toAbsolutePath.nn.normalize.nn
+    assertEquals(
+      LauncherEnvironment.workingDirectory(Map("ATC_INTERNAL_LAUNCH_CWD" -> cwd.toString).get),
+      cwd,
+    )
 
   test("Windows-friendly path syntax expands home and validates paths before running"):
     assertEquals(parse("-C", "~").cwd, Paths.get(scala.util.Properties.userHome).toAbsolutePath.normalize)
     val missingDir = Files.createTempDirectory("atc-main-missing").nn.resolve("gone")
-    val cwdError = intercept[IllegalArgumentException](Main.validateArgs(Main.Args(cwd = missingDir)))
+    val cwdError = intercept[IllegalArgumentException](Cli.validate(Cli.Args(cwd = missingDir)))
     assert(cwdError.getMessage.nn.contains("does not exist"), cwdError.getMessage)
     val file = Files.createTempFile("atc-main-file", ".txt").nn
-    val fileError = intercept[IllegalArgumentException](Main.validateArgs(Main.Args(cwd = file)))
+    val fileError = intercept[IllegalArgumentException](Cli.validate(Cli.Args(cwd = file)))
     assert(fileError.getMessage.nn.contains("not a directory"), fileError.getMessage)
     val cwd = Files.createTempDirectory("atc-main-cwd").nn
     val configError = intercept[IllegalArgumentException](
-      Main.validateArgs(Main.Args(cwd = cwd, config = Some(cwd.resolve("missing.json"))))
+      Cli.validate(Cli.Args(cwd = cwd, config = Some(cwd.resolve("missing.json"))))
     )
     assert(configError.getMessage.nn.contains("Config file does not exist"), configError.getMessage)
     // Informational/global-init actions do not depend on cwd or an explicit config.
-    Main.validateArgs(Main.Args(cwd = missingDir, help = true, config = Some(missingDir)))
-    if java.io.File.separatorChar == '\\' then
+    Cli.validate(Cli.Args(cwd = missingDir, help = true, config = Some(missingDir)))
+    if Platform.isWindows then
       intercept[IllegalArgumentException](parse("-C", "C:work"))
       intercept[IllegalArgumentException](parse("-c", "NUL.json"))
 
@@ -78,13 +93,13 @@ class MainSuite extends munit.FunSuite:
     val request = ExecRequest(List("git status"), "test")
     var asked = 0
     def interactive(request: atc.perms.PermissionRequest): Decision = { asked += 1; Decision.AllowOnce }
-    val scripted = App.permissionPrompter(Main.Args(prompt = Some("work")), interactive)
+    val scripted = App.permissionPrompter(Cli.Args(prompt = Some("work")), interactive)
     val denied = intercept[SecurityException](scripted.ask(request))
     assert(denied.getMessage.nn.contains("non-interactive run cannot ask"), denied.getMessage)
     assertEquals(asked, 0)
-    val approved = App.permissionPrompter(Main.Args(prompt = Some("work"), approveAll = true), interactive)
+    val approved = App.permissionPrompter(Cli.Args(prompt = Some("work"), approveAll = true), interactive)
     assertEquals(approved.ask(request), Decision.AllowSession)
     assertEquals(asked, 0)
-    val normal = App.permissionPrompter(Main.Args(), interactive)
+    val normal = App.permissionPrompter(Cli.Args(), interactive)
     assertEquals(normal.ask(request), Decision.AllowOnce)
     assertEquals(asked, 1)

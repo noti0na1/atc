@@ -1,6 +1,7 @@
 package atc
 
-import atc.host.Processes
+import atc.host.CommandLine
+import atc.platform.Platform
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
@@ -51,16 +52,14 @@ object TestProcess:
   * as the host's process grammar. `pattern(mode)` permits that fixture mode and
   * any following arguments, without permitting every invocation of Java. */
 object ProcessFixture:
-  val Windows: Boolean = java.io.File.separatorChar == '\\'
-
   private val javaExecutable: String =
-    Path.of(sys.props("java.home"), "bin", if Windows then "java.exe" else "java").nn.toString
+    Path.of(sys.props("java.home"), "bin", if Platform.isWindows then "java.exe" else "java").nn.toString
   private val classpath: String = sys.props("java.class.path").nn
   private val base: List[String] =
     List(javaExecutable, "-Dfile.encoding=UTF-8", "-cp", classpath, "atc.TestProcess")
 
-  def line(argv: String*): String = Processes.Stage(argv.toList).line
+  def line(argv: String*): String = CommandLine.Stage(argv.toList).line
 
   def command(mode: String, args: String*): String = line((base ++ (mode +: args))*)
 
-  def pattern(mode: String): String = Processes.parsePipeline(command(mode)).stages.head.line
+  def pattern(mode: String): String = CommandLine.parsePipeline(command(mode)).stages.head.line

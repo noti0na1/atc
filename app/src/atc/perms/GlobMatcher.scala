@@ -1,5 +1,7 @@
 package atc.perms
 
+import atc.platform.Platform
+
 import java.util.Locale
 import scala.util.matching.Regex
 import scala.util.Try
@@ -7,8 +9,6 @@ import scala.util.Try
 /** Simple glob matching for command lines and host names: `*` matches any
   * sequence of characters, everything else is literal. Adapted from TACIT. */
 object GlobMatcher:
-  private val Windows = java.io.File.separatorChar == '\\'
-
   /** `*` becomes `.*`; every other segment is quoted, so it stays literal. */
   private def compile(pattern: String): Regex =
     Regex(pattern.split("\\*", -1).map(Regex.quote).mkString(".*"))
@@ -32,7 +32,7 @@ object GlobMatcher:
     * `git push*` cannot be bypassed as `GIT.EXE push`. Explicit paths stay
     * explicit and must still be granted as such. */
   private def normalizeCommand(value: String): String =
-    if !Windows then value
+    if !Platform.isWindows then value
     else
       val boundary =
         if value.startsWith("\"") then

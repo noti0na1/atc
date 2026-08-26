@@ -73,7 +73,15 @@ class AgentSuite extends munit.FunSuite:
     def thinkingDelta(text: String): Unit = ()
   val ui = TestUI()
 
-  lazy val agent = Agent(Config(), root, policy, ui, EchoModel("echo"), Some(EchoModel("safe")), None)
+  lazy val agent = Agent(
+    Config(),
+    AgentEnvironment.current(root),
+    policy,
+    ui,
+    EchoModel("echo"),
+    Some(EchoModel("safe")),
+    None,
+  )
 
   override def beforeAll(): Unit =
     session = ReplSession(SandboxConfig(safeMode = true, executionTimeoutMs = Some(60000)), host).init()
@@ -119,8 +127,8 @@ class AgentSuite extends munit.FunSuite:
     val outside = Files.createTempDirectory("atc-agent-out").toRealPath()
     Files.writeString(outside.resolve("x.txt"), "outside!")
     decisions = List(Decision.Deny)
-    val outsideCode = Host.scalaString(outside.toString)
-    val fileCode = Host.scalaString(outside.resolve("x.txt").toString)
+    val outsideCode = ScalaSource.stringLiteral(outside.toString)
+    val fileCode = ScalaSource.stringLiteral(outside.resolve("x.txt").toString)
     agent.turn(
       session,
       s"""run: requestFiles($outsideCode, Access.Read, "need it") { read($fileCode) }""",
