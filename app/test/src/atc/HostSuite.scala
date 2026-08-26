@@ -3,7 +3,8 @@ package atc
 import atc.host.*
 import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
-import java.nio.file.{Files, Path}
+import atc.platform.{PathGlob, Platform, PlatformPath}
+import java.nio.file.{Files, LinkOption, Path}
 
 /** The host's `Interface` implementation under the policy, called directly. */
 class HostSuite extends munit.FunSuite:
@@ -36,13 +37,16 @@ class HostSuite extends munit.FunSuite:
   def rule(p: String, a: Option[Access] = None, c: Option[Boolean] = None, locked: Boolean = false) =
     FileRule(PathPattern(p, root), a, c, locked)
 
+  private val echoCommand = ProcessFixture.command("echo")
+  private val echoPattern = ProcessFixture.pattern("echo")
+
   val policy = Policy(
     List(
       rule(".", Some(Access.Write)),
       rule("secrets", c = Some(true)),
       rule("./private", Some(Access.None)),
     ),
-    List("echo"),
+    List(echoPattern),
     List("example.com"),
     prompter
   )
@@ -60,7 +64,7 @@ class HostSuite extends munit.FunSuite:
 
   private def rel(p: String) =
     val path = Path.of(p)
-    if path.isAbsolute then root.relativize(path).toString else p
+    if path.isAbsolute then PlatformPath.portable(root.relativize(path)) else p
 
   test("plain read/write within cwd, relative paths"):
     assertEquals(read("src/A.scala"), "object A")
@@ -160,7 +164,10 @@ class HostSuite extends munit.FunSuite:
     Files.writeString(outside.resolve("o.txt"), "x")
     decisions = List(Decision.AllowSession)
     requestFiles(outside.toString, atc.lib.Access.Read, "look outside") {
-      assertEquals(ls(outside.toString), List(outside.resolve("o.txt").toString)) // absolute: not under cwd
+      assertEquals(
+        ls(outside.toString),
+        List(PlatformPath.portable(outside.resolve("o.txt")))
+      ) // absolute: not under cwd
     }
 
   test("find matches the name for a plain glob and the relative path for one with / or **"):
@@ -221,21 +228,22 @@ class HostSuite extends munit.FunSuite:
     assertEquals(Files.readString(root.resolve("empty2.txt")), "first\n")
 
   test("parseCommandLine, globRegex and splitLines (pure helpers)"):
+    val escapedTail = if Platform.isWindows then List("e\\", "f") else List("e f")
     assertEquals(
-      Processes.parseCommandLine("""git commit -m 'a b' --x="c d" e\ f"""),
-      List("git", "commit", "-m", "a b", "--x=c d", "e f")
+      CommandLine.parseCommandLine("""git commit -m 'a b' --x="c d" e\ f"""),
+      List("git", "commit", "-m", "a b", "--x=c d") ++ escapedTail
     )
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a > b")) // one program only
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a | b"))
-    val p = Processes.parsePipeline("cat < in.txt | sort -u 2>&1 | head -3 >> out.txt")
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a > b")) // one program only
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a | b"))
+    val p = CommandLine.parsePipeline("cat < in.txt | sort -u 2>&1 | head -3 >> out.txt")
     assertEquals(p.stages.map(_.argv), List(List("cat"), List("sort", "-u"), List("head", "-3")))
     assertEquals(p.stages.map(_.mergeErr), List(false, true, false))
     assertEquals((p.stdinFile, p.stdoutFile, p.append), (Some("in.txt"), Some("out.txt"), true))
     assertEquals(p.line, "cat | sort -u 2>&1 | head -3 < in.txt >> out.txt")
-    val q = Processes.parsePipeline("echo 'a | b' >out.txt")
+    val q = CommandLine.parsePipeline("echo 'a | b' >out.txt")
     assertEquals((q.stages.head.argv, q.stdoutFile, q.append), (List("echo", "a | b"), Some("out.txt"), false))
     assertEquals(
-      Processes.parsePipeline("printf 2 > two.txt").stages.head.argv,
+      CommandLine.parsePipeline("printf 2 > two.txt").stages.head.argv,
       List("printf", "2")
     ) // a bare 2 before > is a word...
     for bad <- List(
@@ -256,31 +264,50 @@ class HostSuite extends munit.FunSuite:
         "a > x > y"
       )
     do
-      intercept[IllegalArgumentException](Processes.parsePipeline(bad))
-    intercept[IllegalArgumentException](Processes.parseCommandLine("a 'unterminated"))
-    assertEquals(Processes.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
-    assertEquals(Processes.Stage(List("echo", "a b", "")).line, "echo \"a b\" \"\"")
+      intercept[IllegalArgumentException](CommandLine.parsePipeline(bad))
+    intercept[IllegalArgumentException](CommandLine.parseCommandLine("a 'unterminated"))
+    assertEquals(CommandLine.parseCommandLine("'/path with space/x' arg"), List("/path with space/x", "arg"))
+    assertEquals(CommandLine.Stage(List("echo", "a b", "")).line, "echo \"a b\" \"\"")
     intercept[IllegalArgumentException](
-      Processes.parsePipeline(List.fill(Processes.MaxPipelineStages + 1)("echo").mkString(" | "))
+      CommandLine.parsePipeline(List.fill(CommandLine.MaxPipelineStages + 1)("echo").mkString(" | "))
     )
-    val r = Host.globRegex("src/**/*.scala")
+    val r = PathGlob.regex("src/**/*.scala")
     assert(
       r.matches("src/X.scala") && r.matches("src/a/b/X.scala") && !r.matches("lib/X.scala") && !r.matches("src/X.java")
     )
     assert(
-      Host.globRegex("**/test/*.py").matches("test/a.py") && Host.globRegex("**/test/*.py").matches("x/y/test/a.py")
+      PathGlob.regex("**/test/*.py").matches("test/a.py") && PathGlob.regex("**/test/*.py").matches("x/y/test/a.py")
     )
     assert(
-      Host.globRegex("a/[!x]*.{md,txt}").matches("a/b.md") && !Host.globRegex("a/[!x]*.{md,txt}").matches("a/x.md")
+      PathGlob.regex("a/[!x]*.{md,txt}").matches("a/b.md") &&
+        !PathGlob.regex("a/[!x]*.{md,txt}").matches("a/x.md")
     )
-    assert(!Host.globRegex("a/*.md").matches("a/b/c.md"))
-    assertEquals(Host.splitLines("a\nb\n"), (List("a", "b"), "\n", true))
-    assertEquals(Host.splitLines("a\r\nb"), (List("a", "b"), "\r\n", false))
-    assertEquals(Host.splitLines("a\r\nb\nc\rd"), (List("a", "b", "c", "d"), "\r\n", false))
-    assertEquals(Host.splitLines("a\rb\r"), (List("a", "b"), "\r", true))
-    assertEquals(Host.textLines("a\r\nb\n"), List("a", "b"))
-    assertEquals(Host.splitLines(""), (Nil, "\n", true))
-    assertEquals(Host.splitLines("\n"), (List(""), "\n", true))
+    assert(!PathGlob.regex("a/*.md").matches("a/b/c.md"))
+    if Platform.isWindows then assert(PathGlob.regex("SRC/**/*.SCALA").matches("src/main/A.scala"))
+
+  test("Windows path validation rejects device aliases and ambiguous components"):
+    for path <- List(
+        "NUL.txt",
+        "NUL .txt",
+        "CON",
+        "COM1.log",
+        "COM¹.txt",
+        "LPT³",
+        "dir/name.",
+        "dir/name ",
+        "//?/C:/work/x",
+        "//./pipe/x",
+        "C:work/x",
+        "C:/work/file.txt:stream",
+      )
+    do
+      assert(PlatformPath.windowsValidationError(path).nonEmpty, path)
+    for path <- List("C:/work/file.txt", ".env") do
+      assertEquals(PlatformPath.windowsValidationError(path), None, path)
+    assertEquals(
+      ScalaSource.stringLiteral("C:\\Users\\alice\nnotes\".txt"),
+      "\"C:\\\\Users\\\\alice\\nnotes\\\".txt\"",
+    )
 
   test("readBytes/writeBytes round-trip a binary file byte for byte"):
     val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
@@ -288,6 +315,14 @@ class HostSuite extends munit.FunSuite:
     assert(readBytes("bin.dat").sameElements(bytes))
     writeBytes("copy.dat", readBytes("bin.dat"))
     assert(Files.readAllBytes(root.resolve("copy.dat")).nn.sameElements(bytes))
+
+  test("a literal Unix backslash in a filename survives an API round-trip"):
+    assume(!Platform.isWindows)
+    val name = "back\\slash.txt"
+    write(name, "content")
+    val returned = access(name).path
+    assert(returned.endsWith(name), returned)
+    assertEquals(read(returned), "content")
 
   test("writeBytes is refused on a classified path, like write"):
     intercept[SecurityException](writeBytes("secrets/x.dat", Array[Byte](1, 2)))
@@ -356,16 +391,25 @@ class HostSuite extends munit.FunSuite:
     intercept[SecurityException](requestFiles(other.toString, atc.lib.Access.Read, "again") { 1 })
 
   test("exec policy and output"):
-    val r = exec("echo", List("hi there"))
+    val r = exec(echoCommand, List("hi there"))
     assertEquals(r.exitCode, 0)
     assertEquals(r.stdout.trim, "hi there")
-    val e = intercept[SecurityException](exec("ls"))
+    val pwd = ProcessFixture.command("pwd")
+    val pattern = ProcessFixture.pattern("pwd")
+    val e = intercept[SecurityException](exec(pwd))
     assert(e.getMessage.nn.contains("requestExec"))
     decisions = List(Decision.AllowSession)
-    assertEquals(requestExec(Set("ls*"), "list") { exec("ls", List(root.toString)).exitCode }, 0)
-    assertEquals(exec("ls", Nil, root.toString).exitCode, 0) // session grant persists
+    assertEquals(requestExec(Set(pattern), "inspect cwd") { exec(pwd).exitCode }, 0)
+    assertEquals(exec(pwd, Nil, root.toString).exitCode, 0) // session grant persists
+
+  test("a denied executable path gets a copyable requestExec hint"):
+    val executable = if Platform.isWindows then "C:\\Program Files\\Example\\tool.exe" else "/opt/Example Tools/tool"
+    val error = intercept[SecurityException](exec(s"'$executable' --status"))
+    val literal = ScalaSource.stringLiteral(CommandLine.Stage(List(executable, "--status")).line)
+    assert(error.getMessage.nn.contains(s"requestExec(Set($literal)"), error.getMessage)
 
   test("a command that runs long is shown live after Processes.LiveAfterMs, a quick one is not"):
+    assume(!Platform.isWindows) // intentional integration with the real POSIX shell
     import scala.collection.mutable.ListBuffer
     val begun = ListBuffer[Long]()
     val seen = StringBuilder()
@@ -398,23 +442,24 @@ class HostSuite extends munit.FunSuite:
     assertEquals(env.liveCommands.size, 1)
 
   test("deny lists refuse commands and hosts, and cannot be granted"):
+    val denied = ProcessFixture.command("echo", "secret") + "*"
     val denyPolicy = Policy(
       List(rule(".", Some(Access.Write))),
-      List("echo*"), // allowed by the allow list ...
+      List(echoPattern), // allowed by the allow list ...
       List("*"),
       _ => Decision.AllowSession, // ... and the user would say yes to anything
-      List("echo secret*"), // ... but these are refused outright
+      List(denied), // ... but these are refused outright
       List("*.internal")
     )
     val denyHost = Host(denyPolicy, root, output, llm, hostUi)
     given fs: FileSystem = denyHost.fileSystem
     given ex: Exec = denyHost.processes
     given net: Network = denyHost.network
-    assertEquals(denyHost.exec("echo", List("ok")).stdout.trim, "ok")
-    val e = intercept[SecurityException](denyHost.exec("echo", List("secret", "key")))
-    assert(e.getMessage.nn.contains("denyCommands pattern 'echo secret*'"), e.getMessage)
+    assertEquals(denyHost.exec(echoCommand, List("ok")).stdout.trim, "ok")
+    val e = intercept[SecurityException](denyHost.exec(echoCommand, List("secret", "key")))
+    assert(e.getMessage.nn.contains(s"denyCommands pattern '$denied'"), e.getMessage)
     assert(!e.getMessage.nn.contains("requestExec"), e.getMessage) // asking cannot help
-    val e2 = intercept[SecurityException](denyHost.requestExec(Set("echo secret*"), "try") { 1 })
+    val e2 = intercept[SecurityException](denyHost.requestExec(Set(denied), "try") { 1 })
     assert(e2.getMessage.nn.contains("may not be granted"), e2.getMessage)
     val e3 = intercept[SecurityException](denyHost.httpGet("http://db.internal/x"))
     assert(e3.getMessage.nn.contains("denyHosts pattern '*.internal'"), e3.getMessage)
@@ -467,8 +512,11 @@ class HostSuite extends munit.FunSuite:
     given fs: FileSystem = env.host.fileSystem
     env.file("secrets/key.txt", "THE-SECRET")
     env.dir("pub")
-    Files.createSymbolicLink(env.root.resolve("pub/link.txt"), env.root.resolve("secrets/key.txt"))
-    val target = env.root.resolve("secrets/key.txt").toString
+    assume(
+      TestEnv.trySymbolicLink(env.root.resolve("pub/link.txt"), env.root.resolve("secrets/key.txt")),
+      "symbolic links are unavailable for this account",
+    )
+    val target = PlatformPath.portable(env.root.resolve("secrets/key.txt"))
     intercept[SecurityException](env.host.read("pub/link.txt"))
     val listed = env.host.access("pub").children
     assertEquals(listed.map(_.path), List(target), "a link is listed as its target")
@@ -483,10 +531,24 @@ class HostSuite extends munit.FunSuite:
   test("symlink escaping cwd is judged by its target"):
     val outside = Files.createTempDirectory("atc-link-target").nn.toRealPath().nn
     Files.writeString(outside.resolve("t.txt"), "target")
-    Files.createSymbolicLink(root.resolve("link"), outside)
+    assume(TestEnv.trySymbolicLink(root.resolve("link"), outside), "symbolic links are unavailable for this account")
     intercept[SecurityException](read("link/t.txt"))
     val top = ls(".").map(p => Path.of(p).getFileName.toString)
     assert(!top.contains("link"), top.toString)
+
+  test("a Windows directory junction escaping cwd is judged by its target"):
+    assume(Platform.isWindows, "Windows junction integration test")
+    val outside = Files.createTempDirectory("atc-junction-target").nn.toRealPath().nn
+    Files.writeString(outside.resolve("secret.txt"), "outside")
+    val junction = root.resolve("junction-out").nn
+    val process = ProcessBuilder("cmd.exe", "/d", "/c", "mklink", "/J", junction.toString, outside.toString)
+      .redirectErrorStream(true).start().nn
+    val output = String(process.getInputStream.nn.readAllBytes(), java.nio.charset.Charset.defaultCharset())
+    val exit = process.waitFor()
+    assertEquals(exit, 0, s"could not create a junction: $output")
+    assert(Files.isDirectory(junction, LinkOption.NOFOLLOW_LINKS), s"junction was not created: $output")
+    intercept[SecurityException](read("junction-out/secret.txt"))
+    assert(!ls(".").exists(_.contains("junction-out")), ls(".").toString)
 
   test("a dangling symlink is judged by its (non-existent) target"):
     // Writing through a dangling link creates its target. The policy must evaluate
@@ -494,20 +556,26 @@ class HostSuite extends munit.FunSuite:
     // a file anywhere.
     val outside = Files.createTempDirectory("atc-dangling").nn.toRealPath().nn
     val target = outside.resolve("created.txt") // does not exist
-    Files.createSymbolicLink(root.resolve("dangling.txt"), target)
+    assume(
+      TestEnv.trySymbolicLink(root.resolve("dangling.txt"), target),
+      "symbolic links are unavailable for this account",
+    )
     intercept[SecurityException](write("dangling.txt", "PWNED"))
     intercept[SecurityException](append("dangling.txt", "PWNED"))
     assert(!Files.exists(target))
     // A dangling symlink into the writable tree remains writable.
     val inner = root.resolve("inner-created.txt")
-    Files.createSymbolicLink(root.resolve("dangling-ok.txt"), inner)
+    assert(TestEnv.trySymbolicLink(root.resolve("dangling-ok.txt"), inner))
     write("dangling-ok.txt", "fine")
     assertEquals(Files.readString(inner), "fine")
 
   test("a readable symlinked directory is listed as its target but never entered"):
     Files.createDirectories(root.resolve("real/sub"))
     Files.writeString(root.resolve("real/sub/f.txt"), "f")
-    Files.createSymbolicLink(root.resolve("dirlink"), root.resolve("real"))
+    assume(
+      TestEnv.trySymbolicLink(root.resolve("dirlink"), root.resolve("real")),
+      "symbolic links are unavailable for this account",
+    )
     // List and evaluate the link as its target.
     val top = ls(".")
     assert(top.contains("real"), top.toString)
@@ -519,14 +587,14 @@ class HostSuite extends munit.FunSuite:
     assertEquals(walked.count(_ == "real/sub/f.txt"), 1, walked.toString)
     // Evaluate access through the link at its target.
     assertEquals(read("dirlink/sub/f.txt"), "f")
-    assertEquals(access("dirlink/sub/f.txt").path, root.resolve("real/sub/f.txt").toString)
+    assertEquals(access("dirlink/sub/f.txt").path, PlatformPath.portable(root.resolve("real/sub/f.txt")))
 
   test("move of a file onto itself is a no-op"):
     write("self.txt", "data")
     move("self.txt", "./self.txt")
     assertEquals(read("self.txt"), "data")
 
-  test("TextSink decodes multi-byte characters split across writes, and never throws on bad bytes"):
+  test("TextSink incrementally decodes UTF-8, UTF-16 BOMs, and malformed bytes"):
     val sb = StringBuilder()
     val sink = TextSink(s => sb.append(s))
     for b <- "héllo 🙂 x".getBytes("UTF-8") do sink.write(Array(b)) // one byte at a time
@@ -534,6 +602,25 @@ class HostSuite extends munit.FunSuite:
     assertEquals(sb.toString, "héllo 🙂 x")
     val sb2 = StringBuilder()
     val sink2 = TextSink(s => sb2.append(s))
-    sink2.write(Array(0xff.toByte, 0xfe.toByte, 'a'.toByte))
+    sink2.write(Array(0xc3.toByte, 0x28.toByte)) // malformed UTF-8, not an encoding marker
     sink2.finish()
-    assert(sb2.toString.contains("a") && sb2.toString.contains("\uFFFD"), sb2.toString)
+    assertEquals(sb2.toString, "\uFFFD(")
+    def bomText(bom: Array[Byte], encoded: Array[Byte]): String =
+      val out = StringBuilder()
+      val sink = TextSink(s => out.append(s))
+      for byte <- bom ++ encoded do sink.write(Array(byte))
+      sink.finish()
+      out.toString
+    val sample = "bom 🙂"
+    assertEquals(
+      bomText(Array(0xef.toByte, 0xbb.toByte, 0xbf.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+      sample,
+    )
+    assertEquals(
+      bomText(Array(0xff.toByte, 0xfe.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_16LE)),
+      sample,
+    )
+    assertEquals(
+      bomText(Array(0xfe.toByte, 0xff.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_16BE)),
+      sample,
+    )

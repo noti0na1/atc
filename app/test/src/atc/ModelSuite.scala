@@ -1,12 +1,11 @@
 package atc
 
-import atc.agent.Agent
+import atc.agent.ToolOutput
 import atc.config.{Config, ModelCatalog, ModelConfig, ModelSpec, ProviderConfig}
 import atc.llm.*
 import atc.sandbox.ExecutionResult
 
-/** The model layer: the echo model, provider dispatch, and the pure `Agent`
-  * helpers (`renderForModel`). */
+/** The model layer: the echo model, provider dispatch, and tool-output rendering. */
 class ModelSuite extends munit.FunSuite:
 
   private def collect(m: ChatModel, history: List[Msg]): (Completion, String) =
@@ -14,14 +13,14 @@ class ModelSuite extends munit.FunSuite:
     val c = m.complete(SystemPrompt("sys"), history, Nil, StreamSink(sb.append(_)), () => false)
     (c, sb.toString)
 
-  test("model stop reasons distinguish resumable truncation from safety blocks"):
-    assert(Completion.isTruncatedStop("length"))
-    assert(Completion.isTruncatedStop("MAX-TOKENS"))
-    assert(Completion.isTruncatedStop("max_output_tokens"))
-    assert(!Completion.isTruncatedStop("content_filter"))
-    assert(Completion.isBlockedStop("CONTENT-FILTER"))
-    assert(Completion.isBlockedStop("refusal"))
-    assert(!Completion.isBlockedStop("stop"))
+  test("model stop reasons are normalized into typed loop states"):
+    assertEquals(CompletionStop.fromReason("pause_turn"), CompletionStop.Resume)
+    assertEquals(CompletionStop.fromReason("length"), CompletionStop.Truncated)
+    assertEquals(CompletionStop.fromReason("MAX-TOKENS"), CompletionStop.Truncated)
+    assertEquals(CompletionStop.fromReason("max_output_tokens"), CompletionStop.Truncated)
+    assertEquals(CompletionStop.fromReason("CONTENT-FILTER"), CompletionStop.Blocked)
+    assertEquals(CompletionStop.fromReason("refusal"), CompletionStop.Blocked)
+    assertEquals(CompletionStop.fromReason("end_turn"), CompletionStop.Complete)
 
   test("stream cancellation is checked before probing the network-backed iterator"):
     var generated = false
@@ -68,6 +67,7 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(c.text, "echo: hello")
     assert(c.toolCalls.isEmpty)
     assertEquals(c.stopReason, "end_turn")
+    assertEquals(c.stop, CompletionStop.Complete)
     assertEquals(streamed, "echo: hello")
 
   test("EchoModel turns a `run:` message into a run_scala tool call"):
@@ -75,6 +75,7 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(c.toolCalls.size, 1)
     assertEquals(c.toolCalls.head.name, "run_scala")
     assertEquals(c.stopReason, "tool_use")
+    assertEquals(c.stop, CompletionStop.Complete)
     assertEquals(ujson.read(c.toolCalls.head.arguments).obj("code").str, "1 + 1")
 
   test("EchoModel reports tool results back"):
@@ -145,7 +146,7 @@ class ModelSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
 
-  // ── Agent.renderForModel ────────────────────────────────────────
+  // ── ToolOutput ───────────────────────────────────────────────────
 
   test("Json.parseObject is lenient with tool-call arguments"):
     assertEquals(Json.parseObject("""{"code": "1 + 1"}""").value("code").str, "1 + 1")
@@ -158,28 +159,28 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(Json.fromJava(Json.toJava(v)), v)
 
   test("renderForModel passes short output through"):
-    assertEquals(Agent.renderForModel(ExecutionResult(true, "hello"), 1000), "hello")
-    assertEquals(Agent.renderForModel(ExecutionResult(true, ""), 1000), "(no output)")
+    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, "hello"), 1000), "hello")
+    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, ""), 1000), "(no output)")
 
   test("renderForModel adds the explicit-type hint"):
     val r = ExecutionResult(false, "value e needs an explicit type because the inferred type does not conform to ...")
-    val out = Agent.renderForModel(r, 10000)
+    val out = ToolOutput.renderForModel(r, 10000)
     assert(out.contains("explicit type"), out)
     assert(out.contains("FileEntry^{fs}"), out)
 
   test("renderForModel adds the safe-mode hint"):
     val r = ExecutionResult(false, "Cannot refer to object ArrayBuffer ... from safe code since it is neither ...")
-    val out = Agent.renderForModel(r, 10000)
+    val out = ToolOutput.renderForModel(r, 10000)
     assert(out.toLowerCase.contains("not available in safe mode"), out)
 
   test("renderForModel gives precise safe-mode hints for StringBuilder and top-level var"):
-    val builder = Agent.renderForModel(
+    val builder = ToolOutput.renderForModel(
       ExecutionResult(false, "Cannot refer to object StringBuilder ... from safe code since it is neither ..."),
       10000
     )
     assert(builder.contains("new StringBuilder()"), builder)
     assert(builder.contains("val b: StringBuilder"), builder)
-    val variable = Agent.renderForModel(
+    val variable = ToolOutput.renderForModel(
       ExecutionResult(false, "Mutable variable counter is defined in a class that does not extend Stateful"),
       10000
     )
@@ -188,7 +189,7 @@ class ModelSuite extends munit.FunSuite:
 
   test("renderForModel adds the ambiguous-FileSystem hint"):
     val r = ExecutionResult(false, "Ambiguous given instances: both fs and fs2 match type FileSystem ...")
-    val out = Agent.renderForModel(r, 10000)
+    val out = ToolOutput.renderForModel(r, 10000)
     assert(out.contains("requestFiles"), out)
 
   test("the system prompt really bundles the API reference"):
@@ -200,24 +201,30 @@ class ModelSuite extends munit.FunSuite:
 
   test("renderForModel adds the PATH/no-shell hint for a program that cannot run"):
     val r = ExecutionResult(false, "Cannot run program \"gti\": error=2, No such file or directory")
-    val out = Agent.renderForModel(r, 10000)
+    val out = ToolOutput.renderForModel(r, 10000)
     assert(out.contains("PATH"), out)
     assert(out.contains("no shell"), out)
 
   test("renderForModel adds the switch-mode hint for read-only capture errors"):
-    val out1 = Agent.renderForModel(ExecutionResult(false, "... cannot subsume a read-only capture set ..."), 10000)
+    val out1 = ToolOutput.renderForModel(
+      ExecutionResult(false, "... cannot subsume a read-only capture set ..."),
+      10000,
+    )
     assert(out1.contains("/mode"), out1)
-    val out2 = Agent.renderForModel(ExecutionResult(false, "... Cannot call update method ..."), 10000)
+    val out2 = ToolOutput.renderForModel(ExecutionResult(false, "... Cannot call update method ..."), 10000)
     assert(out2.contains("/mode"), out2)
 
   test("renderForModel adds the mode hint for a capability the mode does not hand out"):
-    val out1 = Agent.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Network ..."), 10000)
+    val out1 = ToolOutput.renderForModel(
+      ExecutionResult(false, "No given instance of type atc.lib.Network ..."),
+      10000,
+    )
     assert(out1.contains("/mode"), out1)
-    val out2 = Agent.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Exec ..."), 10000)
+    val out2 = ToolOutput.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Exec ..."), 10000)
     assert(out2.contains("/mode"), out2)
 
   test("renderForModel reports a denial in the tool result"):
-    val out = Agent.renderForModel(
+    val out = ToolOutput.renderForModel(
       ExecutionResult(true, "ok"),
       10000,
       List(atc.perms.Decision.Deny -> "write on '/x'")
@@ -247,7 +254,7 @@ class ModelSuite extends munit.FunSuite:
 
   test("renderForModel truncates overlong output keeping head and tail"):
     val big = ("H" * 400) + ("T" * 400)
-    val out = Agent.renderForModel(ExecutionResult(true, big), 120)
+    val out = ToolOutput.renderForModel(ExecutionResult(true, big), 120)
     assert(out.length < big.length, out.length.toString)
     assert(out.contains("characters omitted"), out)
     assert(out.startsWith("H"))

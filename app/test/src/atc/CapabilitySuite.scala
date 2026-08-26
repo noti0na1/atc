@@ -25,7 +25,9 @@ import atc.sandbox.*
 class CapabilitySuite extends munit.FunSuite, ReplAssertions:
   override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
 
-  private val env = TestEnv(commands = List("echo"), hosts = List("example.com"), prefix = "atc-cap")
+  private val echoCommand = ProcessFixture.command("echo")
+  private val env =
+    TestEnv(commands = List(ProcessFixture.pattern("echo")), hosts = List("example.com"), prefix = "atc-cap")
   private lazy val session: ReplSession = env.newSession(mode = Mode.Full)
   private def run(code: String): ExecutionResult = { env.activate(); session.run(code) }
 
@@ -117,7 +119,7 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // meaningful "observe without acting" for running a command or a request.
     assertFails(run("""val e2: Exec^{ex.rd} = ex"""))
     assertFails(run("""val n2: Network^{net.rd} = net"""))
-    assertOk(run("""def f(using x: Exec) = exec("echo", List("hi")).exitCode; f(using ex)"""))
+    assertOk(run(s"""def f(using x: Exec) = exec(${ujson.write(echoCommand)}, List("hi")).exitCode; f(using ex)"""))
 
   // ── UserIO: talking to the user is a separate capability ────────
 
@@ -144,20 +146,23 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
   test("the user capability is what request* blocks consume, not io"):
     // `request*` prompt the user, so they take UserIO^. That is also what keeps
     // them out of a pure `Classified.map` (see the capture-contract section).
-    assertOk(run(s"""requestFiles("${env.root}") { read("a.txt").length }"""))
-    assertFails(run(s"""val ru: UserIO^{user.rd} = user; requestFiles("${env.root}")(using ru, fs) { 1 }"""))
+    val root = env.scalaString(env.root)
+    assertOk(run(s"""requestFiles($root) { read("a.txt").length }"""))
+    assertFails(run(s"""val ru: UserIO^{user.rd} = user; requestFiles($root)(using ru, fs) { 1 }"""))
 
   // ── Granted capabilities cannot escape their block ──────────────
 
   test("requestFiles opens a permission scope, prompts, and closes it again"):
     val outside = TestEnv.outsideDir("outside-data")
+    val outsideCode = env.scalaString(outside)
+    val fileCode = env.scalaString(outside.resolve("o.txt"))
     env.requests.clear()
-    val r = assertOk(run(s"""requestFiles("$outside", Access.Read, "why") { read("$outside/o.txt") }"""))
+    val r = assertOk(run(s"""requestFiles($outsideCode, Access.Read, "why") { read($fileCode) }"""))
     assert(r.output.contains("outside-data"), r.output)
     assert(env.requests.exists { case f: FileRequest => f.reason == "why"; case _ => false }, env.requests.toString)
     assertEquals(env.policy.openScopeCount, 0)
     // ...and the grant is gone once the block ends (it was "allow once").
-    assertFails(run(s"""read("$outside/o.txt")"""))
+    assertFails(run(s"read($fileCode)"))
 
   test("a FileEntry from a requestFiles block cannot escape it"):
     assertFails(run("""val leaked = requestFiles("/tmp") { access("/tmp") }"""), "leak")
@@ -172,7 +177,9 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
 
   test("requestFiles hands the block a file system as capable as the caller's"):
     // Full mode: the caller's `fs` is full, so the block's is too and may write.
-    assertOk(run(s"""requestFiles("${env.root}", Access.Write) { write("granted.txt", "ok"); read("granted.txt") }"""))
+    assertOk(run(s"""requestFiles(${env.scalaString(
+        env.root
+      )}, Access.Write) { write("granted.txt", "ok"); read("granted.txt") }"""))
 
   // ── Capabilities cannot be forged, internals are unreachable ────
 
@@ -198,7 +205,9 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // The security property: nothing that leaves the process (or reaches the
     // user, or the normal model) can run on confidential data.
     assertOk(
-      run("""val spawned: Process^{ex} = spawn("echo"); spawned.waitFor(5000).isDefined""")
+      run(
+        s"""val spawned: Process^{ex} = spawn(${ujson.write(echoCommand)}); spawned.waitFor(5000).isDefined"""
+      )
     ) // a handle to try to smuggle
     val channels = List(
       "print to the user" -> """classify("s").map(s => { println(s); s })""",

@@ -12,6 +12,9 @@ import java.nio.file.{Files, Path}
 class AgentSuite extends munit.FunSuite:
   override val munitTimeout = scala.concurrent.duration.Duration(5, "min")
 
+  private val echoCommand = ProcessFixture.command("echo")
+  private val echoPattern = ProcessFixture.pattern("echo")
+
   val root: Path = Files.createTempDirectory("atc-agent").toRealPath()
   Files.writeString(root.resolve("hello.txt"), "hello world")
   Files.createDirectories(root.resolve("secrets"))
@@ -30,7 +33,7 @@ class AgentSuite extends munit.FunSuite:
       FileRule(PathPattern(".", root), Some(Access.Write), None),
       FileRule(PathPattern("secrets", root), None, Some(true)),
     ),
-    List("echo"),
+    List(echoPattern),
     Nil,
     prompter
   )
@@ -70,7 +73,15 @@ class AgentSuite extends munit.FunSuite:
     def thinkingDelta(text: String): Unit = ()
   val ui = TestUI()
 
-  lazy val agent = Agent(Config(), root, policy, ui, EchoModel("echo"), Some(EchoModel("safe")), None)
+  lazy val agent = Agent(
+    Config(),
+    AgentEnvironment.current(root),
+    policy,
+    ui,
+    EchoModel("echo"),
+    Some(EchoModel("safe")),
+    None,
+  )
 
   override def beforeAll(): Unit =
     session = ReplSession(SandboxConfig(safeMode = true, executionTimeoutMs = Some(60000)), host).init()
@@ -116,9 +127,11 @@ class AgentSuite extends munit.FunSuite:
     val outside = Files.createTempDirectory("atc-agent-out").toRealPath()
     Files.writeString(outside.resolve("x.txt"), "outside!")
     decisions = List(Decision.Deny)
+    val outsideCode = ScalaSource.stringLiteral(outside.toString)
+    val fileCode = ScalaSource.stringLiteral(outside.resolve("x.txt").toString)
     agent.turn(
       session,
-      s"""run: requestFiles("$outside", Access.Read, "need it") { read("$outside/x.txt") }""",
+      s"""run: requestFiles($outsideCode, Access.Read, "need it") { read($fileCode) }""",
       () => false
     )
     assert(!lastResult.success)
@@ -126,7 +139,7 @@ class AgentSuite extends munit.FunSuite:
     decisions = List(Decision.AllowOnce)
     agent.turn(
       session,
-      s"""run: requestFiles("$outside", Access.Read, "need it") { read("$outside/x.txt") }""",
+      s"""run: requestFiles($outsideCode, Access.Read, "need it") { read($fileCode) }""",
       () => false
     )
     assert(lastResult.success, lastResult.toString)
@@ -134,11 +147,15 @@ class AgentSuite extends munit.FunSuite:
     assertEquals(asked.size, 2)
     assertEquals(asked.last.asInstanceOf[FileRequest].reason, "need it")
     // scope closed after the block: no lingering access
-    agent.turn(session, s"""run: read("$outside/x.txt")""", () => false)
+    agent.turn(session, s"run: read($fileCode)", () => false)
     assert(!lastResult.success)
 
   test("exec through policy"):
-    agent.turn(session, """run: println(exec("echo", List("from-exec")).stdout.trim)""", () => false)
+    agent.turn(
+      session,
+      s"run: println(exec(${ujson.write(echoCommand)}, List(\"from-exec\")).stdout.trim)",
+      () => false,
+    )
     assert(lastResult.success, lastResult.toString)
     assert(lastToolText.contains("from-exec"))
     agent.turn(session, """run: exec("ls")""", () => false)

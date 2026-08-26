@@ -2,6 +2,7 @@ package atc.host
 
 import atc.lib.*
 import atc.perms.ScopeId
+import atc.platform.PlatformPath
 
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
@@ -44,7 +45,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
       op
     })
 
-  def path: String = p.toString
+  def path: String = PlatformPath.portable(p)
 
   def name: String = Option(p.getFileName).map(_.toString).getOrElse(p.toString)
 
@@ -117,10 +118,10 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     asClassified("readClassified")(Files.readString(p, UTF_8).nn)
 
   def childrenClassified: Classified[List[String]] =
-    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(_.toString))
+    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(PlatformPath.portable))
 
   def walkClassified(): Classified[List[String]] =
-    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(_.toString))
+    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(PlatformPath.portable))
 
   def writeClassified(content: Classified[String]): Unit =
     // Hand the raw `Try` to the host: it runs the permission/target checks before

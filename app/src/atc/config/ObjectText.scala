@@ -1,5 +1,7 @@
 package atc.config
 
+import atc.TextFiles
+
 /** The top-level members of a JSON object's text, with their positions. */
 private[config] case class ObjectText(text: String, open: Int, close: Int, members: List[ObjectText.Member]):
   /** What goes between two members: the newline and indent before the first
@@ -7,9 +9,11 @@ private[config] case class ObjectText(text: String, open: Int, close: Int, membe
   def separator: String =
     members.headOption match
       case Some(first) =>
-        val nl = text.lastIndexOf('\n', first.keyStart)
-        if nl > open then text.substring(nl, first.keyStart) else " "
-      case None => "\n  "
+        val before = text.substring(open + 1, first.keyStart)
+        TextFiles.lastLineEnding(before).fold(" ")(ending => before.substring(ending.index))
+      case None =>
+        val inside = text.substring(open + 1, close)
+        TextFiles.firstLineEnding(inside).fold(TextFiles.DefaultLineEnding)(_.text) + "  "
 
 private[config] object ObjectText:
   /** A member: `keyStart` is its opening quote, `valueStart`/`valueEnd` bound
@@ -19,7 +23,7 @@ private[config] object ObjectText:
   /** Positions of the top-level members of `text`, which must already be
     * known to be a well-formed JSON object. */
   def scan(text: String): ObjectText =
-    var i = 0
+    var i = TextFiles.bomLength(text)
     def skipSpace(): Unit = while i < text.length && text(i).isWhitespace do i += 1
     /** From an opening quote at `i` to just past the closing one. */
     def skipString(): Unit =

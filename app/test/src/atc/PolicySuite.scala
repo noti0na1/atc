@@ -1,6 +1,7 @@
 package atc
 
 import atc.perms.*
+import atc.platform.{Platform, PlatformPath}
 import java.nio.file.{Files, Path}
 
 class PolicySuite extends munit.FunSuite:
@@ -51,23 +52,34 @@ class PolicySuite extends munit.FunSuite:
     val comp = PathPattern("*.pem", root)
     assert(comp.matches(root.resolve("a/b/c.pem")))
     assert(!comp.matches(root.resolve("a/b/c.txt")))
+    if Platform.isWindows then assert(comp.matches(root.resolve("a/b/C.PEM")))
     val anchored = PathPattern("src/*/A.scala", root)
     assert(anchored.matches(root.resolve("src/main/A.scala")))
     assert(!anchored.matches(root.resolve("other/src/main/A.scala")))
+    if Platform.isWindows then
+      val windowsSpelling = PathPattern("src\\*\\A.scala", root)
+      assert(windowsSpelling.matches(root.resolve("src/main/A.scala")))
+      intercept[IllegalArgumentException](PathPattern("C:work*", root))
+    else
+      assert(!anchored.matches(root.resolve("src\\main\\A.scala")), "a Unix backslash is part of one component")
     val star = PathPattern("**/inner", root)
     assert(star.matches(root.resolve("secrets/inner/deep/x")))
     val abs = PathPattern(root.resolve("build").toString, root)
     assert(abs.matches(root.resolve("build/x")))
     assert(!abs.matches(root.resolve("src")))
-    val absoluteGlob = PathPattern(root.resolve("src/*/A.scala").toString, root)
+    val absoluteGlob = PathPattern(s"${PlatformPath.portable(root)}/src/*/A.scala", root)
     assert(absoluteGlob.matches(root.resolve("src/main/A.scala")))
     assert(!absoluteGlob.matches(root.resolve("src/main/B.scala")))
+    val fileSystemRoot = PathPattern(root.getRoot.nn.toString, root)
+    assert(fileSystemRoot.matches(root))
     val home = PathPattern("~", root)
     assert(home.matches(Path.of(scala.util.Properties.userHome).resolve("x")))
     assertEquals(
-      PathPattern.expandHome("~\\nested\\config.json"),
+      PlatformPath.expandHome("~\\nested\\config.json"),
       Path.of(scala.util.Properties.userHome, "nested", "config.json").toString,
     )
+    assertEquals(PlatformPath.portable(Path.of("a", "b", "c")), "a/b/c")
+    if !Platform.isWindows then assertEquals(PlatformPath.portable(Path.of("a\\b")), "a\\b")
 
   test("requests widen access once or for the session, deny throws"):
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.Deny, Decision.AllowSession))
@@ -118,6 +130,10 @@ class PolicySuite extends munit.FunSuite:
     assert(p.commandAllowed(ScopeId.Base, "ls -la"))
     assert(!p.commandAllowed(ScopeId.Base, "git push"))
     assert(!p.commandAllowed(ScopeId.Base, "lsof"))
+    if Platform.isWindows then
+      assert(p.commandAllowed(ScopeId.Base, "GIT.EXE status --short"))
+      assert(!p.commandAllowed(ScopeId.Base, "git STATUS"), "Windows executable names, not arguments, ignore case")
+      assert(GlobMatcher.matchesCommand(".\\gradlew build", "./gradlew build"))
     assert(p.hostAllowed(ScopeId.Base, "docs.scala-lang.org"))
     assert(!p.hostAllowed(ScopeId.Base, "example.com"))
     val s1 = p.requestFile(ScopeId.Base, root.resolve("src"), Access.Write, "")

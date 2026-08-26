@@ -27,18 +27,18 @@ semantics, the terminal, and important implementation conventions.
 
 ## Building and running
 
-The repository ships its own Mill launcher (`./mill`), so a JDK 17+ is all you need. The
-Scala version is a pinned nightly (`Versions.scala` in `build.mill`): capture checking and
-safe mode are experimental and move fast, so ATC tracks one known-good build rather than a
-release.
+The repository ships Mill launchers for Unix (`./mill`) and Windows (`.\mill.bat`), so a
+JDK 17+ is all you need. The Scala version is a pinned nightly (`Versions.scala` in
+`build.mill`): capture checking and safe mode are experimental and move fast, so ATC tracks
+one known-good build rather than a release.
 
 ```bash
-./mill app.test                                   # all tests (munit, about 20 s)
+./mill app.test                                   # all munit tests
 ./mill app.test.testOnly atc.ReplSessionSuite     # one suite
 ./mill app.test.testOnly atc.ReplSessionSuite -- '*timeout*'   # tests matching a glob
 ./mill app.compile                                # compile app (+ lib)
 ./mill __.checkFormat                             # scalafmt check; ./mill __.reformat fixes
-./mill dist                                       # self-contained out/dist.dest/{atc,atc.jar,atc-lib.jar}
+./mill dist                                       # out/dist.dest/{atc,atc.ps1,atc.cmd,atc.jar,atc-lib.jar,version.txt}
 ./start.sh -C ~/some/project                      # sources .env, rebuilds dist if sources changed, runs the TUI
 ./start.sh -c cfg.json -p 'run: 1 + 1'            # one non-interactive turn (plain mode)
 ./mill -i app.run -C /some/project                # dev run without dist (-i keeps the terminal attached)
@@ -47,21 +47,37 @@ ATC_SKIP_BUILD=1 ./start.sh ...                   # skip the rebuild check
 bash tests/atc_test.sh                            # tests of the `atc` wrapper script (bash 3.2+, no network, no Java)
 ```
 
-`start.sh` is the developer path: it rebuilds `out/dist.dest/` with `./mill dist` when a
+The native PowerShell equivalents are:
+
+```powershell
+.\mill.bat app.test
+.\mill.bat app.test.testOnly atc.ReplSessionSuite
+.\mill.bat app.compile
+.\mill.bat __.checkFormat
+.\mill.bat dist
+.\start.ps1 -C "$HOME\some\project"
+$env:ATC_SKIP_BUILD = '1'; .\start.ps1 --version
+```
+
+`start.sh` is the Unix developer path: it rebuilds `out/dist.dest/` with `./mill dist` when a
 source file is newer than the jar, sources a `.env` (`cp .env.example .env`; API keys and
 the `ATC_*` variables below, without overriding what the shell already exported) and passes
-its flags through to `atc`. Without the script: `./mill dist`, then `out/dist.dest/atc`.
-On Windows, `start.cmd` provides the same flow. Its build step uses the portable Mill JVM
-launcher through Git for Windows' Bash; once built, it launches ATC directly with Java.
+its flags through to ATC. Without the script: `./mill dist`, then `out/dist.dest/atc`.
+On Windows, `start.ps1` provides the same flow through the included native `mill.bat`; it
+does not require Bash. `start.cmd` is the execution-policy compatibility entrypoint and,
+like any batch file, is subject to `cmd.exe` argument parsing. The build temporarily runs at
+the checkout root, while ATC itself retains the launch directory unless `-C` overrides it.
 
-To run a local build through the *installed* `atc` wrapper instead, `atc dev <checkout>`
-copies the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release; see
+On Unix, `atc dev <checkout>` runs a local build through the *installed* wrapper: it copies
+the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release; see
 [The wrapper script](#the-wrapper-script).
 
 Environment variables: `ATC_DEBUG=1` (`atc.Debug`) prints stack traces and terminal/stream
 diagnostics; `ATC_ASCII=1` draws the TUI with ASCII glyphs; `ATC_JAVA_OPTS` adds JVM flags
-(wrapper and `start.sh`); `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD` are `start.sh` shorthands for
-`-m`, `-c`, `-C`. A provider with `"api": "echo"` is a key-less model (`run: <code>` in the
+through the Unix wrapper and the two start launchers; `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD`
+are `start.sh`/`start.ps1` shorthands for `-m`, `-c`,
+`-C`; `ATC_ENV_FILE` selects another environment file and `ATC_SKIP_BUILD=1` skips the
+staleness check. A provider with `"api": "echo"` is a key-less model (`run: <code>` in the
 request becomes a `run_scala` call with that code, anything else is echoed back) for smoke
 tests of the sandbox and TUI without network:
 
@@ -83,18 +99,23 @@ Two Mill modules:
 lib/src/atc/lib/   Interface.scala: the agent-facing API (capabilities, data types, Interface)
                    Runtime.scala: the sandbox's injection point (@rejectSafe, not part of the API)
 app/src/atc/
-  (root)           Main → App: command line, wiring, the interactive loop and its slash commands
-  agent/           the loop (model ⇄ run_scala), the system prompt and tool spec, next-input prediction
+  (root)           LauncherEnvironment → Cli → Main → App; shared TextFiles/ScalaSource boundaries
+  agent/           the small loop state machine; typed completion policy, transcript/context bookkeeping,
+                   run_scala adapter and output rendering; system prompt and next-input prediction
   config/          the JSON config model: layers, merging, validation, keys, model catalog, templates
-  host/            the Interface implementation: policy checks, file/process/network effects, Classified
+  host/            the Interface implementation: file/network effects; typed command grammar, Windows
+                   executable resolution, and process lifecycle in separate components
   llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
   perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
+  platform/        the only OS/path-trait checks, portable paths, Win32 validation, slash-based globs
   sandbox/         the in-process REPL: preamble, diagnostic preflight, class-loader isolation, timeouts, interrupts
   ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
 app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
 app/resources/atc/ the starting configs (config-template.json, project-template.json, keys-template.properties)
-atc                the wrapper: installs, updates and runs the release jars (tests/atc_test.sh)
-start.sh           builds a checkout and runs it
+atc                Unix wrapper: installs, updates and runs release jars (tests/atc_test.sh)
+mill / mill.bat    pinned Mill bootstrap launchers for Unix / Windows
+start.sh           builds and runs a checkout on Unix
+start.cmd/.ps1     builds and runs a checkout on Windows
 capture-checking-bug/  a runnable repro of an upstream separate-compilation bug (see below)
 ```
 
@@ -103,11 +124,11 @@ capture-checking-bug/  a runnable repro of an upstream separate-compilation bug 
 `App` (wiring) → `Agent.turn` → `ChatModel.complete` → tool call `run_scala` →
 `ReplSession.run(code)` → `CodeValidator` (fast diagnostic preflight) → compiler safe-mode
 check → REPL eval with the
-`Host` installed as the API implementation → `ExecutionResult` → `Agent.renderForModel`
+`Host` installed as the API implementation → `ExecutionResult` → `ToolOutput.renderForModel`
 (bounded, hint-annotated) back into `Msg.ToolResults` → the model again, until it answers.
 
 `ChatModel.complete` takes one `SystemPrompt(text)` built by `Prompts.system` from the
-configuration, the working directory and the mode, the configured permissions included;
+configuration, an injected `AgentEnvironment` and the mode, the configured permissions included;
 permission grants do not change it (a mode switch restarts the sandbox, while an explicit
 `/classifiedmodel` switch rebuilds the prefix once). A permission the user grants for the
 session is reported in the tool result of the call that asked. Between explicit switches,
@@ -148,8 +169,8 @@ literal text goes through the pure helpers `quote`/`quoteReplacement`
 `TODO(safe-mode)`, for `scala.util.matching.Regex.quote`/`quoteReplacement`, which safe mode
 refuses until the stdlib is tagged)); `replaceLines(path, from, to, text)` /
 `insertLines(path, before, text)` edit by the line numbers `cat` shows (`replaceLines`
-returns the old text so a stale range is visible; `Host.splitLines`/`joinLines` keep the
-file's newline style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
+returns the old text so a stale range is visible; `TextFiles` keeps the file's newline
+style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
 are the binary pair, and `move`/`copy` are composed of the checked read/write/delete
 primitives (so a classified file cannot be moved or copied out). Viewing: `cat(path)` /
 `cat(path, from, to)` print `cat -n`-numbered lines through the `println` path (capped at
@@ -157,10 +178,11 @@ primitives (so a classified file cannot be moved or copied out). Viewing: `cat(p
 and are what the prompt tells the agent to look at files with, so that it reads windows of
 big files and can quote line numbers; `read` stays raw for code. Listings
 (`ls`/`walk`/`find`/`GrepMatch.file`) show paths relative to the working directory when
-inside it (`Host.display`), absolute outside; `find`/`grepRecursive` globs match the file
-name, or the path relative to `dir` when the glob contains `/` or `**` (`Host.globRegex`,
+inside it (`Host.display`), absolute outside, and turn Windows separators into `/`;
+`find`/`grepRecursive` globs match the file name, or the
+path relative to `dir` when the glob contains `/` or `**` (`PathGlob`,
 gitignore-flavoured: `**` spans directories, a leading `**` + `/` also matches none).
-**Commands.** `exec(command)` uses the small grammar in `Processes.parsePipeline`: quoted
+**Commands.** `exec(command)` uses the small grammar in `CommandLine.parsePipeline`: quoted
 words, `|` between stages, `< f`, `> f`, `>> f`, and `2>&1`. There is no shell, so `&&`,
 `;`, `||`, `&`, `2>`, backticks, and `$(` are rejected. `ProcessBuilder.startPipeline`
 runs the stages with real pipes. Each stage is checked independently against the allowed
@@ -188,6 +210,18 @@ start, input, and exit events inside the tool block and can use `/ps` or `/kill 
 Spawned output is not streamed automatically; the agent reads it explicitly, and the
 result panel displays what it read. `Agent.hints` turns `Cannot run program` failures into
 PATH and no-shell guidance. A single parsed pipeline is capped at 16 stages.
+
+On Windows, a bare executable is resolved from `PATH` (not the working directory), using
+`PATHEXT`; write `.\tool` to opt into a repository-local executable. This permits normal
+`.exe`, `.cmd`, and `.bat` entry points such as `npm` and `mill.bat` without pretending that
+`dir`, `copy`, or a PowerShell cmdlet is an executable. A backslash is a path separator, not
+a space escape, so quote an argument containing spaces. Batch files inherently use the
+Windows command processor after their stage is authorized; strict JDK quoting and ATC's
+`%`/`!` checks keep their arguments from becoming extra commands. Other shell built-ins require an explicit
+`cmd.exe`/PowerShell command and therefore a correspondingly powerful permission grant.
+External programs choose their own newline and encoding conventions. `TextSink` defaults to
+UTF-8 and recognizes a leading UTF-8/UTF-16 BOM; tests of native tools must still allow CRLF
+and other platform-specific output rather than assuming Unix `\n`.
 
 **HTTP.** `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
 (`Host.checked`), `httpRequest` is raw, and response bodies are capped at 8 MiB. Any request
@@ -469,14 +503,22 @@ every matching rule (unmatched → none), classified if any rule says so, locked
 so a sub-folder inherits its parent's permission and can only be made stricter
 (`build/generated: write` under `build: read` still yields `read`).
 
-**Every path returned by the host is canonical** (`Host.canonical` for named paths and
-`visibleEntries` for listings). A symlink is listed and evaluated as its target, so an
-entry returned by `children` or `walk` receives the same checks as that path would receive
+Configuration uses `/` separators on every OS. A Windows absolute path should be written as
+`"C:/Users/alice/project"`; native backslashes are JSON escapes and must otherwise be doubled
+(`"C:\\Users\\alice\\project"`). Path-taking API calls accept native Windows input too.
+
+**Every path returned by the host is canonical, with Windows separators rendered as `/`**
+(`Host.canonical` for named paths, `PlatformPath.portable` for API text, and `visibleEntries`
+for listings). Returned strings should be passed as values; code generators must still
+quote legal filename characters such as quotes or a literal Unix backslash. A symlink
+is listed and evaluated as its target, so an entry returned by `children` or `walk` receives
+the same checks as that path would receive
 if addressed directly. This also means that a link in a readable directory to a classified
 file remains classified when listed; `HostSuite` contains the regression test. Dangling
 links are resolved as well because writing through one creates its target, and the policy
-must evaluate that target. Only links require `toRealPath`; a plain child of a canonical
-directory is already canonical. Symlinked directories are listed but never traversed.
+must evaluate that target. Every directory entry is canonicalized because a Windows
+junction/reparse point need not report itself through `Files.isSymbolicLink`; link-like
+directories are listed but never traversed.
 
 **Classified paths.** Content is only observable as `Classified[String]`; a classified
 directory's structure is classified too (listing needs `childrenClassified`/
@@ -659,8 +701,11 @@ thinking/effort, the same as `complete`.
 `NAME=value`, `NAME: value`, `#`/`!` comments, `\` escapes and line continuations).
 `KeyBindings.get` tries the project file, then `~/.atc/keys.properties`, then
 `System.getenv`; an empty value is not a binding, so the lookup falls through. New key
-files are readable only by their owner (mode 0600). ATC warns when loading a file that is
-readable by the group or other users.
+files on POSIX file systems are created with mode `0600`; ATC warns when loading one that is
+readable by the group or other users. Windows files instead inherit the parent directory's
+NTFS ACL, which ATC currently neither rewrites nor audits. The normal global location is
+`%USERPROFILE%\.atc` (`$HOME\.atc` in PowerShell); inspect its ACL with `icacls` on a shared
+machine.
 `Config.resolveApiKey(provider, bindings)` feeds `ModelCatalog.from(config, keys)`.
 `ModelSpec.toString` masks the key and `/config` prints variable names only, never values.
 
@@ -771,7 +816,8 @@ grant later dropped by the context cut or forgotten by `/clear` costs at most a 
 resets grants and history together.
 
 **The history** (`llm.Msg`, provider-neutral; `Agent.history`) holds exactly what was
-said and done, never the terminal's rendering:
+said and done, never the terminal's rendering. `Conversation` owns its mutation and
+role-repair invariants; `AgentMessages` owns the control text inserted into it:
 
 * `Msg.User(text)`: the user's request. *Pending notes* are prepended to it, each on its
   own paragraph, so the transcript never has two user messages in a row: `[sandbox notice]`
@@ -790,10 +836,10 @@ said and done, never the terminal's rendering:
   the provider to continue the truncated assistant response without pretending to be a new
   real user turn; prediction and context-cut boundaries therefore ignore it.
 * `Msg.ToolResults(results)`: one `ToolResult(callId, output, isError)` per call, where
-  `output` is `Agent.renderForModel(result, config.maxToolOutputChars)`:
+  `output` is `ToolOutput.renderForModel(result, config.maxToolOutputChars)`:
   `ExecutionResult.render` (the captured REPL output with host stack frames trimmed, then
   `ERROR: <message>` for a compile/validation/timeout error, or `(no output)` /
-  `(failed, no output)`), a `Hint:` line when `Agent.hints` recognises the error (read-only
+  `(failed, no output)`), a `Hint:` line when `ToolOutput` recognises the error (read-only
   capture / missing `Exec` or `Network` → "switch mode" advice), the whole thing cut in
   the middle with `… [N characters omitted] …` beyond `maxToolOutputChars`, then the
   `[permissions: …]` note when a prompt was answered during the call (uncut, last);
@@ -813,11 +859,11 @@ thinking blocks, Responses reasoning items) when the exact same model reference 
 the neutral history, and so any other model, has only the text and the calls.
 
 **Fitting the window.** Before every model call, when the model has a `contextWindow`,
-`Turn.fitHistoryToContext` estimates the request (`fixedTokens` = system prompt + tool
-schema, plus `Agent.estimateTokens` of every message, chars/4 scaled by the calibration
+`ContextManager.prepare` estimates the request (`fixedTokens` = system prompt + tool
+schema, plus its estimate of every message, chars/4 scaled by the calibration
 from the provider's last prompt count) after reserving the larger of `window/8` and the
 adapter's configured maximum output tokens, and drops whole
-exchanges from the front (`Agent.fitToContext`: cuts only at `Msg.User` boundaries so no
+exchanges from the front (`ContextManager.fitToContext`: cuts only at `Msg.User` boundaries so no
 tool result loses its call, and always keeps the last user message); `contextDropped`
 accumulates so the notice states the total. The same estimate is `Agent.contextUsage`,
 shown after each turn and by `/cost`. If the fixed prompt or latest exchange cannot fit,
@@ -835,12 +881,16 @@ is in force. All of them are recorded under their own purpose in `/cost`.
 
 ## The agent loop
 
-`Agent.turn` is a loop of *rounds*. Each `Turn.round` asks the model and then runs tools,
-resumes, or stops. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
+`Agent.turn` binds a `ScalaToolRunner`, then the core loop runs *rounds*. Each
+`Turn.round` asks the model and follows the typed `CompletionPolicy` decision: run tools,
+resume, or finish. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
 
-- Tool calls run one at a time through `run_scala`; their results are appended before the
-  model is asked again.
-- If the provider returns `unfinished` after a server-side tool such as web search
+- Provider adapters map wire-specific stop strings once into `CompletionStop`; the loop
+  branches on that typed value through `CompletionPolicy`.
+- Tool calls run one at a time through `ToolRunner`; `ScalaToolRunner` owns `run_scala`
+  argument decoding, REPL execution, timing and result rendering. Results are appended
+  before the model is asked again.
+- If the provider returns a resumable stop after a server-side tool such as web search
   (Anthropic `pause_turn`), the model is asked to resume, up to `MaxResumes` times.
 - Output-limit stops (`length`, `max_tokens`, `max_output_tokens`) append a
   `Msg.Continuation` and resume. Tool calls accompanying a truncated or safety-blocked
@@ -971,13 +1021,22 @@ the context part (`context ~45.2k` without a window).
 
 ## Testing
 
-All tests are munit, under `app/test/src/atc/`, and run in about 20 s. They share
-`TestEnv.scala` (temp root, scripted permission decisions, recording host output, live
+All tests are munit, under `app/test/src/atc/`; compiler-heavy timings vary by platform. They
+share `TestEnv.scala` (temp root, scripted permission decisions, recording host output, live
 command output, `newSession`, `activate()`) and `ReplAssertions.scala` (`assertOk`/
-`assertFails` for REPL snippets); `AgentLoopSuite` drives the loop with `ScriptedModel`/
-`RecordingUI` without a network. `AgentUI`, `HostOutput`/`HostLlm`/`HostUi`, `ChatModel`
+`assertFails` for REPL snippets). `AgentCoreLoopSuite` uses an in-memory `ToolRunner` and
+needs no filesystem or compiler; `AgentLoopSuite` adds the real REPL boundary with
+`ScriptedModel`/`RecordingUI`, still without a network. `AgentUI`, `HostOutput`/`HostLlm`/`HostUi`, `ChatModel`
 and `StreamSink` all have test doubles; changing those traits means updating them (the
 two `HostOutput` live-output methods have no-op defaults for that reason).
+
+Keep semantic tests independent of the host shell: use `ProcessFixture` for pipeline and
+process behavior, and reserve platform commands for `PlatformProcessSuite`. Text-file
+format guarantees belong in `TextFilesSuite`; paths and OS decisions use `PlatformPath` /
+`Platform`, while generated Scala literals use `ScalaSource`. Returned API paths use `/`
+on every OS. Source fixtures use LF, while assertions about native process output must
+account for the platform newline. Windows runs test classes serially because parallel Mill
+workers can duplicate the compiler-heavy first suite.
 
 Suite layout, by what each one guarantees (put a new test where its *guarantee* lives, not
 where the code lives):
@@ -1036,7 +1095,7 @@ code by hand.
 
 ## The wrapper script
 
-`atc` (repo root, bash 3.2+) is the user-facing installer/launcher, modelled on TACIT's
+`atc` (repo root, bash 3.2+) is the Unix user-facing installer/launcher, modelled on TACIT's
 `tacit`: `atc setup` (install to `~/.local/bin`, PATH snippet in the shell profile, Java 17+
 check, download), `atc update`, `atc self update|uninstall`, and anything else (`atc`,
 `atc -C dir`, `atc run ...`) execs `java -Datc.lib.classpath=atc-lib.jar -jar atc.jar` from
@@ -1061,15 +1120,31 @@ release-metadata parsing (both parsers), checksum verification, the cache checks
 snippet, locations, command dispatch with a mock `java`, the dev mode, and the download flow
 against a stubbed GitHub; no network or Java needed.
 
+Windows releases instead put `atc.ps1`, `atc.cmd`, `atc.jar`, and `atc-lib.jar` together.
+The PowerShell-native `atc.ps1` is the lossless application launcher; `atc.cmd` is retained
+for Command Prompt compatibility but necessarily has batch-file argument parsing. Both
+accept application flags such as `atc.ps1 --help`, not the Unix wrapper's
+`setup`/`update`/`self`/`dev` commands. Updating is currently a manual replacement of all
+four assets from one release. For a checkout,
+`start.cmd`/`start.ps1` load `.env`, rebuild through `mill.bat` when stale, and then launch
+the local distribution without requiring Bash. Both Windows launch paths carry application
+arguments through private child-environment entries because `java.exe` otherwise converts
+its UTF-16 command line through the legacy ANSI code page. ATC removes those entries from
+the environment of every tool process it starts.
+
 ## Releases and CI
 
-CI (`.github/workflows/scala.yml`, modelled on TACIT's) runs `tests/atc_test.sh`, sets up
-JDK 17, then `__.checkFormat`, `__.compile`, `app.test`, `dist`, and a key-less echo-model
-smoke run of the built `atc` (`-p 'run: println("ci"); 21 * 2'`, grepping the echoed result;
-keep that expectation in sync if the tool-result echo format changes).
+CI (`.github/workflows/scala.yml`, modelled on TACIT's) runs on Linux, macOS, and Windows.
+Unix jobs use `./mill`; Windows uses `mill.bat` and serial tests. Every platform builds the
+distribution and runs the application test suite; the test step also runs after a packaging
+failure so both results are visible. Linux checks formatting, and non-Windows jobs run the
+deterministic Bash-wrapper test suite. CI deliberately does not run end-to-end launcher
+smoke scenarios: they couple shell parsing, packaging, terminal setup, configuration and the
+Scala REPL while duplicating behavior covered by the focused tests.
 
 Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`; the bare version
 is accepted too) makes the `publish-release` job (needs `build`) check the tag against the
-version, run `./mill dist` and `gh release upload` `atc.jar` + `atc-lib.jar`, the exact
-asset names the wrapper looks for. A mismatching tag fails the job with a message saying
-which side to fix.
+version, run `./mill dist`, and upload `atc.jar`, `atc-lib.jar`, `atc.ps1`, and `atc.cmd`.
+The two jar names are the exact assets the Unix wrapper looks for; Windows users download
+all four assets.
+A mismatching tag fails the job with a message saying which side to fix.

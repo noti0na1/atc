@@ -1,4 +1,5 @@
 //| mill-version: 1.1.8
+//| mill-jvm-version: system
 package build
 
 import mill.*, scalalib.*
@@ -71,7 +72,14 @@ object app extends AtcScalaModule:
   }
   def forkArgs = Task { Seq(libClasspathArg(), "-Dfile.encoding=UTF-8") }
   object test extends AtcTests:
-    def forkArgs = Task { Seq(app.libClasspathArg()) }
+    def forkArgs = Task { Seq(app.libClasspathArg(), "-Dfile.encoding=UTF-8") }
+    // Mill's dynamic test queue can let several Windows workers claim the same
+    // suite. Besides duplicating work, that starts several compiler-heavy REPLs.
+    def testParallelism = !scala.util.Properties.isWin
+    // Avoid Windows' command-line length limit for the forked test JVM.
+    def testUseArgsFile = scala.util.Properties.isWin
+
+def windowsPowerShellSource = Task.Source("windows/atc.ps1")
 
 /** Build a self-contained distribution under `out/dist.dest/`. */
 def dist = Task {
@@ -79,18 +87,32 @@ def dist = Task {
   val appJar = app.assembly().path
   os.copy(libJar, Task.dest / "atc-lib.jar", replaceExisting = true)
   os.copy(appJar, Task.dest / "atc.jar", replaceExisting = true)
+  os.write.over(Task.dest / "version.txt", Versions.atc)
   val script =
     s"""#!/usr/bin/env sh
        |DIR=$$(cd "$$(dirname "$$0")" && pwd)
-       |exec java -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
+       |exec java -Dfile.encoding=UTF-8 -Datc.version=${Versions.atc} -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
        |""".stripMargin
-  os.write.over(Task.dest / "atc", script, perms = "rwxr-xr-x")
+  if scala.util.Properties.isWin then os.write.over(Task.dest / "atc", script)
+  else os.write.over(Task.dest / "atc", script, perms = "rwxr-xr-x")
+  val windowsPowerShell =
+    os.read(windowsPowerShellSource().path).replace("@ATC_VERSION@", Versions.atc)
+  os.write.over(Task.dest / "atc.ps1", windowsPowerShell)
   val windowsScript =
     """@echo off
-      |setlocal
-      |set "ATC_DIST_DIR=%~dp0"
-      |java "-Datc.lib.classpath=%ATC_DIST_DIR%atc-lib.jar" -jar "%ATC_DIST_DIR%atc.jar" %*
-      |""".stripMargin
+      |setlocal DisableDelayedExpansion
+      |set "ATC_POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+      |if not exist "%ATC_POWERSHELL%" (
+      |  echo atc: Windows PowerShell was not found at "%ATC_POWERSHELL%". 1>&2
+      |  exit /b 1
+      |)
+      |if not exist "%~dp0atc.ps1" (
+      |  echo atc: atc.ps1 is missing beside "%~f0". Download atc.ps1, atc.cmd, atc.jar, and atc-lib.jar into the same directory. 1>&2
+      |  exit /b 1
+      |)
+      |"%ATC_POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0atc.ps1" %*
+      |exit /b %errorlevel%
+      |""".stripMargin.replace("\n", "\r\n")
   os.write.over(Task.dest / "atc.cmd", windowsScript)
   PathRef(Task.dest)
 }

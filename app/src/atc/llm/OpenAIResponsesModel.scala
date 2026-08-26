@@ -23,8 +23,8 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     if thinking then
       Option.when(cfg.reasoning.isDefined || cfg.reasoningSummary.isDefined) {
         val r = Reasoning.builder()
-        cfg.reasoning.foreach(e => r.effort(ReasoningEffort.of(e.toLowerCase)))
-        cfg.reasoningSummary.foreach(s => r.summary(Reasoning.Summary.of(s.toLowerCase)))
+        cfg.reasoning.foreach(e => r.effort(ReasoningEffort.of(e.toLowerCase(java.util.Locale.ROOT))))
+        cfg.reasoningSummary.foreach(s => r.summary(Reasoning.Summary.of(s.toLowerCase(java.util.Locale.ROOT))))
         r.build()
       }
     else lowestEffort.map(e => Reasoning.builder().effort(ReasoningEffort.of(e)).build())
@@ -106,14 +106,19 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     // `status=incomplete` alone loses why generation stopped. Preserve the
     // reason so max-output truncation can resume while a content filter cannot.
     val incompleteReason =
-      r.incompleteDetails().toScala.flatMap(_.reason().toScala).map(_.asString().toLowerCase)
-    val stop = incompleteReason.orElse(r.status().toScala.map(_.toString.toLowerCase)).getOrElse("completed")
+      r.incompleteDetails().toScala.flatMap(_.reason().toScala).map(_.asString().toLowerCase(java.util.Locale.ROOT))
+    val stop = incompleteReason.orElse(
+      r.status().toScala.map(_.toString.toLowerCase(java.util.Locale.ROOT))
+    ).getOrElse("completed")
     // A response whose last item is a server-side tool call (web search) was
     // cut off by the server; the model has not produced its answer yet.
+    val toolCalls = calls.result()
     val lastItem = r.output().asScala.lastOption
-    val unfinished = Completion.isTruncatedStop(stop) ||
-      (calls.result().isEmpty && lastItem.exists(i => !i.isMessage && !i.isFunctionCall && !i.isReasoning))
-    Completion(text.toString, calls.result(), Some(NativeTurn(providerKey, ref, r.output())), usage, stop, unfinished)
+    val paused = toolCalls.isEmpty && lastItem.exists(i => !i.isMessage && !i.isFunctionCall && !i.isReasoning)
+    val status = CompletionStop.fromReason(stop) match
+      case CompletionStop.Complete if paused => CompletionStop.Resume
+      case other => other
+    Completion(text.toString, toolCalls, Some(NativeTurn(providerKey, ref, r.output())), usage, stop, status)
 
   def complete(
     system: SystemPrompt,

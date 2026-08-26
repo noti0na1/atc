@@ -11,6 +11,8 @@ import java.nio.file.{Files, Path}
   * (migrated from TACIT's ClassifiedSuite, adapted to ATC's policy model). */
 class ClassifiedSuite extends munit.FunSuite:
 
+  private val nl = System.lineSeparator
+
   // ── ClassifiedImpl as a value ────────────────────────────────────
 
   test("wrap creates a classified value whose toString hides the content"):
@@ -285,8 +287,8 @@ class ClassifiedSuite extends munit.FunSuite:
     print(classify("p"))
     println()
     printf("score=%d name=%s%n", 42, classify("alice"))
-    assertEquals(env.agentOut.toString, "Classified(***)\nsame\nClassified(***)\nscore=42 name=Classified(***)\n")
-    assertEquals(env.userOut.toString, "<real\n>same\n<p>\n<score=42 name=alice\n>")
+    assertEquals(env.agentOut.toString, s"Classified(***)\nsame\nClassified(***)\nscore=42 name=Classified(***)$nl")
+    assertEquals(env.userOut.toString, s"<real\n>same\n<p>\n<score=42 name=alice$nl>")
 
   test("println of a failed classified value shows the error to the user only"):
     env.clearOutput()
@@ -305,7 +307,7 @@ class ClassifiedSuite extends munit.FunSuite:
     printf("%s%n", value)
     assertEquals(
       env.agentOut.toString,
-      "Classified(***)\nClassified(***)Classified(***)\n",
+      s"Classified(***)\nClassified(***)Classified(***)$nl",
     )
     assert(!env.agentOut.toString.contains("RENDER-SECRET"), env.agentOut.toString)
     assert(env.userOut.toString.contains("RENDER-SECRET"), env.userOut.toString)
@@ -318,15 +320,15 @@ class ClassifiedSuite extends munit.FunSuite:
     )
     println(failed)
     printf("%s%n", failed)
-    assertEquals(env.agentOut.toString, "Classified(***)\nClassified(***)\n")
+    assertEquals(env.agentOut.toString, s"Classified(***)\nClassified(***)$nl")
     assert(!env.agentOut.toString.contains("MESSAGE-SECRET"), env.agentOut.toString)
     assert(env.userOut.toString.contains("error details could not be rendered"), env.userOut.toString)
 
   test("printf with no classified arguments is identical for both"):
     env.clearOutput()
     printf("%s-%d%n", "a", 1)
-    assertEquals(env.agentOut.toString, "a-1\n")
-    assertEquals(env.userOut.toString, "a-1\n")
+    assertEquals(env.agentOut.toString, s"a-1$nl")
+    assertEquals(env.userOut.toString, s"a-1$nl")
 
   // ── LLM sink ────────────────────────────────────────────────────
 

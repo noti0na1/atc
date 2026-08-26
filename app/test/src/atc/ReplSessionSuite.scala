@@ -261,7 +261,9 @@ class ReplSessionSuite extends munit.FunSuite:
       envQuick.session.foreach(_.clock.resume())
     envQuick.decisions = List(Decision.AllowOnce)
     try
-      val r = assertOk(quick.run(s"""requestFiles("$outside", Access.Read, "slow") { read("$outside/o.txt") }"""))
+      val r = assertOk(quick.run(
+        s"requestFiles(${envQuick.scalaString(outside)}, Access.Read, \"slow\") { read(${envQuick.scalaString(outside.resolve("o.txt"))}) }"
+      ))
       assert(r.output.contains("slow-user"), r.output)
     finally envQuick.onRequest = _ => ()
   test("interrupt() aborts a running evaluation"):
@@ -297,9 +299,10 @@ class ReplSessionSuite extends munit.FunSuite:
   test("time a command runs is not counted against the snippet's timeout"):
     // `exec` runs inside `whileCommandRuns`, which pauses the execution clock:
     // a 2 s command must fit a 1 s snippet budget.
-    val env = TestEnv(commands = List("sleep"), prefix = "atc-repl-cmdpause")
+    val sleep = ProcessFixture.command("sleep")
+    val env = TestEnv(commands = List(ProcessFixture.pattern("sleep")), prefix = "atc-repl-cmdpause")
     val s = env.newSession(timeoutMs = Some(1000L))
-    val r = assertOk(s.run("""exec("sleep", List("2")); println("woke")"""))
+    val r = assertOk(s.run(s"""exec(${ujson.write(sleep)}, List("2000")); println("woke")"""))
     assert(r.output.contains("woke"), r.output)
     assertEquals(env.commandsWrapped, 1) // it did go through the pausing hook
 

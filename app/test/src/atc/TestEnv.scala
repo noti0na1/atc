@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
+import atc.platform.PlatformPath
 import atc.sandbox.{ReplSession, SandboxConfig}
 
 import java.nio.file.{Files, Path}
@@ -113,7 +114,10 @@ final class TestEnv(
   /** Relative to the root; listings already come relative when inside the root. */
   def rel(p: String): String =
     val path = Path.of(p)
-    if path.isAbsolute then root.relativize(path).toString else p
+    if path.isAbsolute then PlatformPath.portable(root.relativize(path)) else p.replace('\\', '/')
+
+  /** A value quoted for interpolation into a sandbox Scala snippet. */
+  def scalaString(value: Any): String = ScalaSource.stringLiteral(String.valueOf(value))
 
   def clearOutput(): Unit =
     agentOut.clear(); userOut.clear()
@@ -138,6 +142,14 @@ final class TestEnv(
     s
 
 object TestEnv:
+  /** Create a symbolic link when the platform/account permits it. Ordinary
+    * Windows users may not have Developer Mode or SeCreateSymbolicLinkPrivilege. */
+  def trySymbolicLink(link: Path, target: Path): Boolean =
+    try
+      Files.createSymbolicLink(link, target)
+      true
+    catch case _: java.io.IOException | _: UnsupportedOperationException | _: SecurityException => false
+
   /** The working directory is writable; nothing else is accessible. */
   val defaultRules: Path => List[FileRule] = root => List(FileRule(PathPattern(".", root), Some(Access.Write), None))
 

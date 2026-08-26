@@ -20,7 +20,7 @@ enum Mode(val label: String, val description: String):
   def next: Mode = Mode.fromOrdinal((ordinal + 1) % Mode.values.length)
 
 object Mode:
-  def parse(s: String): Mode = s.trim.toLowerCase match
+  def parse(s: String): Mode = s.trim.toLowerCase(java.util.Locale.ROOT) match
     case "readonly" | "read-only" | "ro" | "read" => ReadOnly
     case "local" | "rw" => Local
     case "full" | "all" => Full

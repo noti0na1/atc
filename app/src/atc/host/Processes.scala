@@ -2,13 +2,12 @@ package atc.host
 
 import atc.lib.ProcessResult
 
-import java.io.File
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
 /** Running external processes with bounded, deadlock-free output capture */
 object Processes:
-  private val Windows = File.separatorChar == '\\'
   private val MaxStreamChars = 8 * 1024 * 1024
   private val TruncationMarker = "\n...[truncated: output exceeded 8 MiB cap]..."
   /** A command still running after this long has its output shown live from then on. */
@@ -17,226 +16,6 @@ object Processes:
   private val LiveBacklogChars = 64 * 1024
   /** How much of each stream a timeout error quotes. */
   private val TimeoutTailChars = 2000
-  /** Bound the process/thread fan-out of one pipeline. */
-  val MaxPipelineStages = 16
-
-  // ── The command-line grammar ──────────────────────────────────────
-  //
-  // A deliberately tiny subset of a shell: words with quoting, `|` between
-  // stages, `< file`, `> file`, `>> file`, and `2>&1` on a stage. No expansion
-  // (globs, `$VAR`, `~`), no control operators (`&&`, `;`, `||`, `&`), no
-  // command substitution. The parser produces data; no shell ever sees the line.
-
-  /** One program of a pipeline and whether its stderr joins its stdout (`2>&1`). */
-  final case class Stage(argv: List[String], mergeErr: Boolean = false):
-    /** An injective, human-readable rendering used for permission matching.
-      * Argument boundaries must not disappear here: otherwise a permitted
-      * `./tool safe` could also authorize an executable literally named
-      * `./tool safe`. */
-    def line: String = argv.map(renderArg).mkString(" ")
-
-  /** A parsed command line: stages joined by pipes, an optional input file for the
-    * first stage and output file (truncate or append) for the last. */
-  final case class Pipeline(
-    stages: List[Stage],
-    stdinFile: Option[String] = None,
-    stdoutFile: Option[String] = None,
-    append: Boolean = false,
-  ):
-    /** One program, no redirection: what `exec(command, args)` accepts as `command`. */
-    def isSimple: Boolean = stages.lengthIs == 1 && stdinFile.isEmpty && stdoutFile.isEmpty && !stages.head.mergeErr
-    /** How the user sees it (re-joined; quoting is not reconstructed). */
-    def line: String =
-      stages.map(st => st.line + (if st.mergeErr then " 2>&1" else "")).mkString(" | ") +
-        stdinFile.fold("")(f => s" < $f") +
-        stdoutFile.fold("")(f => (if append then " >> " else " > ") + f)
-
-  private enum Tok:
-    case Word(text: String)
-    case Pipe, In, Out, Append, MergeErr
-
-  private def renderArg(arg: String): String =
-    val plain = arg.nonEmpty && arg.forall { char =>
-      (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
-      (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char)
-    }
-    if plain then arg
-    else
-      val escaped = StringBuilder()
-      arg.foreach:
-        case '\\' => escaped.append("\\\\")
-        case '"' => escaped.append("\\\"")
-        case '\n' => escaped.append("\\n")
-        case '\r' => escaped.append("\\r")
-        case '\t' => escaped.append("\\t")
-        case char if Character.isISOControl(char) => escaped.append(f"\\u${char.toInt}%04x")
-        case char => escaped.append(char)
-      s"\"$escaped\""
-
-  private def noShell(line: String, what: String, instead: String): Nothing =
-    throw IllegalArgumentException(
-      s"exec runs no shell: '$what' in \"$line\" is not supported ($instead); quote it ('...') if it was meant literally"
-    )
-
-  /** Tokenize like a simple shell: whitespace separates words, `'...'` is literal,
-    * `"..."` honours `\"` and `\\`, a backslash escapes the next character; the
-    * unquoted operators `|`, `<`, `>`, `>>`, `2>&1` become tokens, and what a shell
-    * would also accept but this grammar does not (`&&`, `;`, `||`, `&`, `2>`,
-    * backticks, `$(`) throws `IllegalArgumentException` saying what to do instead. */
-  private def tokenize(line: String): List[Tok] =
-    val toks = List.newBuilder[Tok]
-    val cur = StringBuilder()
-    var inWord = false
-    var quoted = false // some part of the current word came from quotes or an escape
-    var i = 0
-    def flush(): Unit =
-      if inWord then
-        toks += Tok.Word(cur.toString)
-        cur.clear()
-        inWord = false
-        quoted = false
-    def operator(t: Tok, width: Int): Unit =
-      flush()
-      toks += t
-      i += width
-    while i < line.length do
-      val c = line.charAt(i)
-      c match
-        case ' ' | '\t' | '\n' | '\r' =>
-          flush()
-          i += 1
-        case '\'' =>
-          val end = line.indexOf('\'', i + 1)
-          if end < 0 then throw IllegalArgumentException(s"unterminated single quote in command line: $line")
-          cur.append(line.slice(i + 1, end))
-          inWord = true
-          quoted = true
-          i = end + 1
-        case '"' =>
-          inWord = true
-          quoted = true
-          i += 1
-          var closed = false
-          while !closed do
-            if i >= line.length then throw IllegalArgumentException(s"unterminated double quote in command line: $line")
-            val d = line.charAt(i)
-            if d == '"' then
-              closed = true
-              i += 1
-            else if d == '\\' && i + 1 < line.length && (line.charAt(i + 1) == '"' || line.charAt(i + 1) == '\\') then
-              cur.append(line.charAt(i + 1))
-              i += 2
-            else
-              cur.append(d)
-              i += 1
-        case '\\' if Windows =>
-          // A backslash is a path separator on Windows, not shell syntax.
-          // Quoting remains available for executable paths and arguments with spaces.
-          cur.append('\\')
-          inWord = true
-          i += 1
-        case '\\' if i + 1 < line.length =>
-          cur.append(line.charAt(i + 1))
-          inWord = true
-          quoted = true
-          i += 2
-        case '|' =>
-          if line.startsWith("||", i) then noShell(line, "||", "run the commands separately and branch in Scala")
-          operator(Tok.Pipe, 1)
-        case '<' =>
-          if line.startsWith("<<", i) then noShell(line, "<<", "feed text with ExecOptions(stdin = ...)")
-          operator(Tok.In, 1)
-        case '>' =>
-          if inWord && !quoted && cur.toString == "2" then
-            // `2>&1` merges stderr into the pipe; any other stderr redirection is out of the grammar.
-            if line.startsWith(">&1", i) then
-              cur.clear(); inWord = false
-              toks += Tok.MergeErr
-              i += 3
-            else noShell(line, "2>", "only 2>&1 is supported; stderr is captured in the result anyway")
-          else if line.startsWith(">&", i) then noShell(line, ">&", "only 2>&1 is supported")
-          else if line.startsWith(">>", i) then operator(Tok.Append, 2)
-          else operator(Tok.Out, 1)
-        case '&' =>
-          if line.startsWith("&&", i) then
-            noShell(line, "&&", "run the commands one after the other and check exitCode in Scala")
-          else if line.startsWith("&>", i) then noShell(line, "&>", "only 2>&1 and > file are supported")
-          else noShell(line, "&", "use spawn(...) for a background process")
-        case ';' => noShell(line, ";", "run the commands one after the other")
-        case '`' => noShell(line, "`", "run the inner command first and use its output in Scala")
-        case '$' if line.startsWith("$(", i) =>
-          noShell(line, "$(", "run the inner command first and use its output in Scala")
-        case other =>
-          cur.append(other)
-          inWord = true
-          i += 1
-    flush()
-    toks.result()
-
-  /** Parse a command line into a [[Pipeline]]; `<` names the input of the first
-    * stage and `>`/`>>` the output of the last wherever they appear (at most one of
-    * each). Throws `IllegalArgumentException` for an empty line or stage, a
-    * redirection without a file name, or anything outside the grammar. */
-  def parsePipeline(line: String): Pipeline =
-    val toks = tokenize(line)
-    val stages = List.newBuilder[Stage]
-    var argv = List.newBuilder[String]
-    var words = 0
-    var mergeErr = false
-    var stdinFile: Option[String] = None
-    var stdoutFile: Option[String] = None
-    var append = false
-    def endStage(why: String): Unit =
-      if words == 0 then throw IllegalArgumentException(s"exec: empty command $why in: $line")
-      stages += Stage(argv.result(), mergeErr)
-      argv = List.newBuilder[String]
-      words = 0
-      mergeErr = false
-    def fileAfter(op: String, rest: List[Tok]): (String, List[Tok]) = rest match
-      case Tok.Word(f) :: more => (f, more)
-      case _ => throw IllegalArgumentException(s"exec: '$op' needs a file name in: $line")
-    def go(ts: List[Tok]): Unit = ts match
-      case Nil => ()
-      case Tok.Word(w) :: rest =>
-        argv += w
-        words += 1
-        go(rest)
-      case Tok.Pipe :: rest =>
-        endStage("before '|'")
-        go(rest)
-      case Tok.MergeErr :: rest =>
-        mergeErr = true
-        go(rest)
-      case Tok.In :: rest =>
-        val (f, more) = fileAfter("<", rest)
-        if stdinFile.isDefined then throw IllegalArgumentException(s"exec: more than one '<' in: $line")
-        stdinFile = Some(f)
-        go(more)
-      case (t @ (Tok.Out | Tok.Append)) :: rest =>
-        val (f, more) = fileAfter(if t == Tok.Append then ">>" else ">", rest)
-        if stdoutFile.isDefined then throw IllegalArgumentException(s"exec: more than one '>' / '>>' in: $line")
-        stdoutFile = Some(f)
-        append = t == Tok.Append
-        go(more)
-    go(toks)
-    if words == 0 && stages.result().isEmpty then throw IllegalArgumentException("exec: empty command line")
-    endStage("after '|'")
-    val parsedStages = stages.result()
-    if parsedStages.lengthIs > MaxPipelineStages then
-      throw IllegalArgumentException(
-        s"exec: a pipeline may have at most $MaxPipelineStages stages (got ${parsedStages.size})"
-      )
-    Pipeline(parsedStages, stdinFile, stdoutFile, append)
-
-  /** A single program's words: the line must hold one stage and no redirection
-    * (what `exec(command, args, ...)` accepts as `command`). */
-  def parseCommandLine(line: String): List[String] =
-    val p = parsePipeline(line)
-    if !p.isSimple then
-      throw IllegalArgumentException(
-        s"expected one program, but \"$line\" is a pipeline or has a redirection: put it in the one-line form, exec(\"...\"), without separate args"
-      )
-    p.stages.head.argv
 
   /** Where a long-running command's output is shown as it comes: `begin` once,
     * [[LiveAfterMs]] after the start when the command is still running, then
@@ -327,7 +106,7 @@ object Processes:
     def send(text: String): Unit = synchronized:
       if stdinClosed then throw RuntimeException(s"the stdin of '$line' is closed")
       try
-        stdin.write(text.getBytes("UTF-8"))
+        stdin.write(text.getBytes(StandardCharsets.UTF_8))
         stdin.flush()
       catch
         case e: java.io.IOException =>
@@ -401,16 +180,34 @@ object Processes:
 
     def goLive(): Unit = gate.foreach(_.goLive())
 
-    /** SIGTERM every stage, give them a moment, then SIGKILL what is left. */
+    private def descendants(): List[java.lang.ProcessHandle] =
+      procs.flatMap { process =>
+        val stream = process.descendants().nn
+        try stream.iterator().nn.asScala.toList
+        finally stream.close()
+      }.distinct
+
+    /** Terminate every descendant and pipeline stage, give them a moment, then
+      * force what is left. Wrapper scripts on Windows commonly start the real
+      * server as a child; killing only cmd/npm/gradlew would leak that server. */
     def kill(): Unit =
+      val children = descendants()
+      children.reverse.foreach(_.destroy())
       procs.foreach(_.destroy())
-      if !awaitExit(2000) then procs.foreach(_.destroyForcibly())
+      val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(2000)
+      var interrupted = false
+      while !interrupted && (procs.exists(_.isAlive) || children.exists(_.isAlive)) && System.nanoTime() < deadline do
+        try Thread.sleep(20)
+        catch case _: InterruptedException => interrupted = true
+      children.reverse.filter(_.isAlive).foreach(_.destroyForcibly())
+      procs.filter(_.isAlive).foreach(_.destroyForcibly())
+      if interrupted then Thread.currentThread().interrupt()
       ManagedProcess.live.remove(this)
       ()
 
   object ManagedProcess:
-    /** Every started, not yet exited process of this JVM: killed at shutdown so
-      * an agent's dev server cannot outlive atc. */
+    /** Every started, not yet exited process tree of this JVM: killed at
+      * shutdown so an agent's dev server cannot outlive atc. */
     private val live = java.util.concurrent.ConcurrentHashMap.newKeySet[ManagedProcess]().nn
     java.lang.Runtime.getRuntime.nn.addShutdownHook(Thread(() => live.forEach(_.kill())))
 
@@ -430,6 +227,9 @@ object Processes:
       keepHead: Boolean,
       onExit: Int => Unit,
     ): ManagedProcess =
+      // Enforce strict Windows quoting at the actual launch boundary too:
+      // callers of this low-level API may supply ProcessBuilders directly.
+      WindowsExecutable.configureProcessRuntime()
       val procs: List[java.lang.Process] =
         if pbs.lengthIs == 1 then List(pbs.head.start().nn)
         else ProcessBuilder.startPipeline(pbs.asJava).nn.asScala.toList

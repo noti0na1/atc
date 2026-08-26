@@ -1,5 +1,8 @@
 package atc.config
 
+import atc.{ProcessEnvironment, TextFiles}
+
+import java.io.StringReader
 import java.nio.file.{Files, Path}
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
@@ -27,7 +30,9 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
     * environment; `None` when nothing binds it to a non-empty value. */
   def get(name: String): Option[String] =
     files.iterator.flatMap((_, bindings) => bindings.get(name)).nextOption()
-      .orElse(sys.env.get(name).filter(_.nonEmpty))
+      // The live process-environment lookup follows the platform's name rules;
+      // notably, Windows names are case-insensitive while a copied Scala Map is not.
+      .orElse(ProcessEnvironment.get(name).filter(_.nonEmpty))
 
   /** The names these files bind, for `/config`. Never the values. */
   def names: List[String] = files.flatMap(_._2.keys).distinct.sorted
@@ -63,9 +68,8 @@ object KeyBindings:
   private def read(path: Path): Map[String, String] =
     val props = Properties()
     try
-      val in = Files.newBufferedReader(path).nn
-      try props.load(in)
-      finally in.close()
+      val text = TextFiles.stripBom(Files.readString(path).nn)
+      props.load(StringReader(text))
     catch case e: Exception => throw IllegalArgumentException(s"Cannot read keys $path: ${e.getMessage}")
     props.stringPropertyNames().nn.asScala.iterator
       .map(name => name -> props.getProperty(name).nn.trim)

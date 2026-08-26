@@ -33,12 +33,13 @@ case class ModelSpec(
   */
 final class ModelCatalog(val models: List[ModelSpec]):
   private lazy val aliasCount: Map[String, Int] =
-    models.groupBy(_.alias.toLowerCase).map((a, ms) => a -> ms.size)
+    models.groupBy(_.alias.toLowerCase(java.util.Locale.ROOT)).map((a, ms) => a -> ms.size)
 
   def isEmpty: Boolean = models.isEmpty
 
   /** The shortest name that identifies `m` on its own. */
-  def label(m: ModelSpec): String = if aliasCount.getOrElse(m.alias.toLowerCase, 0) > 1 then m.ref else m.alias
+  def label(m: ModelSpec): String =
+    if aliasCount.getOrElse(m.alias.toLowerCase(java.util.Locale.ROOT), 0) > 1 then m.ref else m.alias
 
   /** All models' labels, for messages and menus. */
   def labels: List[String] = models.map(label)
@@ -47,12 +48,12 @@ final class ModelCatalog(val models: List[ModelSpec]):
     * configured models when it matches none, or both candidates when a bare
     * alias is ambiguous. */
   def find(reference: String): ModelSpec =
-    val wanted = reference.trim.toLowerCase
+    val wanted = reference.trim.toLowerCase(java.util.Locale.ROOT)
     if wanted.isEmpty then throw IllegalArgumentException("No model given")
-    models.find(_.ref.toLowerCase == wanted) match
+    models.find(_.ref.toLowerCase(java.util.Locale.ROOT) == wanted) match
       case Some(m) => m
       case None =>
-        models.filter(_.alias.toLowerCase == wanted) match
+        models.filter(_.alias.toLowerCase(java.util.Locale.ROOT) == wanted) match
           case one :: Nil => one
           case Nil =>
             throw IllegalArgumentException(

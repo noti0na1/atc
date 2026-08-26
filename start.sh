@@ -56,4 +56,4 @@ set -- "$@"
 [ -n "${ATC_CWD:-}" ]    && set -- -C "$ATC_CWD" "$@"
 
 # shellcheck disable=SC2086
-exec java ${ATC_JAVA_OPTS:-} -Datc.lib.classpath="$LIBJAR" -jar "$JAR" "$@"
+exec java ${ATC_JAVA_OPTS:-} -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIBJAR" -jar "$JAR" "$@"

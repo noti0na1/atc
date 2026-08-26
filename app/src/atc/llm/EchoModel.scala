@@ -25,7 +25,14 @@ final class EchoModel(val alias: String, override val ref: String, override val 
   ): Completion =
     def reply(text: String, calls: List[ToolCall] = Nil): Completion =
       sink.text(text)
-      Completion(text, calls, None, TokenUsage(1, 1), if calls.isEmpty then "end_turn" else "tool_use")
+      Completion(
+        text,
+        calls,
+        None,
+        TokenUsage(1, 1),
+        if calls.isEmpty then "end_turn" else "tool_use",
+        CompletionStop.Complete,
+      )
     history.lastOption match
       case Some(Msg.User(text)) =>
         runPayload(text) match
@@ -38,7 +45,7 @@ final class EchoModel(val alias: String, override val ref: String, override val 
           case None => reply(s"echo: $text")
       case Some(Msg.Continuation(text)) => reply(s"echo: $text")
       case Some(Msg.ToolResults(results)) => reply("Result:\n" + results.map(_.output).mkString("\n"))
-      case _ => Completion("", Nil, None, TokenUsage(), "end_turn")
+      case _ => Completion("", Nil, None, TokenUsage(), "end_turn", CompletionStop.Complete)
 
   /** The `run: <scala>` payload of a user message, if it has one. Agent notes
     * (`[sandbox notice] ...`) may be prepended to the text, so the marker is

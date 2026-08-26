@@ -1,8 +1,9 @@
 package atc.sandbox
 
+import atc.{LauncherEnvironment, ProcessEnvironment}
 import atc.lib.{Interface, Runtime, Derivations}
+import atc.platform.Platform
 
-import java.io.File
 import java.nio.file.{Files, Path, Paths}
 
 /** Class-loader isolation for agent code.
@@ -25,19 +26,25 @@ import java.nio.file.{Files, Path, Paths}
 object Sandbox:
 
   val ClasspathProperty = "atc.lib.classpath"
+  private val ClasspathEnvironment = LauncherEnvironment.LibraryClasspath
 
-  /** The compile classpath for agent code, from `-Datc.lib.classpath=<path list>`. */
+  /** The compile classpath for agent code. Development/Unix launchers use the
+    * system property; the Windows batch launcher uses the environment because
+    * java.exe cannot carry every Unicode path through its legacy argv encoding. */
   lazy val libraryClasspath: Seq[Path] =
-    sys.props.get(ClasspathProperty).map(_.trim).filter(_.nonEmpty) match
-      case Some(cp) =>
-        val paths = cp.split(File.pathSeparator).toSeq.filter(_.nonEmpty)
+    val configured = ProcessEnvironment.get(ClasspathEnvironment).map(_.trim).filter(_.nonEmpty)
+      .map(ClasspathEnvironment -> _)
+      .orElse(sys.props.get(ClasspathProperty).map(_.trim).filter(_.nonEmpty).map(ClasspathProperty -> _))
+    configured match
+      case Some((source, cp)) =>
+        val paths = cp.split(Platform.pathListSeparator).toSeq.filter(_.nonEmpty)
           .map(p => Paths.get(p).toAbsolutePath.nn.normalize.nn).filter(Files.exists(_))
         if paths.isEmpty then
-          throw IllegalStateException(s"No existing entries in $ClasspathProperty=$cp")
+          throw IllegalStateException(s"No existing entries in $source=$cp")
         paths
       case None =>
         throw IllegalStateException(
-          s"System property $ClasspathProperty is not set; it must list the capability library classpath."
+          s"Neither $ClasspathEnvironment nor $ClasspathProperty is set; one must list the capability library classpath."
         )
 
   private val sharedPrefixes = List("scala.", "atc.lib.")

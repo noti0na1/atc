@@ -102,7 +102,9 @@ approve the request in a pop-up:
 
 ## Setup
 
-You need JDK 17 or newer. The `atc` wrapper script downloads the jars of the latest
+You need JDK 17 or newer.
+
+**macOS and Linux.** The `atc` wrapper script downloads the jars of the latest
 [GitHub release](https://github.com/noti0na1/atc/releases), checks them against the
 digests GitHub records, and runs them:
 
@@ -117,10 +119,35 @@ From then on `atc` runs ATC in the current directory, `atc update` fetches a new
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
 (To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
-On Windows, place the release assets `atc.cmd`, `atc.jar`, and `atc-lib.jar` in
-the same directory, add that directory to `PATH`, and run `atc`. The JVM agent
-uses native Windows paths and does not require Bash; only the Unix installer
-script above does.
+<details>
+<summary><strong>Windows (best-effort support)</strong></summary>
+
+Windows support is best effort and does not yet have the Unix wrapper's installer or
+automatic updater. From the [latest release](https://github.com/noti0na1/atc/releases/latest),
+download these four assets from the same release into one directory:
+
+- `atc.ps1`
+- `atc.cmd`
+- `atc.jar`
+- `atc-lib.jar`
+
+With JDK 17+ on `PATH`, run ATC from your project directory:
+
+```powershell
+Set-Location 'C:\path\to\your-project'
+& 'C:\path\to\atc\atc.ps1' --version
+& 'C:\path\to\atc\atc.ps1'
+```
+
+You can optionally add the ATC directory to your user `PATH`; then invoke it as `atc.ps1`.
+Prefer the PowerShell launcher because it preserves Unicode and complex arguments.
+`atc.cmd` is a compatibility entrypoint for Command Prompt and simple interactive use.
+
+To update, replace all four files with assets from the same newer release. If your
+PowerShell execution policy blocks local scripts, use `atc.cmd` or follow your
+organization's approved policy rather than weakening a managed policy for ATC.
+
+</details>
 
 **1. Start it.** Change to the project you want to work on, then run `atc`:
 
@@ -137,6 +164,12 @@ exits so you can add the keys you use:
 ANTHROPIC_API_KEY=sk-ant-…
 OPENAI_API_KEY=
 ```
+
+Here `~/.atc` means `$HOME/.atc`; on Windows it is normally
+`%USERPROFILE%\.atc` (`$HOME\.atc` in PowerShell). On POSIX file systems ATC creates a new
+`keys.properties` with mode `0600` and warns if group or other users can read it. On Windows
+the file inherits the directory's NTFS ACL; ATC does not currently rewrite or audit that ACL,
+so keep it under your private profile and check it with `icacls` on a shared machine.
 
 Alternatively, export the variables in your shell or use a local model that needs no key.
 If you decline, nothing is written; ATC uses the built-in starter config for that run
@@ -170,7 +203,8 @@ atc -p 'summarise the README'
 Useful flags: `-m <alias>` pick a model, `--mode readonly|local|full` pick a sandbox mode,
 `-p "<request>"` run one turn and exit, `-c <file>` add a config file, `-C <dir>` set the
 working directory, `--approve-all` auto-approve permission requests (scripted use only);
-`atc run --help` lists them all (`atc --help` describes the wrapper).
+the Unix wrapper uses `atc run --help` to list them (`atc --help` describes that wrapper),
+while the direct Windows launcher uses `atc --help`.
 Because `-p` has no human to answer a pop-up, an unconfigured permission request fails
 without reading stdin; use `--approve-all` only in a trusted setup.
 
@@ -367,8 +401,8 @@ Anything the configuration already permits just works. When an operation is deni
 exception names the block that can ask for it, and the agent wraps just that operation:
 
 ```scala
-requestFiles("/tmp/data", Access.Write, reason = "cache build outputs") {
-  write("/tmp/data/out.txt", "done")      // a wider FileSystem^ is the given inside the block
+requestFiles(".cache/atc", Access.Write, reason = "cache build outputs") {
+  write(".cache/atc/out.txt", "done")     // a wider FileSystem^ is the given inside the block
 }
 requestFiles("~/notes", Access.Read, "look up the design notes") {
   read("~/notes/design.md")
@@ -389,6 +423,9 @@ capable as the one you already hold, so the same call site compiles everywhere.
 ## Configuration
 
 Config files are JSON, and there are three layers:
+
+In the paths below, `~` is the user home; on Windows that is normally
+`%USERPROFILE%` (`$HOME` in PowerShell).
 
 | | layer | file | may |
 |---|---|---|---|
@@ -453,7 +490,7 @@ the final authority. The exact rules are in
     { "path": "secrets",  "classified": true },
     { "path": "~/notes",  "access": "read", "locked": true }
   ],
-  "commands": ["git status", "git diff*", "git log*", "ls", "./mill *"],
+  "commands": ["git status", "git diff*", "git log*"],
   "denyCommands": ["git push*", "rm -rf *", "sudo *"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
   "denyHosts": ["*.internal"],
@@ -508,6 +545,12 @@ rule applies to the matched path **and its entire subtree**. Effective access is
 classified or locked if any matching rule says so, and a deeper rule can only make access
 more restrictive.
 
+Use `/` separators in configuration on every platform. In Windows JSON, write
+`"C:/Users/alice/project"`; a native backslash starts a JSON escape, so the equivalent form
+would need doubled backslashes (`"C:\\Users\\alice\\project"`). The file API accepts native
+Windows input too, but renders Windows separators as `/`. Pass returned strings directly
+back to the API; as with any filename, quote/escape them before generating Scala source.
+
 **Classified** content is only observable as `Classified[String]`, and a classified
 directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
 `walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
@@ -524,6 +567,16 @@ subcommands you mean rather than `git *`. `hosts` are glob patterns on host name
 `http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
 `denyHosts` use the same syntax: **a deny rule overrides every allow rule**, including a
 session grant, an open `request*` scope, and `--approve-all`.
+
+Command availability is platform-specific: `./mill`, `ls`, `cat`, and `bash` are not normal
+Windows commands; use an installed executable or the project's `mill.bat`. `exec` does not
+send its command-line grammar through a general shell; an authorized `.cmd`/`.bat` launcher
+inherently uses the Windows command processor with strict argument checks. Built-ins such as
+`dir` and PowerShell cmdlets still need an explicitly permitted shell—which grants that shell broad authority. Prefer ATC's
+file helpers instead. Quote every argument containing spaces. On Windows a backslash remains
+a path separator, not a space escape. External programs also choose their own newline and
+encoding conventions (commonly CRLF, and sometimes BOM-marked UTF-16 on Windows), so scripts
+should not assume Unix `\n` output from a native command.
 
 ## What it protects, and what it does not
 
@@ -555,7 +608,8 @@ assumptions behind those guarantees, and how to use it safely.
   The capability system governs the Scala the model writes, not what a program you
   permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
   runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
-  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill test`); never grant
+  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill app.test` or
+  `mill.bat app.test`); never grant
   an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
 - **Allowed hosts can receive data.** The agent may send any non-classified data available
   to it to an allowed host. The type system prevents this only for `classified` content.

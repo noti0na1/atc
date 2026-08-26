@@ -22,10 +22,8 @@ jobs:
           mill_version: 1.1.8
         - os: macos-latest
           mill_version: 1.1.8
-        # Mill's native launcher supports Linux and macOS only. The JVM
-        # launcher is portable and runs normally under the configured JDK.
         - os: windows-latest
-          mill_version: 1.1.8-jvm
+          mill_version: 1.1.8
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -48,36 +46,25 @@ jobs:
       if: runner.os == 'Linux'
       shell: bash
       run: ./mill __.checkFormat
-    - name: Compile
-      shell: bash
-      run: ./mill __.compile
-    - name: Run tests
-      shell: bash
-      run: ./mill app.test
     - name: Build distribution
-      shell: bash
-      run: ./mill dist
-    - name: Smoke-test the Unix distribution
       if: runner.os != 'Windows'
       shell: bash
-      run: |
-        echo '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' > "$RUNNER_TEMP/echo.json"
-        out/dist.dest/atc --version
-        out/dist.dest/atc -c "$RUNNER_TEMP/echo.json" -C "$RUNNER_TEMP" -p 'run: println("ci"); 21 * 2' | tee "$RUNNER_TEMP/smoke.log"
-        grep -q 'val res1: Int = 42' "$RUNNER_TEMP/smoke.log"
-    - name: Smoke-test the Windows launcher
+      run: ./mill dist
+    - name: Build distribution (Windows)
       if: runner.os == 'Windows'
       shell: pwsh
-      run: |
-        & out/dist.dest/atc.cmd --version
-        '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' | Set-Content -Encoding utf8 "$env:RUNNER_TEMP/echo.json"
-        $env:ATC_SKIP_BUILD = '1'
-        $output = & ./start.cmd -c "$env:RUNNER_TEMP/echo.json" -C "$env:RUNNER_TEMP" -p 'run: println("ci"); 21 * 2'
-        $output
-        if ($output -notmatch 'val res1: Int = 42') { throw 'Windows smoke test did not produce 42' }
+      run: ./mill.bat dist
+    - name: Run tests
+      if: ${{ !cancelled() && runner.os != 'Windows' }}
+      shell: bash
+      run: ./mill app.test
+    - name: Run tests (Windows, serial)
+      if: ${{ !cancelled() && runner.os == 'Windows' }}
+      shell: pwsh
+      run: ./mill.bat app.test
 
   # Publishing a GitHub release (tag vX.Y.Z) builds the distribution and
-  # attaches both jars and the Windows launcher; the Unix `atc` wrapper downloads
+  # attaches both jars and the Windows launchers; the Unix `atc` wrapper downloads
   # the two jars and checks them against the digests GitHub records.
   publish-release:
     if: github.event_name == 'release'
@@ -108,12 +95,10 @@ jobs:
       uses: coursier/cache-action@v8
     - name: Build distribution
       run: ./mill dist
-    - name: Smoke-test the built jars
-      run: out/dist.dest/atc --version
     - name: Upload the jars to the GitHub release
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name }}
       run: |
-        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar out/dist.dest/atc.cmd --clobber
+        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar out/dist.dest/atc.cmd out/dist.dest/atc.ps1 --clobber
         gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

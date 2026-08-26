@@ -1,6 +1,6 @@
 package atc.ui
 
-import atc.Debug
+import atc.{Debug, ProcessEnvironment}
 import atc.agent.AgentUI
 import atc.lib.{Todo, TodoStatus}
 import atc.perms.*
@@ -25,8 +25,11 @@ import org.jline.reader.{
 import org.jline.reader.impl.{DefaultHighlighter, DefaultParser, LineReaderImpl}
 import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
+import org.jline.terminal.impl.DumbTerminal
 import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader}
 
+import java.io.{InputStream, OutputStream}
+import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.{PosixFileAttributeView, PosixFilePermissions}
 import java.nio.file.{FileAlreadyExistsException, Files, LinkOption, Path}
 import java.util.concurrent.atomic.AtomicBoolean
@@ -64,11 +67,11 @@ import Ansi.{Blue, Bold, ClearLine, Cyan, Dim, Green, Magenta, Red, Reset, Yello
   * Blocks are separated by one blank line. Everything goes through one
   * `write`, which remembers the last characters written so gutters can be
   * inserted at line starts even when text arrives in arbitrary chunks. */
-final class Tui(historyFile: Path) extends AgentUI:
+final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends AgentUI:
   private val historyPath = Tui.secureHistoryFile(historyFile)
   // No grapheme-cluster probing: it sends a DECRQM query to the terminal and
   // waits for a reply, which swallows early input on ptys that don't answer.
-  val terminal: Terminal = TerminalBuilder.builder().system(true).graphemeCluster(false).build()
+  val terminal: Terminal = Tui.openTerminal(nonInteractive)
   private val out = terminal.writer()
   Debug.log(
     s"terminal: ${terminal.getClass.getSimpleName} type=${terminal.getType} size=${terminal.getSize} encoding=${terminal.encoding()}"
@@ -194,8 +197,7 @@ final class Tui(historyFile: Path) extends AgentUI:
       // on), as xterm's modifyOtherKeys, and Alt/Option+Enter as ESC CR.
       keyMap.bind(Reference("atc-newline"), "\u001b[13;2u", "\u001b[27;2;13~", "\u001b\r")
   private val g: Glyphs =
-    if terminal.encoding().name.toUpperCase.contains("UTF") && !sys.env.contains("ATC_ASCII") then Glyphs.unicode
-    else Glyphs.ascii
+    Tui.glyphs(terminal.encoding(), ProcessEnvironment.contains("ATC_ASCII"))
 
   // ── styles (by role, see `Ansi`) ──────────────────────────────────
 
@@ -856,7 +858,8 @@ final class Tui(historyFile: Path) extends AgentUI:
     val decision =
       if plain then
         // No menus without a terminal: a one-letter answer on a line.
-        freeText(styled("Allow? [y]es once / [s]ession / [n]o: ", Yellow)).map(_.toLowerCase) match
+        freeText(styled("Allow? [y]es once / [s]ession / [n]o: ", Yellow))
+          .map(_.toLowerCase(java.util.Locale.ROOT)) match
           case Some(a) if a.startsWith("y") => Decision.AllowOnce
           case Some(a) if a.startsWith("s") => Decision.AllowSession
           case _ => Decision.Deny
@@ -879,7 +882,8 @@ final class Tui(historyFile: Path) extends AgentUI:
   def confirm(question: String): Boolean = popupBlock:
     write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
     val yes =
-      if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase.startsWith("y"))
+      if plain then
+        freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase(java.util.Locale.ROOT).startsWith("y"))
       else menu("Choose", List(Tui.YesLabel, Tui.NoLabel)).contains(Tui.YesLabel)
     if plain then
       write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
@@ -1008,6 +1012,25 @@ final class Tui(historyFile: Path) extends AgentUI:
     terminal.close()
 
 object Tui:
+  /** A scripted `-p` run never needs console discovery or raw mode. Giving it
+    * a known dumb UTF-8 terminal also avoids platform-specific null encodings
+    * when Windows redirects stdin/stdout (as CI and normal pipelines do). */
+  private[atc] def openTerminal(
+    nonInteractive: Boolean,
+    input: InputStream = System.in.nn,
+    output: OutputStream = System.out.nn,
+  ): Terminal =
+    if nonInteractive then
+      new DumbTerminal("atc", Terminal.TYPE_DUMB, input, output, StandardCharsets.UTF_8)
+    else TerminalBuilder.builder().system(true).graphemeCluster(false).build().nn
+
+  /** Choose safe layout characters. Dumb/non-interactive terminals may report
+    * no encoding at all, in which case ASCII is the only sound default. */
+  private[atc] def glyphs(encoding: java.nio.charset.Charset | Null, forceAscii: Boolean): Glyphs =
+    if !forceAscii && Option(encoding).exists(_.name.nn.toUpperCase(java.util.Locale.ROOT).contains("UTF")) then
+      Glyphs.unicode
+    else Glyphs.ascii
+
   /** Prepare the prompt-history file without following a final symlink and
     * make it owner-only on POSIX systems: user prompts can contain secrets.
     * Returning a path under the resolved parent also prevents a parent symlink

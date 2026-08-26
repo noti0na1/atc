@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{FileSystem, IOCap}
 import atc.perms.*
+import atc.platform.Platform
 
 import java.nio.file.{Files, Path}
 
@@ -71,6 +72,11 @@ class GitIgnoreSuite extends munit.FunSuite:
     val root = repo("*.tmp\n", "src/a.tmp" -> "", "src/b.tmp" -> "", "other/c.tmp" -> "")
     Files.writeString(root.resolve("src/.gitignore"), "!b.tmp\n")
     assertEquals(ignoredIn(root, "src/a.tmp", "src/b.tmp", "other/c.tmp"), List(true, false, true))
+
+  test("patterns and .git use Windows filesystem case semantics"):
+    assume(Platform.isWindows)
+    val root = repo("SRC/*.LOG\n", "src/a.log" -> "")
+    assertEquals(ignoredIn(root, "src/a.log", ".GIT/HEAD"), List(true, true))
 
   test("paths outside the repository, and the root itself, are never ignored"):
     val root = repo("*.log\n", "a.log" -> "")

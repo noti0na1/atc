@@ -1,11 +1,29 @@
 package atc
 
-import atc.ui.{Ansi, Tui}
+import atc.ui.{Ansi, Glyphs, Tui}
 
+import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
+
+  test("glyphs fall back to ASCII when a dumb terminal has no encoding"):
+    assertEquals(Tui.glyphs(null, forceAscii = false), Glyphs.ascii)
+    assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = false), Glyphs.unicode)
+    assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = true), Glyphs.ascii)
+
+  test("non-interactive terminals are explicitly dumb UTF-8 terminals"):
+    val terminal = Tui.openTerminal(
+      nonInteractive = true,
+      input = ByteArrayInputStream(Array.emptyByteArray),
+      output = ByteArrayOutputStream(),
+    )
+    try
+      assertEquals(terminal.getType, org.jline.terminal.Terminal.TYPE_DUMB)
+      assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
+    finally terminal.close()
 
   test("withoutPrinted removes the live-shown prints and keeps diagnostics and echoes"):
     val printed = "  leading spaces\nstaged:\nA  file\n"
@@ -58,7 +76,7 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Tui.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
     assertEquals(Tui.uniqueIds(Nil), Nil)
 
-  test("history is an owner-only regular file and a final symlink is refused"):
+  test("history is an owner-only regular file where POSIX permissions exist"):
     val dir = Files.createTempDirectory("atc-history").nn
     val history = dir.resolve("nested/history").nn
     assertEquals(Tui.secureHistoryFile(history), history.toRealPath())
@@ -70,13 +88,16 @@ class TuiSuite extends munit.FunSuite:
       Tui.secureHistoryFile(history)
       val perms = Files.getPosixFilePermissions(history).nn
       assertEquals(perms, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
-      val target = dir.resolve("target").nn
-      Files.writeString(target, "do not append here")
-      val link = dir.resolve("history-link").nn
-      Files.createSymbolicLink(link, target)
-      val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
-      assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
-      assertEquals(Files.readString(target), "do not append here")
+
+  test("history refuses a final symbolic link"):
+    val dir = Files.createTempDirectory("atc-history-link").nn
+    val target = dir.resolve("target").nn
+    Files.writeString(target, "do not append here")
+    val link = dir.resolve("history-link").nn
+    assume(TestEnv.trySymbolicLink(link, target), "symbolic links are unavailable for this account")
+    val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
+    assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
+    assertEquals(Files.readString(target), "do not append here")
 
   // ── sanitization, widths, durations, the tail buffer ─────────────
 

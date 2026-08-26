@@ -3,6 +3,7 @@ package atc
 import atc.host.*
 import atc.lib.{Classified, Exec, ExecOptions, FileSystem, Network}
 import atc.perms.*
+import atc.platform.{Platform, PlatformPath}
 import atc.sandbox.ReplSession
 
 import com.sun.net.httpserver.{HttpExchange, HttpServer}
@@ -59,18 +60,21 @@ class PermissionSuite extends munit.FunSuite:
 
   private def url(path: String): String = s"http://$host:$port$path"
 
+  private def fixture(mode: String, args: String*): String = ProcessFixture.command(mode, args*)
+  private def permits(modes: String*): List[String] = modes.map(ProcessFixture.pattern).toList
+
   // ── Exec, at the host level ─────────────────────────────────────
 
   test("exec runs an allowed command and captures stdout/exit code"):
-    val env = TestEnv(commands = List("echo"))
+    val env = TestEnv(commands = permits("echo"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val r = env.host.exec("echo", List("hello", "world"))
+    val r = env.host.exec(fixture("echo"), List("hello", "world"))
     assertEquals(r.exitCode, 0)
     assertEquals(r.stdout.trim, "hello world")
     assertEquals(r.stderr, "")
-    assertEquals(env.host.execOutput("echo", List("out")).trim, "out")
+    assertEquals(env.host.execOutput(fixture("echo"), List("out")).trim, "out")
     assertEquals(env.commandsWrapped, 2) // both ran inside the clock-pausing hook
 
   test("exec rejects a disallowed command with a request hint"):
@@ -83,30 +87,30 @@ class PermissionSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("requestExec"), e.getMessage)
 
   test("exec captures a non-zero exit code and stderr instead of throwing"):
-    val env = TestEnv(commands = List("ls"))
+    val env = TestEnv(commands = permits("fail"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val r = env.host.exec("ls", List("no-such-file-xyz"))
-    assert(r.exitCode != 0)
-    assert(r.stderr.nonEmpty)
+    val r = env.host.exec(fixture("fail"), List("7", "no-such-file-xyz"))
+    assertEquals(r.exitCode, 7)
+    assertEquals(r.stderr, "no-such-file-xyz\n")
 
   test("exec respects an explicit working directory"):
-    val env = TestEnv(commands = List("pwd"))
+    val env = TestEnv(commands = permits("pwd"))
     env.dir("sub")
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val r = env.host.exec("pwd", Nil, env.root.resolve("sub").toString)
-    assert(r.stdout.trim.endsWith("/sub"), r.stdout)
+    val r = env.host.exec(fixture("pwd"), Nil, env.root.resolve("sub").toString)
+    assertEquals(Path.of(r.stdout.trim), env.root.resolve("sub"))
 
   test("exec rejects a working directory the agent cannot read"):
-    val env = TestEnv(commands = List("pwd"))
+    val env = TestEnv(commands = permits("pwd"))
     val outside = TestEnv.outsideDir()
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val e = intercept[SecurityException](env.host.exec("pwd", Nil, outside.toString))
+    val e = intercept[SecurityException](env.host.exec(fixture("pwd"), Nil, outside.toString))
     assert(e.getMessage.nn.contains("Access denied"), e.getMessage)
 
   test("exec rejects a working directory inside a classified area"):
@@ -116,51 +120,53 @@ class PermissionSuite extends munit.FunSuite:
           FileRule(PathPattern(".", root), Some(Access.Write), None),
           FileRule(PathPattern("secrets", root), None, Some(true)),
         ),
-      commands = List("pwd"),
+      commands = permits("pwd"),
     )
     env.dir("secrets")
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     val secrets = env.root.resolve("secrets").toString
-    val e = intercept[SecurityException](env.host.exec("pwd", Nil, secrets))
+    val e = intercept[SecurityException](env.host.exec(fixture("pwd"), Nil, secrets))
     assert(e.getMessage.nn.contains("classified"), e.getMessage)
-    assert(e.getMessage.nn.contains(secrets), e.getMessage) // the path, not a literal "$dir"
+    assert(e.getMessage.nn.contains(PlatformPath.portable(Path.of(secrets))), e.getMessage) // the path, not "$dir"
 
   test("exec's working-directory check honours a requestFiles grant (allow once)"):
-    val env = TestEnv(commands = List("pwd"))
+    val env = TestEnv(commands = permits("pwd"))
     val outside = TestEnv.outsideDir()
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.AllowOnce)
     val out = env.host.requestFiles(outside.toString, atc.lib.Access.Read, "run there") {
-      env.host.exec("pwd", Nil, outside.toString).stdout.trim
+      env.host.exec(fixture("pwd"), Nil, outside.toString).stdout.trim
     }
-    assertEquals(out, outside.toString)
+    assertEquals(Path.of(out), outside)
     assertEquals(env.requests.size, 1)
     // the grant was for the block only
-    intercept[SecurityException](env.host.exec("pwd", Nil, outside.toString))
+    intercept[SecurityException](env.host.exec(fixture("pwd"), Nil, outside.toString))
 
   test("exec's default working directory is allowed even when cwd is reached through a symlink"):
-    val env = TestEnv(commands = List("pwd"))
+    val env = TestEnv(commands = permits("pwd"))
     val link = Files.createTempDirectory("atc-link").nn.resolve("proj").nn
-    Files.createSymbolicLink(link, env.root)
+    assume(TestEnv.trySymbolicLink(link, env.root), "symbolic links are unavailable for this account")
     // A host whose cwd is the symlink (as `atc -C /tmp/proj` would be on macOS, where /tmp -> /private/tmp).
     val host = Host(env.policy, link, env.output, env.llm, env.ui)
     import env.given
     given ex: Exec = host.processes
     given fs: FileSystem = host.fileSystem
-    val r = host.exec("pwd")
+    val r = host.exec(fixture("pwd"))
     assertEquals(r.exitCode, 0, r.stderr)
-    assertEquals(host.execOutput("pwd").trim, env.root.toString)
+    assertEquals(Path.of(host.execOutput(fixture("pwd")).trim), env.root)
 
   test("exec enforces a timeout"):
-    val env = TestEnv(commands = List("sleep"))
+    val env = TestEnv(commands = permits("sleep"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val e = intercept[RuntimeException](env.host.exec("sleep", List("30"), ExecOptions(timeoutMs = 150L)))
+    val e = intercept[RuntimeException](
+      env.host.exec(fixture("sleep"), List("30000"), ExecOptions(timeoutMs = 150L))
+    )
     assert(e.getMessage.nn.contains("timed out"), e.getMessage)
 
   test("command matching is arg-aware: a glob pattern still filters arguments"):
@@ -184,49 +190,53 @@ class PermissionSuite extends munit.FunSuite:
     assert(error.getMessage.nn.contains("no permitted pattern"), error.getMessage)
 
   test("exec rejects non-positive timeouts before starting a process"):
-    val env = TestEnv(commands = List("echo"))
+    val env = TestEnv(commands = permits("echo"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     for timeout <- List(0L, -1L, Long.MinValue) do
       val error = intercept[IllegalArgumentException](
-        env.host.exec("echo", List("must-not-run"), ExecOptions(timeoutMs = timeout))
+        env.host.exec(fixture("echo"), List("must-not-run"), ExecOptions(timeoutMs = timeout))
       )
       assert(error.getMessage.nn.contains("positive"), error.getMessage)
 
   // ── requestExec scopes ──────────────────────────────────────────
 
   test("requestExec opens a scope, prompts once, and closes it"):
-    val env = TestEnv(commands = List("echo"))
+    val env = TestEnv(commands = Nil)
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.AllowOnce)
-    val out = env.host.requestExec(Set("ls*"), "list") {
-      env.host.exec("ls", List(env.root.toString)).exitCode
+    val pattern = ProcessFixture.pattern("pwd")
+    val out = env.host.requestExec(Set(pattern), "inspect the working directory") {
+      env.host.exec(fixture("pwd")).exitCode
     }
     assertEquals(out, 0)
     assertEquals(env.requests.size, 1)
-    assertEquals(env.requests.head.asInstanceOf[ExecRequest].reason, "list")
+    assertEquals(env.requests.head.asInstanceOf[ExecRequest].reason, "inspect the working directory")
     assertEquals(env.policy.openScopeCount, 0)
     // the once-grant did not leak to the base scope
-    intercept[SecurityException](env.host.exec("ls"))
+    intercept[SecurityException](env.host.exec(fixture("pwd")))
 
   test("requestExec with AllowSession persists the grant"):
-    val env = TestEnv(commands = List("echo"))
+    val env = TestEnv(commands = Nil)
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.AllowSession)
-    env.host.requestExec(Set("ls*"), "list") { () }
-    assertEquals(env.host.exec("ls", List(env.root.toString)).exitCode, 0)
+    val pattern = ProcessFixture.pattern("pwd")
+    env.host.requestExec(Set(pattern), "inspect the working directory") { () }
+    assertEquals(env.host.exec(fixture("pwd")).exitCode, 0)
 
   test("requestExec on an already-permitted pattern does not prompt"):
-    val env = TestEnv(commands = List("echo"))
+    val env = TestEnv(commands = permits("echo"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val r = env.host.requestExec(Set("echo")) { env.host.exec("echo", List("hi")).stdout.trim }
+    val r = env.host.requestExec(Set(ProcessFixture.pattern("echo"))) {
+      env.host.exec(fixture("echo"), List("hi")).stdout.trim
+    }
     assertEquals(r, "hi")
     assert(env.requests.isEmpty)
 
@@ -243,13 +253,14 @@ class PermissionSuite extends munit.FunSuite:
     // A one-time grant must not leave a usable process handle. The handle records
     // its originating scope, is refused after the block closes, and is not listed
     // through the base capability.
-    val env = TestEnv(commands = List("cat"))
+    val env = TestEnv(commands = Nil)
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.decisions = List(Decision.AllowOnce)
-    val (handle, visibleInside) = env.host.requestExec(Set("cat"), "interactive") {
-      val p = env.host.spawn("cat")
+    val catLine = fixture("cat")
+    val (handle, visibleInside) = env.host.requestExec(Set(ProcessFixture.pattern("cat")), "interactive") {
+      val p = env.host.spawn(catLine)
       (p, env.host.runningProcesses.exists(_.id == p.id)) // the block's own scope sees it
     }
     assert(visibleInside)
@@ -262,11 +273,11 @@ class PermissionSuite extends munit.FunSuite:
     env.host.killProcesses() // host-internal cleanup still works
 
   test("a process spawned on the base scope stays usable for the session"):
-    val env = TestEnv(commands = List("cat"))
+    val env = TestEnv(commands = permits("cat"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val cat = env.host.spawn("cat")
+    val cat = env.host.spawn(fixture("cat"))
     cat.sendLine("hi")
     assertEquals(cat.readUntil("hi\n", 5000), "hi\n")
     assert(env.host.runningProcesses.exists(_.id == cat.id))
@@ -299,84 +310,98 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(c.toString, "Classified(***)")
 
   test("exec splits a command line like a shell, honouring quotes, but runs no shell"):
-    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    val env = TestEnv(commands = permits("echo", "cat"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    assertEquals(env.host.exec("echo hello   world").stdout.trim, "hello world")
-    assertEquals(env.host.exec("""echo 'a b' "c \"d\" e" f\ g""").stdout.trim, "a b c \"d\" e f g")
-    assertEquals(env.host.exec("echo", List("x", "y z")).stdout.trim, "x y z") // args stay verbatim
-    assertEquals(env.host.exec("echo a | cat").stdout.trim, "a") // a pipe is part of the grammar
-    val e = intercept[IllegalArgumentException](env.host.exec("echo a && echo b"))
+    val echo = fixture("echo")
+    val cat = fixture("cat")
+    assertEquals(env.host.exec(s"$echo hello   world").stdout.trim, "hello world")
+    val quoted = env.host.exec(echo + """ 'a b' "c \"d\" e" f\ g""").stdout.trim
+    val expectedQuoted = if Platform.isWindows then "a b c \"d\" e f\\ g" else "a b c \"d\" e f g"
+    assertEquals(quoted, expectedQuoted)
+    assertEquals(env.host.exec(echo, List("x", "y z")).stdout.trim, "x y z") // args stay verbatim
+    assertEquals(env.host.exec(s"$echo a | $cat").stdout.trim, "a") // a pipe is part of the grammar
+    val e = intercept[IllegalArgumentException](env.host.exec(s"$echo a && $echo b"))
     assert(e.getMessage.nn.contains("no shell"), e.getMessage)
-    intercept[IllegalArgumentException](env.host.exec("echo $(whoami)"))
-    assertEquals(env.host.exec("echo 'a | b'").stdout.trim, "a | b") // quoted: literal
+    intercept[IllegalArgumentException](env.host.exec(s"$echo $$(whoami)"))
+    assertEquals(env.host.exec(s"$echo 'a | b'").stdout.trim, "a | b") // quoted: literal
     intercept[IllegalArgumentException](env.host.exec("   "))
 
   test("pipelines: stages are connected, checked one by one, exit code pipefail-style, stderr labelled"):
-    val env = TestEnv(commands = List("echo", "cat", "sort", "tr", "false", "ls"))
+    val env = TestEnv(commands = permits("echo", "unsorted", "cat", "sort", "upper", "fail"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    assertEquals(env.host.exec("echo hello | tr a-z A-Z").stdout.trim, "HELLO")
-    assertEquals(env.host.exec("echo 'c\nb\na' | sort | cat").stdout, "a\nb\nc\n")
-    assertEquals(env.host.exec("false | cat").exitCode, 1) // pipefail: the failing stage wins
-    val err = env.host.exec("ls /definitely/not/here | cat")
-    assert(err.exitCode != 0)
-    assert(err.stderr.startsWith("[stage 1: ls /definitely/not/here]\n"), err.stderr)
-    val e = intercept[SecurityException](env.host.exec("echo hi | sort | head"))
+    val echoHello = fixture("echo", "hello")
+    val cat = fixture("cat")
+    val sort = fixture("sort")
+    assertEquals(env.host.exec(s"$echoHello | ${fixture("upper")}").stdout, "HELLO\n")
+    assertEquals(env.host.exec(s"${fixture("unsorted")} | $sort | $cat").stdout, "a\nb\nc\n")
+    assertEquals(env.host.exec(s"${fixture("fail", "1")} | $cat").exitCode, 1) // pipefail: the failing stage wins
+    val failing = fixture("fail", "7", "definitely missing")
+    val failingLine = CommandLine.parsePipeline(failing).stages.head.line
+    val err = env.host.exec(s"$failing | $cat")
+    assertEquals(err.exitCode, 7)
+    assert(err.stderr.startsWith(s"[stage 1: $failingLine]\n"), err.stderr)
+    val e = intercept[SecurityException](env.host.exec(s"${fixture("echo", "hi")} | $sort | head"))
     assert(
-      e.getMessage.nn.contains("'head'") && e.getMessage.nn.contains("""requestExec(Set("head *")"""),
+      e.getMessage.nn.contains("'head'") && e.getMessage.nn.contains("""requestExec(Set("head")"""),
       e.getMessage
     )
     assertEquals(env.commandsWrapped, 4) // each pipeline ran inside the clock-pausing hook once
-    val denying = TestEnv(commands = List("echo", "cat"), denyCommands = List("cat"))
+    val denying = TestEnv(commands = permits("echo", "cat"), denyCommands = List(ProcessFixture.pattern("cat")))
     val d = intercept[SecurityException] {
       given Exec = denying.host.processes
       given FileSystem = denying.host.fileSystem
-      denying.host.exec("echo hi | cat")
+      denying.host.exec(s"${fixture("echo", "hi")} | $cat")
     }
     assert(d.getMessage.nn.contains("denyCommands"), d.getMessage)
 
   test("an allowed command can read a classified file (the command grant is the user's decision)"):
     // Classification constrains the file API. A permitted command is trusted with
     // anything the operating system allows it to read.
-    val env = TestEnv(TestEnv.withSecrets, commands = List("cat"))
+    val env = TestEnv(TestEnv.withSecrets, commands = permits("cat"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.file("secrets/key.txt", "s3cret")
     intercept[SecurityException](env.host.read("secrets/key.txt"))
-    assertEquals(env.host.exec("cat", List("secrets/key.txt")).stdout, "s3cret")
+    assertEquals(env.host.exec(fixture("cat"), List("secrets/key.txt")).stdout, "s3cret")
 
   test("redirections are file operations: checked like read/write, streamed, classified refused"):
-    val env = TestEnv(TestEnv.withSecrets, commands = List("echo", "cat", "ls"))
+    val env = TestEnv(TestEnv.withSecrets, commands = permits("echo", "cat", "fail"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
     env.file("in.txt", "from a file\n")
-    assertEquals(env.host.exec("cat < in.txt").stdout, "from a file\n")
-    env.host.exec("echo first > out/o.txt") // parent directories are created, like write
-    env.host.exec("echo second >> out/o.txt")
+    val cat = fixture("cat")
+    val echo = fixture("echo")
+    assertEquals(env.host.exec(s"$cat < in.txt").stdout, "from a file\n")
+    env.host.exec(s"$echo first > out/o.txt") // parent directories are created, like write
+    env.host.exec(s"$echo second >> out/o.txt")
     assertEquals(env.contents("out/o.txt"), "first\nsecond\n")
-    assertEquals(env.host.exec("cat < in.txt > out/copy.txt").stdout, "") // streamed to the file, not captured
+    assertEquals(env.host.exec(s"$cat < in.txt > out/copy.txt").stdout, "") // streamed to the file, not captured
     assertEquals(env.contents("out/copy.txt"), "from a file\n")
     env.file("secrets/key.txt", "s3cret")
-    val e = intercept[SecurityException](env.host.exec("cat < secrets/key.txt"))
+    val e = intercept[SecurityException](env.host.exec(s"$cat < secrets/key.txt"))
     assert(e.getMessage.nn.contains("classified"), e.getMessage)
-    intercept[SecurityException](env.host.exec("echo leak > secrets/out.txt"))
+    intercept[SecurityException](env.host.exec(s"$echo leak > secrets/out.txt"))
     assert(!Files.exists(env.root.resolve("secrets/out.txt")))
-    val merged = env.host.exec("ls /definitely/not/here 2>&1 | cat") // 2>&1 sends that stage's stderr down the pipe
-    assert(merged.stdout.nonEmpty && merged.stderr.isEmpty, merged.toString)
-    intercept[IllegalArgumentException](env.host.exec("cat < in.txt", Nil, ExecOptions(stdin = "x"))) // two inputs
-    intercept[IllegalArgumentException](env.host.exec("echo a | cat", List("x"))) // args need one program
+    val merged = env.host.exec(s"${fixture("fail", "3", "expected failure")} 2>&1 | $cat")
+    assertEquals(merged.stdout, "expected failure\n")
+    assertEquals(merged.stderr, "")
+    intercept[IllegalArgumentException](env.host.exec(s"$cat < in.txt", Nil, ExecOptions(stdin = "x"))) // two inputs
+    intercept[IllegalArgumentException](env.host.exec(s"$echo a | $cat", List("x"))) // args need one program
 
   test("spawn: talk to a process while it runs, read what it says, and it is reported to the user"):
-    val env = TestEnv(commands = List("cat", "sort", "sleep", "echo"))
+    val env = TestEnv(commands = permits("cat", "sort"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val cat = env.host.spawn("cat")
+    val catLine = fixture("cat")
+    val catShown = CommandLine.parsePipeline(catLine).stages.head.line
+    val cat = env.host.spawn(catLine)
     assert(cat.isAlive && cat.exitCode.isEmpty)
     assertEquals(cat.read(), "") // nothing yet, and read never blocks
     cat.sendLine("hello")
@@ -394,7 +419,7 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(
       env.processEvents.toList,
       List(
-        s"p${cat.id} started: cat",
+        s"p${cat.id} started: $catShown",
         s"p${cat.id} < hello\n",
         s"p${cat.id} < a b ",
         s"p${cat.id} < c\n",
@@ -402,19 +427,20 @@ class PermissionSuite extends munit.FunSuite:
       ),
     )
     // a process that only answers at EOF (sort), and a pipeline as a process
-    val sorter = env.host.spawn("sort | cat")
+    val sorter = env.host.spawn(s"${fixture("sort")} | $catLine")
     sorter.send("b\na\n")
     sorter.closeStdin()
     assertEquals(sorter.readUntil("(?s)a\nb\n", 5000), "a\nb\n")
     assertEquals(sorter.waitFor(5000).map(_.exitCode), Some(0))
-    assertEquals(cat.toString, s"Process(p${cat.id}, \"cat\", exited 0)")
+    assertEquals(cat.toString, s"Process(p${cat.id}, \"$catShown\", exited 0)")
 
   test("spawn: waits time out with the output so far, kill works, the count is bounded, the session end kills all"):
-    val env = TestEnv(commands = List("cat", "sleep", "echo"))
+    val env = TestEnv(commands = permits("cat", "sleep"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    val sleeper = env.host.spawn("sleep 30")
+    val sleep = fixture("sleep", "30000")
+    val sleeper = env.host.spawn(sleep)
     intercept[IllegalArgumentException](sleeper.readUntil("never", -1))
     intercept[IllegalArgumentException](sleeper.waitFor(Long.MinValue))
     val e = intercept[RuntimeException](sleeper.readUntil("never", 300))
@@ -422,15 +448,15 @@ class PermissionSuite extends munit.FunSuite:
     assertEquals(sleeper.waitFor(100), None)
     sleeper.kill()
     assert(sleeper.waitFor(5000).isDefined && !sleeper.isAlive)
-    val cat = env.host.spawn("cat")
+    val cat = env.host.spawn(fixture("cat"))
     cat.send("partial")
     cat.closeStdin()
     Thread.sleep(200)
     val e2 = intercept[RuntimeException](cat.readUntil("never", 2000)) // exited before the match
     assert(e2.getMessage.nn.contains("exited") && e2.getMessage.nn.contains("partial"), e2.getMessage)
     assertEquals(cat.read(), "partial") // the unread output is still there
-    val many = (1 to Host.MaxProcesses).map(_ => env.host.spawn("sleep 30"))
-    val e3 = intercept[IllegalStateException](env.host.spawn("sleep 30"))
+    val many = (1 to Host.MaxProcesses).map(_ => env.host.spawn(sleep))
+    val e3 = intercept[IllegalStateException](env.host.spawn(sleep))
     assert(e3.getMessage.nn.contains("kill()"), e3.getMessage)
     assertEquals(env.host.runningProcesses.size, Host.MaxProcesses)
     assertEquals(env.host.killProcess("p1"), "no running process 'p1' (see /ps)") // p1 (the sleeper) is gone
@@ -443,25 +469,32 @@ class PermissionSuite extends munit.FunSuite:
     intercept[SecurityException](env.host.spawn("python3 -i")) // same checks as exec
 
   test("execOutput throws on a non-zero exit; exec reports it"):
-    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    val env = TestEnv(commands = permits("echo", "fail"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    assertEquals(env.host.exec("false").exitCode, 1)
-    val e = intercept[RuntimeException](env.host.execOutput("false"))
+    val failure = fixture("fail", "1", "expected")
+    assertEquals(env.host.exec(failure).exitCode, 1)
+    val e = intercept[RuntimeException](env.host.execOutput(failure))
     assert(e.getMessage.nn.contains("exited with 1"), e.getMessage)
-    assertEquals(env.host.execOutput("echo ok").trim, "ok")
+    assertEquals(env.host.execOutput(fixture("echo", "ok")).trim, "ok")
 
   test("ExecOptions: stdin is fed to the command and closed, a timeout quotes the output so far"):
-    val env = TestEnv(commands = List("echo", "cat", "sleep", "false"))
+    val env = TestEnv(commands = permits("echo", "cat", "sleep"))
     import env.given
     given ex: Exec = env.host.processes
     given fs: FileSystem = env.host.fileSystem
-    assertEquals(env.host.exec("cat", Nil, ExecOptions(stdin = "fed\nin")).stdout, "fed\nin")
-    assertEquals(env.host.exec("cat").stdout, "") // stdin closed: EOF at once, no hang
-    val e = intercept[RuntimeException](env.host.exec("sleep", List("5"), ExecOptions(timeoutMs = 300)))
+    assertEquals(env.host.exec(fixture("cat"), Nil, ExecOptions(stdin = "fed\nin")).stdout, "fed\nin")
+    assertEquals(env.host.exec(fixture("cat")).stdout, "") // stdin closed: EOF at once, no hang
+    val e = intercept[RuntimeException](
+      env.host.exec(fixture("sleep"), List("5000"), ExecOptions(timeoutMs = 300))
+    )
     assert(e.getMessage.nn.contains("timed out") && e.getMessage.nn.contains("ExecOptions"), e.getMessage)
-    val r = env.host.exec("echo", List("hi"), ExecOptions(workingDir = env.root.toString, timeoutMs = 10_000))
+    val r = env.host.exec(
+      fixture("echo"),
+      List("hi"),
+      ExecOptions(workingDir = env.root.toString, timeoutMs = 10_000)
+    )
     assertEquals(r.stdout.trim, "hi")
 
   test("httpPost sends the body and httpRequest reports status"):
@@ -623,22 +656,30 @@ class PermissionSuite extends munit.FunSuite:
     body(env, s)
 
   test("REPL: exec through the policy, denied then requested"):
-    withSession(commands = List("echo")) { (env, s) =>
-      val ok = s.run("""println(exec("echo", List("from-repl")).stdout.trim)""")
+    val echo = fixture("echo")
+    val pwd = fixture("pwd")
+    val pwdPattern = ProcessFixture.pattern("pwd")
+    withSession(commands = permits("echo")) { (env, s) =>
+      val ok = s.run(s"""println(exec(${ujson.write(echo)}, List("from-repl")).stdout.trim)""")
       assert(ok.success, ok.error.toString)
       assert(env.agentOut.toString.contains("from-repl"))
-      val denied = s.run("""exec("ls")""")
+      val denied = s.run(s"""exec(${ujson.write(pwd)})""")
       assert(!denied.success)
       assert(denied.output.contains("requestExec") || denied.error.exists(_.contains("requestExec")), denied.toString)
       env.decisions = List(Decision.AllowOnce)
-      val granted = s.run("""requestExec(Set("ls*"), "list") { exec("ls", List(".")).exitCode }""")
+      val granted = s.run(
+        s"""requestExec(Set(${ujson.write(pwdPattern)}), "inspect cwd") { exec(${ujson.write(pwd)}).exitCode }"""
+      )
       assert(granted.success, granted.error.toString)
     }
 
   test("REPL: a rejected command inside a granted scope still throws at runtime"):
-    withSession(commands = List("echo")) { (env, s) =>
+    val echoPattern = ProcessFixture.pattern("echo")
+    withSession(commands = permits("echo")) { (env, s) =>
       env.decisions = List(Decision.AllowOnce)
-      val r = s.run("""requestExec(Set("echo")) { exec("rm", List("-rf", "/tmp/none")) }""")
+      val r = s.run(
+        s"""requestExec(Set(${ujson.write(echoPattern)})) { exec("rm", List("-rf", "/tmp/none")) }"""
+      )
       assert(!r.success)
       assert((r.output + r.error.getOrElse("")).contains("no permitted pattern"), r.toString)
     }
@@ -668,8 +709,9 @@ class PermissionSuite extends munit.FunSuite:
     }
 
   test("REPL: exec capability cannot leak out of requestExec"):
-    withSession(commands = List("echo")) { (_, s) =>
-      val r = s.run("""val leaked = requestExec(Set("echo")) { summon[Exec] }""")
+    val echoPattern = ProcessFixture.pattern("echo")
+    withSession(commands = permits("echo")) { (_, s) =>
+      val r = s.run(s"""val leaked = requestExec(Set(${ujson.write(echoPattern)})) { summon[Exec] }""")
       assert(!r.success)
       assert((r.output + r.error.getOrElse("")).toLowerCase.contains("leak"), r.toString)
     }

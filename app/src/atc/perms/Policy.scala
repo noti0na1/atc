@@ -1,5 +1,7 @@
 package atc.perms
 
+import atc.platform.PlatformPath
+
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
@@ -41,7 +43,9 @@ case class FileRule(
       classified.filter(identity).map(_ => "classified"),
       Option.when(locked)("locked"),
     ).flatten
-    val note = why.orElse(grantsWithin.map(root => s"from the project config, granting only inside $root"))
+    val note = why.orElse(grantsWithin.map(root =>
+      s"from the project config, granting only inside ${PlatformPath.portable(root)}"
+    ))
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(" — " + _)}"
 
 /** What the user answers to a permission prompt. */
@@ -170,13 +174,18 @@ final class Policy(
 
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
     val parent = scope(parentId)
+    val shown = PlatformPath.portable(p)
     if access == Access.Write && !mode.allowsWrite then
-      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; writing '$p' cannot be granted")
+      throw SecurityException(
+        s"Access denied: the sandbox is in ${mode.label} mode; writing '$shown' cannot be granted"
+      )
     val current = effective(parentId, p)
     if !(current.access >= access) then
       if current.locked then
-        throw SecurityException(s"Access denied: '$p' is locked to ${current.access.label} by the configuration")
-      decide(FileRequest(p, access, current, reason), s"${access.label} on '$p'") { base.fileGrants ::= (p -> access) }
+        throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
+      decide(FileRequest(p, access, current, reason), s"${access.label} on '$shown'") {
+        base.fileGrants ::= (p -> access)
+      }
     openScope(parent, fileGrants = List(p -> access))
 
   // ── commands ──────────────────────────────────────────────────────

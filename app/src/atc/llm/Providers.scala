@@ -68,7 +68,7 @@ private[atc] object Providers:
     * permanently misclassify a model as not supporting effort. */
   def isReasoningEffortRejection(param: Option[String], message: String): Boolean =
     def mentions(value: String): Boolean =
-      val s = value.trim.toLowerCase
+      val s = value.trim.toLowerCase(java.util.Locale.ROOT)
       s.contains("reasoning_effort") || s.contains("reasoning.effort") || s.contains("reasoning effort")
     param.exists(p => p.trim.equalsIgnoreCase("reasoning") || mentions(p)) || mentions(message)
 
@@ -82,7 +82,7 @@ private[atc] object Providers:
     * takes an effort at all. `None` when the model is not known to reason
     * (sending the parameter to such a model is an error). */
   def lowestEffort(modelId: String, configuredEffort: Boolean): Option[String] =
-    val id = modelId.toLowerCase
+    val id = modelId.toLowerCase(java.util.Locale.ROOT)
     if id.matches("^(o[1-9]|.*/o[1-9]).*") then Some("low")
     else if id.matches("^(.*/)?gpt-5\\.[1-9].*") then Some("none")
     else if id.matches("^(.*/)?gpt-5(-.*)?$") then Some("minimal")

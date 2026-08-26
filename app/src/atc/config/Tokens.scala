@@ -18,7 +18,7 @@ object Tokens:
   def parse(text: String): Tokens =
     text match
       case Form(number, unit) =>
-        val scale = unit.nn.toLowerCase match
+        val scale = unit.nn.toLowerCase(java.util.Locale.ROOT) match
           case "k" => 1e3
           case "m" => 1e6
           case _ => 1.0

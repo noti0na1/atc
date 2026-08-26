@@ -111,7 +111,8 @@ abstract class FileSystem private[atc] () extends Cap:
  *  a full `FileSystem^`. */
 @assumeSafe
 abstract class FileEntry private[atc] () extends Cap:
-  /** Absolute, normalized path. */
+  /** Absolute, normalized path. Windows separators are rendered as `/`; pass
+   *  the returned value directly back to path-taking methods. */
   def path: String
   def name: String
   def exists: Boolean
@@ -141,9 +142,9 @@ abstract class FileEntry private[atc] () extends Cap:
   def readClassified(): Classified[String]
   /** Write classified content; the target must be a classified path. */
   update def writeClassified(content: Classified[String]): Unit
-  /** Absolute paths of the children of a classified directory. */
+  /** Absolute paths of the children of a classified directory (`/` separators on Windows). */
   def childrenClassified: Classified[List[String]]
-  /** All descendant paths, including inside classified directories. */
+  /** All descendant paths, including inside classified directories (`/` separators on Windows). */
   def walkClassified(): Classified[List[String]]
 
 /** Permission to run commands (`given ex`). Derived by the sandbox only from a
@@ -476,7 +477,8 @@ trait Interface:
   def delete(path: String)(using FileSystem^): Unit
 
   /** The entries of a directory (non-recursive). Paths are relative to the working
-   *  directory when inside it, absolute otherwise; every helper accepts either. */
+   *  directory when inside it, absolute otherwise. Windows separators are
+   *  rendered as `/`; every helper accepts either native or returned paths. */
   def ls(dir: String)(using FileSystem): List[String]
 
   /** All descendants of `dir`, parents before children (classified subtrees are
@@ -519,15 +521,23 @@ trait Interface:
    *  commands, `< file` for the input of the first, `> file` / `>> file` for the
    *  output of the last, `2>&1` after a command to send its stderr down the pipe;
    *  every command in it is checked like its own `exec`, and the files like `read` /
-   *  `write` (classified files are refused both ways). There is no shell beyond that:
+   *  `write` (classified files are refused both ways). There is no general shell beyond that:
    *  `&&`, `;`, `||`, `&`, `$(...)`, globs and `$VAR` are not interpreted (an unquoted
    *  one throws): run steps one by one and combine in Scala, feed text with
    *  `ExecOptions(stdin = ...)`. With several commands the exit code is the rightmost
    *  non-zero one (pipefail) and stderr is labelled per stage.
+   *  On Windows, a backslash is a path separator rather than an unquoted escape;
+   *  quote an argument containing spaces. Bare programs are resolved from `PATH`
+   *  plus `PATHEXT`, never implicitly from the working directory; write `./tool.exe`
+   *  to choose a program there. Batch files use the JDK's strict cmd/bat quoting
+   *  and reject values (`%`, `!`, or line breaks) that cmd.exe could expand.
    *  A pipeline has at most 16 stages.
    *  Runs in the working directory unless `workingDir`/`options` say otherwise. The
    *  result carries the exit code and both streams (a non-zero exit does not throw;
-   *  `execOutput` does). Throws `SecurityException` if the command line matches no
+   *  `execOutput` does). Streams default to UTF-8; a leading UTF-8 or UTF-16 BOM
+   *  selects and is removed from that stream. (A selected Windows `.cmd`/`.bat`
+   *  inherently uses the Windows command processor after authorization.)
+   *  Throws `SecurityException` if the command line matches no
    *  permitted pattern, or if the directory is unreadable or classified (the check goes
    *  through `FileSystem`, so a `requestFiles` block covers it), and
    *  `RuntimeException` after `timeoutMs` (default 10 minutes) with the output so far;

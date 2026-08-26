@@ -2,6 +2,7 @@ package atc
 
 import atc.config.*
 import atc.perms.*
+import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
 
@@ -26,11 +27,17 @@ class LayerSuite extends munit.FunSuite:
     val home: Path = Files.createTempDirectory("atc-layer-home").nn.toRealPath().nn
     val cwd: Path = Files.createTempDirectory("atc-layer-cwd").nn.toRealPath().nn
     /** `$HOME` and `$CWD` in a layer's text become this world's directories. */
+    private def jsonStringContent(value: String): String =
+      val quoted = ujson.write(value)
+      quoted.substring(1, quoted.length - 1)
     private def write(p: Path, text: String): Option[Path] =
       if text.isEmpty then None
       else
         Option(p.getParent).foreach(Files.createDirectories(_))
-        Files.writeString(p, text.replace("$HOME", home.toString).replace("$CWD", cwd.toString))
+        Files.writeString(
+          p,
+          text.replace("$HOME", jsonStringContent(home.toString)).replace("$CWD", jsonStringContent(cwd.toString)),
+        )
         Some(p)
     val globalPath: Path = home.resolve(".atc").resolve("config.json").nn
     write(globalPath, global)
@@ -50,9 +57,9 @@ class LayerSuite extends munit.FunSuite:
       settings.denyCommands,
       settings.denyHosts,
     )
-    def access(rel: String): Access = policy.effective(ScopeId.Base, PathPattern.canonical(cwd.resolve(rel).nn)).access
-    def perm(rel: String): Perm = policy.effective(ScopeId.Base, PathPattern.canonical(cwd.resolve(rel).nn))
-    def outside(abs: Path): Access = policy.effective(ScopeId.Base, PathPattern.canonical(abs)).access
+    def access(rel: String): Access = policy.effective(ScopeId.Base, PlatformPath.canonical(cwd.resolve(rel).nn)).access
+    def perm(rel: String): Perm = policy.effective(ScopeId.Base, PlatformPath.canonical(cwd.resolve(rel).nn))
+    def outside(abs: Path): Access = policy.effective(ScopeId.Base, PlatformPath.canonical(abs)).access
 
   // ── the working directory ───────────────────────────────────────
 
@@ -194,7 +201,7 @@ class LayerSuite extends munit.FunSuite:
     // and a locked path cannot be widened by answering a prompt
     val allowing = Policy(w.policy.rules, Nil, Nil, _ => Decision.AllowSession)
     val e = intercept[SecurityException](
-      allowing.requestFile(ScopeId.Base, PathPattern.canonical(w.cwd.resolve(".atc").nn), Access.Read, "peek")
+      allowing.requestFile(ScopeId.Base, PlatformPath.canonical(w.cwd.resolve(".atc").nn), Access.Read, "peek")
     )
     assert(e.getMessage.nn.contains("locked"), e.getMessage)
 
@@ -500,18 +507,18 @@ class LayerSuite extends munit.FunSuite:
     val real = Files.createTempDirectory("atc-symlink-real").nn.toRealPath().nn
     val linkParent = Files.createTempDirectory("atc-symlink-base").nn.toRealPath().nn
     val link = linkParent.resolve("proj").nn
-    Files.createSymbolicLink(link, real)
+    assume(TestEnv.trySymbolicLink(link, real), "symbolic links are unavailable for this account")
     Files.createDirectories(real.resolve(".atc"))
     Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
     // Load the project through the symlink, before the caller canonicalizes it.
     val configuration = Config.load(link, None, linkParent.resolve("no-global.json").nn)
     val policy = Policy(App.fileRules(configuration, link), Nil, Nil, _ => Decision.Deny)
     assertEquals(
-      policy.effective(ScopeId.Base, PathPattern.canonical(real.resolve("src/x.txt").nn)).access,
+      policy.effective(ScopeId.Base, PlatformPath.canonical(real.resolve("src/x.txt").nn)).access,
       Access.Write
     )
     assertEquals(
-      policy.effective(ScopeId.Base, PathPattern.canonical(linkParent.resolve("other.txt").nn)).access,
+      policy.effective(ScopeId.Base, PlatformPath.canonical(linkParent.resolve("other.txt").nn)).access,
       Access.None
     )
 
@@ -541,7 +548,7 @@ class LayerSuite extends munit.FunSuite:
   test("what the user grants at a prompt may exceed a project cap: the human decides"):
     val w = World(project = """{ "files": [ { "path": "./build", "access": "read" } ] }""")
     val allowing = Policy(w.policy.rules, Nil, Nil, _ => Decision.AllowSession)
-    val build = PathPattern.canonical(w.cwd.resolve("build").nn)
+    val build = PlatformPath.canonical(w.cwd.resolve("build").nn)
     assertEquals(allowing.effective(ScopeId.Base, build).access, Access.Read)
     val scope = allowing.requestFile(ScopeId.Base, build, Access.Write, "generate")
     assertEquals(allowing.effective(scope, build).access, Access.Write)
@@ -549,7 +556,7 @@ class LayerSuite extends munit.FunSuite:
     // unless the cap also locks it, which no prompt can widen
     val locked = World(project = """{ "files": [ { "path": "./build", "access": "read", "locked": true } ] }""")
     val lockedPolicy = Policy(locked.policy.rules, Nil, Nil, _ => Decision.AllowSession)
-    val lockedBuild = PathPattern.canonical(locked.cwd.resolve("build").nn)
+    val lockedBuild = PlatformPath.canonical(locked.cwd.resolve("build").nn)
     intercept[SecurityException](lockedPolicy.requestFile(ScopeId.Base, lockedBuild, Access.Write, "generate"))
 
   // ── .gitignore ──────────────────────────────────────────────────

@@ -1,42 +1,17 @@
 package atc
 
 import atc.config.Config
-import atc.perms.Mode
 import atc.ui.Ansi
 
-import java.nio.file.{Path, Paths}
+import java.nio.file.Path
 
 /** Command line entry point: parses the flags and starts [[App]]. */
 object Main:
   /** Written by the build (`Versions.atc` in `build.mill`) into `atc/version.txt`. */
-  lazy val Version: String = Resources.text("/atc/version.txt").map(_.trim).getOrElse("dev")
-
-  case class Args(
-    config: Option[Path] = None,
-    cwd: Path = Paths.get("").toAbsolutePath,
-    model: Option[String] = None,
-    mode: Option[Mode] = None,
-    prompt: Option[String] = None,
-    approveAll: Boolean = false,
-    init: Boolean = false,
-    initGlobal: Boolean = false,
-    help: Boolean = false,
-    version: Boolean = false,
-  )
-
-  def parseArgs(args: List[String], acc: Args = Args()): Args = args match
-    case Nil => acc
-    case ("-c" | "--config") :: p :: rest => parseArgs(rest, acc.copy(config = Some(Paths.get(p))))
-    case ("-C" | "--cwd") :: p :: rest => parseArgs(rest, acc.copy(cwd = Paths.get(p).toAbsolutePath.normalize))
-    case ("-m" | "--model") :: m :: rest => parseArgs(rest, acc.copy(model = Some(m)))
-    case ("-p" | "--prompt") :: p :: rest => parseArgs(rest, acc.copy(prompt = Some(p)))
-    case "--mode" :: m :: rest => parseArgs(rest, acc.copy(mode = Some(Mode.parse(m))))
-    case "--approve-all" :: rest => parseArgs(rest, acc.copy(approveAll = true))
-    case "--init" :: rest => parseArgs(rest, acc.copy(init = true))
-    case "--init-global" :: rest => parseArgs(rest, acc.copy(initGlobal = true))
-    case ("-h" | "--help") :: rest => parseArgs(rest, acc.copy(help = true))
-    case ("-v" | "--version") :: rest => parseArgs(rest, acc.copy(version = true))
-    case other :: _ => throw IllegalArgumentException(s"Unknown argument: $other (try --help)")
+  lazy val Version: String =
+    sys.props.get("atc.version").map(_.trim).filter(_.nonEmpty)
+      .orElse(Resources.text("/atc/version.txt").map(_.trim).filter(_.nonEmpty))
+      .getOrElse("dev")
 
   lazy val usage: String =
     s"""atc $Version — a minimal coding agent with tracked capabilities
@@ -55,8 +30,10 @@ object Main:
        |""".stripMargin
 
   def main(argv: Array[String]): Unit =
-    val args: Args =
-      try parseArgs(argv.toList)
+    val args: Cli.Args =
+      try
+        val launched = LauncherEnvironment.arguments(argv.toList, ProcessEnvironment.get)
+        Cli.validate(Cli.parse(launched))
       catch
         case e: IllegalArgumentException =>
           System.err.println(Ansi.sanitize(Option(e.getMessage).getOrElse(e.getClass.getSimpleName)))
@@ -75,7 +52,7 @@ object Main:
       else run(args)
     sys.exit(exitCode)
 
-  private def run(args: Args): Int =
+  private def run(args: Cli.Args): Int =
     try App(args).run()
     catch
       case App.Exit(code) => code
