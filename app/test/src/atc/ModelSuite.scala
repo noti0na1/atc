@@ -132,6 +132,40 @@ class ModelSuite extends munit.FunSuite:
     // `name` defaults to the alias
     assertEquals(c.find("llama").modelId, "llama")
 
+  test("a display name is presentation-only and formats banner and model-list names"):
+    val configured = Config(
+      providers = Map(
+        "p" -> ProviderConfig(
+          Some("openai"),
+          models = Map(
+            "stable-alias" -> ModelConfig(
+              name = Some("backend-id"),
+              webSearch = true,
+              displayName = Some("Friendly Model"),
+            )
+          ),
+        )
+      )
+    )
+    val c = ModelCatalog.from(configured)
+    val modelSpec = c.find("stable-alias")
+    val model = ChatModel.create(modelSpec)
+
+    assertEquals(modelSpec.displayName, Some("Friendly Model"))
+    assertEquals(modelSpec.modelId, "backend-id")
+    assertEquals(c.labels, List("stable-alias"))
+    assertEquals(model.ref, "p/stable-alias")
+    assertEquals(model.modelId, "backend-id")
+    assertEquals(App.describe(model, modelSpec), "p/stable-alias — Friendly Model (web search)")
+    assertEquals(App.modelDetail(modelSpec), "Friendly Model")
+    intercept[IllegalArgumentException](c.find("Friendly Model"))
+
+  test("model presentation is unchanged without a display name"):
+    val modelSpec = spec("echo")
+    val model = ChatModel.create(modelSpec)
+    assertEquals(App.describe(model, modelSpec), "p/e — echo")
+    assertEquals(App.modelDetail(modelSpec), "p/ignored")
+
   test("a bare alias two providers share is ambiguous; the qualified name is not"):
     val c = catalog(("ollama", "openai", List("llama")), ("vllm", "openai", List("llama")))
     val e = intercept[IllegalArgumentException](c.find("llama"))

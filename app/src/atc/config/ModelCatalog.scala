@@ -19,6 +19,8 @@ case class ModelSpec(
 ):
   /** The unambiguous name of this model, `provider/alias`. */
   def ref: String = s"$provider/$alias"
+  /** Optional human-facing name; model identity and lookup never use it. */
+  def displayName: Option[String] = settings.displayName
 
   /** Never print the key: a `ModelSpec` travels through error messages. */
   override def toString: String =

@@ -38,6 +38,9 @@ case class ModelConfig(
   temperature: Option[Double] = None,
   /** Anthropic web-search tool version: `20260209` (default) or `20250305`. */
   webSearchVersion: Option[String] = None,
+  /** Optional human-facing name used in the banner and model list. It never
+    * changes the alias used to select the model or the id sent to the provider. */
+  displayName: Option[String] = None,
 ) derives ReadWriter
 
 /** One LLM endpoint and the models reachable through it. `api` is the wire
@@ -394,6 +397,15 @@ object Config:
     requireValid(alias == alias.trim, s"model alias '$alias' must not start or end with whitespace")
     requireValid(!alias.contains('/'), s"model alias '$alias' must not contain '/'")
     requireValid(!model.name.exists(_.trim.isEmpty), s"$where.name must not be blank")
+    requireValid(!model.displayName.exists(_.trim.isEmpty), s"$where.displayName must not be blank")
+    requireValid(
+      !model.displayName.exists(name => name != name.trim),
+      s"$where.displayName must not start or end with whitespace"
+    )
+    requireValid(
+      !model.displayName.exists(name => name.contains('\n') || name.contains('\r')),
+      s"$where.displayName must be a single line"
+    )
     model.maxTokens.foreach(requirePositive(s"$where.maxTokens", _))
     model.contextWindow.foreach(tokens => requirePositive(s"$where.contextWindow", tokens.toInt))
     model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))

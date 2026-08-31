@@ -91,10 +91,17 @@ final class ContextManager:
             Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}\n\n$text") :: rest
           case other => other
         warnings += AgentMessages.contextDroppedWarning(model.alias, window, dropped)
+    }
 
-      val estimated = fixedTokens + preparedHistory.map(estimateFor(_, model)).sum
-      val calibrated = (estimated * tokenCalibration).round
-      if calibrated > availableInput && !contextOverflowWarned then
+    // Estimate the final history once; the overflow check below reuses the
+    // same figure instead of scanning the messages a second time.
+    val estimatedInput = fixedTokens + preparedHistory.map(estimateFor(_, model)).sum
+    val calibratedInput = (estimatedInput * tokenCalibration).round
+
+    model.contextWindow.foreach { window =>
+      val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
+      val availableInput = window.toLong - reserve
+      if calibratedInput > availableInput && !contextOverflowWarned then
         contextOverflowWarned = true
         val fixedInput = (fixedTokens * tokenCalibration).round
         val cause =
@@ -104,18 +111,17 @@ final class ContextManager:
           model.alias,
           window,
           cause,
-          calibrated,
+          calibratedInput,
           availableInput,
           reserve,
           model.maxOutputTokens,
         )
     }
 
-    val estimatedInput = fixedTokens + preparedHistory.map(estimateFor(_, model)).sum
     Preparation(
       history = preparedHistory,
       estimatedInput = estimatedInput,
-      calibratedInput = (estimatedInput * tokenCalibration).round,
+      calibratedInput = calibratedInput,
       dropped = dropped,
       totalDropped = contextDropped,
       warnings = warnings.toList,
@@ -183,18 +189,43 @@ object ContextManager:
 
   /** Cut history to an estimated token budget by dropping whole exchanges
     * from the front. A cut starts at a real user message, and the last real
-    * user message plus everything following it is always retained. */
+    * user message plus everything following it is always retained. Linear in
+    * the history length: per-message estimates and their prefix sums are
+    * computed once, then the earliest viable user boundary is chosen. */
   def fitToContext(
     history: List[Msg],
     budget: Long,
     estimate: Msg => Long = ContextManager.estimateTokens,
   ): (List[Msg], Int) =
-    val lastUser = history.lastIndexWhere(_.isInstanceOf[Msg.User])
-    var start = 0
-    var total = history.map(estimate).sum
-    while total > budget && start < lastUser do
-      val next = history.indexWhere(_.isInstanceOf[Msg.User], start + 1)
-      val cut = if next < 0 || next > lastUser then lastUser else next
-      total -= history.slice(start, cut).map(estimate).sum
-      start = cut
-    (history.drop(start), start)
+    val msgs = history.toArray
+    val n = msgs.length
+    val prefix = new Array[Long](n + 1)
+    var i = 0
+    while i < n do
+      prefix(i + 1) = prefix(i) + estimate(msgs(i))
+      i += 1
+    val total = prefix(n)
+    if total <= budget then (history, 0)
+    else
+      val users = scala.collection.mutable.ArrayBuffer[Int]()
+      i = 0
+      while i < n do
+        msgs(i) match
+          case Msg.User(_) => users += i
+          case _ => ()
+        i += 1
+      val lastUser = users.lastOption.getOrElse(-1)
+      if lastUser <= 0 then (history, 0)
+      else
+        // The smallest user boundary whose retained tail fits the budget;
+        // when none does, drop everything before the last user message.
+        val needed = total - budget
+        var start = lastUser
+        var k = 0
+        var found = false
+        while k < users.length && !found do
+          if prefix(users(k)) >= needed then
+            start = users(k)
+            found = true
+          k += 1
+        (msgs.drop(start).toList, start)

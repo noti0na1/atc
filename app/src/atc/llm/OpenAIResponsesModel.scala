@@ -170,6 +170,8 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     def request(reasoning: Option[Reasoning]): Response =
       val b = ResponseCreateParams.builder().model(modelId).input(prompt).store(false)
       system.foreach(b.instructions)
+      cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
+      cfg.temperature.foreach(b.temperature)
       reasoning.foreach(b.reasoning)
       thinkingSwitch(thinking).foreach(b.putAdditionalBodyProperty("thinking", _))
       client.responses().create(b.build())

@@ -3,18 +3,42 @@ package atc.perms
 import atc.platform.Platform
 
 import java.util.Locale
-import scala.util.matching.Regex
 import scala.util.Try
 
 /** Simple glob matching for command lines and host names: `*` matches any
   * sequence of characters, everything else is literal. Adapted from TACIT. */
 object GlobMatcher:
-  /** `*` becomes `.*`; every other segment is quoted, so it stays literal. */
-  private def compile(pattern: String): Regex =
-    Regex(pattern.split("\\*", -1).map(Regex.quote).mkString(".*"))
+  private val WindowsExecutableSuffixes = List(".exe", ".com", ".cmd", ".bat")
 
+  /** Full-string glob matching without regex compilation: `*` matches any
+    * sequence and every other character is literal. Preserve Java regex `.`'s
+    * historical treatment of line terminators, although policy inputs do not
+    * normally contain them. */
   def matches(value: String, pattern: String): Boolean =
-    compile(pattern).matches(value)
+    var valueIndex = 0
+    var patternIndex = 0
+    var starIndex = -1
+    var retryValueIndex = -1
+
+    while valueIndex < value.length do
+      if patternIndex < pattern.length && pattern.charAt(patternIndex) == '*' then
+        starIndex = patternIndex
+        patternIndex += 1
+        retryValueIndex = valueIndex
+      else if patternIndex < pattern.length && pattern.charAt(patternIndex) == value.charAt(valueIndex) then
+        patternIndex += 1
+        valueIndex += 1
+      else if starIndex >= 0 && !regexLineTerminator(value.charAt(retryValueIndex)) then
+        retryValueIndex += 1
+        valueIndex = retryValueIndex
+        patternIndex = starIndex + 1
+      else return false
+
+    while patternIndex < pattern.length && pattern.charAt(patternIndex) == '*' do patternIndex += 1
+    patternIndex == pattern.length
+
+  private def regexLineTerminator(char: Char): Boolean =
+    char == '\n' || char == '\r' || char == '\u0085' || char == '\u2028' || char == '\u2029'
 
   /** Command-line matching. A pattern matches the command line if it matches
     * as a glob, or — when it contains no `*` — if it equals the command line
@@ -47,7 +71,10 @@ object GlobMatcher:
       val suffix = value.substring(boundary)
       val plainName = !command.exists(c => c == '/' || c == '\\' || c == '*' || c == '?')
       val normalized =
-        if plainName then command.replaceFirst("(?i)\\.(?:exe|com|cmd|bat)$", "")
+        if plainName then
+          WindowsExecutableSuffixes.find(command.endsWith).fold(command) { extension =>
+            command.dropRight(extension.length)
+          }
         else command
       normalized + suffix
 

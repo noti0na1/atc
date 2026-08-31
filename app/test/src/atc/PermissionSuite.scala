@@ -6,7 +6,7 @@ import atc.perms.*
 import atc.platform.{Platform, PlatformPath}
 import atc.sandbox.ReplSession
 
-import com.sun.net.httpserver.{HttpExchange, HttpServer}
+import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
 
@@ -32,6 +32,18 @@ class PermissionSuite extends munit.FunSuite:
         ex.sendResponseHeaders(status, b.length.toLong)
         val os = ex.getResponseBody.nn
         os.write(b); os.close()
+    def sizedHandler(size: Int) = new HttpHandler:
+      def handle(ex: HttpExchange): Unit =
+        ex.sendResponseHeaders(200, size.toLong)
+        val out = ex.getResponseBody.nn
+        try
+          val chunk = Array.fill[Byte](8192)('x'.toByte)
+          var remaining = size
+          while remaining > 0 do
+            val count = math.min(remaining, chunk.length)
+            out.write(chunk, 0, count)
+            remaining -= count
+        finally out.close()
     server.createContext("/ok", handler(200, _ => "hello"))
     server.createContext(
       "/echo",
@@ -54,6 +66,16 @@ class PermissionSuite extends munit.FunSuite:
     )
     server.createContext("/not-found", handler(404, _ => """{"error":"not found"}"""))
     server.createContext("/boom", handler(500, _ => "internal error: broke"))
+    server.createContext("/max-body", sizedHandler(Host.HttpMaxResponseBytes))
+    server.createContext("/too-large", sizedHandler(Host.HttpMaxResponseBytes + 1))
+    server.createContext(
+      "/redirect",
+      new HttpHandler:
+        def handle(ex: HttpExchange): Unit =
+          ex.getResponseHeaders.nn.add("Location", "/ok")
+          ex.sendResponseHeaders(302, -1)
+          ex.close()
+    )
     server.start()
 
   override def afterAll(): Unit = if server != null then server.stop(0)
@@ -290,6 +312,19 @@ class PermissionSuite extends munit.FunSuite:
     import env.given
     given net: Network = env.host.network
     assertEquals(env.host.httpGet(url("/ok")), "hello")
+
+  test("HTTP responses use the bounded JDK reader and redirects stay disabled"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    val largest = env.host.httpGet(url("/max-body"))
+    assertEquals(largest.length, Host.HttpMaxResponseBytes)
+    assert(largest.forall(_ == 'x'))
+    val error = intercept[RuntimeException](env.host.httpGet(url("/too-large")))
+    assert(error.getMessage.nn.contains(s"${Host.HttpMaxResponseBytes}-byte limit"), error.getMessage)
+    val redirect = env.host.httpRequest("GET", url("/redirect"))
+    assertEquals(redirect.status, 302)
+    assertEquals(redirect.body, "")
 
   test("httpGet/httpPost throw on an HTTP error with the status and the body; httpRequest reports it raw"):
     val env = TestEnv(hosts = List(host))

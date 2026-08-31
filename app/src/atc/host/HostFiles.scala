@@ -177,40 +177,55 @@ private[host] trait HostFiles:
 
   def readLines(path: String)(using fs: FileSystem): List[String] = fs.access(path).readLines()
 
-  /** Print a numbered view capped at [[Host.CatMaxLines]]. */
+  /** Print a numbered view capped at [[Host.CatMaxLines]]. Lines are streamed,
+    * so a large file or line is never loaded whole: only the shown prefixes
+    * are kept. */
   def cat(path: String)(using fs: FileSystem, user: UserIO): Unit =
-    val lines = fs.access(path).readLines()
-    val lineCount = lines.length
+    val entry = impl(fs.access(path))
+    val kept = collection.mutable.ListBuffer[CappedLine]()
+    var lineCount = 0
+    entry.forEachCappedLine(Host.CatMaxLineChars) { (prefix, chars, number) =>
+      lineCount = number
+      if lineCount <= Host.CatMaxLines then kept += CappedLine(prefix, chars)
+    }
     val text =
       if lineCount == 0 then "[empty file]\n"
       else
-        val body = numbered(lines.take(Host.CatMaxLines), 1)
+        val body = numbered(kept.toList, 1)
         if lineCount <= Host.CatMaxLines then body
         else
           val next = math.min(lineCount, 2 * Host.CatMaxLines)
           body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
     output.print(text, text)
 
-  /** Print an inclusive, one-based range with line numbers. */
+  /** Print an inclusive, one-based range with line numbers. Streamed: only the
+    * requested window is kept in memory, however far `to` runs past the end. */
   def cat(path: String, from: Int, to: Int)(using fs: FileSystem, user: UserIO): Unit =
     if from < 1 || to < from then
       throw IllegalArgumentException(s"cat: the range must satisfy 1 <= from <= to (got $from, $to)")
-    val lines = fs.access(path).readLines()
-    val lineCount = lines.length
+    val entry = impl(fs.access(path))
+    val kept = collection.mutable.ListBuffer[CappedLine]()
+    var lineCount = 0
+    entry.forEachCappedLine(Host.CatMaxLineChars) { (prefix, chars, number) =>
+      lineCount = number
+      if lineCount >= from && lineCount <= to then kept += CappedLine(prefix, chars)
+    }
     val text =
       if from > lineCount then s"[nothing to show: $path has $lineCount lines]\n"
       else
-        val body = numbered(lines.slice(from - 1, math.min(to, lineCount)), from)
+        val body = numbered(kept.toList, from)
         if to > lineCount then body + s"[end of file: $lineCount lines]\n" else body
     output.print(text, text)
 
-  private def numbered(lines: List[String], first: Int): String =
+  private case class CappedLine(prefix: String, chars: Long)
+
+  private def numbered(lines: List[CappedLine], first: Int): String =
     val result = StringBuilder()
     var number = first
     lines.foreach { line =>
       val shown =
-        if line.length <= Host.CatMaxLineChars then line
-        else line.take(Host.CatMaxLineChars) + s" ... [+${line.length - Host.CatMaxLineChars} chars]"
+        val omitted = line.chars - line.prefix.length
+        if omitted == 0 then line.prefix else line.prefix + s" ... [+$omitted chars]"
       result.append(f"$number%6d\t").append(shown).append('\n')
       number += 1
     }
@@ -223,35 +238,49 @@ private[host] trait HostFiles:
   def writeBytes(path: String, content: Array[Byte])(using fs: FileSystem): Unit =
     fs.access(path).writeBytes(content)
 
-  /** Move through checked primitives so the operation grants no extra access. */
+  /** Move through checked primitives so the operation grants no extra access.
+    * Streamed: a large file is copied in chunks rather than read whole. */
   def move(from: String, to: String)(using fs: FileSystem): Unit =
-    val source = fs.access(from)
+    val source = impl(fs.access(from))
     if source.isDirectory then
       throw IllegalArgumentException(s"move: '$from' is a directory; move its files and mkdir/delete the directories")
-    val target = fs.access(to)
+    val target = impl(fs.access(to))
     if source.path != target.path then
-      val bytes = source.readBytes()
-      target.writeBytes(bytes)
+      Using.resource(source.openRead())(in => target.writeFrom(source, in))
       source.delete()
 
   def copy(from: String, to: String)(using fs: FileSystem): Unit =
-    val source = fs.access(from)
+    val source = impl(fs.access(from))
     if source.isDirectory then
       throw IllegalArgumentException(s"copy: '$from' is a directory; copy its files one by one")
-    fs.access(to).writeBytes(source.readBytes())
+    Using.resource(source.openRead())(in => impl(fs.access(to)).writeFrom(source, in))
 
-  /** Rewrite every regex match in place and reject an accidental no-op. */
+  /** The host's own [[FileEntry]] implementation; agent code cannot supply
+    * another, so the cast is safe and keeps streaming helpers off the public API. */
+  private def impl(entry: FileEntry): FileEntryImpl = entry match
+    case e: FileEntryImpl => e
+    case other => throw SecurityException(s"Unknown FileEntry implementation: ${other.getClass.getName}")
+
+  /** Rewrite every regex match in place and reject an accidental no-op. One
+    * pass both counts and rewrites, so a large file is scanned once. */
   def sed(path: String, pattern: String, replacement: String)(using fs: FileSystem): Int =
     if pattern.isEmpty then throw IllegalArgumentException("sed: the pattern must not be empty")
     val regex = ("(?m)" + pattern).r
     val entry = fs.access(path)
     val before = entry.read()
-    val count = regex.findAllMatchIn(before).length
+    val javaReplacement = sedReplacement(replacement)
+    val rewritten = new java.lang.StringBuffer()
+    val matcher = regex.pattern.matcher(before)
+    var count = 0
+    while matcher.find() do
+      count += 1
+      matcher.appendReplacement(rewritten, javaReplacement)
+    matcher.appendTail(rewritten)
     if count == 0 then
       throw IllegalArgumentException(
         s"sed: the regex '$pattern' matches nothing in '${entry.path}', so nothing was changed; check it with grep(path, pattern), and quote literal text with quote(text) (the pattern) and quoteReplacement(text) (the replacement)."
       )
-    entry.write(regex.replaceAllIn(before, sedReplacement(replacement)))
+    entry.write(rewritten.toString)
     count
 
   /** Convert sed-style group and escape syntax to Java replacement syntax. */

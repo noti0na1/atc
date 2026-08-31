@@ -74,8 +74,8 @@ the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release
 
 Environment variables: `ATC_DEBUG=1` (`atc.Debug`) prints stack traces and terminal/stream
 diagnostics; `ATC_ASCII=1` draws the TUI with ASCII glyphs; `ATC_JAVA_OPTS` adds JVM flags
-through the Unix wrapper and the two start launchers; `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD`
-are `start.sh`/`start.ps1` shorthands for `-m`, `-c`,
+through the Unix wrapper, distribution launcher, and the two start launchers; `ATC_MODEL`,
+`ATC_CONFIG`, `ATC_CWD` are `start.sh`/`start.ps1` shorthands for `-m`, `-c`,
 `-C`; `ATC_ENV_FILE` selects another environment file and `ATC_SKIP_BUILD=1` skips the
 staleness check. A provider with `"api": "echo"` is a key-less model (`run: <code>` in the
 request becomes a `run_scala` call with that code, anything else is echoed back) for smoke

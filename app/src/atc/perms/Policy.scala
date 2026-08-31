@@ -149,9 +149,43 @@ final class Policy(
 
   // ── files ─────────────────────────────────────────────────────────
 
+  /** `matchingRules`' memo is bounded so a huge walk cannot keep an unbounded
+    * number of entries alive; eviction only costs recomputation, never a
+    * wrong answer, because the rules themselves are immutable. */
+  private val ConfigPermCacheSize = 16384
+
+  private val matchingRulesCache =
+    new java.util.LinkedHashMap[Path, List[FileRule]](256, 0.75f, true):
+      override def removeEldestEntry(eldest: java.util.Map.Entry[Path, List[FileRule]]): Boolean =
+        size > ConfigPermCacheSize
+
+  /** The configured rules matching a canonical path (itself or an ancestor).
+    *
+    * A rule that matches a directory matches every path below it too — a
+    * component glob matches a component still present in descendants, an
+    * anchored glob always adds a `**`-suffixed descendant variant, and an exact path
+    * covers its whole subtree. A child's matching set is therefore exactly its
+    * parent's set plus the rules that newly match the child, which memoizes
+    * the scan per directory instead of per entry. [[configPerm]]'s aggregation
+    * is order-independent, so the parent-first ordering changes nothing.
+    */
+  private def matchingRules(p: Path): List[FileRule] = matchingRulesCache.synchronized {
+    matchingRulesCache.get(p) match
+      case null =>
+        val computed = Option(p.getParent) match
+          case Some(parent) =>
+            val inherited = matchingRules(parent)
+            val inheritedSet = inherited.toSet
+            inherited ::: rules.filter(r => !inheritedSet.contains(r) && r.pattern.matches(p))
+          case None => rules.filter(_.pattern.matches(p))
+        matchingRulesCache.put(p, computed)
+        computed
+      case found => found
+  }
+
   /** Permission from the configuration only. `p` must be canonical. */
   def configPerm(p: Path): Perm =
-    val matching = rules.filter(_.pattern.matches(p))
+    val matching = matchingRules(p)
     // Nothing grants by default; every matching rule is a ceiling, so the most
     // restrictive one wins however many layers wrote it.
     val granted = matching.filter(_.grants(p)).flatMap(_.access).reduceOption(_.max(_)).getOrElse(Access.None)
@@ -316,8 +350,13 @@ final class Policy(
     base.hosts = Nil
     decisionLog.synchronized:
       decisionLog.clear()
+    matchingRulesCache.synchronized:
+      matchingRulesCache.clear()
 
   def openScopeCount: Int = scopes.size - 1
+
+  /** Number of canonical paths currently memoized (tests and diagnostics). */
+  private[atc] def matchingRulesCacheSize: Int = matchingRulesCache.synchronized(matchingRulesCache.size)
 
   /** Human-readable summary for the UI (`/perms`): the configuration, the mode
     * and what the user granted for the session. */

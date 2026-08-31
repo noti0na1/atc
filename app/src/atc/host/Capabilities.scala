@@ -31,6 +31,7 @@ final class NetworkImpl(val scope: ScopeId) extends Network, Scoped
 final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   private def host: Host = fs.host
   private def scope: ScopeId = fs.scope
+  private[host] def canonicalPath: Path = p
 
   /** Require read access for `what` *and* that the content is not classified;
     * `alt` names the `Classified`-returning member to use instead. */
@@ -87,6 +88,70 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
         op(line, i)
         line = r.readLine()
     }
+
+  /** Stream line prefixes without ever materializing a whole line. `op` gets
+    * the retained prefix, the line's full UTF-16 character count and its
+    * one-based number. CR, LF and CRLF have the same line semantics as
+    * [[forEachLine]], including no phantom line after a final terminator. */
+  private[host] def forEachCappedLine(maxChars: Int)(op: (String, Long, Int) => Unit): Unit =
+    if maxChars < 0 then throw IllegalArgumentException(s"maxChars must be non-negative (got $maxChars)")
+    requireReadable("forEachLine", "readClassified()")
+    val reader = java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8)
+    Using.resource(reader) { r =>
+      val input = new Array[Char](8192)
+      val prefix = StringBuilder(math.min(maxChars, input.length))
+      var lineChars = 0L
+      var lineNumber = 0
+      var afterCr = false
+
+      def emit(): Unit =
+        lineNumber += 1
+        op(prefix.toString, lineChars, lineNumber)
+        prefix.clear()
+        lineChars = 0L
+
+      var read = r.read(input)
+      while read >= 0 do
+        var index = 0
+        while index < read do
+          val char = input(index)
+          if afterCr && char == '\n' then afterCr = false
+          else
+            afterCr = false
+            if char == '\r' then
+              emit()
+              afterCr = true
+            else if char == '\n' then emit()
+            else
+              if lineChars < maxChars.toLong then prefix.append(char)
+              lineChars += 1
+          index += 1
+        read = r.read(input)
+
+      if lineChars > 0 then emit()
+    }
+
+  /** Open this file for streaming reads; checked like `read`. The caller must
+    * close the returned stream. */
+  private[host] def openRead(): java.io.InputStream =
+    requireReadable("read", "readClassified()")
+    Files.newInputStream(p).nn
+
+  /** Stream `in` into this file; checked like `writeBytes`. When source and
+    * target are two names for the same inode, all permission checks still run
+    * but opening the truncating output stream is skipped. */
+  private[host] def writeFrom(source: FileEntryImpl, in: java.io.InputStream): Unit =
+    val permission = host.requireWrite(scope, p, "writeBytes")
+    host.requireNotClassified(permission, p, "writeBytes", "writeClassified(path, classify(content))")
+    val sameFile =
+      if p == source.canonicalPath then true
+      else if !Files.exists(p) then false
+      else
+        try Files.isSameFile(source.canonicalPath, p)
+        catch case _: java.nio.file.NoSuchFileException => false
+    if !sameFile then
+      host.ensureParent(p)
+      Using.resource(Files.newOutputStream(p).nn)(out => in.transferTo(out))
 
   def write(content: String): Unit =
     host.writeFile(scope, p, content, append = false)

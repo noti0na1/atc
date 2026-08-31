@@ -545,6 +545,15 @@ class ConfigSuite extends munit.FunSuite:
     assert(rejected(
       """{ "p": { "api": "anthropic", "models": { "m": { "webSearchVersion": " 20250305 " } } } }"""
     ).getMessage.nn.contains("whitespace"))
+    assert(rejected(
+      """{ "p": { "api": "echo", "models": { "m": { "displayName": "   " } } } }"""
+    ).getMessage.nn.contains("displayName"))
+    assert(rejected(
+      """{ "p": { "api": "echo", "models": { "m": { "displayName": " Friendly " } } } }"""
+    ).getMessage.nn.contains("whitespace"))
+    assert(rejected(
+      """{ "p": { "api": "echo", "models": { "m": { "displayName": "First\nSecond" } } } }"""
+    ).getMessage.nn.contains("single line"))
     val duplicate = rejected(
       """{ "P": { "api": "echo", "models": { "M": {} } },
         |    "p": { "api": "echo", "models": { "m": {} } } }""".stripMargin

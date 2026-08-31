@@ -2,7 +2,6 @@ package atc.host
 
 import atc.lib.*
 
-import java.io.ByteArrayOutputStream
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse as JHttpResponse}
 import java.nio.charset.StandardCharsets
@@ -108,20 +107,12 @@ private[host] trait HostNetwork:
     * buffer without a limit and let an allowed peer exhaust the process heap. */
   private def responseBody(response: JHttpResponse[java.io.InputStream], url: String): String =
     Using.resource(response.body.nn) { input =>
-      val bytes = ByteArrayOutputStream(math.min(8192, Host.HttpMaxResponseBytes))
-      val buffer = new Array[Byte](8192)
-      var total = 0
-      var read = input.read(buffer)
-      while read >= 0 do
-        if read > 0 then
-          if total > Host.HttpMaxResponseBytes - read then
-            throw RuntimeException(
-              s"HTTP response from $url exceeded the ${Host.HttpMaxResponseBytes}-byte limit"
-            )
-          bytes.write(buffer, 0, read)
-          total += read
-        read = input.read(buffer)
-      String(bytes.toByteArray.nn, StandardCharsets.UTF_8)
+      val body = input.readNBytes(Host.HttpMaxResponseBytes + 1).nn
+      if body.length > Host.HttpMaxResponseBytes then
+        throw RuntimeException(
+          s"HTTP response from $url exceeded the ${Host.HttpMaxResponseBytes}-byte limit"
+        )
+      String(body, StandardCharsets.UTF_8)
     }
 
   private def send(

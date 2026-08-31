@@ -30,39 +30,123 @@ object Processes:
     * foreground command: its first megabytes carry the diagnostics); otherwise
     * the oldest text is dropped (a long-running process: the recent output
     * matters). Reads may consume, so an interactive session sees each chunk once. */
-  private final class OutputBuffer(cap: Int, keepHead: Boolean):
+  private[atc] sealed trait OutputBuffer:
+    def append(text: String): Unit
+    /** The unread text, left in place. */
+    def peek: String
+    /** The unread text, consumed. */
+    def take(): String
+    /** The first `n` unread characters, consumed. */
+    def consume(n: Int): String
+    /** Whether the cap ever dropped text (reported once, in `marker`). */
+    def marker: String
+    /** Wait (at most `ms`) for more text to arrive. */
+    def awaitChange(ms: Long): Unit
+
+  private object OutputBuffer:
+    def apply(cap: Int, keepHead: Boolean): OutputBuffer =
+      if keepHead then new HeadBuffer(cap) else new TailBuffer(cap)
+
+  /** Keeps the first `cap` characters (head mode). */
+  private final class HeadBuffer(cap: Int) extends OutputBuffer:
     private val sb = StringBuilder()
     private var truncated = false
     def append(text: String): Unit = synchronized:
-      if keepHead then
-        val room = cap - sb.length
-        if room > 0 then sb.append(text.take(room))
-        if text.length > room then truncated = true
-      else
-        sb.append(text)
-        if sb.length > cap then
-          sb.delete(0, sb.length - cap)
-          truncated = true
+      val room = cap - sb.length
+      if room > 0 then sb.append(text.take(room))
+      if text.length > room then truncated = true
       notifyAll()
-    /** The unread text, left in place. */
     def peek: String = synchronized(sb.toString)
-    /** The unread text, consumed. */
     def take(): String = synchronized:
       val s = sb.toString
       sb.clear()
       s
-    /** The first `n` unread characters, consumed. */
     def consume(n: Int): String = synchronized:
       val s = sb.substring(0, n)
       sb.delete(0, n)
       s
-    /** Whether the cap ever dropped text (reported once, in `marker`). */
-    def marker: String = synchronized:
-      if !truncated then ""
-      else if keepHead then TruncationMarker
-      else "\n...[older output dropped: exceeded 8 MiB cap]...\n"
-    /** Wait (at most `ms`) for more text to arrive. */
+    def marker: String = synchronized(if !truncated then "" else TruncationMarker)
     def awaitChange(ms: Long): Unit = synchronized(wait(math.max(1L, ms)))
+
+  /** Keeps the last `cap` characters (tail mode) in bounded-size chunks, so
+    * dropping the front is a constant-time list removal rather than a
+    * full-buffer shift. Small appends share a chunk: a process producing one
+    * character at a time therefore cannot turn the character cap into millions
+    * of retained `String` objects. */
+  private[atc] final class TailBuffer(cap: Int) extends OutputBuffer:
+    private val MaxChunkChars = 8 * 1024
+    private val chunkChars = math.max(1, math.min(cap, MaxChunkChars))
+    private val chunks = java.util.ArrayDeque[java.lang.StringBuilder]()
+    /** Characters already dropped from the front of the first chunk. */
+    private var headSkip = 0
+    /** Total retained characters, excluding [[headSkip]]. */
+    private var length = 0
+    private var truncated = false
+    def append(text: String): Unit = synchronized:
+      var offset = 0
+      while offset < text.length do
+        val last = chunks.peekLast()
+        val chunk =
+          if last != null && last.length < chunkChars then last
+          else
+            val fresh = java.lang.StringBuilder(chunkChars)
+            chunks.addLast(fresh)
+            fresh
+        val copied = math.min(chunkChars - chunk.length, text.length - offset)
+        chunk.append(text, offset, offset + copied)
+        offset += copied
+        length += copied
+        while length > cap do
+          val first = chunks.peekFirst().nn
+          val firstLen = first.length - headSkip
+          val excess = length - cap
+          if firstLen <= excess then
+            chunks.removeFirst()
+            length -= firstLen
+            headSkip = 0
+            truncated = true
+          else
+            headSkip += excess
+            length -= excess
+            truncated = true
+      notifyAll()
+    def peek: String = synchronized:
+      val out = java.lang.StringBuilder(length + headSkip)
+      chunks.asScala.foreach(c => out.append(c))
+      val s = out.toString
+      if headSkip == 0 then s else s.substring(headSkip)
+    def take(): String = synchronized:
+      val s = peek
+      chunks.clear()
+      headSkip = 0
+      length = 0
+      s
+    def consume(n: Int): String = synchronized:
+      val out = java.lang.StringBuilder(math.min(n, length))
+      var remaining = n
+      while remaining > 0 && !chunks.isEmpty do
+        val first = chunks.peekFirst().nn
+        val avail = first.length - headSkip
+        if avail <= remaining then
+          out.append(first, headSkip, first.length)
+          chunks.removeFirst()
+          headSkip = 0
+          length -= avail
+          remaining -= avail
+        else
+          out.append(first.substring(headSkip, headSkip + remaining))
+          headSkip += remaining
+          length -= remaining
+          remaining = 0
+      out.toString
+    def marker: String = synchronized(
+      if !truncated then "" else "\n...[older output dropped: exceeded 8 MiB cap]...\n"
+    )
+    def awaitChange(ms: Long): Unit = synchronized(wait(math.max(1L, ms)))
+
+    /** Exposed only for a focused invariant test: retained storage must be
+      * bounded by chunks, not by the number of append calls. */
+    private[atc] def retainedChunkCount: Int = synchronized(chunks.size)
 
   /** The gate between the draining threads and the live view: text is held
     * back until `goLive()` (keeping at most the last [[LiveBacklogChars]]),

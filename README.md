@@ -509,6 +509,9 @@ the final authority. The exact rules are in
 A **provider** defines one endpoint (`api`, an optional `url`, and a key) and its `models`.
 A **model** is an alias with a provider-specific `name` (which defaults to the alias) and
 its own settings (`contextWindow`, `reasoning`, `webSearch`, `thinking`, `maxTokens`, …).
+An optional `displayName` replaces the backend model id in the startup banner and
+`/models`; it is presentation-only, so model selection still uses the alias or
+`provider/alias` and provider requests still use `name`.
 The supported `api` values are `anthropic` (Messages API), `openai-responses` (Responses
 API, including DeepSeek and other services through `url`), `openai` (Chat Completions for
 OpenAI-compatible servers such as Ollama, vLLM, or OpenRouter), and `echo` (a keyless

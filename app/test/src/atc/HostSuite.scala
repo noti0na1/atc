@@ -155,6 +155,28 @@ class HostSuite extends munit.FunSuite:
     assertEquals(agentOut.toString, "     1\t" + "x" * Host.CatMaxLineChars + " ... [+7 chars]\n     2\tshort\n")
     agentOut.clear(); userOut.clear()
 
+  test("cat retains only a capped prefix of a giant line and preserves CR/LF line semantics"):
+    agentOut.clear(); userOut.clear()
+    val giantChars = 2 * 1024 * 1024 + 17
+    val chunk = "x" * 8192
+    val writer = Files.newBufferedWriter(root.resolve("giant-line.txt"))
+    try
+      var remaining = giantChars
+      while remaining > 0 do
+        val count = math.min(remaining, chunk.length)
+        writer.write(chunk, 0, count)
+        remaining -= count
+      writer.write("\r\nshort\rthird\nlast\n")
+    finally writer.close()
+    cat("giant-line.txt")
+    assertEquals(
+      agentOut.toString,
+      "     1\t" + "x" * Host.CatMaxLineChars +
+        s" ... [+${giantChars - Host.CatMaxLineChars} chars]\n" +
+        "     2\tshort\n     3\tthird\n     4\tlast\n",
+    )
+    agentOut.clear(); userOut.clear()
+
   test("listings and grep hits are relative to the working directory, absolute outside it"):
     assert(ls(".").contains("src"), ls(".").toString)
     assert(walk(".").contains("src/A.scala"), walk(".").toString)
@@ -197,6 +219,101 @@ class HostSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("readClassified"), e.getMessage)
     assert(Files.exists(root.resolve("secrets/key.txt")) && !Files.exists(root.resolve("leaked.txt")))
     intercept[SecurityException](copy("README.md", "secrets/copy.txt")) // the write refuses a classified target
+
+  test("self-copy preserves content but still checks source and target permissions; exact self-move stays a no-op"):
+    Files.writeString(root.resolve("self-copy.txt"), "payload")
+    copy("self-copy.txt", "./self-copy.txt")
+    assertEquals(Files.readString(root.resolve("self-copy.txt")), "payload")
+
+    val secretBefore = Files.readString(root.resolve("secrets/key.txt"))
+    intercept[SecurityException](copy("secrets/key.txt", "secrets/./key.txt"))
+    assertEquals(Files.readString(root.resolve("secrets/key.txt")), secretBefore)
+    move("secrets/key.txt", "secrets/./key.txt")
+    assertEquals(Files.readString(root.resolve("secrets/key.txt")), secretBefore)
+
+    val readOnlyRoot = Files.createTempDirectory("atc-self-copy-read-only").nn.toRealPath().nn
+    Files.writeString(readOnlyRoot.resolve("same.txt"), "read only")
+    val readOnlyPolicy = Policy(
+      List(FileRule(PathPattern(".", readOnlyRoot), Some(Access.Read), None)),
+      Nil,
+      Nil,
+      prompter,
+    )
+    val readOnlyHost = Host(readOnlyPolicy, readOnlyRoot, output, llm, hostUi)
+    val readOnlyFs = readOnlyHost.fileSystem
+    intercept[SecurityException](readOnlyHost.copy("same.txt", "same.txt")(using readOnlyFs))
+    assertEquals(Files.readString(readOnlyRoot.resolve("same.txt")), "read only")
+
+  test("copy and move preserve same-inode hard links and enforce alias permissions"):
+    val original = root.resolve("hard-original.txt")
+    Files.writeString(original, "hard-linked payload")
+    val copyAlias = root.resolve("hard-copy.txt")
+    val hardLinksSupported =
+      try
+        Files.createLink(copyAlias, original)
+        true
+      catch
+        case _: UnsupportedOperationException | _: java.io.IOException | _: SecurityException => false
+    if !hardLinksSupported then Files.deleteIfExists(original)
+    assume(hardLinksSupported, "hard links are not supported on this filesystem")
+
+    copy("hard-original.txt", "hard-copy.txt")
+    assertEquals(Files.readString(original), "hard-linked payload")
+    assertEquals(Files.readString(copyAlias), "hard-linked payload")
+
+    val moveSource = root.resolve("hard-move-source.txt")
+    val moveTarget = root.resolve("hard-move-target.txt")
+    Files.writeString(moveSource, "move payload")
+    Files.createLink(moveTarget, moveSource)
+    move("hard-move-source.txt", "hard-move-target.txt")
+    assert(!Files.exists(moveSource))
+    assertEquals(Files.readString(moveTarget), "move payload")
+
+    val classifiedSource = root.resolve("secrets/hard-source.txt")
+    Files.createLink(classifiedSource, original)
+    intercept[SecurityException](move("secrets/hard-source.txt", "hard-original.txt"))
+    assert(Files.exists(classifiedSource))
+    assertEquals(Files.readString(original), "hard-linked payload")
+
+    val classifiedTarget = root.resolve("secrets/hard-target.txt")
+    Files.createLink(classifiedTarget, original)
+    intercept[SecurityException](copy("hard-original.txt", "secrets/hard-target.txt"))
+    assertEquals(Files.readString(original), "hard-linked payload")
+
+    val deniedTarget = root.resolve("private/hard-target.txt")
+    Files.createLink(deniedTarget, original)
+    intercept[SecurityException](copy("hard-original.txt", "private/hard-target.txt"))
+    assertEquals(Files.readString(original), "hard-linked payload")
+
+    val readOnlySource = root.resolve("hard-read-only-source.txt")
+    val writableTarget = root.resolve("hard-writable-target.txt")
+    Files.writeString(readOnlySource, "guarded move")
+    Files.createLink(writableTarget, readOnlySource)
+    val aliasPolicy = Policy(
+      List(
+        FileRule(PathPattern("hard-read-only-source.txt", root), Some(Access.Read), None),
+        FileRule(PathPattern("hard-writable-target.txt", root), Some(Access.Write), None),
+      ),
+      Nil,
+      Nil,
+      prompter,
+    )
+    val aliasHost = Host(aliasPolicy, root, output, llm, hostUi)
+    val aliasFs = aliasHost.fileSystem
+    intercept[SecurityException](aliasHost.move("hard-read-only-source.txt", "hard-writable-target.txt")(using aliasFs))
+    assertEquals(Files.readString(readOnlySource), "guarded move")
+    assertEquals(Files.readString(writableTarget), "guarded move")
+
+    List(
+      classifiedSource,
+      classifiedTarget,
+      deniedTarget,
+      copyAlias,
+      moveTarget,
+      original,
+      readOnlySource,
+      writableTarget,
+    ).foreach(Files.deleteIfExists(_))
 
   test("replaceLines/insertLines edit by cat's line numbers, return the old text, keep the newline style"):
     Files.writeString(root.resolve("lines.txt"), "one\ntwo\nthree\nfour\n")

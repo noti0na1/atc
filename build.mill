@@ -91,7 +91,8 @@ def dist = Task {
   val script =
     s"""#!/usr/bin/env sh
        |DIR=$$(cd "$$(dirname "$$0")" && pwd)
-       |exec java -Dfile.encoding=UTF-8 -Datc.version=${Versions.atc} -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
+       |# shellcheck disable=SC2086
+       |exec java $${ATC_JAVA_OPTS:-} -Dfile.encoding=UTF-8 -Datc.version=${Versions.atc} -Datc.lib.classpath="$$DIR/atc-lib.jar" -jar "$$DIR/atc.jar" "$$@"
        |""".stripMargin
   if scala.util.Properties.isWin then os.write.over(Task.dest / "atc", script)
   else os.write.over(Task.dest / "atc", script, perms = "rwxr-xr-x")

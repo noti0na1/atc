@@ -262,3 +262,51 @@ class PolicySuite extends munit.FunSuite:
     assert(!GlobMatcher.matchesCommand("lsblk", "ls"))
     assert(GlobMatcher.matchesHost("API.GitHub.com", "*.github.com"))
     assert(!GlobMatcher.matchesHost("github.com", "*.github.com"))
+
+  test("direct glob matching preserves the previous regex semantics"):
+    def strings(alphabet: List[Char], maxLength: Int): List[String] =
+      def exact(length: Int): List[String] =
+        if length == 0 then List("")
+        else for prefix <- exact(length - 1); char <- alphabet yield prefix + char
+      (0 to maxLength).toList.flatMap(exact)
+
+    val patterns = strings(List('a', '*', '.', '\\', '\n'), 3)
+    val values = strings(List('a', 'b', '.', '\\', '\n', '\r', '\u0085', '\u2028', '\u2029'), 3)
+    patterns.foreach { pattern =>
+      val reference = scala.util.matching.Regex(
+        pattern.split("\\*", -1).map(scala.util.matching.Regex.quote).mkString(".*")
+      )
+      values.foreach { value =>
+        assertEquals(
+          GlobMatcher.matches(value, pattern),
+          reference.matches(value),
+          s"value ${value.map(c => f"U+${c.toInt}%04X")} pattern ${pattern.map(c => f"U+${c.toInt}%04X")}",
+        )
+      }
+    }
+
+  test("configPerm memoizes per path, inherits from the parent directory, and clears on reset"):
+    val p = Policy(
+      rules(
+        (".", Some(Access.Write), None, false),
+        ("src", Some(Access.Read), None, false),
+        ("secrets", None, Some(true), false),
+        (".env", None, Some(true), false),
+        ("build/*.jar", Some(Access.Read), None, false),
+      ),
+      Nil,
+      Nil,
+      ScriptedPrompter(Nil)
+    )
+    assertEquals(p.matchingRulesCacheSize, 0)
+    assertEquals(p.configPerm(root.resolve("src/main/A.scala")), Perm(Access.Read, false))
+    // The path and its ancestors were memoized by the parent-inheriting scan.
+    assert(p.matchingRulesCacheSize >= 3, s"cache size ${p.matchingRulesCacheSize}")
+    // Sibling and unrelated paths still agree with the meet semantics.
+    assertEquals(p.configPerm(root.resolve("src/main/B.scala")), Perm(Access.Read, false))
+    assertEquals(p.configPerm(root.resolve("build/x.jar")), Perm(Access.Read, false))
+    assertEquals(p.configPerm(root.resolve("build/x.txt")), Perm(Access.Write, false))
+    assertEquals(p.configPerm(root.resolve("secrets/key.txt")), Perm(Access.Write, true))
+    assertEquals(p.configPerm(Path.of("/tmp/other/.env")), Perm(Access.None, true))
+    p.resetSession()
+    assertEquals(p.matchingRulesCacheSize, 0)

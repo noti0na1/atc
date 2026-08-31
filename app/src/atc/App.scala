@@ -198,9 +198,9 @@ final class App(args: Cli.Args):
       session.foreach(_.close())
       tui.close()
 
-  /** `provider/alias — model-id`, how a model in use is named everywhere. */
+  /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   private def describe(m: ChatModel): String =
-    s"${m.ref} — ${m.modelId}" + (if m.webSearch then " (web search)" else "")
+    App.describe(m, catalog.find(m.ref))
 
   private def banner(): Unit =
     val noClassifiedModel = "(none — set \"classifiedModel\" in the config to use classifiedChat)"
@@ -395,8 +395,8 @@ final class App(args: Cli.Args):
     val window = context.window.fold(" (no contextWindow configured for this model)")(_ => "")
     tui.println(s"${Tui.contextUsage(context.tokens, context.window)} estimated for the next request$window")
 
-  /** One line per configured model: its name, `provider/model-id`, and the
-    * role it currently plays. */
+  /** One line per configured model: its selectable name, friendly name (or
+    * `provider/model-id` fallback), and the role it currently plays. */
   private def modelRow(spec: ModelSpec): String =
     val marks = List(
       Option.when(agent.model.ref == spec.ref)("agent"),
@@ -404,7 +404,7 @@ final class App(args: Cli.Args):
     ).flatten
     val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
     val width = catalog.labels.map(_.length).maxOption.getOrElse(0)
-    s"${catalog.label(spec).padTo(width, ' ')}  ${spec.provider}/${spec.modelId}$role"
+    s"${catalog.label(spec).padTo(width, ' ')}  ${App.modelDetail(spec)}$role"
 
   private def showModels(): Unit = catalog.models.foreach(m => tui.println("  " + modelRow(m)))
 
@@ -512,6 +512,17 @@ final class App(args: Cli.Args):
 
 object App:
   private val SandboxUnavailable = "the sandbox is not running (a restart failed); try /reset"
+
+  /** Presentation only: references and provider requests continue to use the
+    * configured alias and backend model id. */
+  private[atc] def describe(model: ChatModel, spec: ModelSpec): String =
+    s"${model.ref} — ${spec.displayName.getOrElse(model.modelId)}" +
+      (if model.webSearch then " (web search)" else "")
+
+  /** The detail column of `/models`, with the historical provider/model-id
+    * form retained when no friendly name is configured. */
+  private[atc] def modelDetail(spec: ModelSpec): String =
+    spec.displayName.getOrElse(s"${spec.provider}/${spec.modelId}")
 
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
