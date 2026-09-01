@@ -54,19 +54,17 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       cfg.webSearchVersion.getOrElse("20260209") match
         case "20250305" => b.addTool(ToolUnion.ofWebSearchTool20250305(WebSearchTool20250305.builder().build()))
         case _ => b.addTool(ToolUnion.ofWebSearchTool20260209(WebSearchTool20260209.builder().build()))
+    def addUserText(text: String, mark: Boolean): Unit =
+      val block = TextBlockParam.builder().text(text)
+      if mark then block.cacheControl(cache)
+      b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
     val last = history.length - 1
     history.zipWithIndex.foreach { (msg, i) =>
       // The request always ends with a user-role message (a request or tool results): mark it.
       val mark = i == last
       msg match
-        case Msg.User(text) =>
-          val block = TextBlockParam.builder().text(text)
-          if mark then block.cacheControl(cache)
-          b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
-        case Msg.Continuation(text) =>
-          val block = TextBlockParam.builder().text(text)
-          if mark then block.cacheControl(cache)
-          b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
+        case Msg.User(text) => addUserText(text, mark)
+        case Msg.Continuation(text) => addUserText(text, mark)
         case Msg.Assistant(text, calls, native) =>
           native match
             case Some(n) if n.isFor(providerKey, ref) && n.payload.isInstanceOf[MessageParam] =>

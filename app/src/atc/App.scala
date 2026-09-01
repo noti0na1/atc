@@ -403,8 +403,9 @@ final class App(args: Cli.Args):
       Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
     ).flatten
     val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-    val width = catalog.labels.map(_.length).maxOption.getOrElse(0)
-    s"${catalog.label(spec).padTo(width, ' ')}  ${App.modelDetail(spec)}$role"
+    s"${catalog.label(spec).padTo(labelWidth, ' ')}  ${App.modelDetail(spec)}$role"
+
+  private lazy val labelWidth: Int = catalog.labels.map(_.length).maxOption.getOrElse(0)
 
   private def showModels(): Unit = catalog.models.foreach(m => tui.println("  " + modelRow(m)))
 

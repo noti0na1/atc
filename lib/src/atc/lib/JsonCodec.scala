@@ -17,12 +17,7 @@ private[atc] object JsonCodec:
   def render(j: Json, pretty: Boolean): String =
     val sb = StringBuilder()
     def newline(depth: Int): Unit =
-      if pretty then
-        sb.append('\n')
-        var k = 0
-        while k < depth do
-          sb.append("  ")
-          k += 1
+      if pretty then sb.append('\n').append("  " * depth)
     def go(j: Json, depth: Int): Unit = j match
       case Json.Null => sb.append("null")
       case Json.Bool(b) => sb.append(b)
@@ -76,14 +71,7 @@ private[atc] object JsonCodec:
         case '\t' => sb.append("\\t")
         case '\b' => sb.append("\\b")
         case '\f' => sb.append("\\f")
-        case c if c < ' ' =>
-          val hex = Integer.toHexString(c.toInt)
-          sb.append("\\u")
-          var k = hex.length
-          while k < 4 do
-            sb.append('0')
-            k += 1
-          sb.append(hex)
+        case c if c < ' ' => sb.append(f"\\u${c.toInt}%04x")
         case c => sb.append(c)
       i += 1
     sb.append('"')

@@ -17,23 +17,13 @@ private[atc] object TextFiles:
   case class LineEnding(index: Int, text: String)
 
   def firstLineEnding(text: String): Option[LineEnding] =
-    var index = 0
-    while index < text.length do
-      lineEndingAt(text, index) match
-        case Some(ending) => return Some(ending)
-        case None => index += 1
-    None
+    text.indices.iterator.flatMap(lineEndingAt(text, _)).nextOption()
 
   def lastLineEnding(text: String): Option[LineEnding] =
-    var last: Option[LineEnding] = None
-    var index = 0
-    while index < text.length do
-      lineEndingAt(text, index) match
-        case Some(ending) =>
-          last = Some(ending)
-          index += ending.text.length
-        case None => index += 1
-    last
+    text.indices.reverseIterator.flatMap { index =>
+      // The `\n` of a `\r\n` belongs to the ending that starts one character earlier.
+      lineEndingAt(text, index - 1).filter(_.text == "\r\n").orElse(lineEndingAt(text, index))
+    }.nextOption()
 
   /** Lines plus enough source formatting to join them again. A mixed-ending
     * input is normalized to its first ending when joined. */
@@ -77,8 +67,10 @@ private[atc] object TextFiles:
     prefix + line + lineEnding
 
   private def lineEndingAt(text: String, index: Int): Option[LineEnding] =
-    text.charAt(index) match
-      case '\r' if index + 1 < text.length && text.charAt(index + 1) == '\n' =>
-        Some(LineEnding(index, "\r\n"))
-      case '\r' | '\n' => Some(LineEnding(index, text.charAt(index).toString))
-      case _ => None
+    if index < 0 then None
+    else
+      text.charAt(index) match
+        case '\r' if index + 1 < text.length && text.charAt(index + 1) == '\n' =>
+          Some(LineEnding(index, "\r\n"))
+        case '\r' | '\n' => Some(LineEnding(index, text.charAt(index).toString))
+        case _ => None

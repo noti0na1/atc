@@ -265,12 +265,12 @@ private[host] trait HostFiles:
     * pass both counts and rewrites, so a large file is scanned once. */
   def sed(path: String, pattern: String, replacement: String)(using fs: FileSystem): Int =
     if pattern.isEmpty then throw IllegalArgumentException("sed: the pattern must not be empty")
-    val regex = ("(?m)" + pattern).r
+    val regex = java.util.regex.Pattern.compile(pattern, java.util.regex.Pattern.MULTILINE)
     val entry = fs.access(path)
     val before = entry.read()
     val javaReplacement = sedReplacement(replacement)
     val rewritten = new java.lang.StringBuffer()
-    val matcher = regex.pattern.matcher(before)
+    val matcher = regex.matcher(before)
     var count = 0
     while matcher.find() do
       count += 1

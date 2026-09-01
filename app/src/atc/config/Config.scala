@@ -235,7 +235,8 @@ object Config:
     * `~/.atc/config.json`. */
   private def bundledLayer: ConfigLayer =
     val where = "the bundled starting config"
-    ConfigLayer(Origin.Global, None, readObj(globalTemplate, where), parse(globalTemplate, where), None)
+    val json = readObj(globalTemplate, where)
+    ConfigLayer(Origin.Global, None, json, parse(json, where), None)
 
   private def readLayer(origin: Origin, path: Path): ConfigLayer =
     val text =
@@ -247,7 +248,8 @@ object Config:
     // The policy evaluates canonical paths, so canonicalize the base as well.
     // Otherwise, a project reached through a symlink would never grant access.
     val base = Option.when(origin == Origin.Project)(PlatformPath.canonical(path.getParent.nn.getParent.nn))
-    ConfigLayer(origin, Some(path), readObj(text, path.toString), parse(text, path.toString), base)
+    val json = readObj(text, path.toString)
+    ConfigLayer(origin, Some(path), json, parse(json, path.toString), base)
 
   private def readObj(text: String, where: String): ujson.Obj =
     val parsed =
@@ -257,8 +259,8 @@ object Config:
       case o: ujson.Obj => o
       case _ => throw IllegalArgumentException(s"Config $where must be a JSON object")
 
-  private def parse(text: String, where: String): Config =
-    try read[Config](readObj(text, where))
+  private def parse(json: ujson.Obj, where: String): Config =
+    try read[Config](json)
     catch case e: Exception => throw IllegalArgumentException(s"Invalid config $where: ${e.getMessage}")
 
   /** Settings that are policy: a narrowing layer may only make these stricter,
@@ -304,7 +306,7 @@ object Config:
     val effective = ujson.Obj()
     for (k, v) <- everything.value do if !PolicyKeys.contains(k) then effective(k) = v
     for (k, v) <- granted.value do if PolicyKeys.contains(k) then effective(k) = v
-    val base = parse(ujson.write(effective), "the merged configuration")
+    val base = parse(effective, "the merged configuration")
     val settings = narrowing.foldLeft(base)(tighten)
     val rules = layers.flatMap(l => l.config.files.map(LayeredRule(_, base = l.base)))
     rules.foreach(validateRule)

@@ -111,24 +111,14 @@ object GlobMatcher:
     * canonical dotted-quad form without a DNS lookup. */
   private[atc] def literalIpAddress(value: String): Option[String] =
     val parts = value.split("\\.", -1).toList
-
-    def partValue(part: String): Option[Long] =
-      if part.nonEmpty && part.forall(char => char >= '0' && char <= '9') then
-        try Some(java.lang.Long.parseLong(part, 10))
-        catch case _: NumberFormatException => None
-      else None
-
-    val parsed = parts.foldRight(Option(List.empty[Long])) { (part, result) =>
-      for
-        number <- partValue(part)
-        tail <- result
-      yield number :: tail
-    }
+    // Decimal digits only (`toLongOption` would also take a sign), and no overflow.
+    val numbers = parts.filter(part => part.nonEmpty && part.forall(char => char >= '0' && char <= '9'))
+      .flatMap(_.toLongOption)
 
     if parts.isEmpty || parts.lengthIs > 4 then None
     else
       for
-        values <- parsed
+        values <- Option.when(numbers.lengthIs == parts.length)(numbers)
         lastMax = 1L << (8 * (5 - values.length))
         if values.init.forall(_ <= 255) && values.last < lastMax
         address = values.init.zipWithIndex.foldLeft(values.last) { case (current, (part, index)) =>

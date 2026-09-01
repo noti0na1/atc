@@ -32,7 +32,7 @@ class WindowsProcessIntegrationSuite extends munit.FunSuite:
     val cwd = Files.createTempDirectory("atc-win-cwd").nn.toRealPath().nn
     val bin = Files.createTempDirectory("atc-win-path").nn.toRealPath().nn
     val shadow = Files.writeString(cwd.resolve("tool.exe"), "not an executable").nn
-    val exe = Files.writeString(bin.resolve("tool.exe"), "not an executable").nn
+    Files.writeString(bin.resolve("tool.exe"), "not an executable")
     val cmd = Files.writeString(bin.resolve("tool.cmd"), "@exit /b 0\r\n").nn
     val environment = Map("PATH" -> bin.toString, "PATHEXT" -> ".CMD;.EXE")
     val resolved = WindowsExecutable.resolve(List("tool"), cwd, environment)

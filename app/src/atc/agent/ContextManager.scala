@@ -2,8 +2,6 @@ package atc.agent
 
 import atc.llm.{ChatModel, Completion, Msg, NativeTurn, ToolCall}
 
-import scala.collection.mutable.ListBuffer
-
 /** Context-window accounting for an agent conversation.
   *
   * The manager owns the state that spans model rounds: calibration against the
@@ -69,54 +67,45 @@ final class ContextManager:
     prepare(fixedTokens, history, ModelContext.from(model))
 
   def prepare(fixedTokens: Long, history: List[Msg], model: ModelContext): Preparation =
-    var preparedHistory = history
-    var dropped = 0
-    val warnings = ListBuffer[String]()
-
-    model.contextWindow.foreach { window =>
-      // Leave both estimation slack and, when configured, the full output
-      // allowance. A maxTokens larger than the window intentionally leaves no
-      // room and triggers the actionable warning below.
+    // Leave both estimation slack and, when configured, the full output
+    // allowance. A maxTokens larger than the window intentionally leaves no
+    // room and triggers the actionable warning below.
+    val allowance = model.contextWindow.map { window =>
       val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
-      val availableInput = window.toLong - reserve
-      val room = (availableInput / tokenCalibration).toLong - fixedTokens
-      val fitted = ContextManager.fitToContext(preparedHistory, room, estimateFor(_, model))
-      preparedHistory = fitted._1
-      dropped = fitted._2
-
-      if dropped > 0 then
-        contextDropped += dropped
-        preparedHistory = preparedHistory match
-          case Msg.User(text) :: rest =>
-            Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}\n\n$text") :: rest
-          case other => other
-        warnings += AgentMessages.contextDroppedWarning(model.alias, window, dropped)
+      Allowance(window, reserve, window.toLong - reserve)
     }
+    val (fitted, dropped) = allowance match
+      case Some(a) => fitToContext(history, (a.input / tokenCalibration).toLong - fixedTokens, estimateFor(_, model))
+      case None => (history, 0)
+    contextDropped += dropped
+    val preparedHistory = fitted match
+      case Msg.User(text) :: rest if dropped > 0 =>
+        Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}\n\n$text") :: rest
+      case other => other
 
     // Estimate the final history once; the overflow check below reuses the
     // same figure instead of scanning the messages a second time.
     val estimatedInput = fixedTokens + preparedHistory.map(estimateFor(_, model)).sum
     val calibratedInput = (estimatedInput * tokenCalibration).round
 
-    model.contextWindow.foreach { window =>
-      val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
-      val availableInput = window.toLong - reserve
-      if calibratedInput > availableInput && !contextOverflowWarned then
+    val droppedWarning =
+      allowance.filter(_ => dropped > 0).map(a => AgentMessages.contextDroppedWarning(model.alias, a.window, dropped))
+    val overflowWarning =
+      allowance.filter(a => calibratedInput > a.input && !contextOverflowWarned).map { a =>
         contextOverflowWarned = true
-        val fixedInput = (fixedTokens * tokenCalibration).round
         val cause =
-          if fixedInput > availableInput then AgentMessages.ContextOverflowCause.FixedPrompt
+          if (fixedTokens * tokenCalibration).round > a.input then AgentMessages.ContextOverflowCause.FixedPrompt
           else AgentMessages.ContextOverflowCause.RetainedExchange
-        warnings += AgentMessages.contextOverflowWarning(
+        AgentMessages.contextOverflowWarning(
           model.alias,
-          window,
+          a.window,
           cause,
           calibratedInput,
-          availableInput,
-          reserve,
+          a.input,
+          a.reserve,
           model.maxOutputTokens,
         )
-    }
+      }
 
     Preparation(
       history = preparedHistory,
@@ -124,7 +113,7 @@ final class ContextManager:
       calibratedInput = calibratedInput,
       dropped = dropped,
       totalDropped = contextDropped,
-      warnings = warnings.toList,
+      warnings = droppedWarning.toList ++ overflowWarning,
     )
 
 object ContextManager:
@@ -145,6 +134,9 @@ object ContextManager:
 
   final case class ContextUsage(tokens: Long, window: Option[Int])
 
+  /** A model's window, the part reserved for the answer, and what is left for the request. */
+  private final case class Allowance(window: Int, reserve: Long, input: Long)
+
   final case class Preparation(
     history: List[Msg],
     estimatedInput: Long,
@@ -159,22 +151,20 @@ object ContextManager:
   def estimateTokens(text: String): Long = (text.length + 3) / 4
 
   /** Estimate a neutral message, including per-message framing. */
-  def estimateTokens(msg: Msg): Long = msg match
-    case Msg.User(text) => estimateTokens(text) + 4
-    case Msg.Continuation(text) => estimateTokens(text) + 4
-    case Msg.Assistant(text, calls, native) => estimateAssistantTokens(text, calls, native)
-    case Msg.ToolResults(results) => results.map(result => estimateTokens(result.output) + 12).sum + 4
+  def estimateTokens(msg: Msg): Long = estimateTokens(msg, replayed = _ => true)
 
   /** Model-aware estimate: native replay data from another model is not sent. */
-  def estimateTokens(msg: Msg, providerKey: String, modelRef: String): Long = msg match
-    case Msg.User(text) => estimateTokens(text) + 4
-    case Msg.Continuation(text) => estimateTokens(text) + 4
-    case Msg.Assistant(text, calls, native) =>
-      estimateAssistantTokens(text, calls, native.filter(_.isFor(providerKey, modelRef)))
-    case Msg.ToolResults(results) => results.map(result => estimateTokens(result.output) + 12).sum + 4
+  def estimateTokens(msg: Msg, providerKey: String, modelRef: String): Long =
+    estimateTokens(msg, replayed = _.isFor(providerKey, modelRef))
 
   private def estimateFor(msg: Msg, model: ModelContext): Long =
     estimateTokens(msg, model.providerKey, model.ref)
+
+  private def estimateTokens(msg: Msg, replayed: NativeTurn => Boolean): Long = msg match
+    case Msg.User(text) => estimateTokens(text) + 4
+    case Msg.Continuation(text) => estimateTokens(text) + 4
+    case Msg.Assistant(text, calls, native) => estimateAssistantTokens(text, calls, native.filter(replayed))
+    case Msg.ToolResults(results) => results.map(result => estimateTokens(result.output) + 12).sum + 4
 
   private def estimateAssistantTokens(
     text: String,
@@ -197,35 +187,13 @@ object ContextManager:
     budget: Long,
     estimate: Msg => Long = ContextManager.estimateTokens,
   ): (List[Msg], Int) =
-    val msgs = history.toArray
-    val n = msgs.length
-    val prefix = new Array[Long](n + 1)
-    var i = 0
-    while i < n do
-      prefix(i + 1) = prefix(i) + estimate(msgs(i))
-      i += 1
-    val total = prefix(n)
-    if total <= budget then (history, 0)
+    val sizes = history.map(estimate)
+    val total = sizes.sum
+    val users = history.zipWithIndex.collect { case (Msg.User(_), i) => i }
+    if total <= budget || users.lastOption.forall(_ == 0) then (history, 0)
     else
-      val users = scala.collection.mutable.ArrayBuffer[Int]()
-      i = 0
-      while i < n do
-        msgs(i) match
-          case Msg.User(_) => users += i
-          case _ => ()
-        i += 1
-      val lastUser = users.lastOption.getOrElse(-1)
-      if lastUser <= 0 then (history, 0)
-      else
-        // The smallest user boundary whose retained tail fits the budget;
-        // when none does, drop everything before the last user message.
-        val needed = total - budget
-        var start = lastUser
-        var k = 0
-        var found = false
-        while k < users.length && !found do
-          if prefix(users(k)) >= needed then
-            start = users(k)
-            found = true
-          k += 1
-        (msgs.drop(start).toList, start)
+      // The earliest user boundary that sheds enough (`before(i)` is the size of
+      // everything in front of message `i`); when none does, the last one.
+      val before = sizes.scanLeft(0L)(_ + _).toVector
+      val start = users.find(before(_) >= total - budget).getOrElse(users.last)
+      (history.drop(start), start)

@@ -97,12 +97,4 @@ object AgentMessages:
       "Shorten the request or configure a larger contextWindow/maxTokens combination."
 
   private def longestBacktickRun(text: String): Int =
-    var longest = 0
-    var current = 0
-    text.foreach { char =>
-      if char == '`' then
-        current += 1
-        longest = longest.max(current)
-      else current = 0
-    }
-    longest
+    "`+".r.findAllIn(text).map(_.length).maxOption.getOrElse(0)

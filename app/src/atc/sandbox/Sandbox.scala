@@ -32,9 +32,9 @@ object Sandbox:
     * system property; the Windows batch launcher uses the environment because
     * java.exe cannot carry every Unicode path through its legacy argv encoding. */
   lazy val libraryClasspath: Seq[Path] =
-    val configured = ProcessEnvironment.get(ClasspathEnvironment).map(_.trim).filter(_.nonEmpty)
-      .map(ClasspathEnvironment -> _)
-      .orElse(sys.props.get(ClasspathProperty).map(_.trim).filter(_.nonEmpty).map(ClasspathProperty -> _))
+    def setting(source: String, value: Option[String]) = value.map(_.trim).filter(_.nonEmpty).map(source -> _)
+    val configured = setting(ClasspathEnvironment, ProcessEnvironment.get(ClasspathEnvironment))
+      .orElse(setting(ClasspathProperty, sys.props.get(ClasspathProperty)))
     configured match
       case Some((source, cp)) =>
         val paths = cp.split(Platform.pathListSeparator).toSeq.filter(_.nonEmpty)

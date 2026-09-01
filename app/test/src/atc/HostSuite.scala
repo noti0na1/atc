@@ -551,7 +551,7 @@ class HostSuite extends munit.FunSuite:
     assert(text.contains("early\n") && text.contains("err\n") && text.endsWith("late\n"), text)
     // Through the host, the port hears the command line and its output.
     val env = TestEnv(commands = List("sh *"))
-    import env.{host as h, given}
+    import env.host as h
     h.exec("sh", List("-c", "echo a; sleep 1.3; echo b"))
     assertEquals(env.liveCommands.toList, List("sh -c \"echo a; sleep 1.3; echo b\""))
     assertEquals(env.liveCommandOut.toString, "a\nb\n")

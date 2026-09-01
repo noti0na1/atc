@@ -127,7 +127,7 @@ object InputPredictor:
       case Msg.Assistant(t, _, _) if t.trim.nonEmpty => "Agent: " + ujson.write(cut(t))
     }
     // Roughly the last N exchanges: an exchange is a user line plus the answers to it.
-    val keep = texts.reverse.take(Exchanges * 2).reverse
+    val keep = texts.takeRight(Exchanges * 2)
     if keep.isEmpty then "" else keep.mkString("\n\n") + "\n\nNext user message:"
 
   private def cut(text: String): String =

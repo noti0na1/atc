@@ -211,22 +211,25 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   def run(code: String): ExecutionResult =
     clock.reset() // per run, whichever way it ends (callers read `clock.paused` afterwards)
-    // Safe mode resolves aliases before admitting an API, so ordinary Scala
-    // import aliases are useful and safe there. Without safe mode the lexical
-    // validator is the remaining barrier and aliases must not hide a forbidden API.
-    val violations = CodeValidator.validate(code, strictImportAliases = !config.safeMode)
     if closed then ExecutionResult(false, "", Some("The sandbox session is closed; start a new one."))
-    else if violations.nonEmpty then ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
     else
-      stopRequested = false
-      ParseResult(code.stripTrailing() + "\n")(using state) match
-        case p: Parsed => dispatch(p)
-        case cmd @ (_: TypeOf | _: DocOf | Imports) => dispatch(cmd)
-        case _: Command => ExecutionResult(false, "", Some("Only :type, :doc, and :imports REPL commands are allowed."))
-        case Newline => ExecutionResult(true, "")
-        case SyntaxErrors(_, errors, _) =>
-          ExecutionResult(false, "", Some("Syntax error:\n" + formatDiagnostics(errors)))
-        case other => ExecutionResult(false, "", Some(s"Unexpected parse result: $other"))
+      // Safe mode resolves aliases before admitting an API, so ordinary Scala
+      // import aliases are useful and safe there. Without safe mode the lexical
+      // validator is the remaining barrier and aliases must not hide a forbidden API.
+      CodeValidator.validate(code, strictImportAliases = !config.safeMode) match
+        case Nil => parseAndRun(code)
+        case violations => ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
+
+  private def parseAndRun(code: String): ExecutionResult =
+    stopRequested = false
+    ParseResult(code.stripTrailing() + "\n")(using state) match
+      case p: Parsed => dispatch(p)
+      case cmd @ (_: TypeOf | _: DocOf | Imports) => dispatch(cmd)
+      case _: Command => ExecutionResult(false, "", Some("Only :type, :doc, and :imports REPL commands are allowed."))
+      case Newline => ExecutionResult(true, "")
+      case SyntaxErrors(_, errors, _) =>
+        ExecutionResult(false, "", Some("Syntax error:\n" + formatDiagnostics(errors)))
+      case other => ExecutionResult(false, "", Some(s"Unexpected parse result: $other"))
 
   private def dispatch(res: ParseResult): ExecutionResult =
     config.executionTimeoutMs match

@@ -28,6 +28,12 @@ class TextFilesSuite extends munit.FunSuite:
     val text = "first\r\nsecond\rthird\n"
     assertEquals(TextFiles.firstLineEnding(text), Some(TextFiles.LineEnding(5, "\r\n")))
     assertEquals(TextFiles.lastLineEnding(text), Some(TextFiles.LineEnding(19, "\n")))
+    assertEquals(TextFiles.lastLineEnding("a\n\n"), Some(TextFiles.LineEnding(2, "\n")))
+    assertEquals(TextFiles.lastLineEnding("a\r\r"), Some(TextFiles.LineEnding(2, "\r")))
+    assertEquals(TextFiles.lastLineEnding("a\r\n"), Some(TextFiles.LineEnding(1, "\r\n")))
+    assertEquals(TextFiles.lastLineEnding("\n"), Some(TextFiles.LineEnding(0, "\n")))
+    assertEquals(TextFiles.lastLineEnding("abc"), None)
+    assertEquals(TextFiles.firstLineEnding(""), None)
 
   test("appending follows the existing line-ending convention and preserves a BOM"):
     for ending <- List("\n", "\r\n", "\r") do

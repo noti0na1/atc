@@ -59,24 +59,17 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     tools.foreach(t => b.addTool(functionTool(t)))
     if webSearch then b.addTool(Tool.ofWebSearch(WebSearchTool.builder().`type`(WebSearchTool.Type.WEB_SEARCH).build()))
     val input = List.newBuilder[ResponseInputItem]
+    def message(role: EasyInputMessage.Role, text: String): ResponseInputItem =
+      ResponseInputItem.ofEasyInputMessage(EasyInputMessage.builder().role(role).content(text).build())
     history.foreach {
-      case Msg.User(text) =>
-        input += ResponseInputItem.ofEasyInputMessage(
-          EasyInputMessage.builder().role(EasyInputMessage.Role.USER).content(text).build()
-        )
-      case Msg.Continuation(text) =>
-        input += ResponseInputItem.ofEasyInputMessage(
-          EasyInputMessage.builder().role(EasyInputMessage.Role.USER).content(text).build()
-        )
+      case Msg.User(text) => input += message(EasyInputMessage.Role.USER, text)
+      case Msg.Continuation(text) => input += message(EasyInputMessage.Role.USER, text)
       case Msg.Assistant(text, calls, native) =>
         native match
           case Some(n) if n.isFor(providerKey, ref) && n.payload.isInstanceOf[java.util.List[?]] =>
             input ++= outputItemsToInput(n.payload.asInstanceOf[java.util.List[ResponseOutputItem]])
           case _ =>
-            if text.nonEmpty then
-              input += ResponseInputItem.ofEasyInputMessage(
-                EasyInputMessage.builder().role(EasyInputMessage.Role.ASSISTANT).content(text).build()
-              )
+            if text.nonEmpty then input += message(EasyInputMessage.Role.ASSISTANT, text)
             calls.foreach { c =>
               input += ResponseInputItem.ofFunctionCall(
                 ResponseFunctionToolCall.builder().callId(c.id).name(c.name).arguments(c.arguments).build()

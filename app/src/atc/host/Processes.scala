@@ -297,10 +297,9 @@ object Processes:
 
     /** Start the stages (one `ProcessBuilder` each; the caller may already have
       * redirected the first's input / the last's output to files), feed `stdin`
-      * to the first (closing it either way when it is empty... no: closing it
-      * only when `closeStdinAfter`: a foreground command gets EOF at once, a
-      * spawned one keeps its stdin open for `send`), drain the streams into
-      * buffers, and watch for the exit. */
+      * to the first and close it if `closeStdinAfter` (a foreground command gets
+      * EOF at once, a spawned one keeps its stdin open for `send`), drain the
+      * streams into buffers, and watch for the exit. */
     def start(
       pbs: List[ProcessBuilder],
       stageLines: List[String],
@@ -400,7 +399,6 @@ object Processes:
       if !m.awaitExit(firstWait) then
         m.goLive()
         if !m.awaitExit(timeoutMs - firstWait) then
-          m.kill()
           val (out, err) = m.tails
           throw RuntimeException(
             s"Process '$name' timed out after ${timeoutMs}ms (raise it with ExecOptions(timeoutMs = ...)); output so far:\n$out${
@@ -409,6 +407,6 @@ object Processes:
           )
       m.result()
     catch
-      case e: Exception =>
+      case e: Exception => // a timeout, or an interrupt while waiting: the command must not outlive the call
         m.kill()
         throw e

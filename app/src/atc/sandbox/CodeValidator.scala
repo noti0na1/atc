@@ -480,7 +480,7 @@ object CodeValidator:
     // character offsets/newlines remain stable for diagnostics.
     val stripped = stripLiteralsAndComments(code).replace('`', ' ')
     val originalLines = code.linesIterator.toArray
-    val stringStrippedLines = stripStringLiteralsOnly(code).replace('`', ' ').linesIterator.toArray
+    val stringStripped = stripStringLiteralsOnly(code).replace('`', ' ').linesIterator.zipWithIndex.toList
     val logical = logicalLines(stripped.linesIterator.toArray)
     /** The violation of `pattern` on line `idx`, quoting the original source. */
     def violation(pattern: Forbidden, idx: Int, fallback: String): Violation =
@@ -488,10 +488,7 @@ object CodeValidator:
     val perLine =
       for
         pattern <- forbidden
-        lines =
-          if stringStrippedPatterns.contains(pattern.id)
-          then stringStrippedLines.zipWithIndex.toList
-          else logical
+        lines = if stringStrippedPatterns.contains(pattern.id) then stringStripped else logical
         (line, idx) <- lines
         if pattern.regex.findFirstIn(line).isDefined
       yield violation(pattern, idx, line)

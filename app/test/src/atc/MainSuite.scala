@@ -92,7 +92,7 @@ class MainSuite extends munit.FunSuite:
   test("scripted runs deny permission requests without prompting unless approve-all is explicit"):
     val request = ExecRequest(List("git status"), "test")
     var asked = 0
-    def interactive(request: atc.perms.PermissionRequest): Decision = { asked += 1; Decision.AllowOnce }
+    val interactive: atc.perms.PermissionRequest => Decision = _ => { asked += 1; Decision.AllowOnce }
     val scripted = App.permissionPrompter(Cli.Args(prompt = Some("work")), interactive)
     val denied = intercept[SecurityException](scripted.ask(request))
     assert(denied.getMessage.nn.contains("non-interactive run cannot ask"), denied.getMessage)
