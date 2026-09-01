@@ -74,7 +74,44 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).read().length"""))
     assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).write("x")"""), "read-only")
 
+  test("every exec, execOutput and spawn overload requires a full file system as well as a full Exec"):
+    val echo = ujson.write(echoCommand)
+    val calls = List(
+      "ExecCommand" -> s"exec($echo)",
+      "ExecArgs" -> s"exec($echo, Nil)",
+      "ExecWorkingDir" -> s"exec($echo, Nil, \".\")",
+      "ExecOptions" -> s"exec($echo, Nil, ExecOptions())",
+      "ExecOutputCommand" -> s"execOutput($echo)",
+      "ExecOutputArgs" -> s"execOutput($echo, Nil)",
+      "ExecOutputOptions" -> s"execOutput($echo, Nil, ExecOptions())",
+      "SpawnCommand" -> s"spawn($echo)",
+      "SpawnOptions" -> s"spawn($echo, ExecOptions())",
+    )
+    for (name, call) <- calls do
+      assertFails(
+        run(s"""def reject$name(rofs: FileSystem): Unit = { $call(using ex, rofs); () }; 1"""),
+        "read-only",
+      )
+      assertOk(run(s"""def allow$name(fullFs: FileSystem^): Unit = { $call(using ex, fullFs); () }; 1"""))
+
+  test("a read-only file-system view cannot write through command redirection"):
+    val target = env.root.resolve("read-only-redirection.txt").nn
+    val command = s"${ProcessFixture.command("echo", "blocked")} > ${ProcessFixture.line(target.toString)}"
+    assertFails(
+      run(s"""val rofs: FileSystem^{fs.rd} = fs; exec(${ujson.write(command)})(using ex, rofs)"""),
+      "read-only",
+    )
+    assert(!java.nio.file.Files.exists(target))
+
   // ── Deriving capabilities from `io` ─────────────────────────────
+
+  test("the agent-facing API consumes leaf capabilities, never the io root directly"):
+    val consumers = classOf[atc.lib.Interface].getMethods.toList
+      .filter(_.getParameterTypes.contains(classOf[atc.lib.IOCap]))
+      .map(_.getName)
+      .distinct
+      .sorted
+    assertEquals(consumers, Nil)
 
   test("the derivations are the sandbox's, not the agent's: unreachable from agent code"):
     // The preamble builds `fs`/`ex`/`net` from `io` through `Runtime`; agent code
@@ -90,22 +127,20 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
   test("Exec and Network have no read-only view at all, so commands and requests stay out of Classified.map"):
     // Unlike the file-system capabilities (Stateful), Exec/Network are exclusive-only:
     // the compiler refuses to form `ex.rd` / `net.rd`, and a bare `Exec`/`Network`
-    // cannot alias a capability either. Every API method demands `Exec^` / `Network^`.
+    // cannot alias a capability either. Commands demand `Exec^` plus `FileSystem^`,
+    // while network methods demand `Network^`.
     assertFails(run("""val rex: Exec^{ex.rd} = ex; 1"""), "cannot flow into capture set")
     assertFails(run("""val rn: Network^{net.rd} = net; 1"""), "cannot flow into capture set")
     assertOk(run("""val e: Exec = ex; 1""")) // a bare `Exec` type is `Exec^` (full), not a read-only view...
     assertFails(run(
-      """val e2: Exec = ex; val rofs2: FileSystem^{fs.rd} = fs; classify("s").map(s => exec("echo", List(s))(using e2, rofs2).stdout)"""
+      """val e2: Exec = ex; classify("s").map(s => exec("echo", List(s))(using e2, fs).stdout)"""
     )) // ...so it is just as unusable in map
-    assertFails(
-      run("""val rofs: FileSystem^{fs.rd} = fs; classify("s").map(s => exec("echo", List(s))(using ex, rofs).stdout)""")
-    )
     assertFails(
       run("""classify("s").map(s => { val r: Exec^{ex.rd} = ex; exec("echo", List(s))(using r, fs).stdout })""")
     )
     assertFails(run("""classify("u").map(u => httpGet(u)(using net))"""))
     assertFails(run(
-      """def viaDef(s: String)(using e: Exec^, f: FileSystem) = exec("echo", List(s))(using e, f).stdout; classify("s").map(viaDef)"""
+      """def viaDef(s: String)(using e: Exec^, f: FileSystem^) = exec("echo", List(s))(using e, f).stdout; classify("s").map(viaDef)"""
     ))
 
   test("a read-only view of fs can read and never write, even inside Classified.map"):
@@ -119,7 +154,10 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // meaningful "observe without acting" for running a command or a request.
     assertFails(run("""val e2: Exec^{ex.rd} = ex"""))
     assertFails(run("""val n2: Network^{net.rd} = net"""))
-    assertOk(run(s"""def f(using x: Exec) = exec(${ujson.write(echoCommand)}, List("hi")).exitCode; f(using ex)"""))
+    val echo = ujson.write(echoCommand)
+    assertOk(run(
+      s"""def f(using x: Exec, fullFs: FileSystem^) = exec($echo, List("hi"))(using x, fullFs).exitCode; f(using ex, fs)"""
+    ))
 
   // ── UserIO: talking to the user is a separate capability ────────
 

@@ -59,7 +59,11 @@
   ],
 
   "commands": [],
-  "denyCommands": ["rm -rf *", "sudo *"],
+  "denyCommands": [
+    "rm -rf *", "sudo",
+    "sh", "bash", "dash", "ash", "ksh", "ksh93", "mksh", "zsh", "csh", "tcsh", "fish",
+    "cmd", "powershell", "pwsh", "wsl", "git-bash"
+  ],
 
   "mode": "full",
   "safeMode": true,

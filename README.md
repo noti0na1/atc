@@ -217,8 +217,8 @@ away. Every effectful method demands the capability it needs as a `using` parame
 ```scala
 def read(path: String)(using FileSystem): String
 def write(path: String, content: String)(using FileSystem^): Unit
-def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult
-def httpGet(url: String)(using Network): String
+def exec(command: String, args: Seq[String])(using Exec^, FileSystem^): ProcessResult
+def httpGet(url: String)(using Network^): String
 def println(x: Any)(using UserIO^): Unit
 ```
 
@@ -230,7 +230,8 @@ holds the roots.
 ### Two roots
 
 The preamble binds one root for effects on the machine and one for talking to the human.
-Everything else is derived from the first:
+The sandbox derives the machine-effect leaves from the first, and each mode publishes only
+the leaves it permits:
 
 ```
                         ┌── fs:  FileSystem^{io}    read files; write with a full view
@@ -240,12 +241,18 @@ Runtime.rootIO  ──► io ─┼── ex:  Exec^{io}          run permitted 
 Runtime.rootUser ──► user: UserIO^                  println · print · ask · setTodos · chat
 ```
 
+`io` is the common capture root for every published machine-effect leaf. Local and full mode
+expose it as `IOCap^`; local simply omits `net`. The derivations are sandbox-internal, so
+holding the grouping root cannot manufacture a leaf that the mode did not put in scope.
+Command operations require both full leaves, `Exec^` and `FileSystem^`; every mode that
+publishes `ex` also publishes a full `fs` under the same root.
+
 | Capability | What it authorises | Where one comes from |
 |---|---|---|
 | `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
 | `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | the preamble's `fs` (derived from `io` by the sandbox; `val ro: FileSystem^{fs.rd} = fs` is a read-only view) |
 | `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
-| `Exec` | running commands | the preamble's `ex` (local and full mode) |
+| `Exec` | running commands, together with a full `FileSystem^` | the preamble's `ex` (local and full mode) |
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
 
@@ -293,8 +300,9 @@ Capabilities constrain *effects*. Confidential content follows a second, indepen
 of rules: `readClassified(path)` returns a `Classified[String]`, whose `map` and `flatMap`
 take a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
 untrusted outward channel needs a *full* one (`println`/`ask`/normal-model `chat` need
-`UserIO^`, `write` needs `FileSystem^`, `exec` needs `Exec`, `httpGet` needs `Network`), so none of them can appear
-inside a `map`. The agent can compute on a secret but never see it; `toString` is
+`UserIO^`, `write` needs `FileSystem^`, `exec` needs both `Exec^` and `FileSystem^`, and
+`httpGet` needs `Network^`), so none of them can appear inside a `map`. The agent can compute
+on a secret but never see it; `toString` is
 `Classified(***)`. There are only a few deliberate output paths: `println` (you see the
 value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
 `writeClassified` into a classified path, `classifiedChat` with the configured classified
@@ -347,11 +355,11 @@ file, a process, or the network:
 (`rs$line$3` is the preamble line that holds the `user` given; the `exec` and `write`
 attempts name the lines that hold `ex` and `fs`.) The read-only/full distinction matters
 here: **the same line compiles in one mode but not another** because the view of `fs`
-changes. In full mode, `fs` is the full view, so even a harmless read
+changes. In local and full modes, `fs` is the full view, so even a harmless read
 inside the `map` captures a full capability and is refused:
 
 ```scala
-> key.map(k => k + read("notes.md"))               // full mode: fs is the full view
+> key.map(k => k + read("notes.md"))               // local/full: fs is the full view
 Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 ```
 
@@ -379,16 +387,17 @@ agent can express at all, before the permission policy even comes up.
 | Mode | In scope | The agent can |
 |---|---|---|
 | **read-only** | `io: IOCap` (read-only), `fs: FileSystem^{io.rd}`, `user: UserIO^` | read files, report, ask |
-| **local** | `io: IOCap` (read-only), `fs: FileSystem^`, `ex: Exec^`, `user: UserIO^` | also write files and run commands |
+| **local** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `user: UserIO^` | also write files and run commands |
 | **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `net: Network^{io}`, `user: UserIO^` | also reach the network |
 
 In read-only mode, a write is an `update` call through a read-only view (the error shown
-[above](#what-it-looks-like)); in local mode there is no full `IOCap` to derive a `Network`
-from, so a network call simply has no given to resolve. Either way a mode can withdraw the
-agent's access to the machine while leaving the conversation intact. The agent can therefore
-always explain what it *would* have done; the system prompt directs it to do so instead of
-trying to bypass the mode. The policy enforces the same three levels again at run time, so
-the type check is not the only safeguard.
+[above](#what-it-looks-like)); in local mode the preamble deliberately omits the `Network`
+leaf, so a network call simply has no given to resolve. The derivation API is internal: full
+`io` records the common capture root but is not an agent-callable factory for `net`. Either
+way a mode can withdraw an effect while leaving the conversation intact. The agent can
+therefore always explain what it *would* have done; the system prompt directs it to do so
+instead of trying to bypass the mode. The policy enforces the same three levels again at run
+time, so the type check is not the only safeguard.
 
 Switch modes with `/mode` (cycles read-only → local → full), **Shift-Tab** on an empty
 prompt, `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts a
@@ -418,7 +427,10 @@ not. `locked` rules cannot be widened at all, and a
 `denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
 leave the block (capture checking), and the host closes the permission scope when the block
 exits. `requestFiles` works in every mode: the file system it lends the block is exactly as
-capable as the one you already hold, so the same call site compiles everywhere.
+capable as the one you already hold. Read-only callbacks therefore remain read-only;
+command execution, which requires `FileSystem^`, still compiles only in local/full mode.
+Likewise, `requestExec` widens only `Exec^`: use a nested `requestFiles` block as well when
+the command needs a filesystem permission that is not already configured.
 
 ## Configuration
 
@@ -437,8 +449,8 @@ In the paths below, `~` is the user home; on Windows that is normally
 compiled into the program: anything not granted by a configuration is denied. The
 [starting config](app/resources/atc/config-template.json) written on the first run protects
 without granting access: it lists the providers, classifies common credential paths, puts
-`.atc` itself out of reach, refuses `rm -rf *` and `sudo *`, and grants no files, commands, or
-host. Edit it to grant things machine-wide.
+`.atc` itself out of reach, refuses `rm -rf *`, `sudo`, and common bare Unix/Windows shell
+names, and grants no files, commands, or host. Edit it to grant things machine-wide.
 
 **A directory is workable because a config says so.** The
 [project config](app/resources/atc/project-template.json) that `atc --init` writes (or the
@@ -491,7 +503,11 @@ the final authority. The exact rules are in
     { "path": "~/notes",  "access": "read", "locked": true }
   ],
   "commands": ["git status", "git diff*", "git log*"],
-  "denyCommands": ["git push*", "rm -rf *", "sudo *"],
+  "denyCommands": [
+    "git push*", "rm -rf *", "sudo",
+    "sh", "bash", "dash", "ash", "ksh", "ksh93", "mksh", "zsh", "csh", "tcsh", "fish",
+    "cmd", "powershell", "pwsh", "wsl", "git-bash"
+  ],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
   "denyHosts": ["*.internal"],
   "safeMode": true,
@@ -570,6 +586,10 @@ subcommands you mean rather than `git *`. `hosts` are glob patterns on host name
 `http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
 `denyHosts` use the same syntax: **a deny rule overrides every allow rule**, including a
 session grant, an open `request*` scope, and `--approve-all`.
+
+The starting shell denials are bare names: `"bash"` blocks both `bash` and `bash -c ...`,
+but not an explicit `/bin/bash`, a wrapper, or a renamed interpreter. Keep command grants
+narrow; no finite deny list can classify every program that might execute code.
 
 Command availability is platform-specific: `./mill`, `ls`, `cat`, and `bash` are not normal
 Windows commands; use an installed executable or the project's `mill.bat`. `exec` does not

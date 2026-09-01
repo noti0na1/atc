@@ -55,6 +55,44 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
       if allowed(m) then assert(r.success, s"[${m.label}] expected success for `$code`:\n${r.output}\n${r.error}")
       else assert(!r.success, s"[${m.label}] expected rejection for `$code`, got:\n${r.output}")
 
+  // ── Capability hierarchy ──────────────────────────────────────
+
+  test("full and local system capabilities retain the full io root in their capture types"):
+    val rooted =
+      """val root: IOCap^ = io
+        |val files: FileSystem^{io} = fs
+        |val commands: Exec^{io} = ex
+        |files.access("a.txt").read().length + commands.hashCode + root.hashCode""".stripMargin
+    assertOk(full.run(rooted))
+    assertOk(local.run(rooted))
+    assertOk(full.run("""val network: Network^{io} = net; network.hashCode"""))
+
+  test("read-only system capabilities retain the read-only io root in their capture types"):
+    assertOk(readOnly.run(
+      """val root: IOCap^{io.rd} = io
+        |val files: FileSystem^{io.rd} = fs
+        |files.access("a.txt").read().length + root.hashCode""".stripMargin
+    ))
+    assertFails(readOnly.run("""val root: IOCap^ = io; root.hashCode"""), "read-only")
+
+  test("the preamble declares one consistent io-rooted system capability hierarchy"):
+    val fullChunks = ReplSession.preambleChunks(Mode.Full)
+    val localChunks = ReplSession.preambleChunks(Mode.Local)
+    val readOnlyChunks = ReplSession.preambleChunks(Mode.ReadOnly)
+
+    for chunks <- List(fullChunks, localChunks) do
+      assert(chunks.contains("@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO"))
+      assert(chunks.contains("@assumeSafe given fs: (FileSystem^{io}) = atc.lib.Runtime.fileSystem"))
+      assert(chunks.contains("@assumeSafe given ex: (Exec^{io}) = atc.lib.Runtime.processes"))
+    assert(fullChunks.contains("@assumeSafe given net: (Network^{io}) = atc.lib.Runtime.network"))
+    assert(!localChunks.exists(_.contains("given net:")))
+
+    assert(readOnlyChunks.contains("@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO"))
+    assert(readOnlyChunks.contains(
+      "@assumeSafe given fs: (FileSystem^{io.rd}) = atc.lib.Runtime.readOnlyFileSystem"
+    ))
+    assert(!readOnlyChunks.exists(chunk => chunk.contains("given ex:") || chunk.contains("given net:")))
+
   // ── Reading and reporting work everywhere ───────────────────────
 
   test("reading files works in every mode"):
@@ -133,9 +171,11 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     onlyIn(canNet, """requestNetwork(Set("example.com")) { 1 }""")
 
   test("local mode: there is no Network capability, and the derivation is out of reach"):
-    assertFails(local.run("""val n: Network^ = net; 1"""))
+    assertFails(local.run("""val n: Network^{io} = net; 1"""))
     assertFails(local.run("""def get(): String = httpGet("http://example.com"); 1"""))
-    assertFails(local.run("""atc.lib.Runtime.network(using io)"""))
+    assertFails(local.run("""atc.lib.Runtime.fileSystem(using io)"""), "atc-runtime")
+    assertFails(local.run("""atc.lib.Runtime.processes(using io)"""), "atc-runtime")
+    assertFails(local.run("""atc.lib.Runtime.network(using io)"""), "atc-runtime")
 
   // ── requestFiles adapts to the mode ─────────────────────────────
 
@@ -189,12 +229,13 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
 
   // ── A pure Classified.map may still read ────────────────────────
 
-  test("read-only mode: a pure map over classified data may read files"):
+  test("only read-only mode may capture the ambient fs to read inside a pure map"):
     // `Classified.map` admits read-only captures (`->{any.rd}`), and in read-only
     // mode the ambient `fs` is itself read-only, so reading inside a map is
-    // allowed, while every outward channel stays rejected (see CapabilitySuite).
-    assertOk(readOnly.run("""classify("x").map(s => read("a.txt").length + s.length)"""))
-    assertOk(readOnly.run("""classify("x").map(s => ls(".").size)"""))
+    // allowed. Local/full retain full `fs: FileSystem^{io}`, so even a read
+    // through their ambient capability remains excluded from the pure callback.
+    onlyIn(Set(Mode.ReadOnly), """classify("x").map(s => read("a.txt").length + s.length)""")
+    onlyIn(Set(Mode.ReadOnly), """classify("x").map(s => ls(".").size)""")
     assertFails(readOnly.run("""classify("s").map(s => { println(s); s })"""))
 
   // ── Mode plumbing: config and command line ──────────────────────

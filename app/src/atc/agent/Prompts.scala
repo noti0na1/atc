@@ -24,18 +24,21 @@ object Prompts:
     case Mode.Full =>
       """|Sandbox mode: FULL. In scope: `given io: IOCap^` (the full root capability), `given fs: FileSystem^{io}`
          |(read + write), `given ex: Exec^{io}` (commands), `given net: Network^{io}` (network), each within the
-         |permissions below; `request*` blocks widen them.""".stripMargin
+         |permissions below. The separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`;
+         |`request*` blocks widen the relevant leaf capability.""".stripMargin
     case Mode.Local =>
-      """|Sandbox mode: LOCAL, meaning files and commands but no network. In scope: `given io: IOCap` (a read-only view of the
-         |root: printing, asking, TODOs, `chat` work), `given fs: FileSystem^` (read + write), `given ex: Exec^`
-         |(commands). There is no `Network` and no full `IOCap^` to derive one from: `httpGet`/`requestNetwork` do
-         |not compile. Tell the user to switch to full mode (`/mode full`) if the task needs the network.""".stripMargin
+      """|Sandbox mode: LOCAL, meaning files and commands but no network. In scope: `given io: IOCap^` (the full machine-effect
+         |root), `given fs: FileSystem^{io}` (read + write), and `given ex: Exec^{io}` (commands). The sandbox deliberately
+         |does not provide a `Network`; its derivations are internal, so `httpGet`/`requestNetwork` do not compile even though
+         |`io` is full. The separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`. Tell the user to
+         |switch to full mode (`/mode full`) if the task needs the network.""".stripMargin
     case Mode.ReadOnly =>
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the
-         |root: printing, asking, TODOs, `chat` work) and `given fs: FileSystem^{io.rd}` (read-only). Writes,
-         |`exec`, network and writes inside `requestFiles` do not compile ("... cannot subsume a read-only capture set" /
-         |"Cannot call update method"); `requestFiles(path, Access.Read, reason) { ... }` can still ask to read more (it
-         |grants a read-only file system here, matching your `fs`).
+         |machine-effect root) and `given fs: FileSystem^{io.rd}` (read-only). The separate `given user: UserIO^` handles
+         |reporting, questions, TODOs and `chat`. Writes, `exec`, network and writes inside `requestFiles` do not compile
+         |("... cannot subsume a read-only capture set" / "Cannot call update method");
+         |`requestFiles(path, Access.Read, reason) { ... }` can still ask to read more (it grants a read-only file system here,
+         |matching your `fs`).
          |Do not try to work around this: explain what you would change and let the user switch to local or
          |full mode (`/mode local`, `/mode full`) if they want you to edit files.""".stripMargin
 
@@ -162,7 +165,8 @@ object Prompts:
        |- Capability types carry a read/write mode (the API header explains `^`, `update def` and
        |  `.rd`): a helper that writes must say `(using fs: FileSystem^)`, and
        |  `val ro: FileSystem^{fs.rd} = fs` is a read-only view for code that must not write (it can
-       |  also read files inside `Classified.map`, where the full `fs` may not be captured).
+       |  also read files inside `Classified.map`, where the full `fs` may not be captured). A helper
+       |  that runs commands must require both `(using ex: Exec^, fs: FileSystem^)`.
        |- Prefer the path-based helpers (`read`, `write`, `ls`, `walk`, `exists`, ...) over
        |  `access(...)` handles. A top-level `val` holding a capturing value (`FileEntry`, `Process`)
        |  needs an explicit type (`val e: FileEntry^{fs} = access("x")`, `val p: Process^{ex} = spawn("...")`);

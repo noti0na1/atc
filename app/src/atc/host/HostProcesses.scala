@@ -7,7 +7,13 @@ import atc.perms.ScopeId
 import java.nio.file.Path
 import scala.jdk.CollectionConverters.*
 
-/** Command execution and spawned-process lifecycle supplied by [[Host]]. */
+/** Command execution and spawned-process lifecycle supplied by [[Host]].
+  *
+  * This implementation module is compiled outside capture checking, so its
+  * erased override signatures use plain capability types. The agent-facing
+  * [[atc.lib.Interface]] contract requires full `Exec^` and `FileSystem^` for
+  * `exec`, `execOutput`, and `spawn`.
+  */
 private[host] trait HostProcesses:
   self: Host =>
 

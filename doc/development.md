@@ -149,13 +149,15 @@ types, and the `Interface` trait. The source of that file is bundled into the sy
 (`Prompts.interfaceSource`, also what `/interface` prints), so wording there is prompt
 wording. When you add an API method: declare it in `Interface.scala` (`@assumeSafe`),
 implement it in `Host`, and remember the prompt. Plain signatures in `Host` may override the
-capture-checked ones.
+capture-checked ones. Keep `Interface.scala` comments limited to observable contracts and
+guidance the agent needs to write valid code; implementation rationale, compiler workarounds,
+TODOs and contributor notes belong in this document or beside the implementation.
 
 The REPL preamble (`ReplSession.preambleChunks(mode)`) binds `atc.lib.Runtime.current` as
 `api`, `export`s it, and defines the top-level `given`s for the mode. It is loaded as
 **several REPL rounds, one per given** (`init` loops over the chunks): each given then lands
 in its own line-wrapper object, so a `Classified.map` that reads a file captures only the
-`fs` wrapper instead of the always-full `user`/`io` ones. The givens must stay *top-level*
+`fs` wrapper instead of the separate `user`/`io` wrappers. The givens must stay *top-level*
 (not fields of `object api`): a capability field would force `object api` itself to be a
 capability, and the `@untrackedCaptures` workaround stops uses being charged, which reopens
 the default-argument leak described below.
@@ -189,6 +191,11 @@ runs the stages with real pipes. Each stage is checked independently against the
 patterns and deny list, and the `requestExec` hint identifies missing permissions. Input
 and output redirections pass through the normal file checks and reject classified paths.
 The pipeline uses pipefail-style exit codes and labels standard error by stage.
+
+The agent-facing `exec`, `execOutput`, and `spawn` overloads require both full `Exec^` and
+full `FileSystem^`. Modes issue those full leaves together under `io`; requiring both
+also reflects that the command grammar can write through output redirection even when a
+particular invocation only reads its working directory.
 
 Arguments in `args: Seq[String]` are appended verbatim, while
 `ExecOptions(workingDir, timeoutMs, stdin)` controls the remaining behavior. `exec` returns
@@ -345,28 +352,33 @@ cannot write, for helpers, or for reading files inside `Classified.map` where th
 may not be captured (what the API's `readOnlyFileSystem` used to hand out; it now lives in
 `Derivations`, for the read-only mode's preamble only).
 
-**Two roots.** `IOCap` derives `fs`/`ex`/`net` and is read-only in local and read-only mode
-(so no writable `fs`, `Exec` or `Network` can be derived from it); `UserIO` is *always* full
-(`given user: UserIO^`) and is what `println`/`print`/`printf`/`ask`/`setTodos`/`markTodo`,
-normal-model `chat(String)` and every `request*` take, so reporting and permission prompts work in every
-mode while those effects stay out of `Classified.map`. `todos` takes a read-only `UserIO`.
-`Exec`/`Network` are plain `ExclusiveCapability` (no read-only view) derived only from a
-full `IOCap^`. Why `UserIO` is not derived from `IOCap`: a mode withdraws the machine
-(`IOCap` becomes read-only) and leaves the conversation intact, so the agent can always say
-what it would have done. The local-mode network error is the model of this: `network` is
-`def network(using io: IOCap^): Network^{io}`, there is no full `IOCap` to derive one
-from, so `httpGet` simply has no given to resolve:
+**Two roots.** `IOCap` is the common capture root for the machine-effect leaves
+`fs`/`ex`/`net`. Local and full mode expose `given io: IOCap^`; their writable `fs` and `ex`
+are captured by that same `io`, while only full mode publishes `net`. Read-only mode exposes
+the reader projection `given io: IOCap` and `fs: FileSystem^{io.rd}`. The derivations are
+internal to the sandbox, so possessing full `io` in local mode cannot manufacture the omitted
+`Network` leaf. `UserIO` is *always* full (`given user: UserIO^`) and is what
+`println`/`print`/`printf`/`ask`/`setTodos`/`markTodo`, normal-model `chat(String)` and every
+`request*` take, so reporting and permission prompts work in every mode while those effects
+stay out of `Classified.map`. `todos` takes a read-only `UserIO`. `Exec`/`Network` are plain
+`ExclusiveCapability` (no read-only view), and their derivations require a full `IOCap^`.
+Why `UserIO` is not derived from `IOCap`: read-only mode withdraws the machine's mutable
+leaves while leaving the conversation intact, so the agent can always say what it would have
+done. The local-mode network error is the model of selective leaves: although `network` is
+internally `def network(using io: IOCap^): Network^{io}`, the local preamble does not publish
+its result, so `httpGet` has no given to resolve:
 
 ```
 No given instance of type atc.lib.Network was found for parameter x$2 of method httpGet
 ```
 
 **`Classified.map`** is `T ->{any.rd} B`: the callback may capture *read-only* capabilities
-only. Every untrusted outward channel needs a full capability (`println`/`ask`/`chat`/`setTodos` →
-`UserIO^`; `write`/`append` → `FileSystem^`; `exec` → `Exec`; `httpGet` → `Network`;
-`request*` → `UserIO^`), so none of them compile inside `map`; reading files does compile
-where `fs` is itself read-only (read-only mode). Do **not** loosen any of those to a
-read-only capability without re-running the leak audit (`CapabilitySuite`).
+only. Every untrusted outward channel needs a full capability
+(`println`/`ask`/`chat`/`setTodos` → `UserIO^`; `write`/`append` → `FileSystem^`; `exec` →
+`Exec^` + `FileSystem^`; `httpGet` → `Network^`; `request*` → `UserIO^`), so none of them
+compile inside `map`; reading files does compile where `fs` is itself read-only (read-only
+mode). Do **not** loosen any of those to a read-only capability without re-running the leak
+audit (`CapabilitySuite`).
 `chat(message: String)` in particular used to be the hole that made a bare `{any.rd}`
 unsound.
 
@@ -393,8 +405,10 @@ Long`, base scope `ScopeId.Base`), and close the scope when the block exits. Cap
 checking keeps the lent capability inside the block; the scope id keeps a value that
 somehow outlived it (none should) from being honoured by the host, which resolves
 permissions per call. `requestFiles` lends a file system exactly as capable as the one in
-scope (full in local/full mode, read-only in read-only mode), so the same call site compiles
-in every mode.
+scope (full in local/full mode, read-only in read-only mode). The request itself works in
+every mode, but callbacks needing `FileSystem^`—including command execution—remain
+local/full-only. `requestExec` widens only `Exec^`; a command needing unconfigured file
+access must nest the matching `requestFiles` block.
 
 ## Defence in depth
 
@@ -440,8 +454,9 @@ only to improve feedback; it is not an independent safety layer.
 ## The sandbox
 
 **Modes** (`perms/Mode.scala`, `perms/Policy.scala`): `ReadOnly`, `Local`, `Full`. The
-preamble hands out only that mode's givens (read-only `io`+`fs` / full `fs`+`ex` / full
-`io`+`fs`+`ex`+`net`, plus the always-full `user`), so the wrong effect does not type-check;
+preamble hands out only that mode's givens (read-only `io`+`fs` / full `io` with captured
+`fs`+`ex` / full `io` with captured `fs`+`ex`+`net`, plus the always-full `user`), so the
+wrong effect does not type-check;
 `Policy` (its `@volatile var mode`) also enforces it at run time. Switching mode (`/mode`,
 Shift-Tab, `--mode`, config `"mode"`) sets `policy.mode` and starts a fresh REPL
 (`App.restartSession`); the conversation is kept and the agent gets a `[sandbox notice]` on
@@ -487,8 +502,8 @@ into an immutable collection is fine, and `StringBuilder` works); `Thread.sleep`
 `System.nanoTime` are unavailable (use `java.time`); stdlib objects not tagged `@assumedSafe`
 are refused (`scala.util.matching.Regex.quote`/`quoteReplacement`: the API's pure `quote`/
 `quoteReplacement` stand in until then, marked `TODO(safe-mode)`). Writing helpers need
-`(using fs: FileSystem^)` (the bare `FileSystem` is read-only). `Prompts.modeSection(mode)`
-adds a mode paragraph.
+`(using fs: FileSystem^)` (the bare `FileSystem` is read-only), and command helpers need both
+`Exec^` and `FileSystem^`. `Prompts.modeSection(mode)` adds a mode paragraph.
 
 ## The permission model
 
@@ -545,10 +560,11 @@ sandbox cannot make arbitrary Scala computations constant-time or total.
 **Commands and hosts.** `commands` are patterns over the whole command line: `*` is a
 wildcard, a pattern without `*` matches by word prefix (`"git status"` allows `git status
 --short`; `"ls"` allows `ls -la` but not `lsblk`; `"git diff"` allows `git diff HEAD` but
-not `git difftool`). A command also needs read access to the directory it runs in (the
-working directory by default), which must not be classified; that check goes through the
-`FileSystem` capability, so a `requestFiles` block covers it. A pre-approved command runs
-with the user's privileges and is not subject to the file rules (`git diff --no-index a b`
+not `git difftool`). A command's type requires a full `FileSystem^`; at runtime it needs at
+least read permission for the directory it runs in (the working directory by default),
+which must not be classified. That check goes through the file-system capability, so a
+`requestFiles` block covers it. A pre-approved command runs with the user's privileges and
+is not subject to the file rules (`git diff --no-index a b`
 reads any two files), hence the advice to pre-approve subcommands rather than `git *`.
 `hosts` are globs on host names; only `http`/`https`; redirects are not followed, so a host
 the agent is sent on to has to be listed itself. `denyCommands`/`denyHosts` use the same
@@ -596,8 +612,10 @@ credential paths (`.ssh`, `.gnupg`, `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypi
 `.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
 `*.pem`, `id_rsa`, `id_ed25519`), sets `.atc` to `none` and `locked` (the pattern has no
 `/`, so it covers `~/.atc` and any project's `.atc` alike: the agent can read neither the
-config nor the keys, and no prompt can open them), denies `rm -rf *` and `sudo *`, and
-grants no files, commands, or hosts. The project template opens the project tree, marks
+config nor the keys, and no prompt can open them), denies `rm -rf *`, `sudo`, and
+common bare shell names (`sh`, `bash`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `zsh`, `csh`,
+`tcsh`, `fish`, `cmd`, `powershell`, `pwsh`, `wsl`, `git-bash`), and grants no files,
+commands, or hosts. The project template opens the project tree, marks
 `./.git` read-only and `./secrets` classified, allows read-only Git commands, denies
 `git push*` and `git reset --hard*`, and permits documentation hosts. Git commands are
 governed by `commands`, not by file rules. The host list includes official documentation

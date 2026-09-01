@@ -1,7 +1,7 @@
 package atc
 
 import atc.config.*
-import atc.perms.{Access, Decision, Policy}
+import atc.perms.{Access, Decision, GlobMatcher, Policy}
 
 import java.nio.file.{Files, Path}
 
@@ -58,6 +58,36 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(ownConfig.access, Some("none"))
     assert(ownConfig.locked, "the config that grants everything must not be reachable")
     assert(start.commands.isEmpty, "a fresh config grants no command")
+    for command <- List("rm -rf /tmp/example", "sudo", "sudo -s") do
+      assert(start.denyCommands.exists(GlobMatcher.matchesCommand(command, _)), s"must deny `$command`")
+
+  test("the starting global config denies common command shells"):
+    val denied = upickle.default.read[Config](ujson.read(Config.globalTemplate)).denyCommands
+    val shellInvocations = List(
+      "sh" -> "sh -c true",
+      "bash" -> "bash -c true",
+      "dash" -> "dash -c true",
+      "ash" -> "ash -c true",
+      "zsh" -> "zsh -c true",
+      "ksh" -> "ksh -c true",
+      "ksh93" -> "ksh93 -c true",
+      "mksh" -> "mksh -c true",
+      "fish" -> "fish -c true",
+      "csh" -> "csh -c true",
+      "tcsh" -> "tcsh -c true",
+      "cmd" -> "cmd /c echo ok",
+      "powershell" -> "powershell -Command Write-Output ok",
+      "pwsh" -> "pwsh -Command Write-Output ok",
+      "wsl" -> "wsl -e sh -c true",
+      "git-bash" -> "git-bash --cd-to-home",
+    )
+    for (bare, withArgs) <- shellInvocations do
+      assert(denied.contains(bare), s"the starting denyCommands must contain the bare shell name `$bare`")
+      for command <- List(bare, withArgs) do
+        assert(
+          denied.exists(GlobMatcher.matchesCommand(command, _)),
+          s"the starting denyCommands must refuse shell invocation `$command`: ${denied.mkString(", ")}",
+        )
 
   test("a provider may list no models: an endpoint written down, ready to be filled in"):
     val dir = Files.createTempDirectory("atc-cfg-empty-provider").nn

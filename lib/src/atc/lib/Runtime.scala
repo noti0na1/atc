@@ -6,15 +6,16 @@ import caps.*
 /** How the sandbox derives the mode's capabilities from the root `io`: the REPL
   * preamble (compiled before the safe-mode import) calls these through [[Runtime]]
   * to define the givens `fs`/`ex`/`net`, and the host implements them. Not part of
-  * the agent API: the agent gets the givens of its mode, never the derivations, so
-  * nothing it can call takes a full `IOCap^`. */
+  * the agent API: the agent gets the givens of its mode, never the derivations.
+  * Consequently a full grouping root does not let local mode manufacture the
+  * omitted `Network` leaf. */
 @rejectSafe("it is internal to the sandbox")
 trait Derivations:
   /** The configured file system, full (read + write); needs a full `io`. */
   def fileSystem(using io: IOCap^): FileSystem^{io}
   /** The configured command permissions; needs a full `io`. */
   def processes(using io: IOCap^): Exec^{io}
-  /** The configured network permissions; needs a full `io`. */
+  /** The configured network permissions; needs a full `io` and is exposed only in full mode. */
   def network(using io: IOCap^): Network^{io}
   /** The configured file system as read-only, whatever `io` is (read-only mode's `fs`). */
   def readOnlyFileSystem(using io: IOCap): FileSystem^{io.rd}
@@ -46,8 +47,9 @@ object Runtime:
 
   /** The root-capability labels. The host never inspects them (every check is per
     * call against the policy), so one shared instance of each serves every
-    * sandbox; their power is entirely in their types. `rootIO` derives the file
-    * system / commands / network; `rootUser` talks to the user. */
+    * sandbox; their power is entirely in their types. `rootIO` groups the
+    * mode-selected file-system / command / network leaves; `rootUser` talks to
+    * the user. */
   @caps.unsafe.untrackedCaptures
   val rootIO: IOCap^ = new IOCap
   @caps.unsafe.untrackedCaptures

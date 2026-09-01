@@ -5,11 +5,11 @@ import caps.*
 
 // ═══ Reading this file ════════════════════════════════════════════════════════
 //
-// This is the whole API you can call. It is capture-checked Scala 3; two type
-// notations carry the security rules, so read them like permission bits:
+// This is the whole API you can call. Read these capture-checking types like
+// permission bits:
 //
-//   • `^` marks a capability you hold.  `IOCap^` is the full root capability;
-//     the bare type `IOCap` (no `^`) is its *read-only* view. Same for
+//   • `^` is the full view of a capability. The bare type `IOCap` is the
+//     read-only view of the machine-effect root; same for
 //     `FileSystem^` (can write) vs `FileSystem` (read only). A full capability
 //     can be passed where a read-only one is wanted, never the other way round.
 //     `x.rd` names the read-only view of `x`:  `val ro: FileSystem^{fs.rd} = fs` is a
@@ -20,10 +20,9 @@ import caps.*
 //     only through a *full* capability; on a read-only one you get
 //     "Cannot call update method … its capture set is read-only".
 //
-// `Classified.map` accepts functions that capture only *read-only* capabilities,
-// so ordinary world-changing operations (writing, commands, network, printing,
-// asking) cannot happen on confidential data. The explicit exception is the
-// trusted, assumed-pure `classifiedChat` primitive. See below.
+// `Classified.map`/`flatMap` callbacks may capture only read-only capabilities.
+// Writing, commands, network, printing and asking are rejected; use one of the
+// classified destinations documented below.
 
 // ─── Classified data ─────────────────────────────────────────────────────────
 
@@ -36,16 +35,14 @@ import caps.*
  *  each of those needs a full capability. Whatever you compute stays
  *  classified; `toString` shows `Classified(***)`.
  *
- *  This is termination-insensitive information flow: do not branch on a secret
- *  into nontermination, a timeout, or materially different resource use. The
- *  sandbox cannot make the running time or termination of arbitrary pure Scala
- *  code indistinguishable.
+ *  Do not make nontermination, timeouts, timing or resource consumption depend
+ *  on a secret; those side channels are not prevented.
  *
  *  The only supported destinations are `println` (the user sees the value while
  *  you still see `Classified(***)`), `writeClassified` (to a classified file),
  *  `classifiedChat` with the classified model, and `httpPostClassified` or `secretHeaders`
- *  to an allowed host. Every response to a request carrying classified input is
- *  itself `Classified`, so a server cannot reflect a secret back into plain data.
+ *  to an allowed host. Calls carrying classified input return a `Classified`
+ *  response.
  *
  *  {{{
  *  val secret = readClassified(".env")          // Classified[String]
@@ -66,27 +63,15 @@ abstract class Classified[+T] private[atc] ():
 @assumeSafe
 trait Cap extends caps.Stateful, caps.ExclusiveCapability
 
-/** The root capability for the file system, commands, and network. The view
- *  supplied by the sandbox mode determines which capabilities are available:
- *
- *  - **full** supplies `given io: IOCap^`, enabling files, commands, and network;
- *  - **local** supplies a read-only `given io: IOCap` plus full `fs` and `ex`;
- *  - **read-only** supplies a read-only `given io: IOCap` and read-only `fs`.
- *
- *  The sandbox derives `fs`/`ex`/`net` from `io` when it starts; you cannot derive
- *  anything yourself. In local and read-only modes, where `io` is read-only, the
- *  mode's givens are the only available capabilities (no `Network` in local mode and no writes
- *  in read-only mode). Talking to the user is a *separate* capability (`user`), so
- *  it works in every mode. */
+/** Capture root for machine effects. It has no operations: use the `FileSystem`,
+ *  `Exec` and `Network` givens supplied by the current mode. Holding `io` cannot
+ *  create a capability that is not in scope. */
 @assumeSafe
 class IOCap private[atc] () extends Cap
 
-/** Capability for interacting with the user through `println`/`print`/`printf`,
- *  `ask`, the TODO list (`setTodos`/`markTodo`), and normal-model `chat`. It is
- *  available and mutable (`given user: UserIO^`) in every mode, because these
- *  are effects on the conversation rather than on the file system. You can
- *  always report results, even in read-only mode. Reading the TODO list (`todos`) needs
- *  only the read-only view. */
+/** Capability for `println`/`print`/`printf`, `ask`, TODO updates, and normal-model
+ *  `chat`. `given user: UserIO^` is available in every mode, so you can always
+ *  report results. Reading `todos` needs only its read-only view. */
 @assumeSafe
 class UserIO private[atc] () extends Cap
 
@@ -147,22 +132,20 @@ abstract class FileEntry private[atc] () extends Cap:
   /** All descendant paths, including inside classified directories (`/` separators on Windows). */
   def walkClassified(): Classified[List[String]]
 
-/** Permission to run commands (`given ex`). Derived by the sandbox only from a
- *  full `IOCap^`, so it does not exist in read-only mode. Unlike the file-system
- *  capabilities it has no read-only view: it is all or nothing (`Exec^`), which
- *  is what keeps commands out of `Classified.map`. */
+/** Capability to run commands (`given ex`), available in local and full modes.
+ *  It has no read-only view. `exec`, `execOutput` and `spawn` additionally
+ *  require `FileSystem^`. */
 @assumeSafe
 abstract class Exec private[atc] () extends caps.ExclusiveCapability
 
-/** Permission to reach network hosts (`given net`). Derived by the sandbox only
- *  from a full `IOCap^`, so it exists only in full mode. No read-only view either:
- *  `Network^` or nothing, so no request can be made from `Classified.map`. */
+/** Capability for HTTP requests (`given net`), available only in full mode. It
+ *  has no read-only view. */
 @assumeSafe
 abstract class Network private[atc] () extends caps.ExclusiveCapability
 
 /** A process started with `spawn` that you can interact with while it runs (a REPL, a
- *  dev server, a watcher). It holds the `Exec` it was started with, so it cannot
- *  be used where `Exec` cannot (inside `Classified.map`). It lives until it exits,
+ *  dev server, a watcher). It captures the `ex` used to start it, so it cannot
+ *  be used inside `Classified.map`. It lives until it exits,
  *  you `kill()` it, or the session ends; `runningProcesses` finds the live ones
  *  again. One spawned inside a `requestExec` block is also killed when that block
  *  ends. Start long-lived processes from a standing grant rather than a one-time
@@ -303,7 +286,7 @@ enum Json:
   def keys: List[String] = this match
     case Obj(fields) => fields.map(_._1)
     case _           => Nil
-  /** This object with `key` set to `value` (in place if present, appended otherwise). */
+  /** This object with `key` set to `value` (at its existing position, or appended). */
   def updated(key: String, value: Json): Json = this match
     case Obj(fields) =>
       if fields.exists(_._1 == key) then Obj(fields.map(f => if f._1 == key then (key, value) else f))
@@ -331,49 +314,11 @@ object Json:
 
 // ─── The API ─────────────────────────────────────────────────────────────────
 
-/** Everything you can do. All members are already in scope, along with the
- *  capabilities of the current sandbox mode (full mode shown):
- *
- *  {{{
- *  given io:   IOCap^            // the root, for files/commands/network
- *  given user: UserIO^           // talking to the user (all modes)
- *  given fs:   FileSystem^{io}   // configured paths (read + write)
- *  given ex:   Exec^{io}         // configured commands
- *  given net:  Network^{io}      // configured hosts
- *  }}}
- *
- *  `user` is always there, so `println`/`ask`/`setTodos`/`chat` work in every
- *  mode. In **local** mode `io` is read-only and there is no `net`; in
- *  **read-only** mode `io` is read-only and `fs` is read-only. So `read` works
- *  everywhere, but `write`/`exec`/`httpGet` compile only in the modes that
- *  provide them. If one does not compile, ask the user to switch modes rather
- *  than working around it.
- *
- *  A method that writes needs a full file system: declare your own helpers as
- *  `(using fs: FileSystem^)`, since a bare `FileSystem` is read-only.
- *
- *  If an effect is denied at run time (`SecurityException: … not permitted`),
- *  wrap it in the matching `request*` block; the user is asked, and if they
- *  agree the block runs with the extra permission (which never escapes it).
- *
- *  {{{
- *  cat("src/Main.scala", 1, 40)   // look at lines 1-40 with line numbers
- *  val src = read("src/Main.scala")
- *  sed("src/Main.scala", """^import (\w+)\._$""", "import $1.*")   // in-place edit, fails loudly if nothing matches
- *  write("src/Main.scala", src + "\n// appended")   // or rewrite the whole file
- *  grepRecursive("src", "def main", "*.scala").foreach(m => println(s"${m.file}:${m.lineNumber}"))
- *  val r = exec("git status --short")   // split like a small shell grammar; `|`/redirection work, `&&` does not
- *  println(s"exit ${r.exitCode}\n${r.stdout}${r.stderr}")
- *  val pkg = Json.parse(read("package.json")); println(pkg("scripts")("test").str)
- *
- *  requestFiles("/tmp/data", Access.Write, reason = "cache build outputs") {
- *    write("/tmp/data/out.txt", "done")
- *  }
- *  requestExec(Set("mill *"), reason = "compile the project") {
- *    println(exec("mill", List("compile")).stdout)
- *  }
- *  }}}
- */
+/** Agent-facing operations. All members and the current mode's givens are
+ *  already in scope. Writes need `FileSystem^`; commands need `Exec^` and
+ *  `FileSystem^`; HTTP needs `Network^`; user interaction needs `UserIO^`.
+ *  If configured permissions deny an available effect, use its `request*`
+ *  block. */
 @assumeSafe
 trait Interface:
 
@@ -383,8 +328,10 @@ trait Interface:
    *  a wider `FileSystem` is in scope. The block's file system is as capable as
    *  the one you already have: with a full `fs` you get a full one (so you can
    *  write), with a read-only `fs` (read-only mode) you get a read-only one, so
-   *  this works in every mode. It cannot escape the block. Throws
-   *  `SecurityException` if the user denies it. */
+   *  the request works in every mode. Operations inside still have to fit that
+   *  view: command execution needs `FileSystem^` and remains local/full-only.
+   *  The capability cannot escape the block. Throws `SecurityException` if the
+   *  user denies it. */
   def requestFiles[T, C^](path: String)(using UserIO^, FileSystem^{C})
                          (op: (FileSystem^{any.rd, C}) ?=> T): T
   def requestFiles[T, C^](path: String, access: Access)(using UserIO^, FileSystem^{C})
@@ -450,8 +397,6 @@ trait Interface:
    */
   def sed(path: String, pattern: String, replacement: String)(using FileSystem^): Int
 
-  // TODO(safe-mode): remove `quote`/`quoteReplacement` once safe mode admits
-  // `scala.util.matching.Regex.quote`/`quoteReplacement` (stdlib not yet tagged).
   /** A regex that matches `text` literally (`\Q…\E`), for a `sed` pattern. */
   def quote(text: String): String
   /** `text` as a literal `sed` replacement: its `\` and `$` escaped. */
@@ -510,58 +455,45 @@ trait Interface:
   // ── Commands ────────────────────────────────────────────────────
 
   /** Ask the user for permission to run commands matching `commands` (patterns
-   *  over the full command line, `*` a wildcard: `"git status"`, `"npm *"`). */
+   *  over the full command line, `*` a wildcard: `"git status"`, `"npm *"`).
+   *  The block receives the wider `Exec^`; actually executing a command also
+   *  requires the ambient full `FileSystem^`. */
   def requestExec[T](commands: Iterable[String])(op: Exec^ ?=> T)(using UserIO^, Exec^): T
   def requestExec[T](commands: Iterable[String], reason: String)(op: Exec^ ?=> T)(using UserIO^, Exec^): T
 
-  /** Run a command, without a shell. `command` is split like a simple shell line
-   *  (quotes honoured), so `exec("git status --short")` equals
-   *  `exec("git", List("status", "--short"))`; `args` are appended verbatim (then
-   *  `command` must be one program). The line may be a small pipeline: `|` between
-   *  commands, `< file` for the input of the first, `> file` / `>> file` for the
-   *  output of the last, `2>&1` after a command to send its stderr down the pipe;
-   *  every command in it is checked like its own `exec`, and the files like `read` /
-   *  `write` (classified files are refused both ways). There is no general shell beyond that:
-   *  `&&`, `;`, `||`, `&`, `$(...)`, globs and `$VAR` are not interpreted (an unquoted
-   *  one throws): run steps one by one and combine in Scala, feed text with
-   *  `ExecOptions(stdin = ...)`. With several commands the exit code is the rightmost
-   *  non-zero one (pipefail) and stderr is labelled per stage.
-   *  On Windows, a backslash is a path separator rather than an unquoted escape;
-   *  quote an argument containing spaces. Bare programs are resolved from `PATH`
-   *  plus `PATHEXT`, never implicitly from the working directory; write `./tool.exe`
-   *  to choose a program there. Batch files use the JDK's strict cmd/bat quoting
-   *  and reject values (`%`, `!`, or line breaks) that cmd.exe could expand.
-   *  A pipeline has at most 16 stages.
-   *  Runs in the working directory unless `workingDir`/`options` say otherwise. The
-   *  result carries the exit code and both streams (a non-zero exit does not throw;
-   *  `execOutput` does). Streams default to UTF-8; a leading UTF-8 or UTF-16 BOM
-   *  selects and is removed from that stream. (A selected Windows `.cmd`/`.bat`
-   *  inherently uses the Windows command processor after authorization.)
-   *  Throws `SecurityException` if the command line matches no
-   *  permitted pattern, or if the directory is unreadable or classified (the check goes
-   *  through `FileSystem`, so a `requestFiles` block covers it), and
-   *  `RuntimeException` after `timeoutMs` (default 10 minutes) with the output so far;
-   *  the time a command runs does not count against the snippet's own timeout. */
-  def exec(command: String)(using Exec^, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String])(using Exec^, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec^, FileSystem): ProcessResult
-  def exec(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): ProcessResult
+  /** Run a command without a general shell. A one-line `command` honours quotes
+   *  and supports pipelines with `|`, input `<`, output `>` / `>>`, and `2>&1`.
+   *  `&&`, `;`, `||`, `&`, `$(...)`, globs and `$VAR` are not interpreted; run
+   *  separate steps in Scala. With an explicit `args` sequence, `command` must be
+   *  one program and every argument is passed verbatim.
+   *
+   *  Each pipeline stage needs command permission. Redirections use the normal
+   *  file permissions and reject classified files. The result uses pipefail-style
+   *  exit status and includes stdout/stderr; a non-zero exit does not throw
+   *  (`execOutput` does). Pipelines have at most 16 stages.
+   *
+   *  The default working directory is `.`. Bare programs are found on `PATH`, not
+   *  implicitly in the working directory; use `./program` to select one there.
+   *  Quote arguments containing spaces (on Windows, `\` is a path separator).
+   *  A timeout throws with the output so far. Requires both `Exec^` and
+   *  `FileSystem^`. */
+  def exec(command: String)(using Exec^, FileSystem^): ProcessResult
+  def exec(command: String, args: Seq[String])(using Exec^, FileSystem^): ProcessResult
+  def exec(command: String, args: Seq[String], workingDir: String)(using Exec^, FileSystem^): ProcessResult
+  def exec(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem^): ProcessResult
 
   /** The stdout of a command that succeeded; throws `RuntimeException` with the exit
    *  code and stderr when it did not (use `exec` to inspect a failure). */
-  def execOutput(command: String)(using Exec^, FileSystem): String
-  def execOutput(command: String, args: Seq[String])(using Exec^, FileSystem): String
-  def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): String
+  def execOutput(command: String)(using Exec^, FileSystem^): String
+  def execOutput(command: String, args: Seq[String])(using Exec^, FileSystem^): String
+  def execOutput(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem^): String
 
-  /** Start a command using the same grammar and checks as `exec`, then return
-   *  immediately with a `Process` for interacting with REPLs, servers, or watchers.
-   *  Its stdin stays open for `send` (`ExecOptions(stdin = ...)` is sent first);
-   *  `workingDir` applies, `timeoutMs` does not: it runs until it exits, you `kill()`
-   *  it, or the session ends (and, if spawned inside a `requestExec` block, when that
-   *  block ends). At most eight may be live at once; call `kill()` when finished.
-   *  The user sees the process start, the input you send, and its exit. */
-  def spawn(command: String)(using ex: Exec^, fs: FileSystem): Process^{ex}
-  def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem): Process^{ex}
+  /** Start asynchronously using `exec`'s grammar and checks. Stdin stays open;
+   *  `options.stdin` is sent first and `timeoutMs` is ignored. The process ends on
+   *  exit, `kill()`, session end, or closure of its `requestExec` scope. At most
+   *  eight may be live. The user sees starts, input and exits. */
+  def spawn(command: String)(using ex: Exec^, fs: FileSystem^): Process^{ex}
+  def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem^): Process^{ex}
   /** The processes you started that are still running (to find a handle again). */
   def runningProcesses(using ex: Exec^): List[Process^{ex}]
 
@@ -571,13 +503,9 @@ trait Interface:
   def requestNetwork[T](hosts: Iterable[String])(op: Network^ ?=> T)(using UserIO^, Network^): T
   def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network^ ?=> T)(using UserIO^, Network^): T
 
-  /** HTTP GET: the body of a 2xx/3xx response (at most 8 MiB); a status of 400 or more throws
-   *  `RuntimeException` with the status and the start of the body (use `httpRequest`
-   *  to inspect a failure). Redirects are not followed (each URL is checked against
-   *  the allowed hosts). A `secretHeaders` value (e.g. a token read with
-   *  `readClassified`) is sent without being shown to you; because a peer could
-   *  reflect it, that overload's response stays `Classified`. Only `http`/`https`
-   *  URLs. */
+  /** GET an `http`/`https` URL without following redirects. Responses are limited
+   *  to 8 MiB; status >= 400 throws (use `httpRequest` to inspect it). Supplying
+   *  `secretHeaders` keeps the response `Classified`. */
   def httpGet(url: String)(using Network^): String
   def httpGet(url: String, headers: Map[String, String])(using Network^): String
   def httpGet(url: String, headers: Map[String, String],
@@ -593,7 +521,8 @@ trait Interface:
                headers: Map[String, String],
                secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
-  /** Any method; the raw status and body, never throws on an HTTP error. */
+  /** Any method; return raw status/body without throwing on an HTTP error.
+   *  Supplying `secretHeaders` keeps the response `Classified`. */
   def httpRequest(method: String, url: String)(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String)(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using Network^): HttpResponse
@@ -619,33 +548,20 @@ trait Interface:
 
   // ── Talking to the user ─────────────────────────────────────────
 
-  /** Ask the user a question and wait (`None` if they decline). Offer `options`
-   *  when a choice fits; `multiple` allows several (joined by `; `). For
-   *  decisions and facts only the user has, not for permissions (`request*`).
-   *
-   *  {{{
-   *  ask("Which test framework?", List("munit", "scalatest")) match
-   *    case Some("scalatest") => ...
-   *    case _                 => ...
-   *  }}}
-   */
+  /** Ask the user and wait (`None` if they decline). Offer `options` for bounded
+   *  choices; `multiple` joins selections with `; `. Use this for decisions or
+   *  user-only facts, not permissions (use `request*`). */
   def ask(question: String)(using UserIO^): Option[String]
   def ask(question: String, options: List[String])(using UserIO^): Option[String]
   def ask(question: String, options: List[String], multiple: Boolean)(using UserIO^): Option[String]
 
-  /** Replace the TODO list shown to the user; keep it updated on multi-step tasks.
-   *
-   *  {{{
-   *  setTodos(List(Todo("read the build file"), Todo("add the test", TodoStatus.InProgress)))
-   *  markTodo("read the build file", TodoStatus.Done)
-   *  }}}
-   */
+  /** Replace the TODO list shown to the user; keep it updated on multi-step tasks. */
   def setTodos(items: List[Todo])(using UserIO^): Unit
 
   /** The current TODO list. */
   def todos(using UserIO): List[Todo]
 
-  /** Set the status of the item whose text equals `text`. */
+  /** Set the status of the item whose text exactly equals `text`; throws if absent. */
   def markTodo(text: String, status: TodoStatus)(using UserIO^): Unit
 
   // ── Classified ──────────────────────────────────────────────────
@@ -655,15 +571,13 @@ trait Interface:
 
   // ── LLM ─────────────────────────────────────────────────────────
 
-  /** Ask the untrusted normal model a one-shot question. This outward effect
-   *  requires the full user capability. */
+  /** Ask the untrusted normal model a one-shot question. Requires `UserIO^`;
+   *  never send secrets. */
   def chat(message: String)(using UserIO^): String
 
-  /** Ask the trusted classified model. Its deployment is assumed to be an
-   *  isolated, effect-free classified environment, so this operation is treated
-   *  as pure and may be called inside `Classified.map`. */
+  /** Ask the configured classified model. This capability-free operation may be
+   *  called inside `Classified.map`; it fails if no classified model is configured. */
   def classifiedChat(message: String): String
 
-  /** Ask the trusted classified model about classified content; implemented as
-   *  `message.map(classifiedChat)`, so the answer stays classified. */
+  /** Ask the classified model about classified input; the answer stays classified. */
   def classifiedChat(message: Classified[String]): Classified[String]

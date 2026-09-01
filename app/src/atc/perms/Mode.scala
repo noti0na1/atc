@@ -6,9 +6,9 @@ package atc.perms
 enum Mode(val label: String, val description: String):
   /** `io` and `fs` are read-only views: the agent can only read files. */
   case ReadOnly extends Mode("read-only", "files can only be read; no commands, no network")
-  /** Read and write files, run commands; no network and no full `io`. */
+  /** Full `io` grouping writable `fs` and `ex`; the mode provides no `net`. */
   case Local extends Mode("local", "files can be read and written, commands run; no network")
-  /** The full root capability: files, commands, network. */
+  /** Full `io` grouping `fs`, `ex`, and `net`. */
   case Full extends Mode("full", "files, commands and network")
 
   def allowsWrite: Boolean = this != ReadOnly

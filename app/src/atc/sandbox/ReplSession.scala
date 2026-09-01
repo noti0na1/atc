@@ -70,14 +70,17 @@ object ReplSession:
 
   /** Definitions in scope before any agent code runs, for `mode`.
     *
-    * `object api` holds the host and the root capability privately and
-    * publishes, as givens, only the capabilities of the mode:
+    * `object api` holds the host privately; the preamble publishes, as givens,
+    * only the root view and derived capabilities of the mode:
     *
     *  - full: `io: IOCap^` (the root itself) and `fs`/`ex`/`net` derived from it;
-    *  - local: `io: IOCap` (a read-only view of the root), a full `fs: FileSystem^`
-    *    and `ex: Exec^` derived from the hidden root, with no network and no
-    *    full `io` (so no way to derive one);
+    *  - local: `io: IOCap^` (the root itself) and `fs`/`ex` derived from it,
+    *    with no network capability;
     *  - read-only: `io: IOCap` and the read-only `fs` derived from it.
+    *
+    * The root records the capture hierarchy; it is not itself a factory. The
+    * `Runtime` derivations mint the leaves, and agent code cannot call them, so
+    * local mode cannot produce the omitted `net` from its full `io`.
     *
     * `atc.lib.Runtime.current`/`.rootIO` are `@rejectSafe`: the preamble is
     * compiled before the safe-mode import, agent code after it, so agent code
@@ -87,9 +90,10 @@ object ReplSession:
     * (`object api` + imports) first, then **each given on its own round**. That
     * isolation matters for capture checking: each given becomes a field of its
     * own line-wrapper object, so a pure `Classified.map` that reads a file
-    * captures only the `fs` wrapper, not the always-full `user`/`io` givens,
+    * captures only the `fs` wrapper, not the separate `user`/`io` givens,
     * which live in other wrappers. If all givens shared one wrapper, capturing
-    * `fs` would pull in that full `user`/`io` and the read would be rejected. */
+    * `fs` would also pull in the full `user` capability and the read would be
+    * rejected. */
   def preambleChunks(mode: Mode): List[String] =
     val base =
       """|import language.experimental.captureChecking
@@ -110,10 +114,10 @@ object ReplSession:
         )
       case Mode.Local =>
         List(
-          "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
+          "@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
-          "@assumeSafe given fs: (FileSystem^) = atc.lib.Runtime.fileSystem(using atc.lib.Runtime.rootIO)",
-          "@assumeSafe given ex: (Exec^) = atc.lib.Runtime.processes(using atc.lib.Runtime.rootIO)",
+          "@assumeSafe given fs: (FileSystem^{io}) = atc.lib.Runtime.fileSystem",
+          "@assumeSafe given ex: (Exec^{io}) = atc.lib.Runtime.processes",
         )
       case Mode.ReadOnly =>
         List(

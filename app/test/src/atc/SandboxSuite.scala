@@ -95,7 +95,7 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
   test("the preamble gives each capability its own REPL round"):
     // Separate rounds put each given in its own line wrapper, which is what lets
     // a pure `Classified.map` capture the read-only `fs` without dragging in the
-    // always-full `user`/`io` (see ModeSuite's read-in-map test).
+    // separate `user`/`io` wrappers (see ModeSuite's read-in-map test).
     for m <- Mode.values do
       val chunks = ReplSession.preambleChunks(m)
       assert(chunks.size >= 3, s"${m.label}: expected a base chunk plus one per given, got ${chunks.size}")
