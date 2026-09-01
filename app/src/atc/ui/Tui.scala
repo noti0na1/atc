@@ -799,7 +799,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     define(builder)
     try Option(prompter.prompt(List.empty[AttributedString].asJava, builder.build()).get("a")).flatMap(read)
     catch case _: UserInterruptException | _: EndOfFileException => None
-    finally tail = "\n" // the prompter leaves the cursor at a fresh line
+      // The prompter redraws the answer, clears the menu below it and prints one
+      // more newline (`DefaultPrompter.close`), so the cursor is already past a
+      // blank line: tell `blankLine` so the block does not get a second one.
+    finally tail = "\n\n"
 
   /** A single-choice menu, returning its index so duplicate display labels do
     * not collapse into the first option. */

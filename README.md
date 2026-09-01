@@ -320,8 +320,8 @@ question about a key it must never see:
   │ val key = readClassified("secrets/api.env")
   │ val live = key.map(_.trim.stripPrefix("API_KEY=").startsWith("sk-live"))
   ├ result
-  │ val key: Classified[String]^{} = Classified(***)
-  │ val live: Classified[Boolean]^{} = Classified(***)
+  │ val key: Classified[String] = Classified(***)
+  │ val live: Classified[Boolean] = Classified(***)
   └ ok 41 ms
 
 ● The check ran, but a value computed from a secret is a secret too, so I cannot read
@@ -364,7 +364,7 @@ Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 ```
 
 In read-only mode, `fs` is `FileSystem^{io.rd}`, so the identical line is accepted
-(`val res0: Classified[String]^{} = Classified(***)`). Reading cannot leak the secret,
+(`val res0: Classified[String] = Classified(***)`). Reading cannot leak the secret,
 whereas writing could; the capability view distinguishes the two. The agent can always
 route a secret to an explicitly authorized channel: the terminal, a classified file, the
 classified model, or an allow-listed host.

@@ -57,6 +57,11 @@ class ReplSessionSuite extends munit.FunSuite:
   test("val definition is echoed"):
     val r = assertOk(run("val fortyTwo = 42"))
     assert(r.output.contains("val fortyTwo: Int = 42"), r.output)
+  test("echoed API types carry no empty capture set"):
+    val r = assertOk(run("val pr = ProcessResult(0, \"\", \"\"); def item = Todo(\"a\")"))
+    assert(r.output.contains("val pr: ProcessResult = ProcessResult("), r.output)
+    assert(r.output.contains("def item: Todo"), r.output)
+    assert(!r.output.contains("^{}"), r.output)
   test("function definition and call"):
     assert(assertOk(run("def add(a: Int, b: Int): Int = a + b\nadd(2, 3)")).output.contains("5"))
   test("List map") { assert(assertOk(run("List(1, 2, 3).map(_ * 2)")).output.contains("List(2, 4, 6)")) }
