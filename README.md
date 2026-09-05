@@ -111,6 +111,19 @@ From then on `atc` runs ATC in the current directory, `atc update` fetches a new
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
 (To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
+On an interactive launch, the wrapper checks GitHub for a newer release and asks:
+
+```text
+ATC v0.2.0 is available (installed: v0.1.3). Upgrade now? [y/N]
+```
+
+Enter `y` to download and verify that release, then start it with your original arguments.
+Enter `n` or press Enter to start the installed version. The check times out after five
+seconds; an unavailable release service does not block startup. Scripted `-p` runs,
+help/version and initialization commands, and local `atc dev` builds skip the check.
+Set `ATC_CHECK_UPDATES=0` to disable it. This updates the JARs; `atc self update` updates
+the wrapper itself.
+
 <details>
 <summary><strong>Windows (best-effort support)</strong></summary>
 

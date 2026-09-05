@@ -642,6 +642,20 @@ Directory-name prefixes alone do not prove ownership: uninstall retains director
 as `dev.notes` and `download.notes`, including in a custom cache location. Temporary
 download and development directories are cleaned by the operation that creates them.
 
+Before launching Java, `cmd_run` calls `offer_startup_update`. The check requires terminal
+stdin and stderr, a recognized installed release marker, and an interactive application
+invocation. `ATC_CHECK_UPDATES=0`, `-p`, help/version and initialization flags bypass it.
+GitHub metadata uses a two-second connection timeout and a five-second total timeout;
+lookup failures are ignored. Stable `vMAJOR.MINOR.PATCH` tags are compared numerically,
+and a release without both JAR assets is not offered. Unknown and development markers
+are left for explicit `atc update` handling.
+
+The prompt defaults to No. Approval passes the already-fetched metadata to
+`download_latest_release`, so the updater installs the release the user approved without
+another lookup. Download and checksum errors stop that attempted upgrade before Java
+starts; declining or a failed metadata check starts the current installation. The updater
+checks critical failures explicitly because Bash conditional callers can disable `errexit`.
+
 `atc dev <checkout>` copies an existing local distribution and records `dev|<checkout>`.
 It does not build. `atc update` replaces that development installation with a release.
 Windows updates replace the launchers and JARs together. Native Windows launchers transport

@@ -53,8 +53,9 @@ Locations:
   Jars:      ${CACHE_DIR}/  (override with ATC_CACHE_DIR)
 
 Environment:
-  ATC_JAVA_OPTS   extra JVM flags for 'atc run'
-  GITHUB_TOKEN    raises the GitHub API rate limit for 'setup' and 'update'
+  ATC_JAVA_OPTS        extra JVM flags for 'atc run'
+  ATC_CHECK_UPDATES=0  skip the release check on interactive startup
+  GITHUB_TOKEN         raises the GitHub API rate limit for release checks and downloads
 
 Examples:
   atc setup
@@ -130,7 +131,7 @@ ensure_java() {
 
 release_json() {
   local api_url="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
-  local curl_args=(-sSL -H "Accept: application/vnd.github+json")
+  local curl_args=(-sSL --proto =https --proto-redir =https -H "Accept: application/vnd.github+json" "$@")
   local response http_code body
 
   require_command curl
@@ -328,10 +329,14 @@ cached_jars_match_digests() {
 download_latest_release() (
   local json release_key assets_info tmp_dir name url _digest digest
 
-  mkdir -p "$CACHE_DIR"
-  json="$(release_json)"
-  release_key="$(release_key_from_json "$json")"
-  assets_info="$(extract_assets "$json")"
+  mkdir -p "$CACHE_DIR" || fail "cannot create the cache directory ${CACHE_DIR}."
+  # Startup passes the metadata the user approved, avoiding a second release lookup.
+  json="${1:-}"
+  if [[ -z "$json" ]]; then
+    json="$(release_json)" || fail "failed to retrieve release metadata."
+  fi
+  release_key="$(release_key_from_json "$json")" || fail "failed to parse release metadata."
+  assets_info="$(extract_assets "$json")" || fail "failed to find the required release assets."
 
   if cached_release_matches "$release_key"; then
     local verify_status
@@ -355,10 +360,10 @@ download_latest_release() (
     echo "Cached ATC jars failed checksum verification; downloading again."
     # Invalidate first: if the download fails, 'atc run' must not keep using
     # jars that just failed verification.
-    rm -f "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR"
+    rm -f "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" || fail "cannot remove the invalid cached release."
   fi
 
-  tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")"
+  tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")" || fail "cannot create a download directory."
   # The trap string is evaluated at EXIT: reference the variable (single
   # quotes), never interpolate the path into it — a quote in ATC_CACHE_DIR
   # would otherwise break out of the quoting into an arbitrary rm -rf. On the
@@ -385,12 +390,12 @@ download_latest_release() (
     verify_jar "${tmp_dir}/${name}" "$digest"
   done <<< "$assets_info"
 
-  mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR"
-  mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR"
+  mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR" || fail "cannot install ${APP_JAR_NAME}."
+  mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR" || fail "cannot install ${LIB_JAR_NAME}."
   # Write the marker in the private temp directory first, then rename it: a
   # pre-existing release.txt symlink must never redirect this write.
-  printf '%s\n' "$release_key" > "${tmp_dir}/release.txt"
-  mv "${tmp_dir}/release.txt" "$RELEASE_MARKER"
+  printf '%s\n' "$release_key" > "${tmp_dir}/release.txt" || fail "cannot write the release marker."
+  mv "${tmp_dir}/release.txt" "$RELEASE_MARKER" || fail "cannot install the release marker."
 
   # Success: clean up directly and drop this subshell's cleanup trap. The
   # caller's EXIT trap is outside the subshell and remains untouched.
@@ -402,6 +407,70 @@ download_latest_release() (
   echo "- ${APP_JAR}"
   echo "- ${LIB_JAR}"
 )
+
+# ---------------------------------------------------------------------------
+# Interactive startup update check
+# ---------------------------------------------------------------------------
+
+# Compare stable vMAJOR.MINOR.PATCH tags numerically, never offering a downgrade.
+release_is_newer() {
+  local candidate="$1" installed="$2" candidate_parts installed_parts i
+  local version_pattern='^v?([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})$'
+  [[ "$candidate" =~ $version_pattern ]] || return 1
+  candidate_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  [[ "$installed" =~ $version_pattern ]] || return 1
+  installed_parts=("${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}")
+  for i in 0 1 2; do
+    (( 10#${candidate_parts[i]} > 10#${installed_parts[i]} )) && return 0
+    (( 10#${candidate_parts[i]} < 10#${installed_parts[i]} )) && return 1
+  done
+  return 1
+}
+
+update_terminal_available() {
+  [[ -t 0 && -t 2 ]]
+}
+
+should_check_update() {
+  [[ "${ATC_CHECK_UPDATES:-1}" != "0" ]] || return 1
+  update_terminal_available || return 1
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -p|--prompt|-h|--help|-v|--version|--init|--init-global) return 1 ;;
+      -c|--config|-C|--cwd|-m|--model|--mode)
+        [[ $# -ge 2 ]] || return 1
+        shift
+        ;;
+    esac
+    shift
+  done
+  return 0
+}
+
+offer_startup_update() {
+  should_check_update "$@" || return 0
+  local installed current_tag json latest latest_tag answer
+  installed="$(cat "$RELEASE_MARKER" 2>/dev/null)" || return 0
+  # An absent, unknown or development marker cannot identify an installed release.
+  [[ "$installed" =~ ^[0-9]+\|v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+  current_tag="$(release_tag_of_key "$installed")"
+  json="$(release_json --connect-timeout 2 --max-time 5 2>/dev/null)" || return 0
+  latest="$(release_key_from_json "$json" 2>/dev/null)" || return 0
+  latest_tag="$(release_tag_of_key "$latest")"
+  release_is_newer "$latest_tag" "$current_tag" || return 0
+  # A release may be published before its CI job has finished uploading the jars.
+  (extract_assets "$json") >/dev/null 2>&1 || return 0
+
+  printf 'ATC %s is available (installed: %s). Upgrade now? [y/N] ' "$latest_tag" "$current_tag" >&2
+  if ! read -r answer; then
+    printf '\n' >&2
+    return 0
+  fi
+  case "$answer" in
+    [yY]|[yY][eE][sS]) download_latest_release "$json" >&2 ;;
+    *) printf 'Continuing with ATC %s.\n' "$current_tag" >&2 ;;
+  esac
+}
 
 # ---------------------------------------------------------------------------
 # PATH and the wrapper itself
@@ -684,6 +753,7 @@ cmd_run() {
   local dev_dir
   ensure_java
   require_cached_jars
+  offer_startup_update "$@" || return $?
   dev_dir="$(dev_source)"
   [[ -z "$dev_dir" ]] || echo "atc: running the local build from ${dev_dir} ('atc update' restores the release)" >&2
   # shellcheck disable=SC2086

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for the `atc` wrapper script: release-metadata parsing, checksum
-# verification, cache checks, command dispatch and start.sh environment loading.
+# verification, cache checks, startup updates, dispatch and start.sh environment loading.
 # No network or Java required.
 #
 #   bash tests/atc_test.sh
@@ -130,6 +130,30 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "--- startup update versions and eligibility ---"
+
+assert_succeeds "new patch release" release_is_newer v1.2.4 v1.2.3
+assert_succeeds "version comparison is numeric" release_is_newer v0.10.0 v0.9.9
+assert_succeeds "new major release" release_is_newer 2.0.0 v1.99.99
+assert_succeeds "version digits are decimal" release_is_newer v1.2.09 v1.2.08
+assert_fails "same version with or without v is not newer" release_is_newer v1.2.3 1.2.3
+assert_fails "older releases are not offered" release_is_newer v1.2.9 v1.3.0
+assert_fails "unknown installed version is not upgraded automatically" release_is_newer v1.2.3 dev
+assert_fails "prereleases are not offered" release_is_newer v2.0.0-RC1 v1.0.0
+assert_fails "invalid release tags are ignored" release_is_newer $'v1.2.4\nother' v1.2.3
+
+interactive_update_check() (
+  update_terminal_available() { return 0; }
+  should_check_update "$@"
+)
+assert_succeeds "interactive launch checks for updates" interactive_update_check
+assert_succeeds "working directory and model flags still check" interactive_update_check -C /work -m model
+assert_succeeds "option values are not mistaken for flags" interactive_update_check -m --version
+for flag in -p --prompt -h --help -v --version --init --init-global; do
+  assert_fails "startup skips $flag" interactive_update_check "$flag"
+done
+assert_fails "startup skips an incomplete option" interactive_update_check -C
+
 echo "--- checkout launcher ---"
 
 start_dir="$TEST_TMP/start"
@@ -656,6 +680,129 @@ assert_contains "the copy was replaced" "# newer" "$(cat "$TEST_TMP/selfbin/atc"
 self_perms="$(stat -c %a "$TEST_TMP/selfbin/atc" 2>/dev/null || stat -f %Lp "$TEST_TMP/selfbin/atc")"
 assert_eq "the installed wrapper is world-readable +x" "755" "$self_perms"
 assert_eq "no temp file left after replacement" "" "$(ls "$TEST_TMP/selfbin"/atc.self-update.* 2>/dev/null || true)"
+
+# ---------------------------------------------------------------------------
+echo "--- startup update flow (stubbed GitHub and Java) ---"
+
+startup_bin="$TEST_TMP/startup-bin"
+mkdir -p "$startup_bin"
+cat > "$startup_bin/java" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-version" ]]; then echo 'openjdk version "17.0.2"' >&2; exit 0; fi
+printf 'app:%s\n' "$(cat "$ATC_CACHE_DIR/atc.jar")"
+printf 'arg:%s\n' "$@"
+next_input=""
+read -r next_input || true
+printf 'stdin:%s\n' "$next_input"
+EOF
+chmod +x "$startup_bin/java"
+startup_driver="$TEST_TMP/startup-driver.sh"
+cat > "$startup_driver" <<'EOF'
+set -euo pipefail
+source "$WRAPPER_UNDER_TEST"
+update_terminal_available() { [[ "$STARTUP_SCENARIO" != "redirected" ]]; }
+release_json() {
+  printf '%s\n' "$*" >> "$STARTUP_CASE_DIR/checks"
+  [[ "$STARTUP_SCENARIO" != "offline" ]] || return 1
+  cat "$STARTUP_CASE_DIR/release.json"
+}
+curl() {
+  [[ "$STARTUP_SCENARIO" != "download-failure" ]] || return 1
+  local url="" output=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o) output="$2"; shift 2 ;;
+      https://*) url="$1"; shift ;;
+      *) shift ;;
+    esac
+  done
+  cp "$STARTUP_CASE_DIR/assets/${url##*/}" "$output"
+}
+main "$@"
+EOF
+
+startup_case() {
+  local scenario="$1" input="request" marker="1|v0.1.0" check_updates=1 json="$FIXTURE_JSON"
+  shift
+  STARTUP_CASE_DIR="$TEST_TMP/startup-$scenario"
+  mkdir -p "$STARTUP_CASE_DIR/cache" "$STARTUP_CASE_DIR/assets"
+  printf 'old app\n' > "$STARTUP_CASE_DIR/cache/atc.jar"
+  printf 'old lib\n' > "$STARTUP_CASE_DIR/cache/atc-lib.jar"
+  printf 'new app\n' > "$STARTUP_CASE_DIR/assets/atc.jar"
+  printf 'new lib\n' > "$STARTUP_CASE_DIR/assets/atc-lib.jar"
+  case "$scenario" in
+    current) marker="12345678|v0.2.0" ;;
+    newer-installed) marker="99999999|v1.0.0" ;;
+    development) marker="dev|/checkout" ;;
+    unknown) marker="custom" ;;
+    disabled) check_updates=0 ;;
+    invalid-json) json='{}' ;;
+    incomplete) json="${json//\"atc.jar\"/\"other.jar\"}" ;;
+    decline) input=$'n\nrequest' ;;
+    default-no) input=$'\nrequest' ;;
+    qualified-yes) input=$'yes, later\nrequest' ;;
+    accept|bad-digest|download-failure) input=$'yes\nrequest' ;;
+  esac
+  if have_sha256_tool && [[ "$scenario" != "bad-digest" ]]; then
+    json="$(printf '%s' "$json" | sed \
+      -e "s/abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890/$(sha256_of "$STARTUP_CASE_DIR/assets/atc.jar")/" \
+      -e "s/fedcba0987654321fedcba0987654321fedcba0987654321fedcba0987654321/$(sha256_of "$STARTUP_CASE_DIR/assets/atc-lib.jar")/")"
+  fi
+  printf '%s\n' "$marker" > "$STARTUP_CASE_DIR/cache/release.txt"
+  if [[ "$scenario" == "missing-marker" ]]; then rm "$STARTUP_CASE_DIR/cache/release.txt"; fi
+  printf '%s\n' "$json" > "$STARTUP_CASE_DIR/release.json"
+  printf '%s\n' "$input" > "$STARTUP_CASE_DIR/input"
+  if [[ "$scenario" == "eof" ]]; then : > "$STARTUP_CASE_DIR/input"; fi
+  STARTUP_RC=0
+  env PATH="$startup_bin:$PATH" ATC_CACHE_DIR="$STARTUP_CASE_DIR/cache" ATC_CHECK_UPDATES="$check_updates" \
+    STARTUP_SCENARIO="$scenario" STARTUP_CASE_DIR="$STARTUP_CASE_DIR" WRAPPER_UNDER_TEST="$WRAPPER" \
+    bash "$startup_driver" "$@" < "$STARTUP_CASE_DIR/input" \
+      > "$STARTUP_CASE_DIR/stdout" 2> "$STARTUP_CASE_DIR/stderr" || STARTUP_RC=$?
+}
+
+for scenario in current newer-installed development unknown disabled redirected missing-marker offline invalid-json incomplete; do
+  startup_case "$scenario"
+  assert_eq "$scenario: startup succeeds" "0" "$STARTUP_RC"
+  assert_contains "$scenario: installed app starts" "app:old app" "$(cat "$STARTUP_CASE_DIR/stdout")"
+  assert_eq "$scenario: no update prompt" "" "$(sed -n '/Upgrade now/p' "$STARTUP_CASE_DIR/stderr")"
+  assert_contains "$scenario: stdin is untouched" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+done
+for scenario in development unknown disabled redirected missing-marker; do
+  assert_fails "$scenario: no release lookup" test -e "$TEST_TMP/startup-$scenario/checks"
+done
+
+for scenario in decline default-no qualified-yes eof; do
+  startup_case "$scenario"
+  assert_eq "$scenario: startup succeeds" "0" "$STARTUP_RC"
+  assert_contains "$scenario: upgrade prompt shows both versions" \
+    "ATC v0.2.0 is available (installed: v0.1.0). Upgrade now? [y/N]" "$(cat "$STARTUP_CASE_DIR/stderr")"
+  assert_contains "$scenario: installed app starts" "app:old app" "$(cat "$STARTUP_CASE_DIR/stdout")"
+done
+
+startup_case scripted -p 'hello there'
+assert_eq "scripted run does not check releases" "0" "$STARTUP_RC"
+assert_fails "scripted run makes no lookup" test -e "$STARTUP_CASE_DIR/checks"
+assert_contains "scripted prompt is forwarded" "arg:hello there" "$(cat "$STARTUP_CASE_DIR/stdout")"
+
+if have_sha256_tool; then
+  startup_case accept run -C /work
+  assert_eq "accept: update and launch succeed" "0" "$STARTUP_RC"
+  assert_contains "accept: new app starts" "app:new app" "$(cat "$STARTUP_CASE_DIR/stdout")"
+  assert_contains "accept: next input is preserved" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+  assert_contains "accept: original args are preserved" $'arg:-C\narg:/work' "$(cat "$STARTUP_CASE_DIR/stdout")"
+  assert_eq "accept: matching library is installed" "new lib" "$(cat "$STARTUP_CASE_DIR/cache/atc-lib.jar")"
+  assert_eq "accept: release marker is updated" "12345678|v0.2.0" "$(cat "$STARTUP_CASE_DIR/cache/release.txt")"
+  assert_eq "accept: one bounded lookup, approved metadata reused" \
+    "--connect-timeout 2 --max-time 5" "$(cat "$STARTUP_CASE_DIR/checks")"
+  for scenario in bad-digest download-failure; do
+    startup_case "$scenario"
+    assert_eq "$scenario: failed upgrade is reported" "1" "$STARTUP_RC"
+    assert_eq "$scenario: Java does not start after failed upgrade" "" "$(cat "$STARTUP_CASE_DIR/stdout")"
+    assert_eq "$scenario: old app remains" "old app" "$(cat "$STARTUP_CASE_DIR/cache/atc.jar")"
+    assert_eq "$scenario: old library remains" "old lib" "$(cat "$STARTUP_CASE_DIR/cache/atc-lib.jar")"
+    assert_eq "$scenario: old marker remains" "1|v0.1.0" "$(cat "$STARTUP_CASE_DIR/cache/release.txt")"
+  done
+fi
 
 # ---------------------------------------------------------------------------
 echo
