@@ -2,35 +2,26 @@
 
 [![Scala CI](https://github.com/noti0na1/atc/actions/workflows/scala.yml/badge.svg)](https://github.com/noti0na1/atc/actions/workflows/scala.yml)
 
-ATC (Agent with Tracked Capabilities) is **a terminal coding agent that, by construction,
-cannot exceed the permissions you grant it**.
+ATC (Agent with Tracked Capabilities) is a terminal coding agent that uses a Scala 3 REPL
+and a capability-typed API for file access, commands, HTTP requests and user interaction.
+Each snippet is compiled before execution. Capture checking restricts the capabilities it
+can retain, safe mode restricts available APIs, and the host checks configured permissions
+at runtime.
 
-Its only tool is a Scala 3 REPL. Every action the model takes: reading a file, running a
-command, or fetching a URL, is expressed as Scala code against a small, capability-typed
-library. The code is compiled before it runs, and its effects are tracked in the type
-system through
-[capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
-and [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html):
-a capability calculus with a formal metatheory. The design comes from
-[TACIT](https://github.com/lampepfl/tacit) (*Securing Agents With Tracked Capabilities*,
-CAIS '26). ATC repackages that design as a self-contained terminal agent with improved
-interactivity and more practical permission controls.
+The design is derived from [TACIT](https://github.com/lampepfl/tacit). ATC adds a terminal
+interface, persistent REPL sessions, multiple model providers and layered permissions.
 
-**Safety and privacy first:**
+- **Capability checks:** file writes, commands and network requests require the appropriate
+  capabilities in scope.
+- **Classified data:** confidential values remain wrapped in `Classified` and can be sent
+  only through supported output methods.
+- **Permission rules:** access is denied by default; configuration, temporary grants and
+  session grants determine which operations are permitted. Deny rules take precedence.
 
-- **Effects are tracked, not trusted.** The compiler tracks file, command, network, and
-  secret access as capabilities. Exceeding them is therefore a compile error caught before
-  any code runs.
-- **Privacy is typed.** Secrets become `Classified` values. The model can compute with them
-  but cannot read them or send them to a channel you have not authorized.
-- **You control every permission.** ATC applies a layered, deny-by-default policy to files,
-  commands, and hosts, backed by deny lists that no other rule can override.
-- **Fewer interruptions.** Grant routine access once, and ATC asks only for the remaining
-  permissions. Each extra permission is confined to a scope from which it cannot escape.
-- **Extensible.** A new tool is just a method on the library, inheriting the same tracking,
-  permission checks, and classified-data discipline.
+The compiler and host are part of the trusted implementation. External commands run with
+the user's OS privileges. See [Security model](#security-model) for the assumptions and limits.
 
-## What it looks like
+## Example
 
 Here is a request, the Scala code the agent wrote, the program output, and the final answer:
 
@@ -208,7 +199,7 @@ while the direct Windows launcher uses `atc --help`.
 Because `-p` has no human to answer a pop-up, an unconfigured permission request fails
 without reading stdin; use `--approve-all` only in a trusted setup.
 
-## The idea: capabilities instead of ambient authority
+## Capabilities and ambient authority
 
 In ordinary Scala, any code can call `Files.readString` or start a process: authority is
 *ambient*, available to anyone who can name the method. The agent-facing library takes that
@@ -230,8 +221,8 @@ holds the roots.
 ### Two roots
 
 The preamble binds one root for effects on the machine and one for talking to the human.
-The sandbox derives the machine-effect leaves from the first, and each mode publishes only
-the leaves it permits:
+The sandbox derives the machine capabilities from the first, and each mode publishes only
+the capabilities it permits:
 
 ```
                         ┌── fs:  FileSystem^{io}    read files; write with a full view
@@ -241,10 +232,10 @@ Runtime.rootIO  ──► io ─┼── ex:  Exec^{io}          run permitted 
 Runtime.rootUser ──► user: UserIO^                  println · print · ask · setTodos · chat
 ```
 
-`io` is the common capture root for every published machine-effect leaf. Local and full mode
+`io` is the common capture root for every published machine capability. Local and full mode
 expose it as `IOCap^`; local simply omits `net`. The derivations are sandbox-internal, so
-holding the grouping root cannot manufacture a leaf that the mode did not put in scope.
-Command operations require both full leaves, `Exec^` and `FileSystem^`; every mode that
+holding the root does not create a capability omitted by the current mode.
+Command operations require both full capabilities, `Exec^` and `FileSystem^`; every mode that
 publishes `ex` also publishes a full `fs` under the same root.
 
 | Capability | What it authorises | Where one comes from |
@@ -369,7 +360,7 @@ whereas writing could; the capability view distinguishes the two. The agent can 
 route a secret to an explicitly authorized channel: the terminal, a classified file, the
 classified model, or an allow-listed host.
 
-### What the types do not know
+### Runtime permissions
 
 Types decide what compiles, but they know nothing about your configuration. Every host method
 therefore also checks the permission policy for the relevant path, command, or host, and a
@@ -391,8 +382,8 @@ agent can express at all, before the permission policy even comes up.
 | **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `net: Network^{io}`, `user: UserIO^` | also reach the network |
 
 In read-only mode, a write is an `update` call through a read-only view (the error shown
-[above](#what-it-looks-like)); in local mode the preamble deliberately omits the `Network`
-leaf, so a network call simply has no given to resolve. The derivation API is internal: full
+[above](#example)); in local mode the preamble deliberately omits the `Network`
+capability, so a network call simply has no given to resolve. The derivation API is internal: full
 `io` records the common capture root but is not an agent-callable factory for `net`. Either
 way a mode can withdraw an effect while leaving the conversation intact. The agent can
 therefore always explain what it *would* have done; the system prompt directs it to do so
@@ -445,7 +436,7 @@ In the paths below, `~` is the user home; on Windows that is normally
 | 2 | project | the nearest `.atc/config.json` at or above the working directory | open **its own project** (files inside its folder, commands, hosts); narrow anything |
 | 3 | explicit | `-c <file>` | grant anything |
 
-**`~/.atc/config.json` is the base; there is no implicit policy behind it.** No policy is
+**`~/.atc/config.json` is the global policy layer.** No policy is
 compiled into the program: anything not granted by a configuration is denied. The
 [starting config](app/resources/atc/config-template.json) written on the first run protects
 without granting access: it lists the providers, classifies common credential paths, puts
@@ -462,8 +453,8 @@ ATC finds the project layer by walking up from the working directory, much as Gi
 A project's configuration resides inside the repository, so it may open *that repository*
 but nothing beyond it, and it cannot exceed limits set by the machine's owner. Its file
 rules grant access only within the project directory and can only narrow access elsewhere.
-The `commands` and `hosts` lists are combined across all layers; deny lists provide the
-backstop when a project reaches beyond its tree. `denyCommands` and `denyHosts` accumulate,
+The `commands` and `hosts` lists are combined across all layers. Deny lists restrict these
+grants regardless of their source. `denyCommands` and `denyHosts` accumulate,
 and no layer can remove an entry. Scalar limits (`mode`, `safeMode`, `maxToolCalls`,
 `executionTimeoutMs`, …) can only become stricter. Non-permission settings (`model`,
 `providers`, `instructions`, …) merge in layer order, with later values taking precedence.
@@ -601,12 +592,12 @@ a path separator, not a space escape. External programs also choose their own ne
 encoding conventions (commonly CRLF, and sometimes BOM-marked UTF-16 on Windows), so scripts
 should not assume Unix `\n` output from a native command.
 
-## What it protects, and what it does not
+## Security model
 
-Security guarantees need clear boundaries. This section states what ATC guarantees, the
-assumptions behind those guarantees, and how to use it safely.
+The following restrictions depend on safe mode, the compiler, the host implementation
+and the configured permissions.
 
-### What holds
+### Enforced restrictions
 
 - **No ambient authority.** The Scala the model writes can do only what the capabilities in
   scope allow. Calling a method without the required capability is a compile error, so the
@@ -621,7 +612,7 @@ assumptions behind those guarantees, and how to use it safely.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
 
-### What it assumes
+### Assumptions and limits
 
 - **You are trusted; the model is not.** ATC defends against a mistaken, confused, or
   prompt-injected *model* exceeding the access you granted. It does not defend the machine
@@ -650,7 +641,7 @@ assumptions behind those guarantees, and how to use it safely.
   trusted; a bug in any of them (or in your config) can break a guarantee. Capture
   checking and safe mode are experimental compiler features.
 
-### Keeping it safe in practice
+### Permission configuration
 
 - Grant the least you need, and start in the least mode that works: read-only, then local,
   then full (which is the one that adds the network).
@@ -659,8 +650,7 @@ assumptions behind those guarantees, and how to use it safely.
   rule.
 - Keep credentials behind `classified`, keep `.atc` out of the agent's reach (the templates
   do both), and keep `safeMode` on.
-- Use `denyCommands` and `denyHosts` as a firm backstop for prohibited operations because a
-  deny rule overrides every other permission.
+- Use `denyCommands` and `denyHosts` to prohibit operations regardless of other permissions.
 - For risky operations, prefer a one-time grant in the pop-up to a broad standing grant.
   Reserve `--approve-all` for trusted sandboxes and CI environments.
 

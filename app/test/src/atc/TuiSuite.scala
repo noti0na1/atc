@@ -9,6 +9,20 @@ import java.nio.file.Files
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
 
+  test("escape sequences stop at their final byte, timeout or EOF"):
+    val expired = org.jline.utils.NonBlockingReader.READ_EXPIRED
+    for sequence <- List(
+        List('['.toInt, '1'.toInt, ';'.toInt, '5'.toInt, 'A'.toInt),
+        List('O'.toInt, 'B'.toInt),
+        List('['.toInt, expired),
+        List('['.toInt, -1),
+        List(expired),
+      )
+    do
+      val input = (sequence :+ 'x'.toInt).iterator
+      Tui.discardEscapeSequence(() => input.next())
+      assertEquals(input.next(), 'x'.toInt)
+
   test("glyphs fall back to ASCII when a dumb terminal has no encoding"):
     assertEquals(Tui.glyphs(null, forceAscii = false), Glyphs.ascii)
     assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = false), Glyphs.unicode)

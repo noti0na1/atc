@@ -2,16 +2,11 @@ package atc.config
 
 import java.nio.file.Path
 
-/** Where a configuration layer comes from, and what it is allowed to do.
-  *
-  * A layer that [[grants]] sets the policy. The project layer ships inside the
-  * repository being worked on, so it may open only *that* project (files inside
-  * its own folder, plus the commands and hosts its work needs) and otherwise
-  * only narrows what the granting layers permitted.
-  */
+/** The source and authority of a configuration layer. Global and explicit
+  * layers may grant access anywhere. Project file rules grant access within
+  * their project and constrain matching paths elsewhere. */
 enum Origin(val label: String):
-  /** `~/.atc/config.json`: the base of the policy, and the only default there
-    * is: nothing is permitted behind it. */
+  /** `~/.atc/config.json`: the global policy and settings. */
   case Global extends Origin("global")
   /** The `.atc/config.json` of the project the working directory belongs to. */
   case Project extends Origin("project")

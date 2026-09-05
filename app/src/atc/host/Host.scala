@@ -5,9 +5,7 @@ import atc.perms.{GitIgnore, GlobMatcher, Policy, ScopeId}
 
 import java.nio.file.Path
 
-/** Stable façade for the agent-facing API. Cohesive implementation modules
-  * provide filesystem, process, network, and interaction operations, while this
-  * class owns their shared capabilities and permission-scope lifecycle. */
+/** Implements the agent API and manages shared capabilities and permission scopes. */
 final class Host(
   val policy: Policy,
   val cwd: Path,
@@ -62,8 +60,3 @@ object Host:
     * returned unchanged after case and trailing-dot normalization. */
   def normalizeHost(host: String): String =
     GlobMatcher.normalizeHost(host)
-
-  /** Convert a numeric IPv4 literal with one to four decimal parts into
-    * canonical dotted-quad form without a DNS lookup. */
-  private[host] def literalIpAddress(value: String): Option[String] =
-    GlobMatcher.literalIpAddress(value)

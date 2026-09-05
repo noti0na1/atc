@@ -11,8 +11,8 @@ if (Test-Path -LiteralPath $envFile -PathType Leaf) {
     if ($line -match '^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
       $name = $Matches[1]
       $value = $Matches[2].Trim()
-      if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
-          ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+      if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+          ($value.StartsWith("'") -and $value.EndsWith("'")))) {
         $value = $value.Substring(1, $value.Length - 2)
       }
       if ($value -and -not [Environment]::GetEnvironmentVariable($name, 'Process')) {
@@ -37,7 +37,7 @@ if (-not $needsBuild -and $env:ATC_SKIP_BUILD -ne '1') {
 }
 
 if ($needsBuild) {
-  Write-Host '[start.cmd] building distribution (Mill Windows launcher)...' -ForegroundColor DarkGray
+  Write-Host '[start.ps1] building distribution (Mill Windows launcher)...' -ForegroundColor DarkGray
   Push-Location -LiteralPath $root
   try {
     & (Join-Path $root 'mill.bat') dist

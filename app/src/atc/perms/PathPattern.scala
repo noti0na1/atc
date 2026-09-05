@@ -85,8 +85,7 @@ object PathPattern:
         else (value.substring(0, boundary + 1), value.substring(boundary + 1))
 
   private def globOrDescendantMatchers(glob: String): List[Pattern] =
-    def variants(g: String): List[String] = if g.startsWith("**/") then g :: variants(g.stripPrefix("**/")) else List(g)
-    variants(glob).flatMap(g => List(globPattern(g), globPattern(s"$g/**")))
+    List(globPattern(glob), globPattern(s"$glob/**"))
 
   /** Gitignore-style path glob. PathPattern syntax is slash-based even on
     * Windows, where matching is case-insensitive like the file system. */

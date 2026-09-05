@@ -65,6 +65,7 @@ class InputPredictorSuite extends munit.FunSuite:
     assertEquals(InputPredictor.clean("\"\""), None)
     assertEquals(InputPredictor.clean("x" * 500).map(_.length), Some(InputPredictor.MaxChars))
     assertEquals(InputPredictor.clean("fix\u0007 \u202eabc\t now"), Some("fix abc now"))
+    assertEquals(InputPredictor.clean("run\tthe\ttests"), Some("run the tests"))
 
   test("predict asks the agent model with the transcript, reports the cost, and skips an empty conversation"):
     val m = OneShot("Now add a test for it\n")

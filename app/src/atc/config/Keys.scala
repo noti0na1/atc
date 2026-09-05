@@ -7,24 +7,10 @@ import java.nio.file.{Files, Path}
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-/** The values behind the `${VAR}` references a configuration uses for its API
-  * keys, read from `.atc/keys.properties`, a Java properties file with one
-  * binding per line:
-  *
-  * {{{
-  * DEEPSEEK_API_KEY=sk-...
-  * OPENROUTER_API_KEY=
-  * }}}
-  *
-  * A configuration is meant to be shared (a project's travels with the
-  * repository), so it names variables rather than holding keys, and only this
-  * file has to stay out of version control. `.atc` is `none` and `locked` in
-  * the starting policy, so the agent can read neither.
-  *
-  * A name is looked up in the project's file, then the global one, then the
-  * process environment. **An empty value is not a binding**: the lookup passes
-  * over it and carries on, so blanking a line falls back instead of breaking.
-  */
+/** API-key bindings from project and global `keys.properties` files.
+  * Configuration files reference keys with `${VAR}` instead of storing them.
+  * Lookup uses project bindings, global bindings, then the process environment;
+  * empty values are skipped. The default policy denies access to `.atc`. */
 final case class KeyBindings(files: List[(Path, Map[String, String])]):
   /** The value bound to `name`, from the files in order and then the
     * environment; `None` when nothing binds it to a non-empty value. */

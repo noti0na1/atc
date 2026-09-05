@@ -1,8 +1,6 @@
 package atc.ui
 
-/** The characters that draw the layout; ASCII when the terminal is not UTF-8
-  * (or `ATC_ASCII` is set). Always constructed with named arguments — a bare
-  * list of eighteen one-character strings says nothing. */
+/** Terminal layout characters, with Unicode and ASCII variants. */
 final case class Glyphs(
   /** Opens a block: prose, tool call, thinking. */
   bullet: String,

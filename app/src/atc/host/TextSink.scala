@@ -4,14 +4,10 @@ import java.io.OutputStream
 import java.nio.{ByteBuffer, CharBuffer}
 import java.nio.charset.{Charset, CharsetDecoder, CodingErrorAction, StandardCharsets}
 
-/** An output stream that hands its bytes on as text, as they arrive: what the
-  * live views of program and command output are fed with. UTF-8 is the default;
-  * a leading UTF-8/UTF-16 byte-order mark is detected and removed, so native
-  * Windows tools that mark their output can be read correctly too. Decoding is
-  * incremental, so a character whose bytes are split across writes comes out
-  * whole (with the later write); malformed input is replaced, never thrown.
-  * `finish()` flushes an incomplete trailing sequence as replacement text.
-  * Thread-safe, since process streams are drained concurrently. */
+/** Incrementally decodes output bytes, preserving characters split across writes.
+  * Defaults to UTF-8 and detects a leading UTF-8 or UTF-16 BOM. Malformed input
+  * becomes replacement text; `finish()` flushes an incomplete final sequence.
+  * Writes are synchronized. */
 final class TextSink(sink: String => Unit) extends OutputStream:
   private val boms = List(
     Array(0xef.toByte, 0xbb.toByte, 0xbf.toByte) -> StandardCharsets.UTF_8,

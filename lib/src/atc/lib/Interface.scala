@@ -149,9 +149,8 @@ abstract class Network private[atc] () extends caps.ExclusiveCapability
  *  you `kill()` it, or the session ends; `runningProcesses` finds the live ones
  *  again. One spawned inside a `requestExec` block is also killed when that block
  *  ends. Start long-lived processes from a standing grant rather than a one-time
- *  grant. Wait operations accept a timeout and throw `RuntimeException` when it
- *  expires. The exception includes any output received, which remains available
- *  for a later `read()`.
+ *  grant. `readUntil` throws `RuntimeException` on timeout and keeps the output
+ *  available for a later `read()`. `waitFor` returns `None` on timeout.
  *
  *  {{{
  *  val py: Process^{ex} = spawn("python3 -i")      // top-level val: explicit type, like FileEntry
@@ -370,10 +369,9 @@ trait Interface:
    *  copy a binary file: `writeBytes(to, readBytes(from))`. */
   def writeBytes(path: String, content: Array[Byte])(using FileSystem^): Unit
 
-  /** Move (rename) a file; `to` may be a new name or a path elsewhere (parent
-   *  directories are created). It is read `from`, write `to`, delete `from` with the
-   *  usual checks, so a classified file cannot be moved at all. Directories: move
-   *  their files and `mkdir`/`delete` the directories. */
+  /** Move a file by copying it and deleting the source. Requires write access
+   *  to both paths; classified files are rejected. Parent directories are created.
+   *  The operation is not atomic. Move directory contents individually. */
   def move(from: String, to: String)(using FileSystem^): Unit
   /** Copy a file, binary-safe (`writeBytes(to, readBytes(from))`). */
   def copy(from: String, to: String)(using FileSystem^): Unit

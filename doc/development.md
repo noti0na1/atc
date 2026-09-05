@@ -1,1168 +1,628 @@
-# ATC: development notes
+# ATC development guide
 
-This document explains how ATC is built and the reasoning behind its design. The
-[README](../README.md) is the user guide; it covers installation, day-to-day use, and the
-capability model at a high level. This document is for contributors. It covers building and
-testing, architecture, the capability design, the sandbox, permissions, configuration
-semantics, the terminal, and important implementation conventions.
+This guide covers the build, architecture, implementation constraints and tests. The
+[README](../README.md) covers installation, configuration and the agent-facing API.
 
-## Table of Contents
-
-1. [Building and running](#building-and-running)
-2. [Architecture](#architecture)
-3. [Capture checking in brief](#capture-checking-in-brief)
-4. [The capability design](#the-capability-design)
-5. [Defence in depth](#defence-in-depth)
-6. [The sandbox](#the-sandbox)
-7. [The permission model](#the-permission-model)
-8. [Configuration semantics](#configuration-semantics)
-9. [Models and providers](#models-and-providers)
-10. [What the model sees: the context](#what-the-model-sees-the-context)
-11. [The agent loop](#the-agent-loop)
-12. [The terminal](#the-terminal)
-13. [Testing](#testing)
-14. [Conventions and gotchas](#conventions-and-gotchas)
-15. [The wrapper script](#the-wrapper-script)
-16. [Releases and CI](#releases-and-ci)
+The [type-system background](#type-system-background) explains the theoretical model;
+the [capability design](#the-capability-design) maps it to ATC. The remaining sections
+describe runtime enforcement, execution, configuration and maintenance.
 
 ## Building and running
 
-The repository ships Mill launchers for Unix (`./mill`) and Windows (`.\mill.bat`), so a
-JDK 17+ is all you need. The Scala version is a pinned nightly (`Versions.scala` in
-`build.mill`): capture checking and safe mode are experimental and move fast, so ATC tracks
-one known-good build rather than a release.
+Use JDK 17 or newer and the included Mill launcher. `build.mill` pins Mill, the Scala
+nightly compiler and dependencies. Capture checking and safe mode require that compiler;
+compiler upgrades must pass the capability and sandbox suites.
 
 ```bash
-./mill app.test                                   # all munit tests
-./mill app.test.testOnly atc.ReplSessionSuite     # one suite
-./mill app.test.testOnly atc.ReplSessionSuite -- '*timeout*'   # tests matching a glob
-./mill app.compile                                # compile app (+ lib)
-./mill __.checkFormat                             # scalafmt check; ./mill __.reformat fixes
-./mill dist                                       # out/dist.dest/{atc,atc.ps1,atc.cmd,atc.jar,atc-lib.jar,version.txt}
-./start.sh -C ~/some/project                      # sources .env, rebuilds dist if sources changed, runs the TUI
-./start.sh -c cfg.json -p 'run: 1 + 1'            # one non-interactive turn (plain mode)
-./mill -i app.run -C /some/project                # dev run without dist (-i keeps the terminal attached)
-./mill app.test.runMain atc.Scratch file.scala [nosafe] [preamble.scala]   # run `// ---`-separated snippets in a sandbox
-ATC_SKIP_BUILD=1 ./start.sh ...                   # skip the rebuild check
-bash tests/atc_test.sh                            # tests of the `atc` wrapper script (bash 3.2+, no network, no Java)
+./mill app.compile
+./mill app.test
+./mill app.test.testOnly atc.ReplSessionSuite
+./mill app.test.testOnly atc.ReplSessionSuite -- '*timeout*'
+./mill __.checkFormat
+./mill __.reformat
+./mill dist
+bash tests/atc_test.sh
 ```
 
-The native PowerShell equivalents are:
+On Windows, replace `./mill` with `.\mill.bat`. Tests run serially there because Mill's
+parallel queue can duplicate compiler-intensive suites. If the Mill server cannot start,
+use `./mill --no-server ...`. The permission suite starts a local HTTP server and needs
+permission to bind a loopback socket.
 
-```powershell
-.\mill.bat app.test
-.\mill.bat app.test.testOnly atc.ReplSessionSuite
-.\mill.bat app.compile
-.\mill.bat __.checkFormat
-.\mill.bat dist
-.\start.ps1 -C "$HOME\some\project"
-$env:ATC_SKIP_BUILD = '1'; .\start.ps1 --version
-```
+`dist` writes `atc`, `atc.ps1`, `atc.cmd`, `atc.jar`, `atc-lib.jar` and `version.txt` to
+`out/dist.dest/`. The Unix launcher and JARs form the Unix distribution; Windows uses the
+PowerShell launcher with the same JARs. The batch launcher is a compatibility entry point.
 
-`start.sh` is the Unix developer path: it rebuilds `out/dist.dest/` with `./mill dist` when a
-source file is newer than the jar, sources a `.env` (`cp .env.example .env`; API keys and
-the `ATC_*` variables below, without overriding what the shell already exported) and passes
-its flags through to ATC. Without the script: `./mill dist`, then `out/dist.dest/atc`.
-On Windows, `start.ps1` provides the same flow through the included native `mill.bat`; it
-does not require Bash. `start.cmd` is the execution-policy compatibility entrypoint and,
-like any batch file, is subject to `cmd.exe` argument parsing. The build temporarily runs at
-the checkout root, while ATC itself retains the launch directory unless `-C` overrides it.
+`./start.sh` and `.\start.ps1` load `.env`, rebuild stale distributions and launch ATC.
+They preserve non-empty exported environment values and pass application arguments through.
+The build runs in the checkout; ATC retains the launch directory unless `-C` overrides it.
+Environment files contain literal `KEY=value` entries; shell expansion is not performed.
 
-On Unix, `atc dev <checkout>` runs a local build through the *installed* wrapper: it copies
-the checkout's `out/dist.dest/` jars into `~/.atc/jars/` in place of the release; see
-[The wrapper script](#the-wrapper-script).
+| Variable | Purpose |
+|---|---|
+| `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD` | Start-script defaults for `-m`, `-c`, `-C` |
+| `ATC_ENV_FILE` | Alternative environment file |
+| `ATC_SKIP_BUILD=1` | Skip the start script's rebuild check |
+| `ATC_JAVA_OPTS` | Additional JVM flags for Unix launchers and checkout start scripts |
+| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
+| `ATC_ASCII` | Select ASCII terminal glyphs when set |
 
-Environment variables: `ATC_DEBUG=1` (`atc.Debug`) prints stack traces and terminal/stream
-diagnostics; `ATC_ASCII=1` draws the TUI with ASCII glyphs; `ATC_JAVA_OPTS` adds JVM flags
-through the Unix wrapper, distribution launcher, and the two start launchers; `ATC_MODEL`,
-`ATC_CONFIG`, `ATC_CWD` are `start.sh`/`start.ps1` shorthands for `-m`, `-c`,
-`-C`; `ATC_ENV_FILE` selects another environment file and `ATC_SKIP_BUILD=1` skips the
-staleness check. A provider with `"api": "echo"` is a key-less model (`run: <code>` in the
-request becomes a `run_scala` call with that code, anything else is echoed back) for smoke
-tests of the sandbox and TUI without network:
-
-```bash
-echo '{ "model": "echo", "providers": { "echo": { "api": "echo", "models": { "echo": {} } } } }' > /tmp/echo.json
-./start.sh -c /tmp/echo.json -C /tmp/proj -p 'run: println("hi"); 21 * 2'
-```
+For development without packaging, use `./mill -i app.run`. For manual REPL checks,
+`./mill app.test.runMain atc.Scratch file.scala` evaluates snippets separated by `// ---`.
+An `echo` provider supports local testing: `run: <Scala code>` invokes the REPL; other
+requests are echoed. It needs no API key or network connection.
 
 ## Architecture
 
-Two Mill modules:
+| Component | Responsibility |
+|---|---|
+| `lib` | Agent-facing capability types, data types and `Interface`; compiled with capture checking |
+| `app` | Configuration, models, permissions, host operations, REPL and terminal |
+| `agent/` | Turn loop, completion decisions, history, context estimates, prompts and input prediction |
+| `config/` | Configuration layers, validation, key bindings and model catalog |
+| `host/` | File, process, network and user operations implementing `Interface` |
+| `llm/` | Provider-neutral messages and provider adapters |
+| `perms/` | Policy, permission scopes, path patterns, modes and gitignore visibility |
+| `platform/` | OS behavior, path normalization and portable path globs |
+| `sandbox/` | Compiler setup, REPL evaluation, validation, class loading and interruption |
+| `ui/` | JLine input, streaming output, Markdown and syntax highlighting |
 
-| Module | What it is |
-|--------|------------|
-| `lib`  | The one API the model programs against: `atc.lib.Interface` plus the capability and data types (`FileSystem`, `Classified`, `Todo`, …), compiled with capture checking (`-language:experimental.captureChecking`, `-Wsafe-init`), every agent-visible definition `@assumeSafe`. No implementation lives here; the sandbox injection point (`atc.lib.Runtime`, holding `current`, the root capabilities and the derivations `fileSystem`/`readOnlyFileSystem`/`processes`/`network` the preamble builds the givens from, declared by the `Derivations` trait; all `@rejectSafe`) sits in its own file, outside the API source the model is shown. |
-| `app`  | The agent program. `atc.host.Host` **implements `Interface` directly** (permission policy, file/process/network effects, questions, TODO list, LLM calls), and the REPL preamble binds that implementation as `api`, so a call in agent code is a plain method call on the host, with no marshalling layer to keep in sync. Also: sandbox and REPL management, LLM providers, terminal UI. |
+One turn follows this path:
 
-```
-lib/src/atc/lib/   Interface.scala: the agent-facing API (capabilities, data types, Interface)
-                   Runtime.scala: the sandbox's injection point (@rejectSafe, not part of the API)
-app/src/atc/
-  (root)           LauncherEnvironment → Cli → Main → App; shared TextFiles/ScalaSource boundaries
-  agent/           the small loop state machine; typed completion policy, transcript/context bookkeeping,
-                   run_scala adapter and output rendering; system prompt and next-input prediction
-  config/          the JSON config model: layers, merging, validation, keys, model catalog, templates
-  host/            the Interface implementation: file/network effects; typed command grammar, Windows
-                   executable resolution, and process lifecycle in separate components
-  llm/             provider-neutral messages and ChatModel, plus the Anthropic, OpenAI and echo adapters
-  perms/           the permission policy: rules and path patterns, scopes and grants, modes, gitignore
-  platform/        the only OS/path-trait checks, portable paths, Win32 validation, slash-based globs
-  sandbox/         the in-process REPL: preamble, diagnostic preflight, class-loader isolation, timeouts, interrupts
-  ui/              the JLine terminal: streaming output, panels, pop-ups, Markdown and Scala colouring
-app/test/src/atc/  munit suites, one per guarantee (TestEnv + ReplAssertions are the shared fixtures)
-app/resources/atc/ the starting configs (config-template.json, project-template.json, keys-template.properties)
-atc                Unix wrapper: installs, updates and runs release jars (tests/atc_test.sh)
-mill / mill.bat    pinned Mill bootstrap launchers for Unix / Windows
-start.sh           builds and runs a checkout on Unix
-start.cmd/.ps1     builds and runs a checkout on Windows
-capture-checking-bug/  a runnable repro of an upstream separate-compilation bug (see below)
+```text
+App → Agent → ChatModel.complete → CompletionPolicy
+                  ↓ tool calls
+          ScalaToolRunner → ReplSession → Host
+                  ↑ execution result and permission decisions
 ```
 
-### Data flow of one turn
+`Agent` controls turn state. `Conversation` owns history and protocol repair;
+`ContextManager` owns token estimates and history fitting. `ScalaToolRunner` decodes
+`run_scala`, invokes the REPL, records execution time and renders results through
+`ToolOutput`. `AgentMessages` contains notices exchanged with the model and UI.
 
-`App` (wiring) → `Agent.turn` → `ChatModel.complete` → tool call `run_scala` →
-`ReplSession.run(code)` → `CodeValidator` (fast diagnostic preflight) → compiler safe-mode
-check → REPL eval with the
-`Host` installed as the API implementation → `ExecutionResult` → `ToolOutput.renderForModel`
-(bounded, hint-annotated) back into `Msg.ToolResults` → the model again, until it answers.
+`Host` implements `Interface` directly through file, process, network and interaction
+traits. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
+The REPL shares library classes with the application, so calls need no serialization layer.
 
-`ChatModel.complete` takes one `SystemPrompt(text)` built by `Prompts.system` from the
-configuration, an injected `AgentEnvironment` and the mode, the configured permissions included;
-permission grants do not change it (a mode switch restarts the sandbox, while an explicit
-`/classifiedmodel` switch rebuilds the prefix once). A permission the user grants for the
-session is reported in the tool result of the call that asked. Between explicit switches,
-every request uses the same prefix plus what was appended, whatever caching the provider
-offers (see [What the model sees](#what-the-model-sees-the-context)).
-Completions stream into a `StreamSink` (text / notes / thinking) that the UI renders live.
+## Type-system background
 
-History (`llm.Msg`) is provider-neutral, so `/model` can switch vendors mid-conversation;
-each provider stashes a `NativeTurn` on the assistant message for exact replay when the
-exact same model reference continues. Another model, even on the same protocol, receives
-only the neutral text and tool calls; model-bound encrypted reasoning is never replayed to it.
+### Authority, effects and retained capabilities
 
-### The lib ⇄ app boundary
+A capability is a reference that authorizes an operation. Passing `FileSystem` to a
+method provides file access through that object. A `using` parameter makes the dependency
+explicit in the method signature, but implicit argument passing alone does not prevent a
+closure or object from retaining the reference. Capture checking tracks that retention.
 
-`lib/src/atc/lib/Interface.scala` is the whole agent-visible surface: the capabilities
-(`IOCap`, `UserIO`, `FileSystem`, `FileEntry`, `Exec`, `Network`), `Classified`, the data
-types, and the `Interface` trait. The source of that file is bundled into the system prompt
-(`Prompts.interfaceSource`, also what `/interface` prints), so wording there is prompt
-wording. When you add an API method: declare it in `Interface.scala` (`@assumeSafe`),
-implement it in `Host`, and remember the prompt. Plain signatures in `Host` may override the
-capture-checked ones. Keep `Interface.scala` comments limited to observable contracts and
-guidance the agent needs to write valid code; implementation rationale, compiler workarounds,
-TODOs and contributor notes belong in this document or beside the implementation.
+In ATC, capability types and runtime permissions answer different questions. The type
+system determines whether code can read, write, execute or communicate at all. The policy
+determines which concrete files, commands and hosts an available capability may access.
+For example, a write can compile in full mode and still fail because its path is locked.
+A write in read-only mode fails before the policy receives an operation.
 
-The REPL preamble (`ReplSession.preambleChunks(mode)`) binds `atc.lib.Runtime.current` as
-`api`, `export`s it, and defines the top-level `given`s for the mode. It is loaded as
-**several REPL rounds, one per given** (`init` loops over the chunks): each given then lands
-in its own line-wrapper object, so a `Classified.map` that reads a file captures only the
-`fs` wrapper instead of the separate `user`/`io` wrappers. The givens must stay *top-level*
-(not fields of `object api`): a capability field would force `object api` itself to be a
-capability, and the `@untrackedCaptures` workaround stops uses being charged, which reopens
-the default-argument leak described below.
+### Capture sets and subcapturing
 
-Editing helpers in the API: `sed(path, regex, replacement)` is the targeted edit (Java regex
-compiled with `(?m)` so `^`/`$` are per line; the replacement takes Java's `$1`/`${name}`
-plus sed's `\1`/`\n`/`\t`, translated by `Host.sedReplacement`; it returns the match count
-and throws when nothing matches, so a mistyped pattern cannot look like a successful edit;
-literal text goes through the pure helpers `quote`/`quoteReplacement`
-(`Pattern.quote`/`Matcher.quoteReplacement` underneath; temporary stand-ins, marked
-`TODO(safe-mode)`, for `scala.util.matching.Regex.quote`/`quoteReplacement`, which safe mode
-refuses until the stdlib is tagged)); `replaceLines(path, from, to, text)` /
-`insertLines(path, before, text)` edit by the line numbers `cat` shows (`replaceLines`
-returns the old text so a stale range is visible; `TextFiles` keeps the file's newline
-style); `write`/`writeBytes` rewrite a whole file, `readBytes`/`writeBytes`
-are the binary pair, and `move`/`copy` are composed of the checked read/write/delete
-primitives (so a classified file cannot be moved or copied out). Viewing: `cat(path)` /
-`cat(path, from, to)` print `cat -n`-numbered lines through the `println` path (capped at
-`Host.CatMaxLines` with a note naming the next window; lines cut at `Host.CatMaxLineChars`),
-and are what the prompt tells the agent to look at files with, so that it reads windows of
-big files and can quote line numbers; `read` stays raw for code. Listings
-(`ls`/`walk`/`find`/`GrepMatch.file`) show paths relative to the working directory when
-inside it (`Host.display`), absolute outside, and turn Windows separators into `/`;
-`find`/`grepRecursive` globs match the file name, or the
-path relative to `dir` when the glob contains `/` or `**` (`PathGlob`,
-gitignore-flavoured: `**` spans directories, a leading `**` + `/` also matches none).
-**Commands.** `exec(command)` uses the small grammar in `CommandLine.parsePipeline`: quoted
-words, `|` between stages, `< f`, `> f`, `>> f`, and `2>&1`. There is no shell, so `&&`,
-`;`, `||`, `&`, `2>`, backticks, and `$(` are rejected. `ProcessBuilder.startPipeline`
-runs the stages with real pipes. Each stage is checked independently against the allowed
-patterns and deny list, and the `requestExec` hint identifies missing permissions. Input
-and output redirections pass through the normal file checks and reject classified paths.
-The pipeline uses pipefail-style exit codes and labels standard error by stage.
+`T^{c}` describes a value that may retain capability `c`; `T^{c, d}` permits both.
+Subcapturing expresses coverage: `{c}` is covered by `{c, d}`. Coverage can also follow a
+reference's declared captures, so a handle typed `FileEntry^{fs}` is accounted for by
+`fs`. For ordinary capturing types, a smaller permitted capture set gives a more specific
+type. Capture sets describe possible dependencies, not a list of operations already run.
 
-The agent-facing `exec`, `execOutput`, and `spawn` overloads require both full `Exec^` and
-full `FileSystem^`. Modes issue those full leaves together under `io`; requiring both
-also reflects that the command grammar can write through output redirection even when a
-particular invocation only reads its working directory.
+Function types make the distinction explicit:
 
-Arguments in `args: Seq[String]` are appended verbatim, while
-`ExecOptions(workingDir, timeoutMs, stdin)` controls the remaining behavior. `exec` returns
-non-zero exits normally, whereas `execOutput` throws; timeout errors include the output
-captured so far. Both `exec` and `spawn` use `Host.prepare` for parsing, permission checks,
-and `ProcessBuilder` construction, then `Processes.ManagedProcess` for execution. A managed
-process owns the pipeline stages, bounded output buffers fed by drain threads, an optional
-live view, and an exit watcher. A JVM-wide registry lets the shutdown hook kill any process
-still running.
+| Type | Capabilities retained by the function |
+|---|---|
+| `A -> B` | None |
+| `A ->{c} B` | Those covered by `c` |
+| `A => B` | A general capturing function, written `A ->{any} B` |
 
-`exec` starts the process, waits up to the timeout, and returns `result()`. `spawn` returns
-a `ProcessImpl`, an `atc.lib.Process` capability that captures `ex` and therefore cannot
-enter `Classified.map`. Its standard input remains open for `send`; `read` and `readErr`
-consume output, `readUntil(regex, ms)` waits without consuming on failure, and `waitFor`
-and `kill` manage its lifetime. The host permits at most `Host.MaxProcesses` live processes
-and assigns IDs (`p1`, `p2`, …) that are never reused. `runningProcesses` removes completed
-entries, and `App` calls `host.killProcesses()` when the REPL session ends. The user sees
-start, input, and exit events inside the tool block and can use `/ps` or `/kill [id|all]`.
-Spawned output is not streamed automatically; the agent reads it explicitly, and the
-result panel displays what it read. `Agent.hints` turns `Cannot run program` failures into
-PATH and no-shell guidance. A single parsed pipeline is capped at 16 stages.
+See the compiler's [capture-checking basics](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/basics.html)
+for the subcapturing rules and function notation.
 
-On Windows, a bare executable is resolved from `PATH` (not the working directory), using
-`PATHEXT`; write `.\tool` to opt into a repository-local executable. This permits normal
-`.exe`, `.cmd`, and `.bat` entry points such as `npm` and `mill.bat` without pretending that
-`dir`, `copy`, or a PowerShell cmdlet is an executable. A backslash is a path separator, not
-a space escape, so quote an argument containing spaces. Batch files inherently use the
-Windows command processor after their stage is authorized; strict JDK quoting and ATC's
-`%`/`!` checks keep their arguments from becoming extra commands. Other shell built-ins require an explicit
-`cmd.exe`/PowerShell command and therefore a correspondingly powerful permission grant.
-External programs choose their own newline and encoding conventions. `TextSink` defaults to
-UTF-8 and recognizes a leading UTF-8/UTF-16 BOM; tests of native tools must still allow CRLF
-and other platform-specific output rather than assuming Unix `\n`.
-
-**HTTP.** `httpGet`/`httpPost` throw on status >= 400 with the status and a body prefix
-(`Host.checked`), `httpRequest` is raw, and response bodies are capped at 8 MiB. Any request
-carrying a classified body or header returns `Classified[...]`; construction, transport,
-status and body failures after unwrapping stay inside it, so a peer cannot reflect a secret
-back into plain data. JSON: `atc.lib.Json` (the enum and its companion live in `Interface.scala`
-so the agent sees the API; parser/renderer in `lib/.../JsonCodec.scala`, not bundled).
-`ExecOptions` and `Todo` are plain data types, so their default arguments are fine: the no-
-defaults rule is about capability-taking methods.
-
-## Capture checking in brief
-
-ATC's design relies on an experimental Scala 3 feature. This section introduces the
-concepts needed to understand the rest of the document.
-[Capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html)
-adds a second dimension to the type system: in addition to tracking *what* a value is, the
-compiler tracks *which capabilities it can reach*. A **capability** is a value tracked in
-this way, and its type is a subtype of `caps.Capability`. ATC's `FileSystem`, `Exec`,
-`Network`, `UserIO`, and `IOCap` types all qualify through `caps.ExclusiveCapability`. The
-feature is based on a small formal calculus with a soundness proof; relevant papers are
-listed under [References](#references).
-
-**Capture sets.** Every type carries a *capture set*, written in `^{...}`, naming the
-capabilities that values of the type may use:
+This helper expresses an ATC callback's dependency directly:
 
 ```scala
-val a: FileSystem^{fs}        // may use exactly fs
-val b: FileSystem^{fs, net}   // may use fs and net
-val c: FileSystem^            // ^ abbreviates ^{cap}: may use anything
+def printer(using user: UserIO^): String ->{user} Unit =
+  (text: String) => println(text)
 ```
 
-A type without `^` captures nothing and is therefore *pure*. The compiler propagates
-capture sets through calls, closures, and fields without widening them implicitly. A value
-typed `^{fs}`, for example, has been proved unable to access the network.
+The callback retains the supplied `user`. Its return type is `Unit`, but that does not
+make it pure: purity depends on captured capabilities. Converting an effectful method to a
+function must preserve this dependency; the default-argument regression discussed below
+is important for precisely this reason.
 
-**Subcapturing.** Capture sets are ordered by inclusion, and that order lifts to subtyping:
-`T^{fs}` is a subtype of `T^{fs, net}`. A value that uses fewer capabilities can stand in
-for one that may use more, but not the reverse. Passing a `T^{fs, net}` where a `T^{fs}` is
-expected is therefore a type error. This rule underpins both read-only views and the mode
-hierarchy.
+### Scope and capture polymorphism
 
-**Functions capture what their body uses.** A function value's capture set is the union of
-the capabilities its body refers to. `A -> B` is a pure function (empty set); `A => B` is
-sugar for `A ->{cap} B`, one that may use anything; and `A ->{fs} B` may use `fs` and nothing
-else. This is the type used by `Classified.map`:
+`T^` abbreviates `T^{any}`, but `any` is scoped. It is not one unrestricted global
+permission that can absorb capabilities introduced in deeper scopes. Scoped capability
+parameters and restrictions on result captures prevent a callback from returning a
+resource whose lifetime ends when the callback returns. This includes returning a
+closure, collection or object that indirectly retains the resource. The upstream
+[scoped-capability rules](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/scoped-capabilities.html)
+describe the role of lexical scope.
+
+ATC's `requestFiles` also preserves the caller's access mode with a capture-set parameter.
+Its full overload is declared in `Interface` as:
 
 ```scala
-def map[B](op: T ->{any.rd} B): Classified[B]
+def requestFiles[T, C^](path: String, access: Access, reason: String)
+                      (using UserIO^, FileSystem^{C})
+                      (op: (FileSystem^{any.rd, C}) ?=> T): T
 ```
 
-`op` may capture only *read-only* capabilities (`any.rd`). A body that tries to print,
-write, call `exec`, or call `httpGet` therefore does not compile because each operation
-requires a full capability. The confidential value can be transformed, but it cannot be
-routed out through one of those channels.
+`C^` abstracts over a capture set. The contextual callback receives an inner file-system
+given that includes the caller's captures. It therefore retains a full view when the caller
+has one and remains read-only for a read-only caller. The scoped component prevents the
+temporary capability from escaping in `T`. This is ATC's use of
+[explicit capture polymorphism](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/polymorphism.html).
 
-**Capabilities cannot escape their scope.** A capability introduced for a bounded region
-cannot be captured by anything that outlives that region. Storing it in a longer-lived
-binding, returning it, or closing over it in an escaping function causes a compile error.
-The calculus models this with *boxes*, and the error says that the capability "cannot be
-included in outer capture set." This rule allows a `request*` block to receive a wider
-capability safely:
+Within an initialized ATC REPL, the following returns ordinary text successfully:
 
 ```scala
-val stolen = requestFiles("/tmp", Access.Write, "cache") { // lends a full FileSystem^
-  write("/tmp/x", "ok")     // fine: the capability is used inside the block
-  summon[FileSystem^]       // error: returning it would let it escape the block
+val copiedText = requestFiles(".", Access.Read, "inspect project") {
+  read("notes.txt")
 }
 ```
 
-**Safe mode** ([reference](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html))
-is a second experimental layer that ATC enables alongside capture checking. Capture
-checking is sound only when *every* capability is tracked; a library that returned an
-untracked capability—for example, a `println` that secretly held `System.out`—would create
-a hole. Safe mode closes this gap by rejecting definitions that are not explicitly marked
-safe. The agent-visible API is `@assumeSafe`, while the sandbox injection point is
-`@rejectSafe`, so agent code cannot name it. Untagged standard-library objects are
-unavailable, which is why the API provides pure alternatives for a few standard methods.
-Safe mode comes from [TACIT](https://github.com/lampepfl/tacit), on which ATC builds.
+Returning the temporary file system instead is rejected:
 
-**Mutability.** ATC also uses the nightly compiler's
-[mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html),
-which *reinterprets the bare type as the read-only view* (`FileSystem` means
-`FileSystem^{any.rd}`, not the pure empty set) and marks the mutating operations `update`,
-callable only through the full `^`. The next section explains this refinement and how ATC
-combines these pieces into its [capability design](#the-capability-design).
+```scala
+val escaped = requestFiles(".", Access.Read, "inspect project") {
+  summon[FileSystem^]
+}
+```
 
-### References
+The first result does not retain the temporary authority. It may still contain confidential
+information, so lifetime checking alone is insufficient for data protection; `Classified`
+provides that separate constraint.
 
-- **The feature:** the Scala 3 nightly documentation. The project tracks a pinned compiler
-  build ([capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html),
-  [safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html),
-  [mutability](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html)).
-- **The formalized calculus:** *Capturing Types*, by Boruch-Gruszecki, Brachthäuser, Lee,
-  Lhoták and Odersky (ACM TOPLAS, 2023), which defines the capture calculus (CC<:, with boxes
-  for the escape checking above) and proves it sound.
-- **The agent application:** *Securing Agents with Tracked Capabilities* (TACIT, CAIS '26),
-  which introduces safe mode and the capability-typed sandbox that ATC repackages.
+### Read-only views and stateful capabilities
+
+ATC's `Cap` extends `Stateful` and `ExclusiveCapability`. For that combination, a bare
+capability type receives a read-only capture set. `x.rd` restricts access through `x`;
+an `update` method requires full access. This is an access restriction on the same runtime
+object, not a copy of the object or proof that nobody else can mutate it.
+
+The ordinary rule that smaller capture sets yield subtypes needs this qualification:
+stateful read-only sets also express access permissions. A full reference can be used
+through a read-only view without erasing its tracked dependency. The compiler represents
+this distinction internally with a reader qualifier. See
+[stateful capabilities](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html).
+
+```scala
+val ro: FileSystem^{fs.rd} = fs
+ro.access("notes.txt").read()           // permitted when the file policy allows it
+ro.access("notes.txt").write("changed") // compile error: read-only receiver
+```
+
+`Exec` and `Network` extend only `ExclusiveCapability`. They do not support `.rd`; a bare
+`Exec` is already a full capability. Do not generalize the bare-`FileSystem` convention to
+every capability type. `CapabilitySuite` tests this distinction.
+
+### Safe mode and the trusted implementation
+
+Capture tracking requires APIs to expose their real dependencies. An apparently pure
+method that secretly reads a global file handle would invalidate that reasoning. Safe mode
+restricts untracked casts, reflection, unsafe annotations and access to global components.
+`@assumeSafe` admits a trusted library definition; it is a responsibility of the library
+author, not a proof generated for the implementation. `@rejectSafe` excludes selected
+definitions from safe code. See the compiler's
+[safe-mode reference](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html).
+
+ATC compiles `lib` with capture checking, explicit nulls and safe initialization checks.
+The host implementation in `app` uses ordinary Scala signatures and Java I/O. Consequently,
+the implementation of each admitted API must preserve the interface contract manually:
+use the supplied capability, check the appropriate scope and policy, and keep classified
+values out of ordinary outputs and exceptions.
+
+The online language documentation follows newer nightlies. The executable examples above
+were checked against the compiler pinned in `build.mill`; use ATC's compiler suites to
+resolve differences during upgrades. Theoretical properties of capture checking do not
+constitute a formal verification of ATC, its dependencies or its runtime environment.
 
 ## The capability design
 
-This section expands on the README's
-[overview](../README.md#the-idea-capabilities-instead-of-ambient-authority) with the details
-required by the implementation. If the `^{...}` capture-set notation is unfamiliar, read
-[Capture checking in brief](#capture-checking-in-brief) first.
+The build bundles `lib/src/atc/lib/Interface.scala` into the system prompt and `/interface`.
+Its comments are API documentation for the model: keep contracts and examples there;
+keep implementation rationale in this guide or beside host code. Add operations to the
+interface and host together, then verify their required capabilities.
 
-**Capabilities cannot be forged.** The capability classes have `private[atc]` constructors
-(agent code is compiled into the empty package), the only instances are the ones the REPL
-preamble binds. `atc.lib.Runtime` contains `current`, `rootIO`, `rootUser`, `install`, and
-the `fileSystem`, `readOnlyFileSystem`, `processes`, and `network` derivations. It is
-`@rejectSafe`, so agent code cannot even name it under safe mode. The regex validator also
-recognises the common direct spelling so it can return a shorter error before compilation;
-the compiler check is authoritative.
+Capture sets describe the capabilities a value may retain. For ATC's stateful capability
+types, the bare type is the read-only view; `^` denotes full access. For example,
+`FileSystem` can read and `FileSystem^` can read or write. `FileEntry` mutation methods are
+`update def`s, which require full access. A full file system can be explicitly restricted:
 
-**Mutability / read-only tracking** follows the nightly's `mutability.md`: the mode-tracked
-capabilities (`IOCap`, `UserIO`, `FileSystem`, `FileEntry`) extend
-`atc.lib.Cap = caps.Stateful, caps.ExclusiveCapability`. A bare type is the read-only view
-(`^{any.rd}`); `^`/`^{io}` is full. The write side (`FileEntry.write/append/delete/mkdir/
-writeClassified`) are `update def`s, callable only through a full capture set. `x.rd` names
-the read-only view of `x`: `val ro: FileSystem^{fs.rd} = fs` is a file system that provably
-cannot write, for helpers, or for reading files inside `Classified.map` where the full `fs`
-may not be captured (what the API's `readOnlyFileSystem` used to hand out; it now lives in
-`Derivations`, for the read-only mode's preamble only).
-
-**Two roots.** `IOCap` is the common capture root for the machine-effect leaves
-`fs`/`ex`/`net`. Local and full mode expose `given io: IOCap^`; their writable `fs` and `ex`
-are captured by that same `io`, while only full mode publishes `net`. Read-only mode exposes
-the reader projection `given io: IOCap` and `fs: FileSystem^{io.rd}`. The derivations are
-internal to the sandbox, so possessing full `io` in local mode cannot manufacture the omitted
-`Network` leaf. `UserIO` is *always* full (`given user: UserIO^`) and is what
-`println`/`print`/`printf`/`ask`/`setTodos`/`markTodo`, normal-model `chat(String)` and every
-`request*` take, so reporting and permission prompts work in every mode while those effects
-stay out of `Classified.map`. `todos` takes a read-only `UserIO`. `Exec`/`Network` are plain
-`ExclusiveCapability` (no read-only view), and their derivations require a full `IOCap^`.
-Why `UserIO` is not derived from `IOCap`: read-only mode withdraws the machine's mutable
-leaves while leaving the conversation intact, so the agent can always say what it would have
-done. The local-mode network error is the model of selective leaves: although `network` is
-internally `def network(using io: IOCap^): Network^{io}`, the local preamble does not publish
-its result, so `httpGet` has no given to resolve:
-
-```
-No given instance of type atc.lib.Network was found for parameter x$2 of method httpGet
+```scala
+val ro: FileSystem^{fs.rd} = fs
 ```
 
-**`Classified.map`** is `T ->{any.rd} B`: the callback may capture *read-only* capabilities
-only. Every untrusted outward channel needs a full capability
-(`println`/`ask`/`chat`/`setTodos` → `UserIO^`; `write`/`append` → `FileSystem^`; `exec` →
-`Exec^` + `FileSystem^`; `httpGet` → `Network^`; `request*` → `UserIO^`), so none of them
-compile inside `map`; reading files does compile where `fs` is itself read-only (read-only
-mode). Do **not** loosen any of those to a read-only capability without re-running the leak
-audit (`CapabilitySuite`).
-`chat(message: String)` in particular used to be the hole that made a bare `{any.rd}`
-unsound.
+| Mode | Machine capabilities supplied by the preamble |
+|---|---|
+| `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}` |
+| `local` | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}` |
+| `full` | Local capabilities plus `net: Network^{io}` |
 
-`classifiedChat(String)` is the deliberate trusted primitive: its configured model is
-assumed to run in an isolated classified environment with no outward connection or side
-effects, so the API treats it as pure and admits it inside `Classified.map`.
-`classifiedChat(Classified[String])` is the label-preserving
-`message.map(classifiedChat)` wrapper. This is a trusted-computing-base/configuration
-assumption, not something the host can prove about an arbitrary configured endpoint.
+Every mode also supplies `user: UserIO^` for output, questions, TODO updates and normal
+`chat` calls. `UserIO` is independent of the machine root so user interaction remains
+available in read-only mode. `Exec` and `Network` have no read-only view. Command operations
+require both `Exec^` and `FileSystem^`, including when redirection writes a file.
 
-**The API has no default arguments on capability-taking methods**; use overloads instead.
-A defaulted parameter makes a `def` wrapper eta-expand to a pure function and slip into
-`Classified.map` (a real, demonstrated exfiltration:
-`def h(s) = exec("echo", List(s)).stdout; classify(x).map(h)` used to run the command).
-`exec`/`execOutput`/`httpGet`/`httpPost`/`httpRequest`/`httpPostClassified`/`ask`/
-`grepRecursive`/`requestFiles`/`requestExec`/`requestNetwork` are therefore telescoping
-overloads, and `CapabilitySuite` has regression guards for the def-wrapper case. A related
-upstream bug (separate compilation losing an object's capability status) has a runnable
-repro in `capture-checking-bug/`.
+Capability constructors are private to ATC. `Runtime` and `Derivations` provide the
+sandbox's internal bootstrap API and are marked `@rejectSafe`. Agent code cannot derive
+missing capabilities from a root it holds.
 
-**`request*` blocks** open a child permission scope that only widens, lend the block a
-capability carrying that scope's id (`FileSystemImpl(scope, host)`; `opaque type ScopeId =
-Long`, base scope `ScopeId.Base`), and close the scope when the block exits. Capture
-checking keeps the lent capability inside the block; the scope id keeps a value that
-somehow outlived it (none should) from being honoured by the host, which resolves
-permissions per call. `requestFiles` lends a file system exactly as capable as the one in
-scope (full in local/full mode, read-only in read-only mode). The request itself works in
-every mode, but callbacks needing `FileSystem^`—including command execution—remain
-local/full-only. `requestExec` widens only `Exec^`; a command needing unconfigured file
-access must nest the matching `requestFiles` block.
+The preamble loads each given in a separate REPL round. Each therefore occupies a separate
+wrapper class: a read-only operation capturing `fs` does not also capture the full `user`
+capability. Keep the givens at the top level; grouping them in an object changes capture
+checking behavior.
+
+### Classified data
+
+`Classified.map` and `flatMap` accept callbacks of type `T ->{any.rd} B`. They may capture
+read-only capabilities. Printing, writing, commands, network requests, permission requests
+and normal `chat` all require full capabilities and are rejected in those callbacks.
+
+`ClassifiedImpl` stores a `Try`: non-fatal computation failures remain confidential.
+Authorized destinations are the user terminal, classified files, the configured classified
+model and permitted HTTP hosts. HTTP calls with classified headers or bodies return
+classified responses, preventing a server from reflecting a secret into ordinary output.
+Validate public parameters and permissions before inspecting classified values, and keep
+subsequent failures inside the classified result or user-only output.
+
+The data-flow argument relies on both parts of the API. `map` does not expose a plain
+result, and its callback cannot capture a full output capability. Thus deriving a Boolean
+from a secret keeps the Boolean classified too. Allowing `println`, a mutable file handle,
+or an untrusted model callback inside `map` would expose information even if the callback
+returned a harmless value.
+
+An explicit read-only file system can be used to compute a classified result:
+
+```scala
+classify("notes.txt").map(path => read(path)(using ro))
+```
+
+The `printer` callback defined above is rejected in the same position:
+
+```scala
+classify("private").map(printer) // requires UserIO^, which map cannot capture
+```
+
+Exception handling is part of this boundary. A callback may throw an exception containing
+a secret, so a failed `Try` must remain classified. Authorized output methods must also
+handle failures in user-defined rendering, including `toString` and `getMessage`, without
+letting the exception reach the model. Fatal errors must abort evaluation rather than
+becoming a condition the agent can catch and inspect.
+
+`classifiedChat(String)` is treated as pure. This assumes the configured endpoint is
+isolated and has no observable effects beyond its result; ATC cannot establish that about
+an arbitrary endpoint. Timing, termination and resource-consumption side channels are
+outside the classified-data guarantees.
+
+**Use overloads instead of default arguments on capability-taking API methods.** Default
+arguments have allowed method wrappers to lose required captures when passed to
+`Classified.map`. `CapabilitySuite` covers this regression. Changes to callback signatures,
+capability requirements or preamble structure must retain those tests.
+
+### References
+
+The pinned compiler implements experimental
+[capture checking](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/index.html),
+[safe mode](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/safe.html)
+and [mutable capabilities](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html).
+ATC's design is derived from [TACIT](https://github.com/lampepfl/tacit).
 
 ## Defence in depth
 
-Scala compiler safe mode, together with capture checking, is the authoritative static safety
-check for agent code. The runtime policy, class-loader boundary and deny rules support that
-compiler-enforced model at execution time. `CodeValidator` appears earlier in the pipeline
-only to improve feedback; it is not an independent safety layer.
+Safe mode and capture checking enforce the static capability boundary. `CodeValidator`
+provides early diagnostics for common restricted APIs and unsupported catches. It is a
+lexical check, with possible false positives and false negatives. Keep it small; accepting
+code here does not establish that the code is safe. Disabling safe mode removes the
+compiler's API restrictions.
 
-1. **The policy at run time.** Every host method checks the permission `Policy` for the
-   path, command, or host, including the scope ID of the capability used for the call. A
-   process handle returned by `spawn` also carries its originating scope. Consequently,
-   `runningProcesses` returns only processes visible from the caller's scope chain, and all
-   operations on a handle are refused after its scope closes. A process started inside a
-   `requestExec` block is killed when that block closes (`killProcessesInScope`), so a
-   one-time grant cannot leave behind a live but inaccessible process. `Policy.mode`
-   enforces the three modes again by downgrading writes to reads and refusing `exec` or
-   network access, so the type check is not the only safeguard.
-2. **Preflight feedback (not a safety layer).** `sandbox/CodeValidator.scala` is a
-   deliberately small, fast lexical preflight before compilation. It recognises common invalid forms—direct ambient APIs,
-   known escape-hatch spellings and evaluator-hostile catches—and returns focused guidance
-   without paying for a compiler round. It does not parse or type-check Scala, is not
-   exhaustive, and may have both false positives and false negatives. Accepted code is not
-   thereby safe: safe mode must still compile and approve it. Keep the implementation to
-   cheap regexes and linear scans; do not turn it into a second Scala parser or security
-   checker. Add a rule only when its early diagnostic is useful, and cover that feedback in
-   `CodeValidatorSuite`. If `safeMode` is disabled, the authoritative compiler check is
-   deliberately absent; stricter validator feedback does not restore the same guarantee.
-3. **Class-loader isolation** (`sandbox/Sandbox.scala`): the REPL's class loader has
-   `SandboxLoader` as parent, which delegates only `scala.*` and `atc.lib.*` to the app
-   loader and everything else to the platform loader, so agent code cannot see `atc.host`,
-   the LLM clients, JLine or the compiler, and the sandbox classpath holds no third-party
-   library. `getResource` hides `*.class` so `-Xrepl-interrupt-instrumentation:true`
-   instruments only REPL-defined classes (otherwise the REPL would re-define
-   `atc.lib.Interface` and lose the installed host). `Runtime`'s bootstrap slot is
-   process-global; the process-wide evaluation lock re-selects a session's own host before
-   lazy preamble initialization and every evaluation, so concurrent session objects cannot
-   mix their capabilities.
-4. **Deny lists at the effect.** `commandDenied`/`hostDenied` are consulted where the
-   effect happens (so a session grant, an open scope or `--approve-all` cannot pass them),
-   and `refuseDenied` throws out of `requestExec`/`requestNet` before the prompter is
-   called, with a message telling the model the refusal is final.
+`SandboxLoader` shares `scala.*` and `atc.lib.*` with the application, excluding compiler
+implementation packages. Other classes resolve through the JDK platform loader. Class
+resources are hidden so REPL instrumentation does not redefine the shared API classes.
+
+The host checks permissions at each operation. Scope checks apply even when a locked rule
+already determines access. Command and host deny rules remain effective inside temporary
+scopes and after session grants. External commands run with the user's OS privileges;
+ATC's file and HTTP permissions do not constrain the internals of those commands.
 
 ## The sandbox
 
-**Modes** (`perms/Mode.scala`, `perms/Policy.scala`): `ReadOnly`, `Local`, `Full`. The
-preamble hands out only that mode's givens (read-only `io`+`fs` / full `io` with captured
-`fs`+`ex` / full `io` with captured `fs`+`ex`+`net`, plus the always-full `user`), so the
-wrong effect does not type-check;
-`Policy` (its `@volatile var mode`) also enforces it at run time. Switching mode (`/mode`,
-Shift-Tab, `--mode`, config `"mode"`) sets `policy.mode` and starts a fresh REPL
-(`App.restartSession`); the conversation is kept and the agent gets a `[sandbox notice]` on
-its next turn saying its definitions are gone. `/new` (`App.newSession`) goes further: it
-drops the REPL, `agent.clear()`, `host.clearTodos()`, `policy.resetSession()` (session
-grants and open scopes; rules, deny lists and mode stay), calls `System.gc()` (the old
-compiler and class loader are most of the process's memory) and starts a fresh REPL.
+`ReplSession` persists definitions until a reset, new session or mode change. Safe mode is
+imported after the trusted preamble. Compiler diagnostics and runtime results are returned
+as `ExecutionResult`; an exception recorded by `CappedRendering` marks evaluation failure.
+A string containing the word `error` in ordinary output does not determine run success.
 
-**Evaluation, timeouts, interrupts** (`sandbox/ReplSession.scala`): evaluation runs on a
-worker thread. `ExecutionClock.paused` excludes both the time spent waiting for the user
-(permission prompts, questions) and the time a command runs (`HostOutput.whileCommandRuns`,
-which `App` maps to the same clock pause), plus nested `chat` model calls that own a provider
-request timeout (pauses nest), so an external wait does not trip the snippet's shorter
-timeout. Interrupts and timeouts raise the REPL stop flag through `OpenReplDriver`, a
-subclass of the compiler's `ReplDriver`. The driver also installs `CappedRendering`, which
-lives in **package `dotty.tools.repl`** because `Rendering` is `private[repl]`.
-`skipPoisonedWrapper()` advances the wrapper index so a half-initialised class name is never
-reused. `clock.reset()` happens at the top of every
-`run`. Whether agent code threw an uncaught exception comes from the renderer
-(`CappedRendering.renderError` sets `threw`; the REPL prints the trace as ordinary output),
-not from scanning the output. `close()` marks the session closed (later `run`s fail with a
-clear message) and interrupts a running evaluation; the compiler and class loader are
-reclaimed by the GC once nothing refers to the session. A runtime error in agent code does
-not fail the REPL: the session reports it to the model as an error with host stack frames
-trimmed (`ExecutionResult.trimStackFrames`) and hints appended for common capture-checking
-stumbles (`Agent.hints`: read-only-capture / missing-`Exec`/`Network` errors map to "switch
-mode" advice).
+With an execution timeout configured, evaluation runs on a daemon worker. `ExecutionClock`
+excludes nested waits for user input, external commands and model calls that have their own
+timeouts. Interrupts set the compiler's REPL stop flag and interrupt blocking operations.
+`skipInvalidWrapper` advances past a potentially incomplete wrapper class. Completed file,
+process or network effects are not rolled back after interruption or timeout.
 
-**Output capture.** The REPL driver's output (echoes, diagnostics) and `System.out/err`
-during evaluation go into a bounded capture (`BoundedOutputStream`, a truncation marker
-past the cap). The agent's own `println`s reach the same capture through
-`HostOutput.print` → `ReplSession.printStream` (so they interleave with REPL output in
-order) and the terminal through `Tui.agentPrint`, which remembers them to subtract from the
-result panel by exact substring (`Tui.withoutPrinted`); that relies on `ReplSession` not
-trimming leading whitespace of captured output. Echoed values are capped
-(`SandboxConfig.maxEchoChars`, without ever splitting a surrogate pair); printed output is
-bounded only by the capture.
+Evaluation temporarily replaces `System.out` and `System.err`, so a process-wide lock
+serializes capture. The same lock protects selection of the session's host in `Runtime`,
+including lazy preamble initialization. Lock acquisition has a timeout: an evaluation that
+cannot stop must not block every subsequent request indefinitely. Such a stuck evaluation
+requires restarting ATC.
 
-**Safe-mode quirks** the agent hits, documented in the system prompt (`agent/Prompts.scala`):
-top-level `val`s of capturing types need explicit types; `Option.foreach/map` need pure
-functions; no top-level `var` and no `scala.collection.mutable` (a *local* `var` accumulating
-into an immutable collection is fine, and `StringBuilder` works); `Thread.sleep`/
-`System.nanoTime` are unavailable (use `java.time`); stdlib objects not tagged `@assumedSafe`
-are refused (`scala.util.matching.Regex.quote`/`quoteReplacement`: the API's pure `quote`/
-`quoteReplacement` stand in until then, marked `TODO(safe-mode)`). Writing helpers need
-`(using fs: FileSystem^)` (the bare `FileSystem` is read-only), and command helpers need both
-`Exec^` and `FileSystem^`. `Prompts.modeSection(mode)` adds a mode paragraph.
+Output capture retains at most 4 MiB and reports truncation. Top-level value echoes have a
+separate character limit. User-visible prints also enter the REPL capture; the TUI records
+a bounded prefix to subtract already-displayed output from result panels. Preserve leading
+whitespace in capture because subtraction uses exact text.
+
+| Command | State reset |
+|---|---|
+| `/clear` | Conversation, queued notes and usage accounting |
+| `/reset` | REPL and spawned processes; conversation and session grants remain |
+| `/mode` | REPL and spawned processes, with the selected capabilities |
+| `/new` | REPL, conversation, TODOs, usage and session grants |
+
+REPL restarts queue a notice for the model's next turn. `/run` queues the user's code and
+its result because definitions are shared with the agent. Closed sessions reject further
+runs. Input predictions are invalidated after state changes and before shutdown.
 
 ## The permission model
 
-`perms/`: a `Policy` = configured `FileRule`s + session grants + a tree of scopes + the
-`denyCommands`/`denyHosts` lists.
+`Policy` combines configured file rules, session grants and temporary permission scopes.
+For a canonical path, matching granting rules supply access and every matching rule imposes
+an access ceiling. The strictest ceiling wins; unmatched paths have no access.
+Classification and locking apply if any matching rule enables them. Temporary and session
+grants may widen access but cannot remove classification or exceed a locked rule.
 
-**File rules.** Patterns are gitignore-flavoured (`perms/PathPattern.scala`): no `/` →
-matches a path component anywhere; relative with `/` → against the working directory (or
-the project folder for a project rule, `LayeredRule.base`); absolute and `~/…`. A rule
-applies to the matched path and its whole subtree. Effective access is the *minimum* over
-every matching rule (unmatched → none), classified if any rule says so, locked if any does;
-so a sub-folder inherits its parent's permission and can only be made stricter
-(`build/generated: write` under `build: read` still yields `read`).
+### Policy algebra
 
-Configuration uses `/` separators on every OS. A Windows absolute path should be written as
-`"C:/Users/alice/project"`; native backslashes are JSON escapes and must otherwise be doubled
-(`"C:\\Users\\alice\\project"`). Path-taking API calls accept native Windows input too.
+Access levels form the finite order `None < Read < Write`. For canonical path `p`, let
+`M(p)` be all matching rules and `G(p)` the subset allowed to grant at `p`. A global or
+explicit rule can grant anywhere it matches; a project rule can grant only inside its
+project. The implementation in `configPerm` is equivalent to:
 
-**Every path returned by the host is canonical, with Windows separators rendered as `/`**
-(`Host.canonical` for named paths, `PlatformPath.portable` for API text, and `visibleEntries`
-for listings). Returned strings should be passed as values; code generators must still
-quote legal filename characters such as quotes or a literal Unix backslash. A symlink
-is listed and evaluated as its target, so an entry returned by `children` or `walk` receives
-the same checks as that path would receive
-if addressed directly. This also means that a link in a readable directory to a classified
-file remains classified when listed; `HostSuite` contains the regression test. Dangling
-links are resolved as well because writing through one creates its target, and the policy
-must evaluate that target. Every directory entry is canonicalized because a Windows
-junction/reparse point need not report itself through `Files.isSymbolicLink`; link-like
-directories are listed but never traversed.
+```text
+grant(p)   = maximum explicit access in G(p), default None
+ceiling(p) = minimum explicit access in M(p), default Write
+config(p)  = min(grant(p), ceiling(p))
 
-**Classified paths.** Content is only observable as `Classified[String]`; a classified
-directory's structure is classified too (listing needs `childrenClassified`/
-`walkClassified`, returning `Classified[List[String]]`; `walk`/`grepRecursive`/`find` do not
-descend into it). A plain `write` to a classified path is refused (use `writeClassified`),
-and `writeClassified` to a non-classified path is also refused because it would declassify
-the value. Sinks do not reveal whether a classified computation failed: a pure `map` can
-fail conditionally on the secret, so exposing the failure bit would create a per-bit oracle.
-`writeClassified` checks the permission and target classification *before* inspecting the
-value, ensuring that a denied or non-classified target fails identically in either case. If
-the computation failed, it writes no content but still creates the target, preventing file
-existence from revealing the failure bit, and reports the failure only to the user. A
-failed secret HTTP header cannot simply be omitted because the resulting response, such as
-a 401 instead of a 200, could reveal the failure. All overloads carrying classified input
-therefore keep both failure and response in a `Classified` result. Rendering a classified
-value is guarded too: an agent-defined `toString` or `Throwable.getMessage` cannot throw a
-secret-bearing exception back into the REPL result.
+scoped(s,p) = maximum matching file grant in s and its ancestors, default None
+access(s,p) = config(p)                         when p is locked
+              max(config(p), scoped(s,p))       otherwise
+effective(s,p) = min(access(s,p), Read)          in read-only mode
+                 access(s,p)                    in other modes
+```
 
-The information-flow claim is **termination-insensitive**. A pure callback can still vary
-its running time, resource consumption or termination with a secret, and a timeout can make
-that difference observable. The prompt forbids using such side channels; the in-process
-sandbox cannot make arbitrary Scala computations constant-time or total.
+A missing rule access field imposes no access ceiling; it may independently set
+classification or locking. For example, a project-wide write rule plus a read rule on
+`src` yields read access in `src`. An additional classification rule on `src/private`
+changes how content may be observed without changing that read level. A temporary write
+grant may raise the read level only when no matching rule locks it.
 
-**Commands and hosts.** `commands` are patterns over the whole command line: `*` is a
-wildcard, a pattern without `*` matches by word prefix (`"git status"` allows `git status
---short`; `"ls"` allows `ls -la` but not `lsblk`; `"git diff"` allows `git diff HEAD` but
-not `git difftool`). A command's type requires a full `FileSystem^`; at runtime it needs at
-least read permission for the directory it runs in (the working directory by default),
-which must not be classified. That check goes through the file-system capability, so a
-`requestFiles` block covers it. A pre-approved command runs with the user's privileges and
-is not subject to the file rules (`git diff --no-index a b`
-reads any two files), hence the advice to pre-approve subcommands rather than `git *`.
-`hosts` are globs on host names; only `http`/`https`; redirects are not followed, so a host
-the agent is sent on to has to be listed itself. `denyCommands`/`denyHosts` use the same
-syntax and win over everything (see [Defence in depth](#defence-in-depth)); they are listed
-in `/perms` and in the system prompt.
+`matchingRules` caches immutable matches, including inherited ancestor matches, in a
+bounded LRU map. It does not cache temporary grants or mode-dependent decisions, so opening
+or closing a scope cannot leave stale effective permissions. The scope must be resolved
+even for locked paths; otherwise a closed capability could remain usable under a locked
+read rule.
 
-**Prompts and scopes.** Pop-ups go through `PermissionPrompter`/`HostUi.askUser`;
-`App.whileUserDecides` pauses the execution clock while the user answers. A grant is
-*once* (the block's scope) or *for the session* (`Policy` session grants, forgotten by
-`/new`); `locked` blocks both. Session grants from a prompt bypass the config layers' caps
-(the human decides).
+### Scope lifecycle
 
-**Visibility, not permission:** `perms/GitIgnore.scala`. With config `respectGitignore`
-(default true) `Host.visibleEntries` drops `.git` and every `.gitignore`-matched path (the
-enclosing repository's files and nested ones, with `!` negations, `**`, directory-only
-`dir/` and anchoring as git reads them), so `ls`/`walk`/`find`/`grepRecursive`/`children*`
-skip them while reads and writes by name still work. The policy decides access first, then
-gitignore hides; nested `.gitignore` files hide more the deeper you go.
+A `request*` call opens a child scope, and its capability carries that scope's ID. Closing
+the block closes the scope and kills processes owned by it. Process handles require an
+open originating scope; `runningProcesses` filters by scope visibility.
+
+At runtime, a request resolves its parent scope, checks mode and deny restrictions, and
+asks only for permissions not already held. `AllowOnce` applies to the child scope;
+`AllowSession` also records the grant on `ScopeId.Base`. The callback runs through
+`Host.inScope`, whose `finally` block terminates scoped processes and closes the scope.
+Denial throws before a child scope is opened. The compiler's lifetime checks and the
+host's scope IDs therefore enforce complementary parts of the same request contract.
+
+File patterns match a path or an ancestor. Component globs match at any depth; relative
+patterns with separators use the layer's base; absolute patterns and `~` use an absolute
+path. `PathGlob` handles slash-based globs on all platforms. Canonicalization resolves
+symlinks, including dangling write targets. Directory traversal does not follow symlinked
+directories or Windows junctions. Filesystem checks and subsequent operations are not an
+OS-level transactional sandbox.
+
+`GitIgnore` controls visibility in listings and recursive searches, independently of
+permissions. It reads repository and nested `.gitignore` files, caches them for the session
+and always hides `.git`. An ignored path can still be accessed explicitly if permitted.
+
+Commands use `*` globs; a pattern without `*` also matches a word prefix. Hosts are
+case-insensitive and normalize numeric IP literals. Deny rules are checked at use, even
+when a requested pattern was previously approved. Each permission decision is included in
+the tool result so the model knows whether approval was temporary, session-wide or denied.
+
+## Host operations
+
+Text helpers use UTF-8. `TextFiles` accepts LF, CRLF and CR and preserves the first newline
+style and final-newline convention during line edits. Listings return paths relative to the
+working directory when possible; API paths use `/` separators on every platform.
+
+`cat` streams bounded line prefixes and prints line numbers. `sed` counts and rewrites in
+one pass and rejects zero matches. `replaceLines` returns the replaced text; callers must
+account for line-number changes between edits. `copy` and `move` stream data, check both
+paths and avoid truncating a file copied onto itself or a hard-link alias. `move` checks
+source write permission before copying but is not atomic.
+
+`CommandLine` parses quoted arguments, pipelines, `<`, `>`, `>>` and `2>&1`. It rejects shell
+control operators and does not expand variables or globs. Explicit argument sequences are
+passed verbatim. Each pipeline stage and redirected file is checked separately.
+`WindowsExecutable` resolves bare commands from absolute PATH entries and validates batch
+arguments before launch.
+
+`Processes` drains stdout and stderr concurrently into bounded buffers. Foreground commands
+retain prefixes; spawned processes retain recent output. Results use the rightmost non-zero
+pipeline exit code. `readUntil` consumes through a regex match; on timeout it throws and
+keeps output unread. `waitFor` returns `None` on timeout. Process termination includes
+pipeline stages and descendants. Shutdown kills registered processes.
+
+HTTP operations validate the scheme, host and headers, do not follow redirects, and cap
+response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400 or higher;
+`httpRequest` returns raw status and body. Classified request handling retains subsequent
+transport and response failures within `Classified`.
 
 ## Configuration semantics
 
-The user-facing summary is in the [README](../README.md#configuration); this is the exact
-behaviour (`config/Layers.scala`, `Config.load`/`combine`; tests in `LayerSuite`).
+Layers load in this order: global, nearest project, explicit `-c` file. A project is the
+nearest ancestor containing `.atc/config.json` or `.atc/keys.properties`. Duplicate file
+paths retain their first role. Project rules are anchored to the directory containing
+`.atc` and grant access only within it; their restrictions apply wherever they match.
 
-**Three layers** are applied in order: global (`~/.atc/config.json`), project (the nearest
-`.atc/config.json` at or above the working directory), and explicit (`-c file`).
-`Config.projectRoot` finds the project by walking upward; a `.atc` directory containing
-either `config.json` or `keys.properties` establishes a project.
+| Setting | Merge rule |
+|---|---|
+| Providers | Merge by provider name; model entries merge by alias, replacing a repeated alias |
+| Model selection, instructions, other ordinary settings | Later layer wins |
+| Commands, hosts | Concatenate across layers |
+| File rules | Retain each rule and its layer base |
+| Deny commands, deny hosts | Accumulate across layers |
+| Mode and numeric limits | Granting layers set values; project layers may only tighten them |
+| Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
 
-**The program grants no permission implicitly and writes no file without asking.** On an
-interactive run, `App.setup` offers to create `config-template.json` and
-`keys-template.properties` when `~/.atc/config.json` is missing (`Config.ensureGlobal`). If
-the user declines, ATC loads the template as an in-memory `Origin.Global` layer with
-`path = None`; `/config` displays this as `(bundled)`. Non-interactive `-p` runs never ask:
-setup offers are skipped and permission requests fail closed unless the caller chose
-`--approve-all`; this is reported as a scripted-run limitation, not as a user denial.
-If no configuration grants the working directory and it has no project configuration,
-`App.setup` offers to create `project-template.json` and `.atc/.gitignore` through
-`Config.initProject`, the same operation used by `--init`, and then reloads. After creating
-the global configuration, ATC exits with `App.Exit(0)` so the user can add keys. Once
-created, configuration files are changed only by `/model` and `/classifiedmodel`.
+Only explicitly defined project settings narrow a value. A missing timeout means no limit.
+`Configuration.rules` is the complete rule list; do not build policy from `settings.files`,
+which contains only granting-layer entries. Configuration validation checks modes, limits,
+patterns, model references and provider settings before execution.
 
-The templates protect resources but grant no access. The global template classifies common
-credential paths (`.ssh`, `.gnupg`, `.env`, `.env.*`, `.netrc`, `.npmrc`, `.pypirc`,
-`.docker`, `.kube`, `.aws`, `.azure`, `.gcloud`,
-`*.pem`, `id_rsa`, `id_ed25519`), sets `.atc` to `none` and `locked` (the pattern has no
-`/`, so it covers `~/.atc` and any project's `.atc` alike: the agent can read neither the
-config nor the keys, and no prompt can open them), denies `rm -rf *`, `sudo`, and
-common bare shell names (`sh`, `bash`, `dash`, `ash`, `ksh`, `ksh93`, `mksh`, `zsh`, `csh`,
-`tcsh`, `fish`, `cmd`, `powershell`, `pwsh`, `wsl`, `git-bash`), and grants no files,
-commands, or hosts. The project template opens the project tree, marks
-`./.git` read-only and `./secrets` classified, allows read-only Git commands, denies
-`git push*` and `git reset --hard*`, and permits documentation hosts. Git commands are
-governed by `commands`, not by file rules. The host list includes official documentation
-and paper hosts, but not package registries or code-hosting services, because `httpPost`
-may send data to any permitted host.
+`Config.combine` first merges ordinary settings in layer order, then obtains policy
+settings from granting layers and applies project restrictions. Numeric restrictions use
+minimum; enabled safety flags use logical OR. These operations are order-independent for
+narrowing layers. A field omitted from a project JSON object is not an explicit request
+for its case-class default, which is why `ConfigLayer.defines` participates in tightening.
 
-**Project rules are read against the project folder**: running atc in `repo/src/main`
-picks up `repo/.atc/config.json`, and `"./build"` there always means `repo/build`. Should
-the search reach the home directory, `~/.atc/config.json` stays the granting layer rather
-than becoming a project one (a path named twice keeps its first role). The asymmetry: a
-relative pattern in the *global* config still means "relative to the working directory"
-(that config is tied to no project), so `{ "path": ".", "access": "write" }` in
-`~/.atc/config.json` opens whatever directory atc is started in, and only that, while the
-same rule in a project config always opens the whole project.
+Key bindings are separate from settings. Lookup uses project files, global files, then the
+live process environment; blank values are skipped. New key files use owner-only POSIX
+permissions where supported. Windows uses inherited ACLs.
 
-**Non-policy settings** (`model`, `classifiedModel`, `providers`, `instructions`,
-`predictInput`) merge in layer order, later wins; providers merge per provider and then per
-model alias, so a project config can add a model to a provider the global config defined
-without repeating its `api`, `url` or `key`, and a redefined alias replaces that model entry
-outright.
-This makes repository configuration authoritative inside its checkout; users should review
-project model endpoints, standing command/host grants, and instructions before running it.
-
-**Policy settings come from the granting layers** (global and `-c`) and are then narrowed
-by the project layer:
-
-* **`files`**: `Policy.configPerm = min(ceiling over every matching rule, max over the
-  matching rules that may grant p)`. A project rule carries `grantsWithin =
-  Some(projectRoot)`, so it grants only inside the folder holding its `.atc` while its
-  ceiling applies wherever it matches: a project config opens its own tree, never reaches
-  outside it (`{ "path": "~/.ssh", "access": "read" }` in one grants nothing), and never
-  exceeds a granting layer's limit. `classified` and `locked` only ever restrict, so they
-  apply from any layer and no layer can take them off.
-* **`commands` / `hosts`**: the plain union of every layer's list (a project may
-  pre-approve the commands and hosts its work needs; the deny lists are the backstop).
-* **`denyCommands` / `denyHosts`**: union; any layer can add, none can drop.
-* **Scalars** (`mode`, `safeMode`, `respectGitignore`, `maxToolCalls`,
-  `maxToolOutputChars`, `executionTimeoutMs`): min / or-towards-on, but only for keys the
-  layer actually defines (`ConfigLayer.defines`), which is why leaving a key out and setting
-  it to its default are different things. `safeMode` is a latch: on unless a granting layer
-  sets it false; a narrowing layer can only switch it on.
-
-Narrowing is unconditional and order-independent (every step is a minimum, an "or" or a
-union): `-c` outranks the project layer for the model but cannot undo its narrowing.
-Session grants from a prompt bypass the caps; `locked` still blocks them. `.gitignore`
-comes last and is not a permission at all.
-
-**`/model` and `/classifiedmodel` persist**: when cwd has its own `.atc/config.json` the
-switch is written there (`App.remember` → `Config.setTopLevel`, a layout-preserving
-top-level-key edit over the `config/ObjectText.scala` scanner, `null` for `off`); a parent
-project's config is never written, and nothing is written without one in cwd; a `-c` file
-that sets the same key still wins.
+`Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings. The
+`ObjectText` scanner operates only after JSON validation. Duplicate keys update the final
+occurrence, matching ujson's lookup. Writes use a temporary file and atomic replacement
+where supported, preserving POSIX permissions and resolving a configured symlink target.
 
 ## Models and providers
 
-`config/ModelCatalog.scala`: the config has `providers` (an `api` wire protocol + `url`/
-`key`/`keyEnv` + models by alias); `ModelConfig` holds only per-model settings plus `name`
-(the provider's model id, defaulting to the alias). `ModelCatalog.from(config)` flattens
-them into `ModelSpec`s (provider, alias, api, modelId, baseUrl, resolved key, settings) in
-provider-then-alias order; `find` takes a bare alias, or `provider/alias` when two providers
-share an alias (the bare alias is then refused with both candidates named), and `label`
-prints the shortest unambiguous name. A model's `name` may contain a slash
-(`"anthropic/claude-sonnet-4.5"` on OpenRouter); only the alias may not. A provider may list
-no models (an endpoint ready for a later layer to fill in). One vendor reachable through
-two protocols is two providers, since the protocol belongs to the endpoint.
+`ModelCatalog` resolves `provider/alias` or an unambiguous bare alias, ignoring case.
+`displayName` affects presentation only. `ChatModel` has streaming `complete` and one-shot
+`simple` operations. Provider adapters normalize stop reasons into `CompletionStop`.
 
-`ChatModel.create(spec)` dispatches on `spec.api`; the adapters extend `SpecModel`
-(`llm/Providers.scala`: names, `cfg`, `webSearch`, `contextWindow` from the spec) and read
-`spec.settings` for everything else; the two OpenAI-shaped ones share `OpenAIShapedModel`
-(client, `thinking` switch, guessed lowest effort and its fallback). Per adapter:
+`Msg` carries neutral text and tool calls. Assistant messages may also carry a `NativeTurn`
+for replay to the exact provider/model reference that produced it. Switching models uses
+neutral fields and excludes model-bound reasoning data. `TokenUsage.input` includes cache
+reads and writes; adapters normalize provider-specific accounting.
 
-* `anthropic`: Messages API (official Java SDK). `webSearch: true` adds the server-side
-  `web_search` tool (`web_search_20260209`; `"webSearchVersion": "20250305"` for older
-  models). Adaptive thinking is on unless `"thinking": false`; `reasoning` maps to
-  `output_config.effort` (`low|medium|high|xhigh|max`).
-* `openai-responses`: Responses API. `webSearch: true` adds the built-in `web_search` tool;
-  `reasoning` maps to `reasoning.effort`; `"reasoningSummary": "auto"` asks for streamed
-  reasoning summaries (shown as thinking; DeepSeek streams its reasoning without it).
-* `openai`: Chat Completions. `webSearch: true` sets `web_search_options` (only
-  search-enabled models accept it).
-* For both OpenAI-shaped adapters `"thinking": true|false` sends the vendor switch
-  `thinking: {"type": "enabled"|"disabled"}` (DeepSeek/GLM/Kimi/MiniMax;
-  `Providers.thinkingSwitch`, an extra body property on every call); unset for OpenAI
-  itself, which rejects the parameter.
-* `echo`: `EchoModel`, key-less, for tests and smoke runs; it honours `contextWindow` so
-  the context display can be demoed.
+Anthropic requests mark the system prompt and recent user/tool-result content for caching.
+Responses requests use stateless replay with encrypted reasoning content. OpenAI-compatible
+adapters send vendor `thinking` parameters only when configured. Non-thinking one-shot
+requests can retry without a guessed reasoning effort when the provider rejects that
+parameter; unrelated bad requests are not retried by this fallback.
 
-`ChatModel.simple(system, prompt, thinking)` is the one-shot call (normal `chat`, trusted
-`classifiedChat`, and next-input prediction). With `thinking = false` it disables Anthropic thinking
-and sends OpenAI the lowest `reasoning_effort` the model family takes
-(`Providers.lowestEffort`: `none` ≥ 5.1, `minimal` GPT-5, `low` o-series or any model the
-config gives an effort; nothing for models not known to reason), or `disabled` when the
-vendor thinking switch is configured; a `BadRequestException` on that guess sets
-`effortRejected` only when its parameter/message specifically identifies reasoning effort
-(`OpenAIShapedModel.withEffortFallback`), and the request is then repeated plainly, once per
-process. Unrelated 400 responses are not retried. `thinking = true` applies the configured
-thinking/effort, the same as `complete`.
+Provider SDK request construction remains in each adapter. Shared configuration and client
+setup belong in `Providers`; model selection belongs in `ModelCatalog`.
 
-**API keys**: a provider keeps `key`/`keyEnv` naming a `${VAR}`; the *values* come from
-`.atc/keys.properties` (`config/Keys.scala`, read with `java.util.Properties`, so
-`NAME=value`, `NAME: value`, `#`/`!` comments, `\` escapes and line continuations).
-`KeyBindings.get` tries the project file, then `~/.atc/keys.properties`, then
-`System.getenv`; an empty value is not a binding, so the lookup falls through. New key
-files on POSIX file systems are created with mode `0600`; ATC warns when loading one that is
-readable by the group or other users. Windows files instead inherit the parent directory's
-NTFS ACL, which ATC currently neither rewrites nor audits. The normal global location is
-`%USERPROFILE%\.atc` (`$HOME\.atc` in PowerShell); inspect its ACL with `icacls` on a shared
-machine.
-`Config.resolveApiKey(provider, bindings)` feeds `ModelCatalog.from(config, keys)`.
-`ModelSpec.toString` masks the key and `/config` prints variable names only, never values.
+## Conversation context and agent loop
 
-**Context window.** `ModelConfig.contextWindow: Option[Tokens]` (`config/Tokens.scala`, an
-opaque `Int` whose upickle reader takes a number or `"256k"`/`"1m"`; decimal multipliers) →
-`ChatModel.contextWindow: Option[Int]`. Before every model call `Turn.fitHistoryToContext`
-drops whole exchanges from the front of `agent.history` (`Agent.fitToContext`, cuts only at
-`Msg.User` boundaries, keeps the last user message) until `estimateTokens` (chars/4 ×
-`tokenCalibration`, the ratio observed prompt tokens / estimate from the previous
-completion; `TokenUsage.input` is the whole prompt for every provider, Anthropic's cache
-reads/writes included) fits after reserving `max(window/8, configured max output tokens)`;
-the first kept user message gets `Agent.contextCutNotice(total dropped)` prepended and the
-UI warns. The estimate uses a native assistant payload only for the exact model that can
-replay it and resets its tokenizer calibration when `/model` switches.
-`Agent.contextUsage` (the same calibrated estimate of the next request, plus the window)
-is what the turn summary line (`Tui.TurnStats`, `Tui.contextUsage`) and `/cost` show as
-`context 45.2k/200k (23%)`. TODO: compaction (summarise instead of cut).
+The system prompt contains environment data, workflow instructions, capability rules, the
+API source and configured permissions. Session grants are reported in tool results so they
+do not change the prompt prefix. Repository-derived scalar values are JSON-quoted; larger
+instruction and permission blocks are marked as data.
 
-**Usage accounting.** `ChatModel.simple` returns a `Reply(text, usage)`; every model call
-is recorded in `Agent.recordUsage(purpose, usage)` (a synchronized per-purpose ledger:
-`Agent.Turns`/`Chat`/`ClassifiedChat`/`Prediction`; `agent.usage` is the sum), which is
-what `/cost` prints.
+`CompletionPolicy` selects tool execution, continuation or completion. Calls from truncated
+or blocked responses are not executed. Output limits add `Msg.Continuation`; server-side
+pauses can resume directly. Resume and tool-budget rejection counts bound repeated work.
+The interactive tool budget may be extended by the user; non-interactive runs stop at it.
 
-## What the model sees: the context
+`Conversation` repairs pending tool results after a failure and inserts assistant markers
+when needed. Pending REPL notices are prepended to the next user message. Real user input
+and internal continuation messages remain distinct for context fitting and prediction.
 
-Every request to the agent model is assembled from the same four parts, in this order.
-The order matters for prompt caching (the provider caches a prefix), so the parts that
-change least often come first and the history last. A **turn** is one user
-message and everything until the model's final answer; within it, every **round** (one
-model call) re-sends the whole context so far, plus the tool results of the previous round.
+`ContextManager` estimates tokens from text and replay payloads, then calibrates against
+provider counts. It reserves output capacity and drops complete older exchanges at user
+boundaries. The latest exchange is retained. An unavoidable overflow produces a warning
+once per user turn. Changing models resets calibration.
 
-```
-┌ system prompt (stable between explicit mode/classified-model switches) ───┐  Prompts.system(...).text
-│ identity: "a coding agent with tracked capabilities … acts only by         │  changes only with cwd, config,
-│   writing Scala and running it with run_scala"                             │  mode or classified-model switch
-│ Environment: working directory, OS, REPL flags, whether a classified       │
-│   model is configured (never which), the gitignore note                    │
-│ How to work: orient first (find and read AGENTS.md/CLAUDE.md/README/…,     │
-│   learn the build and test commands from them and the build files),        │
-│   explore → sed/write → verify with exec → println, request* on            │
-│   "Access denied", session grants are reported in results, do not          │
-│   retry capability compile errors, small snippets, todos/ask, never        │
-│   end on a plan                                                            │
-│ Sandbox mode paragraph (Prompts.modeSection): the givens of the mode       │
-│   and what does not compile in it                                          │
-│ Rules of the sandbox: what is forbidden, read-only vs full views,          │
-│   top-level val/var quirks, Option/effects, fatal throwables, Classified   │
-│ API reference: the full source of lib/…/Interface.scala                    │  Prompts.interfaceSource
-│ Configured instructions: config "instructions", if any                     │
-│ Current permissions: mode, file rules (classified-only patterns folded     │  policy.configSummary:
-│   into one line), commands, hosts, the always-refused lists; never the     │  no session grants, so
-│   session grants                                                           │  it never changes
-├ tools ─────────────────────────────────────────────────────────────────────┤  Prompts.ToolName, toolDescription,
-│ run_scala(code: String): the only tool                                     │  toolParameters (JSON schema)
-├ history (agent.history: List[Msg]), turn by turn, append-only ─────────────┤
-│ turn 1                                                                     │
-│   User("fix the failing test")                                             │  round 1 sends everything above + this
-│   Assistant("Let me look at it.", [run_scala(code₁)], native)              │  the model answered with a call
-│   ToolResults([ToolResult(id₁, rendered result₁, isError)])                │  round 2 sends all of it again + these
-│   Assistant("", [run_scala(code₂)], native)                                │  code₂ asked with requestExec …
-│   ToolResults([ToolResult(id₂, rendered result₂ +                          │  … and the user allowed it for
-│       "[permissions: the user allowed … for the session …]", isError)])    │  the session: said here, once
-│   Assistant("Fixed: the assertion compared …", [], native)                 │  no call: final answer, turn over
-│ turn 2                                                                     │  the REPL was reset in between
-│   User("[sandbox notice] The Scala REPL was restarted …                    │  pending notes, then the request,
-│         [user ran code] … ```scala … ``` Result: …                         │  in one user message
-│         now add a regression test for it")                                 │
-│   Assistant(…, [run_scala(code₃)], native) · ToolResults([…]) · …          │
-│   Assistant("Added …", [], native)                                         │
-│ turn 3 …                                                                   │  and so on; /clear or /new empties it
-│ (once the window is full, the oldest turns are dropped, cut at a User, and │  fitHistoryToContext
-│  the first kept User starts with "[context notice] The N oldest …")        │
-└────────────────────────────────────────────────────────────────────────────┘
-```
+The estimator starts at approximately one token per four UTF-16 characters, plus message
+framing. For a configured context window `W`, it reserves
+`max(W / 8, configured maximum output tokens)`. Completed requests with at least 200 input
+tokens update the provider/estimate ratio, clamped to `[0.25, 8.0]`. Estimates include only
+native payloads eligible for replay to the selected model and avoid counting native and
+neutral assistant content twice. This is an estimate, not provider tokenization.
 
-**The system prompt** is a single `SystemPrompt(text)`. Its contents include
-`Policy.configSummary` without session grants, so permission decisions never invalidate the
-prefix. A mode switch restarts the sandbox and rebuilds it; `/classifiedmodel` also changes
-the one availability line and therefore the prefix. Between those explicit switches each
-request consists of the same cacheable prefix followed by new messages. OpenAI-compatible
-APIs can use automatic prefix caching, while Anthropic uses explicit breakpoints on the
-system block and final history message. Providers without caching lose nothing. Keeping a
-live permissions block in the prompt would invalidate this prefix after every grant, which
-an earlier implementation did.
+History fitting computes message sizes and prefix sums once, then chooses a real user
+boundary. It never cuts between a tool request and its results or drops only part of the
+latest exchange. `Msg.Continuation` is excluded from those boundaries so an automatic
+resume cannot remove the user request it is continuing.
 
-The prompt embeds the complete source of `Interface.scala`, which is also displayed by
-`/interface`. Its docstrings are therefore the authoritative descriptions of individual
-methods. The surrounding prompt explains workflow, permission requests, and REPL or
-safe-mode conventions, then directs the model to those docstrings for API details. A mode
-paragraph is also included, which is why changing modes restarts the REPL and rebuilds the
-prompt. The prompt states whether a classified model is configured, so the model knows
-whether `classifiedChat` is available, but never identifies that model.
-`Agent.systemPrompt` is recomputed before every round; ATC does not cache it internally, but
-the result remains identical while mode and classified-model availability stay unchanged.
-
-**Prompt decisions travel in the history.** The model cannot see the pop-ups, so without
-feedback it takes an "allow once" for a standing grant and a later "no" for a revocation
-(both observed live). `Policy.decide` therefore logs every decision
-(`decisionCount`/`decisionsSince`: once, session, denied, with the phrase it was about);
-`Agent.runScala` reads what was logged during a tool call and `renderForModel` appends
-`[permissions: the user allowed commands npm * once (this call only; a later call must ask
-again); the user allowed read on '/x' for the rest of this session (no request needed from
-now on); the user denied …]` after the (possibly cut) result, so the model learns exactly
-where it happened, keeps seeing it in later rounds, and the already-sent messages never
-change. `/run` does the same for decisions made while the user's own code ran. A session
-grant later dropped by the context cut or forgotten by `/clear` costs at most a needless
-`request*`, which the policy answers without a prompt since the grant still holds; `/new`
-resets grants and history together.
-
-**The history** (`llm.Msg`, provider-neutral; `Agent.history`) holds exactly what was
-said and done, never the terminal's rendering. `Conversation` owns its mutation and
-role-repair invariants; `AgentMessages` owns the control text inserted into it:
-
-* `Msg.User(text)`: the user's request. *Pending notes* are prepended to it, each on its
-  own paragraph, so the transcript never has two user messages in a row: `[sandbox notice]`
-  (the REPL was restarted by `/reset` or a mode switch: definitions are gone),
-  `[user ran code]` (what the user ran with `/run`, as a fenced block, and its rendered
-  result), and, on the first kept message after a context cut, `[context notice] The N
-  oldest messages … were dropped`. Notes are *prepended* to the next user message
-  rather than inserted as messages of their own, again so that nothing already sent changes.
-* `Msg.Assistant(text, toolCalls, native)`: the model's prose and its `run_scala` calls
-  (`ToolCall(id, name, arguments)`, the code as JSON), plus the provider's `NativeTurn` for
-  exact replay when the same model reference continues (Anthropic content blocks including
-  server-side web-search results, Responses output items); another model gets the neutral
-  text and calls. An interrupted turn ends with `Assistant("[interrupted by
-  user]")` so the history stays well-formed.
-* `Msg.Continuation(text)`: an internal user-role bridge after an output-limit stop. It asks
-  the provider to continue the truncated assistant response without pretending to be a new
-  real user turn; prediction and context-cut boundaries therefore ignore it.
-* `Msg.ToolResults(results)`: one `ToolResult(callId, output, isError)` per call, where
-  `output` is `ToolOutput.renderForModel(result, config.maxToolOutputChars)`:
-  `ExecutionResult.render` (the captured REPL output with host stack frames trimmed, then
-  `ERROR: <message>` for a compile/validation/timeout error, or `(no output)` /
-  `(failed, no output)`), a `Hint:` line when `ToolOutput` recognises the error (read-only
-  capture / missing `Exec` or `Network` → "switch mode" advice), the whole thing cut in
-  the middle with `… [N characters omitted] …` beyond `maxToolOutputChars`, then the
-  `[permissions: …]` note when a prompt was answered during the call (uncut, last);
-  `isError` is `!result.success`. The budget and cancellation cases are results too ("Tool budget of N
-  calls per turn exhausted; answer the user now.", "Cancelled by the user before
-  execution.", "Missing 'code' argument."), as is an unknown tool name.
-
-What a tool result contains is therefore: the agent's own `println`s (`agentText`, so a
-classified value is `Classified(***)` here while the human saw the content), anything the
-REPL echoed (top-level `val`s and the last expression, capped at `maxEchoChars`),
-diagnostics and traces; and `ask()` answers come back as the return value inside the
-program, not as messages. What it does *not* contain: the live output of a long `exec`
-(that is display only; the `ProcessResult` carries it), the contents of `.atc` (locked by
-the starting policy), and any key (`/config` and the prompt name variables only). The
-model's own reasoning is in the context only as part of a provider's native turn (Anthropic
-thinking blocks, Responses reasoning items) when the exact same model reference continues;
-the neutral history, and so any other model, has only the text and the calls.
-
-**Fitting the window.** Before every model call, when the model has a `contextWindow`,
-`ContextManager.prepare` estimates the request (`fixedTokens` = system prompt + tool
-schema, plus its estimate of every message, chars/4 scaled by the calibration
-from the provider's last prompt count) after reserving the larger of `window/8` and the
-adapter's configured maximum output tokens, and drops whole
-exchanges from the front (`ContextManager.fitToContext`: cuts only at `Msg.User` boundaries so no
-tool result loses its call, and always keeps the last user message); `contextDropped`
-accumulates so the notice states the total. The same estimate is `Agent.contextUsage`,
-shown after each turn and by `/cost`. If the fixed prompt or latest exchange cannot fit,
-the turn proceeds for advisory/custom windows but emits an actionable warning.
-
-**The other model calls have their own, smaller contexts.** `chat(message)` from agent
-code is a capability-requiring one-shot call to the untrusted normal model.
-`classifiedChat(String)` is exposed as an assumed-pure call to the isolated classified
-model, with a one-line system prompt ("a trusted assistant handling confidential data");
-the `Classified[String]` overload maps it without removing the label. The next-input prediction sends
-`InputPredictor.System` and a rendered transcript of the last `Exchanges` user/agent text
-pairs (tool calls and results left out, each message cut to `MessageChars`), never to the
-classified model. Nested chats pause the snippet clock while their provider-level timeout
-is in force. All of them are recorded under their own purpose in `/cost`.
-
-## The agent loop
-
-`Agent.turn` binds a `ScalaToolRunner`, then the core loop runs *rounds*. Each
-`Turn.round` asks the model and follows the typed `CompletionPolicy` decision: run tools,
-resume, or finish. Per-turn counters enforce `Agent.Max*` and `config.maxToolCalls`:
-
-- Provider adapters map wire-specific stop strings once into `CompletionStop`; the loop
-  branches on that typed value through `CompletionPolicy`.
-- Tool calls run one at a time through `ToolRunner`; `ScalaToolRunner` owns `run_scala`
-  argument decoding, REPL execution, timing and result rendering. Results are appended
-  before the model is asked again.
-- If the provider returns a resumable stop after a server-side tool such as web search
-  (Anthropic `pause_turn`), the model is asked to resume, up to `MaxResumes` times.
-- Output-limit stops (`length`, `max_tokens`, `max_output_tokens`) append a
-  `Msg.Continuation` and resume. Tool calls accompanying a truncated or safety-blocked
-  response are treated as partial and never executed. Empty terminal responses get a
-  visible assistant marker so later provider history stays valid.
-- The tool budget (`maxToolCalls`, 200 by default) is a checkpoint. When it is exhausted, the
-  UI is asked (`AgentUI.confirmMoreToolCalls`; the TUI shows a yes/no pop-up, `-p` runs and
-  test doubles decline) whether the turn may go on for another budget; if not, the model gets
-  an error result and the turn stops after `MaxBudgetRejections` repeated requests.
-- Any other response is the final answer. There is no longer a "nudge": a heuristic over the
-  reply's prose misread too many closings; the system prompt says that ending without a tool
-  call means the turn is finished, and the user can always say "go on."
-
-`cancelled` is polled before probing each stream event and before every tool call; an
-interrupted turn ends with an `[interrupted by user]` assistant message when role repair is
-needed. Safety/refusal stop reasons are shown to the user.
-
-**Pending notes.** Things the model must hear at the start of its next turn (`[sandbox
-notice]` after a REPL restart, `[user ran code]` after `/run`) are queued in an ordered
-list and prepended to the next user message, so the transcript never holds two user
-messages in a row; `clear()` drops them.
-
-**Next-input prediction** (`agent/InputPredictor.scala`, config `predictInput`, default
-on): after each interactive turn `App` calls `predictor.start()`, which asks
-`agent.model.simple` for the likely next request on one coalescing daemon worker and hands it to
-`Tui.suggest`; the TUI draws it as faint ghost text through a `DefaultHighlighter` subclass
-(display only: JLine positions the cursor from the buffer), and Tab / → accept it
-(`atc-accept-suggestion-*` widgets fall back to the previous binding). A generation counter
-drops stale guesses; rapid starts retain only the newest waiting job and interrupt the
-current SDK call best-effort, so a client that ignores interruption still cannot create
-unbounded workers. Model/session changes and `/run` invalidate old state. Prediction
-transcripts are JSON-quoted data, and output is reduced to one control-free line.
-`Tui.suggest` redraws via `callWidget(REDISPLAY)`, which JLine only honours while reading.
-Plain mode and `-p` runs never predict; the classified model is never used.
-
-**`/run [code]`** (`App.runCode`) lets the user run Scala in the same `ReplSession`:
-rendered with `tui.toolStart(code, "/run")`/`toolEnd` inside `beginTurn`/`endTurn` (so
-Ctrl-C interrupts it and Ctrl-O works); `agent.noteUserRan(code, result)` queues the note
-for the model. It is not counted as a tool call.
+`InputPredictor` sends recent conversation text to the agent model on one daemon worker.
+A generation counter prevents stale publication; at most one job runs and one waits.
+Predictions are reduced to visible single-line text and reported separately in usage.
 
 ## The terminal
 
-`ui/Tui.scala` implements `AgentUI` directly. Every content kind has one shape, so a glance
-tells them apart:
+`Tui` owns JLine input, streaming response blocks, tool panels and permission menus.
+`Ansi` removes terminal controls from external text before display. Keep model-visible
+capture text unchanged; sanitize only at display boundaries. `TextSink` incrementally
+handles UTF-8 and BOM-marked UTF-16 process output.
 
-```
-> your request
+Ctrl-C interrupts a turn. Ctrl-O toggles expanded output; compact mode folds long output
+and summarizes reasoning. Shift-Tab cycles sandbox modes. Tab completes slash commands or
+accepts a prediction; the right arrow also accepts predictions. Ctrl-D exits.
 
-● assistant prose                       bullet + indent, Markdown rendered as it streams
+`Continuation` handles open brackets, strings and comments for `/run`. Shift+Enter and
+backslash followed by Enter insert a newline. An empty line submits a code block; Ctrl-C
+cancels block input. During a turn, a separate reader retains typed input for the next
+prompt and discards escape sequences, stopping on timeout or EOF. Menu reads pause that
+reader.
 
-● run_scala                             tool block (magenta)
-  │ code the agent runs
-  ├ output                              the program's own println output, live
-  │ hello
-  │ $ ./mill test                       a command (exec) that keeps running: its
-  │ compiling ...                         output as it comes
-  ├ result   (or  ├ error)              what the REPL added: echoed values, diagnostics
-  │ val x: Int = 1
-  └ ok 34 ms (or └ failed 34 ms)
+`MarkdownStream` incrementally renders supported Markdown and buffers tables until column
+widths are known. `Highlight` uses the compiler's Scala scanner. Layout calculations use
+terminal cell widths. History is owner-only on POSIX systems and rejects final symlinks.
+Non-interactive runs use a dumb UTF-8 terminal and do not prompt for permission unless
+explicitly configured to auto-approve requests.
 
-  ▸ TODO  ✓ done  ▶ in progress  ○ pending      redrawn once per snippet
-  ⚠ Permission request …  /  ? question         pop-ups (list/checkbox menus)
-```
+## Testing and conventions
 
-Before display, untrusted text—including model prose and reasoning, tool code and output,
-and paths embedded in prompts—passes through `Ansi.sanitize`, which strips C0/C1 controls
-and ESC. All output then goes through a single `write` method that tracks the final two
-characters (`tail`) so gutters can
-be inserted into arbitrarily chunked streams; `LiveRegion` redraws in place, and the two
-things that use it own their state as inner components (`thinking` = the reasoning window /
-full stream, `liveOutput` = folding of long program output, budgeted in wrapped terminal
-*rows* via the pure `Tui.place` so long or newline-free output cannot fill the screen;
-`toggleExpanded` detaches and re-renders both); the result panel bounds itself the same
-way, by fitting each shown line to one row. The limits are the constants in `Tui`'s
-companion (`MaxPanelLines`, `FoldAfterRows`, `FoldTail`, `ThinkingWindow`). A raw-mode key
-thread runs only during a turn (Ctrl-O toggles expanded view; other keys become type-ahead
-for the next prompt) and is paused (`keys.withPaused`) around JLine pop-ups. Styles are
-hand-rolled SGR codes (`ui/Ansi.scala`, shared with the Markdown renderer and the
-highlighter); JLine's `toAnsi` rewrites box glyphs into DEC escapes, which is also why the
-continuation prompt is ASCII; the glyph set (Unicode or ASCII, `ATC_ASCII=1`) is
-`ui/Glyphs.scala`. `Markdown.scala` (streaming renderer: headings, lists, quotes, rules,
-emphasis, code spans, fenced code blocks coloured when the fence says `scala`, pipe tables
-drawn once complete) and `Highlight.scala` (the compiler's `SyntaxHighlighting`) are pure
-and unit-tested. Plain mode (no real terminal) disables colours, menus, folding and live
-regions, and pop-ups fall back to a plain `answer>` line.
+Tests use munit under `app/test/src/atc`. Extend the suite responsible for the behavior:
 
-**Live program output.** `Tui.agentPrint(agentText, userText)` shows the agent's prints
-as they happen (classified values are shown to the user marked `[classified]`, the model
-sees `Classified(***)`) and remembers `agentText` to subtract from the result panel.
-**Live command output**: `Processes.run(pb, name, timeout, live: Option[LiveOutput])`
-drains stdout/stderr through a `TextSink` (incremental UTF-8 decoder, `host/TextSink.scala`)
-into a `LiveGate` that holds the text back (a tail of `LiveBacklogChars`) until the command
-has run for `Processes.LiveAfterMs`, then calls `begin()` once and `output(text)` per chunk
-from the drain threads; `Host.exec` maps these to `HostOutput.commandRunning(line)`/
-`commandOutput(text)` (default no-ops on the trait; `TestEnv` records them), and `App`
-forwards to `Tui.commandRunning`/`commandOutput`, which print `$ line` and the chunks into
-the same `├ output` section as the prints but *not* into the subtraction buffer (the tool
-result does not carry them). Quick commands show nothing. Compiler safe mode rejects direct
-`System.out/err` access (the validator reports the common spelling earlier), so only
-`println` and this are live; the REPL's
-captured stream (echoes, diagnostics, `printStackTrace()`) stays in the result panel.
+- `CapabilitySuite`, `ModeSuite`, `SandboxSuite`, `ReplSessionSuite`: compiler boundaries,
+  capability requirements, REPL state and interruption.
+- `PolicySuite`, `PermissionSuite`, `HostSuite`, `ClassifiedSuite`: permission rules and
+  host effects, including classified values and local HTTP requests.
+- `ConfigSuite`, `LayerSuite`, `ModelSuite`, `GitIgnoreSuite`: configuration and lookup.
+- `AgentCoreLoopSuite`, `AgentLoopSuite`, `CompletionPolicySuite`, `ContextManagerSuite`:
+  loop decisions, transcript repair, context fitting and the real REPL integration.
+- `TuiSuite`, `RenderSuite`, `InputPredictorSuite`: terminal helpers, rendering and prediction.
+- `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
 
-**Input.** `Tui.readLine` is a JLine `LineReader` with: a `Completer` for slash commands
-(`Tui.completions`, words typed so far → values for the last word; `App` fills it from
-`SlashCommand`, the pure table of names, aliases and `/help` text in
-`app/src/atc/SlashCommand.scala`, and the `/model`/`/classifiedmodel`/`/mode` argument
-values; `SlashCommand.parse` resolves a typed line and `App.dispatch` matches over the enum,
-so a command without an action does not compile); Shift-Tab → `/mode` on an empty prompt
-(`atc-cycle-mode`); the ghost-text suggestion; and **multi-line input** in two halves. Keys
-(the `atc-enter`/`atc-newline` widgets, bound in every mode): Enter (CR and LF) goes through
-`atc-enter`, which turns a trailing `\` into a newline (typed by hand, or how an iTerm2/VS
-Code set up by Claude Code sends Shift+Enter; VS Code sends `\` CR LF, so the LF is peeked
-and dropped via `LineReaderImpl.peekCharacter`) and otherwise calls `ACCEPT_LINE`; CSI-u
-Shift+Enter (`ESC[13;2u`), xterm modifyOtherKeys (`ESC[27;2;13~`) and Alt+Enter (`ESC CR`)
-insert a newline directly. Parsing (`ui/Continuation.scala`, pure, tested in `TuiSuite`,
-applied by a JLine `Parser`): on accept it throws `EOFError` (with the bracket depth,
-`INDENTATION` 2) so JLine inserts an indented newline instead of accepting, when the last
-line is non-empty and either `Tui.readBlock` is active (a bare `/run`: until an empty line)
-or a `/run`/`/scala` line has unclosed brackets/strings/comments per
-`Continuation.unclosed` (a small Scala lexer: brackets, strings with escapes and triple
-quotes, char literals, line and nested block comments). Enter on an empty line always
-submits (the escape hatch); `readLine` strips the trailing blank line. The secondary prompt
-is `%P | `.
+`TestEnv` supplies temporary directories, scripted permissions and recording host ports.
+`ReplAssertions` checks snippets. Prefer `ProcessFixture` over host shell commands for
+portable process tests; reserve native commands for platform integration suites.
+`tests/atc_test.sh` uses temporary files and stubbed downloads/Java to test the Unix wrapper
+and checkout environment loading.
 
-**Turn summary.** `endTurn(TurnStats)` prints `● worked for 3 s · 2 tool calls · 1.2k
-tokens · context 45.2k/200k (23%)`; `Tui.count` formats short numbers, `Tui.contextUsage`
-the context part (`context ~45.2k` without a window).
+All Scala modules use explicit null checks where configured; Java APIs may require `.nn`.
+Use `Platform` and `PlatformPath` for OS decisions and `ScalaSource` for generated Scala
+literals. Keep model/provider escaping, shell quoting and terminal sanitization separate.
+Scalafmt uses a 120-column configuration that preserves existing layout. `Interface.scala`
+is excluded because the formatter cannot parse its capture-checking syntax; format it by
+hand. Preserve tests for capability contracts when editing it.
 
-## Testing
+## Wrappers, releases and CI
 
-All tests are munit, under `app/test/src/atc/`; compiler-heavy timings vary by platform. They
-share `TestEnv.scala` (temp root, scripted permission decisions, recording host output, live
-command output, `newSession`, `activate()`) and `ReplAssertions.scala` (`assertOk`/
-`assertFails` for REPL snippets). `AgentCoreLoopSuite` uses an in-memory `ToolRunner` and
-needs no filesystem or compiler; `AgentLoopSuite` adds the real REPL boundary with
-`ScriptedModel`/`RecordingUI`, still without a network. `AgentUI`, `HostOutput`/`HostLlm`/`HostUi`, `ChatModel`
-and `StreamSink` all have test doubles; changing those traits means updating them (the
-two `HostOutput` live-output methods have no-op defaults for that reason).
+The Unix `atc` wrapper installs to `~/.local/bin` and caches JARs in `~/.atc/jars`.
+`ATC_INSTALL_DIR` and `ATC_CACHE_DIR` override those locations. Release downloads require
+SHA-256 digests for both JARs. Metadata uses jq when available and a field-order-dependent
+fallback otherwise. A cache marker records `release-id|tag`; verified updates replace it
+with the downloaded artifacts. Uninstall validates the cache root and removes ATC-owned
+artifacts while retaining configuration and unrelated files.
+Directory-name prefixes alone do not prove ownership: uninstall retains directories such
+as `dev.notes` and `download.notes`, including in a custom cache location. Temporary
+download and development directories are cleaned by the operation that creates them.
 
-Keep semantic tests independent of the host shell: use `ProcessFixture` for pipeline and
-process behavior, and reserve platform commands for `PlatformProcessSuite`. Text-file
-format guarantees belong in `TextFilesSuite`; paths and OS decisions use `PlatformPath` /
-`Platform`, while generated Scala literals use `ScalaSource`. Returned API paths use `/`
-on every OS. Source fixtures use LF, while assertions about native process output must
-account for the platform newline. Windows runs test classes serially because parallel Mill
-workers can duplicate the compiler-heavy first suite.
+`atc dev <checkout>` copies an existing local distribution and records `dev|<checkout>`.
+It does not build. `atc update` replaces that development installation with a release.
+Windows updates replace the launchers and JARs together. Native Windows launchers transport
+Unicode application arguments through private `ATC_INTERNAL_*` environment variables;
+ATC removes those variables from tool-process environments.
 
-Suite layout, by what each one guarantees (put a new test where its *guarantee* lives, not
-where the code lives):
-
-* **`CapabilitySuite`**: the capability type system (read-only vs full views, `update`
-  methods, derivation from `IOCap`, `UserIO` vs `IOCap`, escapes from `request*`, forging,
-  and the `Classified.map` capture contract incl. the def-wrapper/default-argument
-  regression guards).
-* **`ModeSuite`**: the read-only/local/full matrix (`onlyIn(modes, code)` asserts a snippet
-  compiles in exactly those modes) plus the policy's runtime enforcement and the config/CLI
-  plumbing.
-* **`SandboxSuite`**: the sandbox itself (session, host wiring, persistence, loader
-  isolation, compiler boundary and validator diagnostics).
-* **`ReplSessionSuite`**: REPL mechanics (language coverage, errors, timeouts, interrupts,
-  output capture and caps, REPL command allow-list).
-* **`ClassifiedSuite`**: `Classified` semantics against the host directly.
-* **`PermissionSuite`** / **`PolicySuite`** / **`HostSuite`**: the permission model, the
-  policy algebra, the host's path canonicalisation, exec (incl. live output) and network.
-* **`LayerSuite`**, **`ConfigSuite`**, **`ModelSuite`**, **`GitIgnoreSuite`**,
-  **`CodeValidatorSuite`**: configuration layering, the config model, the model catalog and
-  adapters, gitignore matching, the validator's early diagnostics.
-* **`AgentLoopSuite`**, **`AgentSuite`**, **`InputPredictorSuite`**: the loop, the system
-  prompt and rendering for the model, the context cut, pending notes, usage, prediction.
-* **`TuiSuite`**, **`RenderSuite`**, **`SlashCommandSuite`**: the terminal's pure helpers
-  (row placement, print subtraction, number formatting, the continuation rules), the
-  Markdown/highlighting renderers, the slash-command table.
-
-The bootstrap host slot is process-global, but `ReplSession` re-selects its own host under
-the evaluation lock before lazy preamble initialization and every run. `TestEnv.activate`
-remains useful for direct setup code, but live sessions no longer depend on callers racing
-to select the slot. `Scratch` (`./mill app.test.runMain atc.Scratch file.scala`) runs
-`// ---`-separated snippets in a sandbox and prints the results, handy for trying agent
-code by hand.
-
-## Conventions and gotchas
-
-* `-Yexplicit-nulls` everywhere, including agent code: Java results are `T | Null`, use
-  `.nn`; regex match groups are nullable. `-Wsafe-init` in `lib`.
-* `inline` is a keyword; don't name methods that.
-* Formatting: scalafmt via Mill (`__.reformat` / `__.checkFormat`), style-preserving config
-  (keeps line breaks, docstrings, trailing commas; 120 columns). `lib/.../Interface.scala`
-  is excluded (scalafmt cannot parse capture-checking syntax), so format it by hand.
-* The REPL echoes top-level values; echoes are capped (`SandboxConfig.maxEchoChars`) and the
-  TUI subtracts the agent's own prints from the panel by exact substring, which relies on
-  `ReplSession` not trimming leading whitespace of captured output.
-* One REPL session per conversation: definitions persist across turns until `/reset`,
-  `/new` or a mode switch, and the model is told when they are gone.
-* Driving the TUI programmatically (from a script or pty): if the launching shell put
-  SIGINT to `SIG_IGN` (background jobs of non-interactive shells), the JVM cannot register a
-  handler and Ctrl-C does nothing; reset signal dispositions in the child. jline-prompt menus
-  use application-cursor mode (`ESC O B` for down). The first interactive run asks the
-  "write a project config?" question on stdin, so a piped script's first line answers it.
-* `CLAUDE.md` (git-ignored, for the coding agent working on this repository) carries the
-  same architecture notes in compressed form; keep the two in step when you change a
-  mechanism described here.
-
-## The wrapper script
-
-`atc` (repo root, bash 3.2+) is the Unix user-facing installer/launcher, modelled on TACIT's
-`tacit`: `atc setup` (install to `~/.local/bin`, PATH snippet in the shell profile, Java 17+
-check, download), `atc update`, `atc self update|uninstall`, and anything else (`atc`,
-`atc -C dir`, `atc run ...`) execs `java -Datc.lib.classpath=atc-lib.jar -jar atc.jar` from
-`~/.atc/jars/` (beside the global config; uninstall validates the cache root and removes only
-ATC-owned artifacts, never the surrounding `config.json`/`keys.properties`;
-`ATC_CACHE_DIR`/`ATC_INSTALL_DIR` override, used by the tests). It fetches `releases/latest`
-from the GitHub API (`GITHUB_TOKEN` raises the
-rate limit; `jq` when available, a grep fallback otherwise), needs the assets `atc.jar` and
-`atc-lib.jar`, and fails closed on a missing or mismatching sha256 `digest`; the marker
-`release.txt` holds `id|tag`, and a cache whose jars no longer match their digests is
-re-downloaded.
-
-`atc dev <checkout>` (`install_dev_build`) is the developer mode: it copies
-`<checkout>/out/dist.dest/{atc.jar,atc-lib.jar}` over the cached jars and writes
-`dev|<checkout>` to the marker, so `cached_release_matches` fails and `atc update` downloads
-the release again, and `cmd_run` (via `dev_source`) says on stderr that a local build is
-running. It never builds (a staleness note comes from `find -newer` over `build.mill`,
-`app/`, `lib/`); `./mill dist` or `start.sh` does that.
-
-`tests/atc_test.sh` sources the script (its guarded `main` does not run) and covers
-release-metadata parsing (both parsers), checksum verification, the cache checks, the PATH
-snippet, locations, command dispatch with a mock `java`, the dev mode, and the download flow
-against a stubbed GitHub; no network or Java needed.
-
-Windows releases instead put `atc.ps1`, `atc.cmd`, `atc.jar`, and `atc-lib.jar` together.
-The PowerShell-native `atc.ps1` is the lossless application launcher; `atc.cmd` is retained
-for Command Prompt compatibility but necessarily has batch-file argument parsing. Both
-accept application flags such as `atc.ps1 --help`, not the Unix wrapper's
-`setup`/`update`/`self`/`dev` commands. Updating is currently a manual replacement of all
-four assets from one release. For a checkout,
-`start.cmd`/`start.ps1` load `.env`, rebuild through `mill.bat` when stale, and then launch
-the local distribution without requiring Bash. Both Windows launch paths carry application
-arguments through private child-environment entries because `java.exe` otherwise converts
-its UTF-16 command line through the legacy ANSI code page. ATC removes those entries from
-the environment of every tool process it starts.
-
-## Releases and CI
-
-CI (`.github/workflows/scala.yml`, modelled on TACIT's) runs on Linux, macOS, and Windows.
-Unix jobs use `./mill`; Windows uses `mill.bat` and serial tests. Every platform builds the
-distribution and runs the application test suite; the test step also runs after a packaging
-failure so both results are visible. Linux checks formatting, and non-Windows jobs run the
-deterministic Bash-wrapper test suite. CI deliberately does not run end-to-end launcher
-smoke scenarios: they couple shell parsing, packaging, terminal setup, configuration and the
-Scala REPL while duplicating behavior covered by the focused tests.
-
-Publishing a GitHub release whose tag is `v<Versions.atc>` (`build.mill`; the bare version
-is accepted too) makes the `publish-release` job (needs `build`) check the tag against the
-version, run `./mill dist`, and upload `atc.jar`, `atc-lib.jar`, `atc.ps1`, and `atc.cmd`.
-The two jar names are the exact assets the Unix wrapper looks for; Windows users download
-all four assets.
-A mismatching tag fails the job with a message saying which side to fix.
+CI builds distributions and runs application tests on Linux, macOS and Windows. Linux
+checks formatting; Unix jobs run the Bash wrapper tests. Published release tags must match
+`Versions.atc` (with an optional `v` prefix). The release job builds and uploads the two
+JARs and Windows launchers after the platform jobs succeed.

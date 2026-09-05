@@ -12,11 +12,14 @@ set -eu
 ROOT=$(cd "$(dirname "$0")" && pwd)
 ENV_FILE=${ATC_ENV_FILE:-$ROOT/.env}
 
-# Load .env without clobbering variables already exported in the shell.
+# Load literal KEY=value entries without replacing non-empty exported values.
 if [ -f "$ENV_FILE" ]; then
+  cr=$(printf '\r')
   while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%"$cr"}
     case "$line" in ''|'#'*) continue ;; esac
     line=${line#export }
+    case "$line" in *=*) ;; *) continue ;; esac
     key=${line%%=*}
     value=${line#*=}
     case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
@@ -50,7 +53,6 @@ if [ "$needs_build" = 1 ]; then
   (cd "$ROOT" && ./mill dist >/dev/null)
 fi
 
-set -- "$@"
 [ -n "${ATC_MODEL:-}" ]  && set -- -m "$ATC_MODEL" "$@"
 [ -n "${ATC_CONFIG:-}" ] && set -- -c "$ATC_CONFIG" "$@"
 [ -n "${ATC_CWD:-}" ]    && set -- -C "$ATC_CWD" "$@"

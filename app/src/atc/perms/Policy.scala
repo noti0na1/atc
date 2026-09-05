@@ -202,8 +202,9 @@ final class Policy(
 
   /** Effective permission in `scopeId`. `p` must be canonical. */
   def effective(scopeId: ScopeId, p: Path): Perm =
+    val currentScope = scope(scopeId)
     val cfg = configPerm(p)
-    val perm = if cfg.locked then cfg else cfg.copy(access = cfg.access.max(grantedAccess(scope(scopeId), p)))
+    val perm = if cfg.locked then cfg else cfg.copy(access = cfg.access.max(grantedAccess(currentScope, p)))
     if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =

@@ -22,7 +22,7 @@ case class ModelSpec(
   /** Optional human-facing name; model identity and lookup never use it. */
   def displayName: Option[String] = settings.displayName
 
-  /** Never print the key: a `ModelSpec` travels through error messages. */
+  /** Redact the API key from diagnostics. */
   override def toString: String =
     s"ModelSpec($ref, api=$api, model=$modelId, url=${baseUrl.getOrElse("default")}, " +
       s"key=${if apiKey.isDefined then "<set>" else "<from environment>"})"

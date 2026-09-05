@@ -2,9 +2,8 @@ package atc.agent
 
 import atc.llm.{Msg, ToolResult}
 
-/** Owns transcript mutation and the role-alternation invariants expected by
-  * model providers. The loop asks for semantic operations instead of editing
-  * the message list or assembling protocol markers itself. */
+/** Stores conversation history and pending notes, and repairs incomplete
+  * message sequences after failed or interrupted rounds. */
 private[agent] final class Conversation:
   private var messages: List[Msg] = Nil
   private var pendingNotes: List[String] = Nil

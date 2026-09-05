@@ -282,7 +282,7 @@ verify_jar() {
   name="$(basename "$file")"
   [[ -n "$digest" ]] || fail "no digest in release metadata for ${name}; refusing to install an unverified jar."
   if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
-    expected="${BASH_REMATCH[1]}"
+    expected="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f')"
   else
     fail "unrecognised digest format '${digest}' for ${name}; expected 'sha256:' followed by 64 hex characters."
   fi
@@ -311,7 +311,7 @@ cached_jars_match_digests() {
     [[ -n "$name" ]] || return 1
     [[ -n "$digest" ]] || return 2
     if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
-      expected="${BASH_REMATCH[1]}"
+      expected="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f')"
     else
       return 2
     fi
@@ -662,14 +662,9 @@ cmd_uninstall() {
     echo "No installed atc wrapper was found at ${INSTALL_PATH}."
   fi
   if [[ -d "$CACHE_DIR" ]]; then
-    # Remove only artifacts ATC owns. Never recursively delete an override merely
-    # because it happens to contain marker/jar filenames.
+    # Remove known artifacts only. A dev.* or download.* directory name does not
+    # establish ownership, especially when ATC_CACHE_DIR points to a shared directory.
     rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp"
-    local download_dir
-    for download_dir in "$CACHE_DIR"/download.* "$CACHE_DIR"/dev.*; do
-      [[ -d "$download_dir" || -L "$download_dir" ]] || continue
-      rm -rf -- "$download_dir"
-    done
     if rmdir -- "$CACHE_DIR" 2>/dev/null; then
       echo "Removed ${CACHE_DIR}"
     else

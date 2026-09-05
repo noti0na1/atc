@@ -1,9 +1,7 @@
 package atc
 
-/** The slash commands of the interactive loop: how each is typed (`usage`
-  * starts with its name), the other spellings it answers to, and what `/help`
-  * says about it. Pure on purpose, so the help text, Tab completion and the
-  * parsing of a typed line are testable without a terminal; [[App]] runs them. */
+/** Slash-command names, aliases and help text. Parsing and completion share
+  * this table; [[App]] implements the command actions. */
 enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Help extends SlashCommand("/help", "this help", "/h", "/?")
   case Model extends SlashCommand("/model [ref]", "switch the agent model (no argument: pick from a list)")

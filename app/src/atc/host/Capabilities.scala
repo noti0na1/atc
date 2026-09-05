@@ -8,16 +8,10 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import scala.util.{Try, Using}
 
-/** Concrete capabilities. Each carries the id of its permission scope; the
-  * policy resolves the effective permissions of that scope (its own grants
-  * plus those of its ancestors, on top of the configured base). Constructors
-  * of the abstract capability classes are `private[atc]`, so agent code (in
-  * the empty package) cannot forge these.
-  *
-  * The read-only/full distinction is purely a matter of types on the agent
-  * side (`FileEntry`'s `update` methods, `Cap`'s capture sets): the same
-  * objects serve both views, and the host enforces the policy, including the
-  * sandbox mode, on every call. */
+/** Runtime capabilities carry a permission scope ID. The host checks scope,
+  * configured permissions and sandbox mode on each operation. Agent-facing
+  * capture types enforce the read-only/full distinction over these same objects.
+  * Capability constructors are private to ATC. */
 sealed trait Scoped:
   def scope: ScopeId
 

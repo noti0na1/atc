@@ -4,19 +4,10 @@ import atc.lib.Classified
 
 import scala.util.{Success, Try}
 
-/** The host's `Classified` implementation. It wraps a `Try` so a failing pure
-  * computation inside `map` stays confidential too: the failure is only
-  * observable at a sink. Purity of `map`/`flatMap` arguments is enforced by
-  * capture checking on the agent side (the declared signature in `atc.lib`);
-  * this class just carries the value.
-  *
-  * `Try` traps only `NonFatal`, so a *fatal* throwable raised by a callback
-  * (`StackOverflowError`, `OutOfMemoryError`, an `InterruptedException`, or the
-  * sandbox's `ThreadDeath` stop signal) propagates out of `map`/`flatMap` and
-  * aborts the evaluation rather than becoming a masked failure. That is safe
-  * because agent code cannot *catch* a fatal throwable — `CodeValidator` rejects
-  * such catches — so a fatal throw cannot be turned into a per-bit oracle over
-  * the classified value (nor be used to swallow a timeout/interrupt). */
+/** Stores classified values and non-fatal computation failures in `Try`.
+  * Capture checking enforces callback purity in the agent-facing API.
+  * Fatal errors and interruption propagate to abort evaluation; the validator
+  * rejects catches that could expose those failures or suppress cancellation. */
 final class ClassifiedImpl[+T](val value: Try[T]) extends Classified[T]:
   def map[B](op: T => B): Classified[B] = ClassifiedImpl(value.map(op))
   def flatMap[B](op: T => Classified[B]): Classified[B] =

@@ -5,17 +5,10 @@ import atc.llm.{ChatModel, Msg, TokenUsage}
 
 import java.util.concurrent.atomic.AtomicLong
 
-/** Guesses what the user will type next, from the conversation so far, so the
-  * terminal can offer it as ghost text at the prompt (Tab / → accepts).
-  *
-  * The guess is made on a background thread by the *agent* model (never the
-  * classified one: the history it sees is the same the agent model already
-  * saw). A guess is shown only if nothing invalidated it while it was being
-  * made: every [[start]] and [[invalidate]] bumps a generation, and a slow
-  * answer for an older generation is dropped. One coalescing worker bounds
-  * resource use: rapid starts retain only the newest waiting job and interrupt
-  * the current call best-effort. Failures are silent: no guess is just no ghost
-  * text. */
+/** Predicts the next user input on one background worker using the agent model.
+  * A generation counter discards stale results. Repeated starts replace the
+  * pending job and attempt to interrupt the active request. Prediction failures
+  * are logged only in debug mode. */
 final class InputPredictor(
   model: () => ChatModel,
   history: () => List[Msg],
@@ -69,8 +62,7 @@ final class InputPredictor(
           case some @ Some(_) => pending = None; some
           case None => worker = null; again = false; None
       job.foreach { j =>
-        // Do not let an interrupt used to retire the previous job poison the
-        // next provider call after the previous one returned normally.
+        // Clear a previous job's interrupt before starting the next request.
         Thread.interrupted()
         val guess =
           if generation.get != j.generation then None
@@ -153,8 +145,8 @@ object InputPredictor:
     * and Unicode formatting controls (including bidi overrides) are removed. */
   private def safeLine(line: String): String =
     line.iterator
-      .filterNot(c => Character.isISOControl(c) || Character.getType(c) == Character.FORMAT)
       .map(c => if Character.isWhitespace(c) || Character.isSpaceChar(c) then ' ' else c)
+      .filterNot(c => Character.isISOControl(c) || Character.getType(c) == Character.FORMAT)
       .mkString
       .replaceAll(" +", " ")
       .trim

@@ -6,23 +6,10 @@ import atc.platform.Platform
 
 import java.nio.file.{Files, Path, Paths}
 
-/** Class-loader isolation for agent code.
-  *
-  * The REPL compiles agent code against the *library classpath* (`atc.lib` +
-  * the Scala standard library, as jars/dirs) and loads the compiled classes
-  * into a loader whose parent is [[SandboxLoader]]:
-  *
-  * {{{
-  *   REPL loader → SandboxLoader → { app loader for scala.* and atc.lib.*,
-  *                                    platform loader for the JDK }
-  * }}}
-  *
-  * so agent code sees the JDK, the Scala standard library and the capability
-  * API — the very same classes the application uses, which is what lets the
-  * application implement `atc.lib.Interface` directly and the sandbox call it
-  * without any marshalling — but nothing else of the application (LLM
-  * clients, config, policy, UI, compiler, their dependencies).
-  */
+/** Isolates REPL classes from application internals. Agent code compiles against
+  * `atc.lib` and the Scala standard library. The parent loader shares those
+  * classes with the application and delegates other classes to the JDK platform
+  * loader. Sharing the API classes allows direct calls to the host implementation. */
 object Sandbox:
 
   val ClasspathProperty = "atc.lib.classpath"

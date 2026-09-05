@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for the `atc` wrapper script: release-metadata parsing, checksum
-# verification, cache checks and command dispatch. No network, no Java needed.
+# verification, cache checks, command dispatch and start.sh environment loading.
+# No network or Java required.
 #
 #   bash tests/atc_test.sh
 set -euo pipefail
@@ -129,6 +130,25 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "--- checkout launcher ---"
+
+start_dir="$TEST_TMP/start"
+mkdir -p "$start_dir"
+cat > "$start_dir/java" <<'JAVA'
+#!/bin/sh
+printf 'arg=<%s>\n' "$@"
+printf 'loaded=<%s> kept=<%s> malformed=<%s> literal=<%s>\n' \
+  "${ATC_TEST_LOADED-}" "${ATC_TEST_KEPT-}" "${ATC_TEST_MALFORMED-}" "${ATC_TEST_LITERAL-}"
+JAVA
+chmod +x "$start_dir/java"
+printf '%s\r\n' 'ATC_TEST_LOADED="from file"' 'ATC_TEST_KEPT=file' \
+  'ATC_TEST_MALFORMED' 'ATC_TEST_LITERAL=$(must_stay_literal)' > "$start_dir/test.env"
+start_output="$(env -i PATH="$start_dir:/usr/bin:/bin" ATC_ENV_FILE="$start_dir/test.env" \
+  ATC_SKIP_BUILD=1 ATC_TEST_KEPT=exported /bin/sh "$REPO_ROOT/start.sh" -p 'quoted "prompt"')"
+assert_contains "start.sh reads CRLF and preserves exported values" \
+  'loaded=<from file> kept=<exported> malformed=<> literal=<$(must_stay_literal)>' "$start_output"
+assert_contains "start.sh preserves argument boundaries" 'arg=<quoted "prompt">' "$start_output"
+
 echo "--- java version ---"
 
 assert_eq "JDK 21" "21" "$(java_major_from_line 'openjdk version "21.0.1" 2023-10-17')"
@@ -145,6 +165,8 @@ if have_sha256_tool; then
   printf 'hello atc\n' > "$sample"
   sample_hex="$(sha256_of "$sample")"
   assert_succeeds "matching digest verifies" verify_jar "$sample" "sha256:${sample_hex}"
+  assert_succeeds "uppercase hexadecimal digest verifies" verify_jar "$sample" \
+    "sha256:$(printf '%s' "$sample_hex" | tr 'a-f' 'A-F')"
   assert_fails "mismatching digest fails" verify_jar "$sample" "sha256:$(printf '0%.0s' $(seq 1 64))"
   assert_fails "empty digest fails closed" verify_jar "$sample" ""
   assert_fails "unknown digest format fails" verify_jar "$sample" "md5:abc"
@@ -161,6 +183,8 @@ if have_sha256_tool; then
     "$APP_URL" "$(sha256_of "$LIB_JAR")" "$LIB_URL" "$(sha256_of "$LIB_JAR")")"
   partial_info="$(printf 'atc.jar\t%s\t\natc-lib.jar\t%s\tsha256:%s\n' "$APP_URL" "$LIB_URL" "$(sha256_of "$LIB_JAR")")"
   assert_succeeds "cache matches its digests" cached_jars_match_digests "$good_info"
+  upper_info="$(printf '%s' "$good_info" | awk -F '\t' 'BEGIN { OFS="\t" } { sub(/^sha256:/, "", $3); $3="sha256:" toupper($3); print }')"
+  assert_succeeds "cache accepts uppercase hexadecimal digests" cached_jars_match_digests "$upper_info"
   assert_fails "cache with a changed jar does not match" cached_jars_match_digests "$bad_info"
   assert_fails "an asset without a digest makes the cache untrusted (fail closed)" cached_jars_match_digests "$partial_info"
   rm -f "$APP_JAR"
@@ -595,11 +619,14 @@ uninstall_keeps_unrelated_custom_files() {
     export ATC_CACHE_DIR="$TEST_TMP/shared-custom-cache"
     export ATC_INSTALL_DIR="$TEST_TMP/guard-bin4"
     source "$WRAPPER"
-    mkdir -p "$CACHE_DIR"
+    mkdir -p "$CACHE_DIR/dev.notes" "$CACHE_DIR/download.notes"
     printf '12345678|v0.2.0\n' > "$RELEASE_MARKER"
     printf 'precious\n' > "$CACHE_DIR/keep.txt"
+    printf 'precious\n' > "$CACHE_DIR/dev.notes/keep.txt"
+    printf 'precious\n' > "$CACHE_DIR/download.notes/keep.txt"
     cmd_uninstall >/dev/null 2>&1
-    [[ -d "$CACHE_DIR" && -f "$CACHE_DIR/keep.txt" && ! -e "$RELEASE_MARKER" ]]
+    [[ -f "$CACHE_DIR/keep.txt" && ! -e "$RELEASE_MARKER" &&
+       -f "$CACHE_DIR/dev.notes/keep.txt" && -f "$CACHE_DIR/download.notes/keep.txt" ]]
   )
 }
 assert_succeeds "uninstall removes only owned artifacts from a shared custom cache" uninstall_keeps_unrelated_custom_files

@@ -91,6 +91,10 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(early, "")
     assertEquals(m.push(chunks.last) + m.finish(), out)
 
+  test("table columns align wide and combining characters by terminal width"):
+    val text = "| 名 | N |\n|---|---|\n| e\u0301 | 1 |\n"
+    assertEquals(plain(render(text)), "名 │ N\n───┼──\ne\u0301  │ 1\n")
+
   test("a table ends at the first non-row line, an unterminated one at finish, and a lone | line is text"):
     assertEquals(plain(render("| a | b |\n|---|---|\n| 1 | 2 |\nafter\n")), "a │ b\n──┼──\n1 │ 2\nafter\n")
     assertEquals(plain(render("| a | b |\n|---|---|\n| 1 | 2 |")), "a │ b\n──┼──\n1 │ 2\n")

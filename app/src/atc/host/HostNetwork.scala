@@ -9,9 +9,7 @@ import java.time.Duration
 import java.util.Locale
 import scala.util.{Success, Try, Using}
 
-/** Network-facing operations supplied by [[Host]]. Keeping HTTP construction
-  * here makes the permission boundary and classified-data handling reviewable
-  * without mixing them with filesystem or process code. */
+/** HTTP operations with host permissions and classified request/response handling. */
 private[host] trait HostNetwork:
   self: Host =>
 

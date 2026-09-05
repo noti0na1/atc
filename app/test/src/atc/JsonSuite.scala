@@ -81,6 +81,11 @@ class JsonSuite extends munit.FunSuite:
     assertEquals(Json.parse("-0.25e+2").num, -25.0)
     assertEquals(Json.parse("\"escaped\\nnewline\"").str, "escaped\nnewline")
 
+  test("Unicode escapes require exactly four ASCII hexadecimal digits"):
+    for hex <- List("+123", "-123", "１２３４", "12xz") do
+      intercept[IllegalArgumentException](Json.parse("\"\\u" + hex + "\""))
+    assertEquals(Json.parse("\"\\u00aF\"").str, "¯")
+
   test("control characters and non-finite numbers render as valid JSON"):
     assertEquals(Json.Str("tab\t bell\u0007").render, "\"tab\\t bell\\u0007\"")
     assertEquals(Json.Num(Double.NaN).render, "null")

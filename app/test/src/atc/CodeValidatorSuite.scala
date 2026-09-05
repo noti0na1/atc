@@ -14,6 +14,15 @@ class CodeValidatorSuite extends munit.FunSuite:
 
   // ── Rejection by category ────────────────────────────────────────
 
+  test("nested block comments preserve offsets and do not trigger API diagnostics"):
+    val comment = "/* outer /* inner */ java.io.File\nSystem.exit(0) */"
+    val code = comment + "\nval answer = 42"
+    val stripped = CodeValidator.stripLiteralsAndComments(code)
+    assertEquals(stripped, comment.map(c => if c == '\n' then '\n' else ' ') + "\nval answer = 42")
+    assertAllowed(code)
+    val violations = CodeValidator.validate(comment + "\nimport java.io.File")
+    assert(violations.exists(v => v.ruleId == "file-io-java" && v.lineNumber == 3))
+
   test("reject java.io") { assertRejected("import java.io.File", "file-io-java") }
   test("reject java.nio") { assertRejected("import java.nio.file.Files", "file-io-nio") }
   test("reject scala.io") { assertRejected("import scala.io.Source", "file-io-scala") }

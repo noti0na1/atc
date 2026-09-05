@@ -3,15 +3,8 @@ package atc.host
 import atc.lib.{Process, ProcessResult}
 import atc.perms.{Policy, ScopeId}
 
-/** The agent's handle on a spawned process: the [[Processes.ManagedProcess]]
-  * plus the session-level id and the hooks that show the user what the agent
-  * sends it.
-  *
-  * The handle records the scope in which `spawn` ran and refuses all operations
-  * after that scope closes, matching the "escaped its block" treatment of a
-  * leaked capability (`Policy.requireScopeOpen`). Without this check, a process
-  * started by a one-time `requestExec` grant could remain controllable through
-  * `runningProcesses` for the rest of the session. */
+/** A spawned-process handle with a session ID, output callbacks and permission
+  * scope. Operations require the originating scope to remain open. */
 final class ProcessImpl(
   val id: Int,
   private[atc] val managed: Processes.ManagedProcess,

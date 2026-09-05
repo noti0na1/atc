@@ -246,6 +246,7 @@ private[host] trait HostFiles:
       throw IllegalArgumentException(s"move: '$from' is a directory; move its files and mkdir/delete the directories")
     val target = impl(fs.access(to))
     if source.path != target.path then
+      requireWrite(scopeOf(fs), source.canonicalPath, "move")
       Using.resource(source.openRead())(in => target.writeFrom(source, in))
       source.delete()
 

@@ -3,12 +3,8 @@ package atc.lib
 import language.experimental.captureChecking
 import caps.*
 
-/** How the sandbox derives the mode's capabilities from the root `io`: the REPL
-  * preamble (compiled before the safe-mode import) calls these through [[Runtime]]
-  * to define the givens `fs`/`ex`/`net`, and the host implements them. Not part of
-  * the agent API: the agent gets the givens of its mode, never the derivations.
-  * Consequently a full grouping root does not let local mode manufacture the
-  * omitted `Network` leaf. */
+/** Internal capability derivations used by the REPL preamble. Agent code receives
+  * the givens selected by its mode and cannot invoke these derivations. */
 @rejectSafe("it is internal to the sandbox")
 trait Derivations:
   /** The configured file system, full (read + write); needs a full `io`. */

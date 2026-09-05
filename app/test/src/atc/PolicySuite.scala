@@ -104,6 +104,14 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(p.effective(ScopeId.Base, f).access, Access.Write)
     assertEquals(prompter.asked.size, 3)
 
+  test("closed scopes cannot access paths covered by locked rules"):
+    val p = Policy(rules((".", Some(Access.Read), None, true)), Nil, Nil, _ => Decision.Deny)
+    val path = root.resolve("locked.txt")
+    val scope = p.requestFile(ScopeId.Base, path, Access.Read, "")
+    assertEquals(p.effective(scope, path).access, Access.Read)
+    p.closeScope(scope)
+    intercept[SecurityException](p.effective(scope, path))
+
   test("locked rules cannot be widened, classified stays classified"):
     val prompter = ScriptedPrompter(List(Decision.AllowSession, Decision.AllowSession))
     val p = Policy(

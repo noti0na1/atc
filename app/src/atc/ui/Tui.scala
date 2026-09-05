@@ -4,7 +4,7 @@ import atc.{Debug, ProcessEnvironment}
 import atc.agent.AgentUI
 import atc.lib.{Todo, TodoStatus}
 import atc.perms.*
-import atc.sandbox.ExecutionResult
+import atc.sandbox.{ExecutionResult, ReplSession}
 
 import org.jline.prompt.{CheckboxResult, ListResult, PromptBuilder, PromptResult, PrompterConfig, PrompterFactory}
 import org.jline.keymap.KeyMap
@@ -37,36 +37,10 @@ import scala.jdk.CollectionConverters.*
 
 import Ansi.{Blue, Bold, ClearLine, Cyan, Dim, Green, Magenta, Red, Reset, Yellow}
 
-/** Terminal front-end. Every kind of content has one shape so a glance tells
-  * them apart:
-  *
-  * {{{
-  * > user request                        cyan prompt
-  *
-  * ● thinking… (last lines, live)        dim; collapses to "● thought for 8 s · 40 lines"
-  *
-  * ● assistant prose                     bullet, 2-space indent, Markdown rendered
-  *
-  * ● run_scala                           tool block, magenta
-  *   │ code                              magenta gutter, syntax-coloured
-  *   ├ output                            live program output, dim gutter
-  *   │ hello                             (folded after some rows: "⋯ N more lines" + the last few lines, live)
-  *   ├ result  /  ├ error                what the REPL added: echoes, diagnostics
-  *   │ val x: Int = 1
-  *   └ ok 34 ms  /  └ failed 34 ms
-  *
-  *   ▸ TODO  ✓ done  ▶ in progress  ○ pending
-  *
-  *   ⚠ Permission request …             pop-ups (yellow); ? questions (cyan)
-  * }}}
-  *
-  * Ctrl-O during a turn toggles the *expanded* view: thinking streams in
-  * full and output is never folded (the toggle sticks for the session).
-  * Without a real terminal (`-p` in a pipe) everything is shown in full.
-  *
-  * Blocks are separated by one blank line. Everything goes through one
-  * `write`, which remembers the last characters written so gutters can be
-  * inserted at line starts even when text arrives in arbitrary chunks. */
+/** JLine terminal interface for input, streaming responses, tool output and menus.
+  * Ctrl-O toggles expanded output; non-interactive terminals print all output.
+  * Writes track line boundaries so streamed chunks retain their indentation.
+  * See `doc/development.md` for the layout and keyboard controls. */
 final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends AgentUI:
   private val historyPath = Tui.secureHistoryFile(historyFile)
   // No grapheme-cluster probing: it sends a DECRQM query to the terminal and
@@ -492,7 +466,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * model cannot see it. `printed` keeps the RAW text (it is matched verbatim
     * against the REPL capture in `toolEnd`); only the display is sanitized. */
   def agentPrint(agentText: String, userText: String): Unit = synchronized:
-    printed.append(agentText)
+    // Text beyond the REPL capture limit cannot be subtracted from its result.
+    val room = ReplSession.MaxOutputBytes - printed.length
+    if room > 0 then printed.append(agentText.take(room))
     openOutputSection()
     if agentText == userText then liveOutput.emit(Ansi.sanitize(userText))
     else liveOutput.emit(styled("[classified] ", Yellow, Bold) + styled(Ansi.sanitize(userText), Yellow))
@@ -740,16 +716,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       * bytes are all ≥ 32 and would otherwise land in the type-ahead as
       * `[A`-style garbage. */
     private def drainEscape(in: NonBlockingReader): Unit =
-      def next(): Int =
-        try in.read(30L)
-        catch case _: Exception => -1
-      next() match
-        case -1 => ()
-        case '[' => // CSI: parameter/intermediate bytes until a final byte 0x40–0x7E
-          var f = 0
-          while { f = next(); f != -1 && !(f >= 0x40 && f <= 0x7e) } do ()
-        case 'O' => next() // SS3: exactly one more byte
-        case _ => () // Alt+key and friends: nothing more to swallow
+      Tui.discardEscapeSequence(() => in.read(30L))
 
     private def loop(): Unit =
       val in: NonBlockingReader = terminal.reader()
@@ -983,7 +950,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         ))
         again = false
       catch
-        case _: UserInterruptException => again = true
+        case _: UserInterruptException => again = !blockMode
         case e: EndOfFileException =>
           Debug.log(s"EOF on input: ${e.getMessage}"); Debug.trace(e)
           result = None; again = false
@@ -1015,6 +982,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     terminal.close()
 
 object Tui:
+  /** Consume CSI/SS3 bytes after ESC, stopping on a final byte, EOF or timeout. */
+  private[atc] def discardEscapeSequence(read: () => Int): Unit =
+    def next(): Int =
+      try read()
+      catch case _: java.io.IOException => -1
+    next() match
+      case '[' =>
+        var char = next()
+        while char >= 0 && !(char >= 0x40 && char <= 0x7e) do char = next()
+      case 'O' => next(); ()
+      case _ => ()
+
   /** A scripted `-p` run never needs console discovery or raw mode. Giving it
     * a known dumb UTF-8 terminal also avoids platform-specific null encodings
     * when Windows redirects stdin/stdout (as CI and normal pipelines do). */
@@ -1112,13 +1091,9 @@ object Tui:
       i += Character.charCount(cp)
     w
 
-  /** A text buffer behind a live tail window. Appending counts lines (so the
-    * "N more lines" header stays exact), and `tail(n)` scans BACK from the end —
-    * the previous "split the whole buffer on every chunk" was quadratic for a
-    * chatty command or a long reasoning stream. Past `cap` the front is dropped:
-    * at a line boundary when one is in reach, otherwise mid-line (so memory stays
-    * bounded even for newline-free output — the pathological case the cap exists
-    * for). The line counts are kept incrementally and are unaffected by the cut. */
+  /** Bounded output buffer with incremental line counts. `tail(n)` scans backward
+    * for the requested lines. Overflow discards a prefix at a line boundary when
+    * possible, or within a line when necessary to enforce the character limit. */
   private[atc] final class TailBuffer(cap: Int):
     private val sb = StringBuilder()
     private var newlines = 0L

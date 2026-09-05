@@ -256,7 +256,11 @@ object Processes:
     /** Let the drains deliver the last chunks; then everything unread, consumed. */
     def result(): ProcessResult =
       drains.foreach(_.join(5000))
-      ProcessResult(exitCode.getOrElse(-1), stdoutBuf.take() + stdoutBuf.marker, labelled(stderrBufs.map(_.take())))
+      ProcessResult(
+        exitCode.getOrElse(-1),
+        stdoutBuf.take() + stdoutBuf.marker,
+        labelled(stderrBufs.map(buffer => buffer.take() + buffer.marker)),
+      )
 
     /** The last part of each stream, unread text included, for an error message. */
     def tails: (String, String) =

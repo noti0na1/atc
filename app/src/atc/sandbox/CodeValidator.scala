@@ -228,12 +228,16 @@ object CodeValidator:
           if blankComments then { blank('/'); blank('*') }
           else { emit('/'); emit('*') }
           i += 2
-          var closed = false
-          while i < len && !closed do
-            if i + 1 < len && code.charAt(i) == '*' && code.charAt(i + 1) == '/' then
+          var depth = 1
+          while i < len && depth > 0 do
+            if code.startsWith("/*", i) then
+              if blankComments then { blank('/'); blank('*') }
+              else { emit('/'); emit('*') }
+              i += 2; depth += 1
+            else if code.startsWith("*/", i) then
               if blankComments then { blank('*'); blank('/') }
               else { emit('*'); emit('/') }
-              i += 2; closed = true
+              i += 2; depth -= 1
             else
               if blankComments then blank(code.charAt(i)) else emit(code.charAt(i))
               i += 1

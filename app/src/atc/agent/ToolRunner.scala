@@ -43,6 +43,6 @@ private[atc] final class ScalaToolRunner(
       ToolResult(call.id, rendered, isError = !result.success)
 
 private[atc] object ScalaToolRunner:
-  /** The one and only native tool: everything else is a Scala function. */
+  /** The native Scala tool; other operations are library calls. */
   val tools: List[ToolSpec] =
     List(ToolSpec(Prompts.ToolName, Prompts.toolDescription, Prompts.toolParameters))

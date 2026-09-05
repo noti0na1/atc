@@ -2,9 +2,7 @@ package atc.host
 
 import atc.lib.Todo
 
-// What the host needs from the application: where agent output goes, how to
-// talk to the user, and how to reach the LLMs. `App` wires these to the TUI
-// and the agent; tests plug in recorders.
+// Host dependencies supplied by App or test implementations.
 
 /** Where the agent's `println` output goes. */
 trait HostOutput:

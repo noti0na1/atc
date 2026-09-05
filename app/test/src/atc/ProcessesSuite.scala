@@ -1,8 +1,16 @@
 package atc
 
-import atc.host.Processes
+import atc.host.{CommandLine, Processes}
+import scala.jdk.CollectionConverters.*
 
 class ProcessesSuite extends munit.FunSuite:
+  test("captured stderr reports truncation at its output limit"):
+    val command = ProcessFixture.command("stderr", (8 * 1024 * 1024 + 1).toString)
+    val result = Processes.run(ProcessBuilder(CommandLine.parseCommandLine(command).asJava), command, 10000L)
+    assertEquals(result.exitCode, 0)
+    assertEquals(result.stdout, "")
+    assert(result.stderr.contains("truncated"), result.stderr.takeRight(100))
+
   test("tail output coalesces fragmented appends and truncates only past the cap"):
     val buffer = Processes.TailBuffer(64)
     val text = (0 until 64).map(i => ('a' + i % 26).toChar).mkString

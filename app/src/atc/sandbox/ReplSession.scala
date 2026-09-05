@@ -79,7 +79,7 @@ object ReplSession:
     *  - read-only: `io: IOCap` and the read-only `fs` derived from it.
     *
     * The root records the capture hierarchy; it is not itself a factory. The
-    * `Runtime` derivations mint the leaves, and agent code cannot call them, so
+    * `Runtime` derivations create the capabilities, and agent code cannot call them, so
     * local mode cannot produce the omitted `net` from its full `io`.
     *
     * `atc.lib.Runtime.current`/`.rootIO` are `@rejectSafe`: the preamble is
@@ -134,7 +134,7 @@ object ReplSession:
     * evaluations are serialized. A `ReentrantLock` (rather than `synchronized`)
     * lets a run give up when a previous evaluation was interrupted but its
     * thread never died: that thread holds the stream forever, and waiting on
-    * it with `synchronized` would wedge the whole process. */
+    * it with `synchronized` would block every subsequent evaluation. */
   private val outputLock = java.util.concurrent.locks.ReentrantLock()
   private val OutputLockWaitMs = 10000L
 
@@ -270,9 +270,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       // The evaluation was interrupted: its wrapper class may be half-initialized
       // (`ThreadDeath` from the stop check surfaces as an `ExceptionInInitializerError`
       // the REPL renders as normal output). Skip that wrapper index so the next
-      // line does not collide with the poisoned class, and report the abort.
-      skipPoisonedWrapper()
-      ExecutionResult(false, "", Some("Execution interrupted by the user (session state unchanged)"))
+      // line does not collide with the invalid class, and report the abort.
+      skipInvalidWrapper()
+      ExecutionResult(false, "", Some("Execution interrupted by the user (completed effects are not rolled back)"))
     else
       thrown match
         case Some(e) => ExecutionResult(false, output, Option(e.getMessage).orElse(Some(e.toString)))
@@ -282,9 +282,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
             case _ => false
           ExecutionResult(!compileFailed && !failed, output)
 
-  /** After a stopped evaluation, advance past the (possibly poisoned) wrapper
+  /** After a stopped evaluation, advance past the potentially invalid wrapper
     * index and mark it invalid, so a later line does not reuse the class name. */
-  private def skipPoisonedWrapper(): Unit =
+  private def skipInvalidWrapper(): Unit =
     state = state.copy(
       objectIndex = state.objectIndex + 1,
       invalidObjectIndexes = state.invalidObjectIndexes + state.objectIndex,
@@ -312,9 +312,13 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       if worker.isAlive then
         interrupt()
         worker.join(2000)
-        skipPoisonedWrapper()
+        skipInvalidWrapper()
         val note = if worker.isAlive then "; the evaluation could not be stopped and is still running" else ""
-        ExecutionResult(false, "", Some(s"Execution timed out after ${limitMs}ms (session state unchanged)$note"))
+        ExecutionResult(
+          false,
+          "",
+          Some(s"Execution timed out after ${limitMs}ms (completed effects are not rolled back)$note")
+        )
       else
         resultRef.get() match
           case null => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
@@ -328,7 +332,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       try outputLock.tryLock(OutputLockWaitMs, TimeUnit.MILLISECONDS)
       catch
         // Interrupted while waiting (e.g. a user interrupt landed here): the lock
-        // may well be free — retry once, uninterruptibly, before crying "stuck".
+        // may well be free — retry once, uninterruptibly, before reporting a blocked evaluation.
         case _: InterruptedException => outputLock.tryLock()
     onEnter
     if !acquired then ("", Some(RuntimeException(StuckEvaluationMessage)))

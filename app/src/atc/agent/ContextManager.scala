@@ -2,13 +2,9 @@ package atc.agent
 
 import atc.llm.{ChatModel, Completion, Msg, NativeTurn, ToolCall}
 
-/** Context-window accounting for an agent conversation.
-  *
-  * The manager owns the state that spans model rounds: calibration against the
-  * provider's token count and the cumulative number of messages dropped. Call
-  * [[beginTurn]] once for each user turn so an unavoidable overflow is warned
-  * at most once during that turn.
-  */
+/** Estimates context usage, calibrates estimates against provider token counts,
+  * and removes older exchanges when necessary. Call [[beginTurn]] once per user
+  * turn to reset the overflow warning. */
 final class ContextManager:
   import ContextManager.*
 

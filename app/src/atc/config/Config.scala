@@ -120,8 +120,7 @@ case class Config(
 ) derives ReadWriter
 
 object Config:
-  /** `~/.atc/config.json`: the base of the whole policy. Nothing is permitted
-    * behind it, so it is also where every grant has to be written. */
+  /** The global configuration, loaded before project and explicit layers. */
   def globalPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("config.json").nn
 
   /** `<dir>/.atc/config.json`, the project config of `dir`. */
@@ -280,7 +279,7 @@ object Config:
     *    to a provider the global config defined.
     *  - **`commands` / `hosts`** are the union of every layer's list: a project
     *    config may pre-approve the commands and hosts its work needs, the way
-    *    it may open its own files. The deny lists are the backstop.
+    *    it may open its own files. Deny rules restrict all grants.
     *  - **policy settings** come from the *granting* layers (global, `-c`)
     *    merged the same way, and are then narrowed by the project layer:
     *    limits and the sandbox mode by the stricter value, `safeMode` /
@@ -319,9 +318,8 @@ object Config:
     def onlyIfSet[T](key: String)(stricter: => T)(keep: => T): T = if layer.defines(key) then stricter else keep
     base.copy(
       mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
-      // A latch: `|| ` can only move it towards on, whatever the layer says.
-      safeMode = base.safeMode || onlyIfSet("safeMode")(n.safeMode)(false),
-      respectGitignore = base.respectGitignore || onlyIfSet("respectGitignore")(n.respectGitignore)(false),
+      safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
+      respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
       // A missing timeout means "no limit", so it is the *least* strict value.
       executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
         (base.executionTimeoutMs, n.executionTimeoutMs) match
@@ -390,7 +388,7 @@ object Config:
     requireValid(value == value.trim, s"$where must not start or end with whitespace (was '$value')")
     requireValid(
       allowed.contains(value.trim.toLowerCase(java.util.Locale.ROOT)),
-      s"$where must be one of ${allowed.mkString("|")} (was '$value')"
+      s"$where must be one of ${allowed.toList.sorted.mkString("|")} (was '$value')"
     )
 
   private def validateModel(provider: String, alias: String, model: ModelConfig): Unit =

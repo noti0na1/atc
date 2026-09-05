@@ -50,10 +50,7 @@ final class App(args: Cli.Args):
   @volatile var session: Option[ReplSession] = None
   tui.onInterrupt = () => session.foreach(_.interrupt())
 
-  /** Show a pop-up: the time the human takes to answer does not count against the execution timeout. */
-  private def whileUserDecides[T](popup: => T): T = withClockPaused(popup)
-
-  /** Nor does the time a command runs (it has its own timeout, see `ExecOptions`). */
+  /** Exclude user input and operations with their own timeout from the snippet clock. */
   private def withClockPaused[T](body: => T): T =
     session.foreach(_.clock.pause())
     try body
@@ -62,7 +59,7 @@ final class App(args: Cli.Args):
   // ── permission policy ─────────────────────────────────────────────
 
   val prompter: PermissionPrompter =
-    App.permissionPrompter(args, request => whileUserDecides(tui.askPermission(request)))
+    App.permissionPrompter(args, request => withClockPaused(tui.askPermission(request)))
   val policy =
     Policy(
       App.fileRules(configuration, cwd),
@@ -105,7 +102,7 @@ final class App(args: Cli.Args):
       reply.text
   val hostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
-      whileUserDecides(tui.askUser(question, options, multiple))
+      withClockPaused(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
@@ -194,6 +191,7 @@ final class App(args: Cli.Args):
           interactive()
           0
     finally
+      predictor.invalidate()
       host.killProcesses()
       session.foreach(_.close())
       tui.close()

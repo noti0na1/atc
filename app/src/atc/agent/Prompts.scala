@@ -25,7 +25,7 @@ object Prompts:
       """|Sandbox mode: FULL. In scope: `given io: IOCap^` (the full root capability), `given fs: FileSystem^{io}`
          |(read + write), `given ex: Exec^{io}` (commands), `given net: Network^{io}` (network), each within the
          |permissions below. The separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`;
-         |`request*` blocks widen the relevant leaf capability.""".stripMargin
+         |`request*` blocks widen the relevant capability.""".stripMargin
     case Mode.Local =>
       """|Sandbox mode: LOCAL, meaning files and commands but no network. In scope: `given io: IOCap^` (the full machine-effect
          |root), `given fs: FileSystem^{io}` (read + write), and `given ex: Exec^{io}` (commands). The sandbox deliberately
@@ -159,7 +159,7 @@ object Prompts:
        |
        |${modeSection(policy.mode)}
        |
-       |Rules of the sandbox (compile errors will tell you when you slip)
+       |Sandbox rules
        |$safeModeRules
        |- In every mode, ambient file/network/process APIs, reflection, unsafe System operations, and new threads are forbidden.
        |- Capability types carry a read/write mode (the API header explains `^`, `update def` and

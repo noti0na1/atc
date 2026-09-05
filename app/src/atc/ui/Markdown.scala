@@ -182,8 +182,8 @@ class MarkdownStream(glyphs: MarkdownStream.Glyphs, highlight: String => List[St
     else if d.endsWith(":") then Align.Right
     else Align.Left
 
-  /** Length as shown: inline markers take no room. */
-  private def visibleLength(cell: String): Int = cell.replace("**", "").replace("`", "").length
+  /** Terminal cell width after removing inline style markers. */
+  private def visibleLength(cell: String): Int = Tui.displayWidth(cell.replace("**", "").replace("`", ""))
 
   /** Draw the collected table: bold header, a rule with junctions, cells
     * padded to the column width and aligned as the delimiter row says. */

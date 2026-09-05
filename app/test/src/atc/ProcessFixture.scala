@@ -44,6 +44,7 @@ object TestProcess:
       if rest.nonEmpty then writeErr(rest.mkString(" ") + "\n")
       sys.exit(code.toInt)
     case "sleep" :: millis :: Nil => Thread.sleep(millis.toLong)
+    case "stderr" :: chars :: Nil => writeErr("e" * chars.toInt)
     case other =>
       writeErr(s"bad TestProcess arguments: ${other.mkString(" ")}\n")
       sys.exit(64)

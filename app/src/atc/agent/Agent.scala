@@ -5,25 +5,10 @@ import atc.llm.*
 import atc.perms.{Decision, Policy}
 import atc.sandbox.{ExecutionResult, ReplSession}
 
-/** The agent loop: user message → (model → tool calls)* → final answer.
-  *
-  * A *turn* handles one user message as a sequence of *rounds*. Each round
-  * asks the model once and then acts on its answer:
-  *
-  *  - tool calls → run them (`run_scala`, one at a time), append the results
-  *    and ask again;
-  *  - a resumable completion (the provider paused after a server-side tool or
-  *    hit an output limit) → ask again so the model resumes;
-  *  - anything else is the final answer: the turn is over (the system prompt
-  *    tells the model that ending without a tool call means "finished"; the loop
-  *    does not second-guess its prose).
-  *
-  * Bounds keep a confused model from looping: `config.maxToolCalls` per turn (a
-  * checkpoint: the UI may grant another budget, see [[AgentUI.confirmMoreToolCalls]]),
-  * [[Agent.MaxResumes]] and [[Agent.MaxBudgetRejections]].
-  * `cancelled` is polled while streaming and before every tool call; an
-  * interrupted turn ends with an `[interrupted by user]` assistant message so
-  * the history stays well-formed. */
+/** Runs each user turn as model completions followed by sequential tool calls.
+  * Provider pauses and output limits may resume generation. Tool budgets,
+  * resume limits and cancellation bound each turn. Conversation repairs keep
+  * provider history valid after interruptions or failures. */
 final class Agent(
   config: Config,
   environment: AgentEnvironment,
@@ -61,7 +46,7 @@ final class Agent(
   def recordUsage(purpose: String, u: TokenUsage): Unit =
     synchronized { usageBy.update(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
 
-  /** The one and only native tool: everything else is a Scala function. */
+  /** The native Scala tool; other operations are library calls. */
   private var tools = ScalaToolRunner.tools
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
@@ -89,9 +74,7 @@ final class Agent(
     val usage = context.contextUsage(fixedTokens, history, model)
     (tokens = usage.tokens, window = usage.window)
 
-  /** Tell the model that its REPL was replaced, so it does not conclude that
-    * the documented "definitions persist between calls" guarantee is false when
-    * its earlier `val`s and `def`s have vanished. */
+  /** Queue a notice that definitions from the previous REPL no longer exist. */
   def noteSandboxRestarted(reason: String): Unit =
     conversation.queueNote(AgentMessages.sandboxRestarted(reason))
 
@@ -207,7 +190,7 @@ final class Agent(
       if cancelled() then interrupted()
       else if !overBudget then Continue
       else
-        // Give the model a chance to react to the budget error, then stop insisting.
+        // Allow a response to the budget error before enforcing the retry limit.
         budgetRejections += 1
         if budgetRejections < Agent.MaxBudgetRejections then Continue
         else

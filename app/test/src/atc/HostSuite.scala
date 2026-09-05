@@ -220,6 +220,25 @@ class HostSuite extends munit.FunSuite:
     assert(Files.exists(root.resolve("secrets/key.txt")) && !Files.exists(root.resolve("leaked.txt")))
     intercept[SecurityException](copy("README.md", "secrets/copy.txt")) // the write refuses a classified target
 
+  test("move checks source write permission before creating or replacing the destination"):
+    val source = root.resolve("move-read-only.txt")
+    val target = root.resolve("move-existing.txt")
+    Files.writeString(source, "source content")
+    Files.writeString(target, "original destination")
+    val restricted = Policy(
+      List(rule(".", Some(Access.Write)), rule("move-read-only.txt", Some(Access.Read))),
+      Nil,
+      Nil,
+      _ => Decision.Deny,
+    )
+    val restrictedHost = Host(restricted, root, output, llm, hostUi)
+    val fs = FileSystemImpl(ScopeId.Base, restrictedHost)
+    for destination <- List("move-existing.txt", "move-new-dir/file.txt") do
+      intercept[SecurityException](restrictedHost.move("move-read-only.txt", destination)(using fs))
+    assertEquals(Files.readString(source), "source content")
+    assertEquals(Files.readString(target), "original destination")
+    assert(!Files.exists(root.resolve("move-new-dir")))
+
   test("self-copy preserves content but still checks source and target permissions; exact self-move stays a no-op"):
     Files.writeString(root.resolve("self-copy.txt"), "payload")
     copy("self-copy.txt", "./self-copy.txt")

@@ -5,7 +5,7 @@ import atc.sandbox.ExecutionResult
 
 /** Renders one sandbox evaluation as the text returned to the model. */
 object ToolOutput:
-  /** A hint appended to tool output for a common capture-checking / safe-mode stumble. */
+  /** A hint appended to tool output for a common capture-checking or safe-mode error. */
   private case class Hint(applies: String => Boolean, text: String)
   private val hints = List(
     Hint(
@@ -26,7 +26,7 @@ object ToolOutput:
     ),
     Hint(
       _.contains("Cannot run program"),
-      "that program is not on the PATH (or is misspelt). Note that exec runs no shell: `exec(\"git status\")` is split into words for you, pipes and `<`/`>`/`>>`/`2>&1` work, but `&&`, `;`, globs and `$VAR` do not; run steps one by one and combine in Scala.",
+      "The program could not be started. Check PATH, the executable and interpreter, permissions and working directory. exec runs no shell: `exec(\"git status\")` is split into words for you, pipes and `<`/`>`/`>>`/`2>&1` work, but `&&`, `;`, globs and `$VAR` do not; run steps one by one and combine in Scala.",
     ),
     Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),
@@ -49,8 +49,8 @@ object ToolOutput:
     * middle so both the first diagnostics and the tail survive). */
   def renderForModel(r: ExecutionResult, maxChars: Int): String = renderForModel(r, maxChars, Nil)
 
-  /** The result as the model sees it: the rendered output with a hint for the
-    * usual stumbles, cut in the middle beyond `maxChars`, then a note for every
+  /** The result as the model sees it: the rendered output with a hint for common
+    * errors, cut in the middle beyond `maxChars`, then a note for every
     * decision the user made at a permission prompt during the run. The note
     * comes last and uncut: the model cannot see the pop-ups, so this is how it
     * learns whether a grant was for this call or for the session (and the
