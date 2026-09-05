@@ -51,6 +51,8 @@ case class FileRule(
 /** What the user answers to a permission prompt. */
 enum Decision:
   case AllowOnce, AllowSession, Deny
+  /** Do not grant the request; return the user's instructions to the agent. */
+  case Revise(instructions: String)
 
 /** One pop-up put to the user. Subclasses supply the `label -> value` rows;
   * [[details]] aligns them (and appends the reason) for the UI. */
@@ -308,6 +310,8 @@ final class Policy(
       decisionLog += (decision -> what)
     decision match
       case Decision.Deny => throw SecurityException(s"Access denied by the user: $what")
+      case Decision.Revise(_) =>
+        throw SecurityException(s"Permission request not approved: $what. The user supplied instructions to revise it.")
       case Decision.AllowOnce => ()
       case Decision.AllowSession => remember
 

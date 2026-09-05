@@ -96,7 +96,9 @@ object GlobMatcher:
 
   private def looksLikeIpv6(value: String): Boolean =
     value.contains(':') && value.forall { char =>
-      char == ':' || char == '.' || (char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')
+      char == ':' || char == '.' ||
+      (char >= '0' && char <= '9') ||
+      (char >= 'a' && char <= 'f')
     }
 
   private def ipv6Literal(value: String): Option[String] =

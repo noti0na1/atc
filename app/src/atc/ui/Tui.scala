@@ -117,7 +117,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     val keyMap = reader.getKeyMaps.get(LineReader.MAIN)
     if keyMap != null then
       val seqs =
-        (Option(KeyMap.key(terminal, InfoCmp.Capability.back_tab)).toList :+ "\u001b[Z").distinct.filter(_.nonEmpty)
+        (Option(KeyMap.key(terminal, InfoCmp.Capability.back_tab)).toList
+          :+ "\u001b[Z").distinct.filter(_.nonEmpty)
       keyMap.bind(Reference("atc-cycle-mode"), seqs*)
       // Tab and → accept the ghost text (when the cursor is at the end and
       // there is some); otherwise they do what they did before.
@@ -827,24 +828,28 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     req.details.foreach(d => write(Indent + Indent + styled(Ansi.sanitize(d), Yellow) + "\n"))
     val decision =
       if plain then
-        // No menus without a terminal: a one-letter answer on a line.
-        freeText(styled("Allow? [y]es once / [s]ession / [n]o: ", Yellow))
-          .map(_.toLowerCase(java.util.Locale.ROOT)) match
-          case Some(a) if a.startsWith("y") => Decision.AllowOnce
-          case Some(a) if a.startsWith("s") => Decision.AllowSession
-          case _ => Decision.Deny
+        Tui.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
       else
-        menu("Allow?", List(Tui.AllowOnce, Tui.AllowSession, Tui.DenyLabel)) match
-          case Some(Tui.AllowOnce) => Decision.AllowOnce
-          case Some(Tui.AllowSession) => Decision.AllowSession
-          case _ => Decision.Deny
+        var selected: Option[Decision] = None
+        while selected.isEmpty do
+          selected = menu("Allow?", List(Tui.AllowOnce, Tui.AllowSession, Tui.DenyLabel, Tui.ReviseLabel)) match
+            case Some(Tui.AllowOnce) => Some(Decision.AllowOnce)
+            case Some(Tui.AllowSession) => Some(Decision.AllowSession)
+            case Some(Tui.ReviseLabel) =>
+              info("Describe what to change. The current request will not be approved.")
+              freeText(styled("instructions> ", Cyan)).map(Decision.Revise(_))
+            case _ => Some(Decision.Deny)
+        selected.get
     // The menu already echoes the choice; confirm only what the user did not see.
-    if plain || decision == Decision.Deny then
-      val label = decision match
-        case Decision.AllowOnce => styled(s"${g.arrow} allowed once", Green)
-        case Decision.AllowSession => styled(s"${g.arrow} allowed for this session", Green)
-        case Decision.Deny => styled(s"${g.arrow} denied", Red)
-      write(Indent + label + "\n")
+    decision match
+      case Decision.Revise(instructions) =>
+        write(Indent + styled(s"${g.arrow} instructions sent: ${Ansi.sanitize(instructions)}", Cyan) + "\n")
+      case _ if plain || decision == Decision.Deny =>
+        val label = if decision == Decision.AllowOnce then styled(s"${g.arrow} allowed once", Green)
+        else if decision == Decision.AllowSession then styled(s"${g.arrow} allowed for this session", Green)
+        else styled(s"${g.arrow} denied", Red)
+        write(Indent + label + "\n")
+      case _ => ()
     decision
 
   /** A yes/no question from the app itself (setup, not the agent): a menu
@@ -860,7 +865,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     yes
 
   /** Ask the user a question on behalf of the agent. Options render as a
-    * menu (or checkboxes when `multiple`), always with an "Other" free-text
+    * menu (or checkboxes when `multiple`), always with a custom-answer
     * entry; no options → a free-text line. `None` on Ctrl-C/Ctrl-D. */
   def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = popupBlock:
     // The question and options are model-written: sanitize.
@@ -870,17 +875,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     val answer: Option[String] =
       if cleanOptions.isEmpty || plain then
         cleanOptions.foreach(o => write(Indent + Indent + styled(s"- $o", Cyan) + "\n"))
+        if cleanOptions.nonEmpty then info("Choose a listed answer or type your own answer or instructions.")
         freeText(answerPrompt)
       else if multiple then
-        checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.OtherLabel) match
+        checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.AddAnswerLabel) match
           case None => None
           case Some(ids) =>
-            val chosen = ids.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
+            val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
             if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
             else if chosen.isEmpty then None
             else Some(chosen.mkString("; "))
       else
-        menuIndex("Choose", cleanOptions :+ Tui.OtherLabel) match
+        menuIndex("Choose an answer", cleanOptions :+ Tui.OtherLabel) match
           case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
           case Some(i) => cleanOptions.lift(i)
           case None => None
@@ -893,9 +899,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     answer
 
   private def freeText(prompt: String): Option[String] = keys.withPaused:
-    try Some(reader.readLine(prompt)).map(_.trim).filter(_.nonEmpty)
-    catch
-      case _: UserInterruptException | _: EndOfFileException => None
+    try Tui.readAnswer(reader.readLine(prompt))
     finally tail = "\n"
 
   // ── TODO panel ────────────────────────────────────────────────────
@@ -982,6 +986,25 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     terminal.close()
 
 object Tui:
+  /** Cancel the input field and consume JLine's interrupt before another prompt reads. */
+  private[atc] def readAnswer(read: => String): Option[String] =
+    try Some(read).map(_.trim).filter(_.nonEmpty)
+    catch
+      case _: UserInterruptException =>
+        Thread.interrupted()
+        None
+      case _: EndOfFileException => None
+
+  /** Plain permission prompts accept exact approvals; every other answer is feedback. */
+  private[atc] def permissionReply(answer: Option[String]): Decision =
+    answer.map(_.trim).filter(_.nonEmpty) match
+      case None => Decision.Deny
+      case Some(text) => text.toLowerCase(java.util.Locale.ROOT) match
+          case "y" | "yes" => Decision.AllowOnce
+          case "s" | "session" => Decision.AllowSession
+          case "n" | "no" => Decision.Deny
+          case _ => Decision.Revise(text)
+
   /** Consume CSI/SS3 bytes after ESC, stopping on a final byte, EOF or timeout. */
   private[atc] def discardEscapeSequence(read: () => Int): Unit =
     def next(): Int =
@@ -1153,7 +1176,9 @@ object Tui:
   val AllowOnce = "Yes, this time"
   val AllowSession = "Yes, for the rest of this session"
   val DenyLabel = "No"
-  val OtherLabel = "Other (type an answer)"
+  val ReviseLabel = "Tell the agent what to change"
+  val OtherLabel = "Write a different answer"
+  val AddAnswerLabel = "Add an answer or instructions"
   val YesLabel = "Yes"
   val NoLabel = "No"
 

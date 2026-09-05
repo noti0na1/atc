@@ -89,6 +89,7 @@ approve the request in a pop-up:
     › Yes, this time
       Yes, for the rest of this session
       No
+      Tell the agent what to change
 ```
 
 ## Setup
@@ -411,10 +412,26 @@ requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-You receive a pop-up (*Yes, this time* / *Yes, for the rest of this session* / *No*). If
-approved, the block runs with the extra permission. The result tells the agent what you
-decided, so "this time" requires another request next time, while "for the session" does
-not. `locked` rules cannot be widened at all, and a
+Permission prompts offer these choices:
+
+- **Yes, this time:** grant the request for the current block.
+- **Yes, for the rest of this session:** retain the grant for later calls.
+- **No:** reject the submitted request.
+- **Tell the agent what to change:** send instructions so the agent can revise its request.
+
+For example, if a request includes five commands, choose **Tell the agent what to change**
+and enter “Request only the first four commands; skip the deployment command.” The original
+request receives no grant. The agent receives your instructions, skips remaining tool calls
+from that batch, and can request the narrower permissions. Typed feedback is preserved even
+when other tool output is truncated. Rejecting a batch does not create a permanent deny
+rule for each item. Cancelling the instruction entry returns to the permission choices.
+
+Without a menu-capable terminal, enter `y`, `s` or `n`, or type instructions directly.
+Only exact approval answers grant permission: “yes, except the deployment command” is
+feedback that the agent must address, not approval for the entire request.
+
+The result tells the agent what you decided, so “this time” requires another request next
+time, while “for the session” does not. `locked` rules cannot be widened at all, and a
 `denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
 leave the block (capture checking), and the host closes the permission scope when the block
 exits. `requestFiles` works in every mode: the file system it lends the block is exactly as
@@ -655,6 +672,11 @@ and the configured permissions.
   Reserve `--approve-all` for trusted sandboxes and CI environments.
 
 ## The terminal
+
+Questions with listed choices also offer **Write a different answer**. Multiple-choice
+questions offer **Add an answer or instructions**, which combines your text with the
+selected answers. You can use these options to correct an assumption or describe a choice
+the agent did not list. In a plain terminal, type your answer directly.
 
 `/help` lists the slash commands: `/model`, `/classifiedmodel`, `/models`, `/mode`, `/perms`,
 `/config`, `/todos`, `/cost` (tokens, and how full the context is), `/interface` (the API the

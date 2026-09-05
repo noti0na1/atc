@@ -124,7 +124,8 @@ class HostSuite extends munit.FunSuite:
     assert(!out.contains(s"line ${Host.CatMaxLines + 1}\n"), out.takeRight(200))
     assert(
       out.endsWith(
-        s"""... [600 more lines (1000 in all): cat("big.txt", ${Host.CatMaxLines + 1}, ${2 * Host.CatMaxLines}) shows the next]\n"""
+        s"""... [600 more lines (1000 in all): cat("big.txt", ${Host.CatMaxLines + 1}, ${2 *
+            Host.CatMaxLines}) shows the next]\n"""
       ),
       out.takeRight(200),
     )

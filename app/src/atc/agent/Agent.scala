@@ -172,8 +172,10 @@ final class Agent(
     /** Run the requested tools in order, honouring cancellation and the per-turn budget. */
     private def runTools(calls: List[ToolCall]): Outcome =
       var overBudget = false
+      var needsReplan = false
       val results = calls.map { call =>
         if cancelled() then ToolResult(call.id, AgentMessages.cancelledBeforeExecution, isError = true)
+        else if needsReplan then ToolResult(call.id, AgentMessages.skippedAfterFeedback, isError = true)
         else if used >= budget && !extendBudget() then
           overBudget = true
           ToolResult(
@@ -184,7 +186,9 @@ final class Agent(
         else
           used += 1
           toolCalls += 1
-          runner.run(call)
+          val result = runner.run(call)
+          needsReplan = result.needsReplan
+          result
       }
       conversation.append(Msg.ToolResults(results))
       if cancelled() then interrupted()

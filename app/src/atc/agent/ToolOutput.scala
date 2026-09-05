@@ -75,6 +75,10 @@ object ToolOutput:
       case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
       case (Decision.AllowSession, what) =>
         s"the user allowed $what for the rest of this session (no request needed from now on)"
-      case (Decision.Deny, what) => s"the user denied $what (do not ask again for the same thing)"
+      case (Decision.Deny, what) =>
+        s"the user denied $what (this request was not approved; do not repeat it unchanged or infer a permanent ban on every item)"
+      case (Decision.Revise(instructions), what) =>
+        s"the user requested changes to $what (no permission granted). User instructions: ${ujson.write(instructions)}. " +
+          "Revise the plan to follow these instructions and request only the permissions still needed; this is not a blanket denial"
     }
     s"[permissions: ${parts.mkString("; ")}]"

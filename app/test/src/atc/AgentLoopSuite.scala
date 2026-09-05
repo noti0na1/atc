@@ -664,6 +664,43 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.systemPrompt.text, promptBefore)
     assert(!agent.systemPrompt.text.contains(pattern))
 
+  test("permission feedback stops the old batch and reaches the model before a narrower request"):
+    val commands = List("one", "two", "three", "four", "five")
+    def request(patterns: List[String], target: String): String =
+      s"""requestExec(Set(${patterns.map(ujson.write(_)).mkString(", ")}), "run tasks") {
+         |  write(${ujson.write(target)}, "executed")
+         |}""".stripMargin
+    val original = s"try ${request(commands, "original.txt")} catch case _: SecurityException => ()"
+    val stale = """write("stale.txt", "executed")"""
+    val revised = request(commands.init, "revised.txt")
+    val model = ScriptedModel(
+      "m",
+      Seq(ScriptedModel.tools(original, stale), ScriptedModel.tool(revised), ScriptedModel.Reply("done"))
+    )
+    val (env, session, _, agent) = setup(model, cfg = Config(maxToolOutputChars = 20), commands = Nil)
+    val instructions = "Request only one, two, three and four; skip five."
+    env.decisions = List(Decision.Revise(instructions), Decision.AllowOnce)
+
+    agent.turn(session, "run the tasks", never)
+
+    assert(!java.nio.file.Files.exists(env.root.resolve("original.txt")))
+    assert(!java.nio.file.Files.exists(env.root.resolve("stale.txt")))
+    assertEquals(env.contents("revised.txt"), "executed")
+    val first = toolResults(agent).head.results
+    assert(!first.head.isError, first.head.output) // the snippet caught the permission exception
+    assert(first.head.needsReplan)
+    assert(first.head.output.contains(instructions), first.head.output)
+    assertEquals(first(1).output, AgentMessages.skippedAfterFeedback)
+    assertEquals(model.seenHistories(1).last, Msg.ToolResults(first))
+    assertEquals(env.requests.size, 2)
+    assertEquals(
+      env.requests.collect { case r: atc.perms.ExecRequest => r.commands.toSet }.toList,
+      List(commands.toSet, commands.init.toSet)
+    )
+    assertEquals(env.policy.openScopeCount, 0)
+    assertEquals(env.policy.base.commands, Nil)
+    assertEquals(agent.toolCalls, 2)
+
   test("usage is accumulated across the turn and reset by clear()"):
     val (_, s, _, agent) = setup(ScriptedModel(
       "m",

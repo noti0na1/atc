@@ -1,6 +1,7 @@
 package atc
 
 import atc.ui.{Ansi, Glyphs, Tui}
+import atc.perms.Decision
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
 import java.nio.charset.StandardCharsets
@@ -8,6 +9,28 @@ import java.nio.file.Files
 
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
+
+  test("cancelling a text answer clears JLine's interrupt before returning to the menu"):
+    try
+      val answer = Tui.readAnswer {
+        Thread.currentThread().interrupt()
+        throw org.jline.reader.UserInterruptException("unfinished")
+      }
+      assertEquals(answer, None)
+      assert(!Thread.currentThread().isInterrupted)
+      assertEquals(Tui.readAnswer(" revised instructions "), Some("revised instructions"))
+      assertEquals(Tui.readAnswer(throw org.jline.reader.EndOfFileException()), None)
+    finally Thread.interrupted()
+
+  test("plain permission prompts require an exact approval and preserve qualified answers as instructions"):
+    for answer <- List("y", "YES", " yes ") do
+      assertEquals(Tui.permissionReply(Some(answer)), Decision.AllowOnce)
+    for answer <- List("s", "SESSION", " session ") do
+      assertEquals(Tui.permissionReply(Some(answer)), Decision.AllowSession)
+    for answer <- List(None, Some(""), Some("  "), Some("n"), Some("NO")) do
+      assertEquals(Tui.permissionReply(answer), Decision.Deny)
+    for answer <- List("yes, except the fifth command", "skip deployment", "session only for tests", "只运行测试") do
+      assertEquals(Tui.permissionReply(Some(answer)), Decision.Revise(answer))
 
   test("escape sequences stop at their final byte, timeout or EOF"):
     val expired = org.jline.utils.NonBlockingReader.READ_EXPIRED

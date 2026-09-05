@@ -292,9 +292,8 @@ object CodeValidator:
               while before >= 0 && (code.charAt(before) == ' ' || code.charAt(before) == '\t') do before -= 1
               var after = k + 1
               while after < len && (code.charAt(after) == ' ' || code.charAt(after) == '\t') do after += 1
-              val continues =
-                (before >= 0 && (code.charAt(before) == '.' || code.charAt(before) == ',')) ||
-                  (after < len && code.charAt(after) == '.')
+              val continues = (before >= 0 && (code.charAt(before) == '.' || code.charAt(before) == ',')) ||
+                (after < len && code.charAt(after) == '.')
               if continues then k += 1 else { stop = true; k += 1 }
             case _ => k += 1
         i = k

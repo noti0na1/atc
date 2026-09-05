@@ -77,6 +77,23 @@ class AgentCoreLoopSuite extends munit.FunSuite:
     assertEquals(ui.budgetAsks, 1)
     assertEquals(agent.toolCalls, 1)
 
+  test("user feedback skips the remaining batch and lets the next completion revise the plan"):
+    val ids = List("feedback", "stale-one", "stale-two")
+    val (model, _, agent) = setup(Seq(toolStep(ids*), toolStep("revised", "continued"), ScriptedModel.Reply("done")))
+    val runner = RecordingRunner(call =>
+      ToolResult(call.id, s"result:${call.id}", isError = false, needsReplan = call.id == "feedback")
+    )
+
+    agent.runTurn(runner, "go", () => false)
+
+    assertEquals(runner.calls.map(_.id).toList, List("feedback", "revised", "continued"))
+    val first = toolResults(agent).head.results
+    assertEquals(first.map(_.callId), ids)
+    assertEquals(first.tail.map(_.output), List.fill(2)(AgentMessages.skippedAfterFeedback))
+    assert(first.tail.forall(_.isError))
+    assertEquals(model.seenHistories(1).last, Msg.ToolResults(first))
+    assertEquals(agent.toolCalls, 3)
+
   test("mid-batch cancellation preserves the complete call/result alignment"):
     val ids = List("ran", "cancelled-one", "cancelled-two")
     val (_, ui, agent) = setup(Seq(toolStep(ids*)))

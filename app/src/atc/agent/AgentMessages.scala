@@ -14,6 +14,8 @@ object AgentMessages:
   val toolBudgetLoopWarning: String =
     "model kept requesting tools after exhausting the tool budget; stopping this turn"
   val cancelledBeforeExecution: String = "Cancelled by the user before execution."
+  val skippedAfterFeedback: String =
+    "Not executed: the user supplied instructions at a permission prompt. Revise the plan before requesting more tools."
   val missingCodeArgument: String = "Missing 'code' argument."
 
   def thinkingStatus(modelAlias: String): String = s"$modelAlias is thinking"
@@ -39,8 +41,7 @@ object AgentMessages:
 
   /** Prepend queued notes to the user's input without creating adjacent user
     * messages in provider history. */
-  def userMessage(notes: List[String], input: String): String =
-    (notes :+ input).mkString("\n\n")
+  def userMessage(notes: List[String], input: String): String = (notes :+ input).mkString("\n\n")
 
   def turnFailed(error: Throwable): String =
     val detail = Option(error.getMessage).getOrElse(error.toString)

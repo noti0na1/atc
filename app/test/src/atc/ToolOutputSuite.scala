@@ -35,3 +35,16 @@ class ToolOutputSuite extends munit.FunSuite:
     assert(rendered.contains("the user allowed read on '/tmp/project' for the rest of this session"), rendered)
     assert(rendered.contains("the user denied write on '/tmp/project'"), rendered)
     assert(rendered.endsWith(")]"), rendered)
+
+  test("permission feedback reaches the model in full even when execution output is truncated"):
+    val instructions = "Skip the fifth command.\nRequest only the other four, with a \"test\" scope."
+    val rendered = ToolOutput.renderForModel(
+      ExecutionResult(false, "x" * 1000),
+      20,
+      List(Decision.Revise(instructions) -> "commands one, two, three, four, five"),
+    )
+    assert(rendered.contains("characters omitted"), rendered)
+    assert(rendered.contains("no permission granted"), rendered)
+    assert(rendered.contains(ujson.write(instructions)), rendered)
+    assert(rendered.contains("request only the permissions still needed"), rendered)
+    assert(!rendered.contains("the user denied"), rendered)

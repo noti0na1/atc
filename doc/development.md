@@ -415,6 +415,12 @@ asks only for permissions not already held. `AllowOnce` applies to the child sco
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
 
+`Decision.Revise(instructions)` records user feedback without granting access or opening a
+scope. The pending request throws a permission error. `ToolOutput` appends the complete,
+JSON-quoted instructions after the bounded execution output. A revision is distinct from
+`Deny`: the model should change its plan and may submit a narrower permission request.
+Neither decision adds a permanent deny rule; configured deny rules remain unchanged.
+
 File patterns match a path or an ancestor. Component globs match at any depth; relative
 patterns with separators use the layer's base; absolute patterns and `~` use an absolute
 path. `PathGlob` handles slash-based globs on all platforms. Canonicalization resolves
@@ -550,6 +556,14 @@ boundary. It never cuts between a tool request and its results or drops only par
 latest exchange. `Msg.Continuation` is excluded from those boundaries so an automatic
 resume cannot remove the user request it is continuing.
 
+When a permission prompt returns feedback, `ScalaToolRunner` sets `ToolResult.needsReplan`
+from the recorded decision, even if the snippet caught the permission exception. `Agent`
+then skips the remaining tool calls in that completion and supplies an error result for
+each skipped call, preserving the provider's request/result pairing. The next completion
+can issue revised calls normally. This scheduling flag is internal and is not serialized
+by provider adapters. It does not roll back earlier effects or stop code that continues
+inside the same snippet after catching the permission exception.
+
 `InputPredictor` sends recent conversation text to the agent model on one daemon worker.
 A generation counter prevents stale publication; at most one job runs and one waits.
 Predictions are reduced to visible single-line text and reported separately in usage.
@@ -570,6 +584,18 @@ backslash followed by Enter insert a newline. An empty line submits a code block
 cancels block input. During a turn, a separate reader retains typed input for the next
 prompt and discards escape sequences, stopping on timeout or EOF. Menu reads pause that
 reader.
+
+Permission menus include **Tell the agent what to change**, followed by free-text input.
+Empty or cancelled feedback returns to the menu. `Tui.readAnswer` consumes JLine's
+preserved input-cancellation interrupt so the next menu can read normally.
+Plain prompts accept exact `y`/`yes` or
+`s`/`session` approvals, exact `n`/`no` denials, and treat other non-empty input as
+`Decision.Revise`. In particular, a qualified answer starting with “yes” or “skip” must
+not become an approval by prefix matching. EOF and empty plain replies deny the request.
+
+Question menus always include a custom-answer option. For multiple selections, chosen
+answers retain their display order and custom text is appended. User input is returned to
+the host's `ask` call; only its terminal display is sanitized.
 
 `MarkdownStream` incrementally renders supported Markdown and buffers tables until column
 widths are known. `Highlight` uses the compiler's Scala scanner. Layout calculations use

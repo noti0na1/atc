@@ -166,7 +166,12 @@ private[atc] object JsonCodec:
             case 'u' =>
               if i + 4 > s.length then fail("bad \\u escape")
               val hex = s.slice(i, i + 4)
-              if !hex.forall(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) then
+              if !hex.forall(c =>
+                  (c >= '0' && c <= '9') ||
+                    (c >= 'a' && c <= 'f') ||
+                    (c >= 'A' && c <= 'F')
+                )
+              then
                 fail(s"bad \\u escape '$hex'")
               sb.append(Integer.parseInt(hex, 16).toChar)
               i += 4

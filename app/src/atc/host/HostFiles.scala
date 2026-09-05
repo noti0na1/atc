@@ -195,7 +195,9 @@ private[host] trait HostFiles:
         if lineCount <= Host.CatMaxLines then body
         else
           val next = math.min(lineCount, 2 * Host.CatMaxLines)
-          body + s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
+          body +
+            s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines +
+                1}, $next) shows the next]\n"
     output.print(text, text)
 
   /** Print an inclusive, one-based range with line numbers. Streamed: only the

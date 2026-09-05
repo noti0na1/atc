@@ -7,8 +7,7 @@ import scala.util.matching.Regex
 private[atc] object PathGlob:
   def pattern(glob: String): Pattern = Pattern.compile(source(glob), Platform.pathRegexFlags)
 
-  def regex(glob: String): Regex =
-    ((if Platform.isWindows then "(?i)" else "") + source(glob)).r
+  def regex(glob: String): Regex = ((if Platform.isWindows then "(?i)" else "") + source(glob)).r
 
   private def source(glob: String): String =
     val result = StringBuilder("^")

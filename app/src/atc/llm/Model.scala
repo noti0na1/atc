@@ -7,7 +7,13 @@ case class ToolSpec(name: String, description: String, parametersJson: String)
 
 case class ToolCall(id: String, name: String, arguments: String)
 
-case class ToolResult(callId: String, output: String, isError: Boolean)
+case class ToolResult(
+  callId: String,
+  output: String,
+  isError: Boolean,
+  /** Local scheduling flag: return to the model before executing more calls from this batch. */
+  needsReplan: Boolean = false,
+)
 
 /** Provider-native replay data for an assistant turn (e.g. Anthropic content
   * blocks including server web-search results, OpenAI Responses output

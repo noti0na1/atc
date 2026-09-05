@@ -1,7 +1,7 @@
 package atc.agent
 
 import atc.llm.{Json, ToolCall, ToolResult, ToolSpec}
-import atc.perms.Policy
+import atc.perms.{Decision, Policy}
 import atc.sandbox.ReplSession
 
 /** Executes the tools exposed to the model. The agent loop owns when a tool may
@@ -39,8 +39,13 @@ private[atc] final class ScalaToolRunner(
       // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
       val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
       ui.toolEnd(result, millis)
-      val rendered = ToolOutput.renderForModel(result, maxOutputChars, policy.decisionsSince(decisionsBefore))
-      ToolResult(call.id, rendered, isError = !result.success)
+      val decisions = policy.decisionsSince(decisionsBefore)
+      val rendered = ToolOutput.renderForModel(result, maxOutputChars, decisions)
+      val needsReplan = decisions.exists {
+        case (Decision.Revise(_), _) => true
+        case _ => false
+      }
+      ToolResult(call.id, rendered, isError = !result.success, needsReplan = needsReplan)
 
 private[atc] object ScalaToolRunner:
   /** The native Scala tool; other operations are library calls. */

@@ -263,7 +263,9 @@ class ModelSuite extends munit.FunSuite:
       10000,
       List(atc.perms.Decision.Deny -> "write on '/x'")
     )
-    assert(out.contains("the user denied write on '/x' (do not ask again for the same thing)"), out)
+    assert(out.contains("the user denied write on '/x'"), out)
+    assert(out.contains("do not repeat it unchanged"), out)
+    assert(out.contains("or infer a permanent ban on every item"), out)
 
   // ── EchoModel ───────────────────────────────────────────────────
 

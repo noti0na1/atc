@@ -112,6 +112,37 @@ class PolicySuite extends munit.FunSuite:
     p.closeScope(scope)
     intercept[SecurityException](p.effective(scope, path))
 
+  test("permission feedback grants nothing and allows a revised command request"):
+    val feedback = Decision.Revise("Request only one, two, three and four; skip five.")
+    val prompter = ScriptedPrompter(List(feedback, Decision.AllowOnce))
+    val policy = Policy(Nil, Nil, Nil, prompter)
+    val commands = List("one", "two", "three", "four", "five")
+    intercept[SecurityException](policy.requestExec(ScopeId.Base, commands, "run the task"))
+    assertEquals(policy.openScopeCount, 0)
+    assertEquals(policy.base.commands, Nil)
+    assert(commands.forall(command => !policy.commandAllowed(ScopeId.Base, command)))
+    assertEquals(policy.decisionsSince(0).map(_._1), List(feedback))
+
+    val scope = policy.requestExec(ScopeId.Base, commands.init, "revised task")
+    assert(commands.init.forall(policy.commandAllowed(scope, _)))
+    assert(!policy.commandAllowed(scope, "five"))
+    policy.closeScope(scope)
+    assertEquals(prompter.asked.size, 2)
+    assertEquals(policy.base.commands, Nil)
+
+  test("feedback on file and network requests leaves grants and scopes unchanged"):
+    val feedback = Decision.Revise("Use a different resource.")
+    val policy = Policy(Nil, Nil, Nil, ScriptedPrompter(List(feedback, feedback)))
+    val path = root.resolve("notes.txt")
+    intercept[SecurityException](policy.requestFile(ScopeId.Base, path, Access.Write, "edit"))
+    intercept[SecurityException](policy.requestNet(ScopeId.Base, List("example.com"), "fetch"))
+    assertEquals(policy.effective(ScopeId.Base, path).access, Access.None)
+    assert(!policy.hostAllowed(ScopeId.Base, "example.com"))
+    assertEquals(policy.base.fileGrants, Nil)
+    assertEquals(policy.base.hosts, Nil)
+    assertEquals(policy.openScopeCount, 0)
+    assertEquals(policy.decisionsSince(0).map(_._1), List(feedback, feedback))
+
   test("locked rules cannot be widened, classified stays classified"):
     val prompter = ScriptedPrompter(List(Decision.AllowSession, Decision.AllowSession))
     val p = Policy(

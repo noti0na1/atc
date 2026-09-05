@@ -49,7 +49,8 @@ private[atc] object CommandLine:
 
   private def renderArg(arg: String): String =
     val plain = arg.nonEmpty && arg.forall { char =>
-      (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+      (char >= 'a' && char <= 'z') ||
+      (char >= 'A' && char <= 'Z') ||
       (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char) ||
       (Platform.isWindows && char == '\\')
     }

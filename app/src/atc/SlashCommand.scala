@@ -43,8 +43,8 @@ object SlashCommand:
   /** The names, in `/help` order, for Tab completion (aliases are accepted but not offered). */
   def names: List[String] = values.toList.map(_.name)
 
-  lazy val helpText: String =
-    ("Commands:" :: values.toList.map(c => s"  ${c.usage.padTo(24, ' ')}${c.help}")).mkString("\n")
+  lazy val helpText
+    : String = ("Commands:" :: values.toList.map(c => s"  ${c.usage.padTo(24, ' ')}${c.help}")).mkString("\n")
 
   /** The command a typed line names (case-insensitively), with its argument:
     * the rest of the line, trimmed. `Left(typed)` when nothing answers to it. */
