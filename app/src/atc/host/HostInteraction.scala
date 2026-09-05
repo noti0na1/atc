@@ -11,6 +11,19 @@ private[host] trait HostInteraction:
   self: Host =>
 
   @volatile private var todoList: List[Todo] = Nil
+  @volatile private var notes = TaskNotes()
+
+  def setTaskNotes(value: TaskNotes)(using UserIO): Unit =
+    val text = (value.goal :: (value.constraints ++ value.completed ++ value.remaining)).mkString("\n")
+    if text.length > 16000 then
+      throw IllegalArgumentException("Task notes exceed 16000 characters; summarize completed work.")
+    notes = value
+
+  def taskNotes(using UserIO): TaskNotes = notes
+  private[atc] def currentTaskNotes: TaskNotes = notes
+  private[atc] def restoreTaskState(value: TaskNotes, todos: List[Todo]): Unit =
+    notes = value
+    todoList = todos
 
   /** Report a classified computation failure only through the user channel;
     * exposing the failure bit to the agent could reveal classified data. */
@@ -78,7 +91,9 @@ private[host] trait HostInteraction:
 
   private[atc] def currentTodos: List[Todo] = todoList
 
-  private[atc] def clearTodos(): Unit = todoList = Nil
+  private[atc] def clearTodos(): Unit =
+    todoList = Nil
+    notes = TaskNotes()
 
   def classify[T](value: T): Classified[T] = ClassifiedImpl.wrap(value)
 

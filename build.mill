@@ -12,6 +12,7 @@ object Versions:
   val upickle = "4.4.3"
   val openai = "4.58.0"
   val anthropic = "2.61.0"
+  val okhttp = "4.12.0" // Matches the provider SDKs; call cancellation needs its public API.
   val munit = "1.3.6"
 
 val scalaNightlies = "https://repo.scala-lang.org/artifactory/maven-nightlies/"
@@ -55,6 +56,7 @@ object app extends AtcScalaModule:
     mvn"com.lihaoyi::upickle:${Versions.upickle}",
     mvn"com.openai:openai-java:${Versions.openai}",
     mvn"com.anthropic:anthropic-java:${Versions.anthropic}",
+    mvn"com.squareup.okhttp3:okhttp:${Versions.okhttp}",
   )
   /** The REPL compiler needs the library and the Scala stdlib as jars/dirs on
     * its `-classpath` (the same artifacts the app runs with). */

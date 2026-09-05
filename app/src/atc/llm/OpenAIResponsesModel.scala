@@ -10,7 +10,6 @@ import com.openai.models.responses.*
 
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
-import scala.util.Using
 
 /** OpenAI Responses API (official Java SDK), streaming, with the built-in
   * `web_search` tool when enabled. */
@@ -121,8 +120,10 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     cancelled: () => Boolean
   ): Completion =
     val acc = ResponseAccumulator.create()
-    Using.resource(client.responses().createStreaming(params(system, history, tools))) { stream =>
-      Streaming.drain(stream.stream(), cancelled) { ev =>
+    val stream = streamingClient.async().responses().createStreaming(params(system, history, tools))
+    ModelRequest.awaitStream(() => stream.close()) {
+      stream.subscribe { ev =>
+        if cancelled() then throw CancelledException()
         acc.accumulate(ev)
         ev.outputItemAdded().toScala.foreach { added =>
           val item = added.item()
@@ -139,7 +140,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
             s"OpenAI response failed: ${f.response().error().toScala.map(_.message()).getOrElse("unknown")}"
           )
         )
-      }
+      }.onCompleteFuture()
     }
     val r = acc.response()
     Debug.log {

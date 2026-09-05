@@ -1,7 +1,7 @@
 package atc
 
 import atc.SlashCommand as Cmd
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, SessionStore, TurnOutcome}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -73,7 +73,8 @@ final class App(args: Cli.Args):
 
   // ── host (the sandbox API implementation) and its ports ───────────
 
-  val output = new HostOutput:
+  val output: HostOutput = new HostOutput:
+    override def fileChanged(change: atc.host.FileChange): Unit = tui.fileChanged(change)
     def print(agentText: String, userText: String): Unit =
       session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
@@ -84,7 +85,7 @@ final class App(args: Cli.Args):
       tui.processEvent(s"$$ $commandLine  [p$id started]")
     override def processInput(id: Int, text: String): Unit = tui.processEvent(s"p$id > ${text.stripSuffix("\n")}")
     override def processExited(id: Int, exitCode: Int): Unit = tui.processEvent(s"[p$id exited $exitCode]")
-  val llm = new HostLlm:
+  val llm: HostLlm = new HostLlm:
     def chat(message: String): String =
       val reply = withClockPaused(agent.model.simple(None, message))
       agent.recordUsage(Agent.Chat, reply.usage)
@@ -100,17 +101,17 @@ final class App(args: Cli.Args):
         ))
       agent.recordUsage(Agent.ClassifiedChat, reply.usage)
       reply.text
-  val hostUi = new HostUi:
+  val hostUi: HostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       withClockPaused(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
-  val host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
+  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
 
   // ── agent ─────────────────────────────────────────────────────────
 
-  val agent = Agent(
+  val agent: Agent = Agent(
     config,
     AgentEnvironment.current(cwd),
     policy,
@@ -118,24 +119,33 @@ final class App(args: Cli.Args):
     initialModel,
     initialClassified,
     config.instructions,
+    () => (host.currentTaskNotes, host.currentTodos),
   )
+  tui.onSubmit = agent.submit
+  tui.queuedInputs = () => agent.queuedInputCount
+
+  private def updateStatusContext(): Unit =
+    tui.contextLabel = s"${agent.model.ref} | ${policy.mode.label} | ${App.pretty(cwd)}"
+  updateStatusContext()
 
   // ── running ───────────────────────────────────────────────────────
 
-  private def newReplSession(): ReplSession =
+  private def ensureSession(): ReplSession = session.getOrElse {
     tui.status(s"starting sandbox (${policy.mode.label} mode)")
-    try ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
-    finally tui.endTurn()
+    val created = ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
+    if tui.isInterrupted then
+      created.close()
+      throw atc.llm.CancelledException()
+    session = Some(created)
+    created
+  }
 
-  /** Close the sandbox session, if any, and start a fresh one. False (after
-    * reporting `failure`) when the new one could not start; the app then runs
-    * without a session until the next attempt. */
+  /** Discard the REPL and its processes. The next tool call initializes a new session. */
   private def replaceSession(failure: String): Boolean =
-    host.killProcesses() // spawned processes belong to the session
-    session.foreach(_.close())
-    session = None
     try
-      session = Some(newReplSession())
+      host.killProcesses()
+      session.foreach(_.close())
+      session = None
       true
     catch
       case e: Exception =>
@@ -154,21 +164,15 @@ final class App(args: Cli.Args):
       predictor.invalidate()
     ok
 
-  /** `/new`: start over as if atc had just been launched, keeping only what
-    * the user configured (mode, models). The sandbox is closed, the
-    * conversation, TODO list and every session-scoped permission grant are
-    * forgotten, and a fresh REPL is started. Nothing refers to the old session
-    * afterwards, so its compiler and class loader can be collected; the GC is
-    * asked for explicitly since that is most of the process's memory. */
+  /** Clear conversation, task state, output history and grants while retaining configured models and mode. */
   private def newSession(): Boolean =
-    host.killProcesses()
-    session.foreach(_.close())
-    session = None
-    agent.clear()
-    host.clearTodos()
-    policy.resetSession()
-    System.gc()
-    replaceSession("could not start the sandbox")
+    val replaced = replaceSession("could not clear the sandbox")
+    if replaced then
+      agent.clear()
+      host.clearTodos()
+      tui.clearOutputHistory()
+      policy.resetSession()
+    replaced
 
   def run(): Int =
     try
@@ -182,18 +186,20 @@ final class App(args: Cli.Args):
       args.prompt match
         case Some(p) =>
           tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
-          session = Some(newReplSession())
           // Report a failed turn through the process exit code so scripts can detect it.
-          if runTurn(p) then 0 else 1
+          runTurn(p).exitCode
         case None =>
           banner()
-          session = Some(newReplSession())
           interactive()
           0
     finally
       predictor.invalidate()
       host.killProcesses()
       session.foreach(_.close())
+      modelCache.values.foreach { model =>
+        try model.close()
+        catch case scala.util.control.NonFatal(error) => Debug.trace(error)
+      }
       tui.close()
 
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
@@ -236,26 +242,21 @@ final class App(args: Cli.Args):
     predictor.invalidate()
     if predicting then predictor.start()
 
-  /** Run one turn. Returns `false` if no sandbox is available or the turn throws,
-    * allowing a `-p` invocation to exit with a non-zero status. */
-  private def runTurn(input: String): Boolean =
+  /** Run one turn and retain its outcome for the terminal summary and scripted exit code. */
+  private def runTurn(input: String): TurnOutcome =
     predictor.invalidate()
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
+    var outcome = TurnOutcome.Failed
     try
-      session match
-        case Some(s) =>
-          agent.turn(s, input, () => tui.isInterrupted)
-          true
-        case None =>
-          tui.error(App.SandboxUnavailable)
-          false
+      outcome = agent.turn(ensureSession(), input, () => tui.isInterrupted)
+      outcome
     catch
       case e: Exception =>
-        tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
+        tui.error(Debug.describe(e))
         Debug.trace(e)
-        false
+        TurnOutcome.Failed
     finally
       val tokens = (agent.usage.input + agent.usage.output) - (usageBefore.input + usageBefore.output)
       val context = agent.contextUsage
@@ -265,13 +266,16 @@ final class App(args: Cli.Args):
         tokens,
         context.tokens,
         context.window,
+        outcome,
       )))
       if predicting then predictor.start()
 
   private def interactive(): Unit =
     var running = true
     while running do
-      tui.readLine(prompt) match
+      val next = if agent.queuedInputCount > 0 then Some("") else tui.readLine(prompt)
+      next match
+        case Some("") if agent.queuedInputCount > 0 => runTurn("")
         case None =>
           Debug.log("input closed, exiting")
           running = false
@@ -293,6 +297,7 @@ final class App(args: Cli.Args):
     case "/model" :: _ :: Nil => catalog.labels
     case "/classifiedmodel" :: _ :: Nil => catalog.labels :+ "off"
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
+    case "/perms" :: _ :: Nil => List("revoke")
     case _ => Nil
   }
 
@@ -304,7 +309,11 @@ final class App(args: Cli.Args):
         true
       case Right((Cmd.Quit, _)) => false
       case Right((cmd, arg)) =>
-        dispatch(cmd, arg)
+        try dispatch(cmd, arg)
+        catch
+          case scala.util.control.NonFatal(error) =>
+            tui.error(Option(error.getMessage).getOrElse(error.getClass.getSimpleName))
+            Debug.trace(error)
         true
 
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
@@ -313,15 +322,16 @@ final class App(args: Cli.Args):
     case Cmd.ClassifiedModel => switchClassifiedModel(arg)
     case Cmd.Models => showModels()
     case Cmd.Mode => switchMode(arg)
-    case Cmd.Perms => tui.println(policy.summary)
+    case Cmd.Perms => permissions(arg)
     case Cmd.Config => showConfig()
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
     case Cmd.Run => runCode(arg)
     case Cmd.New =>
       predictor.invalidate()
       if newSession() then
-        tui.success("new session: conversation, TODO list and session grants forgotten; sandbox restarted")
-    case Cmd.Reset => if restartSession("you asked for /reset") then tui.success("sandbox restarted")
+        tui.success("new session: conversation, task notes and session grants cleared")
+    case Cmd.Reset =>
+      if restartSession("you asked for /reset") then tui.success("REPL cleared; starts with the next tool call")
     case Cmd.Clear =>
       agent.clear()
       predictor.invalidate()
@@ -331,6 +341,33 @@ final class App(args: Cli.Args):
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
     case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
     case Cmd.Cost => showCost()
+    case Cmd.Output => tui.showOutput(arg)
+    case Cmd.Task =>
+      val notes = host.currentTaskNotes
+      tui.println(s"Goal: ${notes.goal}")
+      List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
+        .foreach((label, values) =>
+          tui.println(s"$label:")
+          values.foreach(value => tui.println(s"  - $value"))
+        )
+    case Cmd.Save =>
+      val path = if arg.isEmpty then cwd.resolve(s".atc/sessions/session-${System.currentTimeMillis()}.json").nn
+      else sessionPath(arg)
+      SessionStore.write(path, agent.snapshot)
+      tui.success(s"Saved conversation to ${App.pretty(path)}")
+    case Cmd.Resume =>
+      if arg.isEmpty then tui.error("Usage: /resume <file>")
+      else
+        val saved = SessionStore.read(sessionPath(arg))
+        predictor.invalidate()
+        if newSession() then
+          host.restoreTaskState(saved.task, saved.todos)
+          agent.restore(saved)
+          if saved.model != agent.model.ref then
+            tui.info(s"Using ${agent.model.ref}; the saved session used ${saved.model}.")
+          tui.success(
+            s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
+          )
     case Cmd.Quit => () // `command` ends the loop instead
 
   /** `/run`: the user runs Scala in the sandbox themselves, against the same
@@ -347,23 +384,21 @@ final class App(args: Cli.Args):
     predictor.invalidate()
     val code = if arg.nonEmpty then arg else readCode()
     if code.trim.isEmpty then return
-    session match
-      case None => tui.error(App.SandboxUnavailable)
-      case Some(s) =>
-        tui.beginTurn()
-        try
-          tui.toolStart(code, "/run")
-          val start = System.nanoTime()
-          val decisionsBefore = policy.decisionCount
-          val result = s.run(code)
-          val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
-          tui.toolEnd(result, millis)
-          agent.noteUserRan(code, result, policy.decisionsSince(decisionsBefore))
-        catch
-          case e: Exception =>
-            tui.error(s"${e.getClass.getSimpleName}: ${e.getMessage}")
-            Debug.trace(e)
-        finally tui.endTurn()
+    tui.beginTurn()
+    try
+      tui.toolStart(code, "/run")
+      val start = System.nanoTime()
+      val s = ensureSession()
+      val decisionsBefore = policy.decisionCount
+      val result = s.run(code)
+      val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
+      tui.toolEnd(result, millis)
+      agent.noteUserRan(code, result, policy.decisionsSince(decisionsBefore))
+    catch
+      case e: Exception =>
+        tui.error(Debug.describe(e))
+        Debug.trace(e)
+    finally tui.endTurn()
 
   /** The block of code typed after a bare `/run`; empty when cancelled (Ctrl-C, Ctrl-D). */
   private def readCode(): String =
@@ -371,7 +406,38 @@ final class App(args: Cli.Args):
     tui.suggest(None) // no ghost text while typing code
     tui.readBlock(prompt).getOrElse("")
 
-  /** `/config`: the layers, which key names are bound (never the values), and the scalar settings. */
+  private def sessionPath(value: String): Path =
+    val path = java.nio.file.Paths.get(PlatformPath.native(PlatformPath.expandHome(value))).nn
+    (if path.isAbsolute then path else cwd.resolve(path).nn).normalize.nn
+
+  /** Session grant selection and revocation; configured policy is unchanged. */
+  private def permissions(arg: String): Unit =
+    val grants = policy.sessionGrants
+    def list(): Unit =
+      if grants.isEmpty then tui.info("No session grants.")
+      else grants.zipWithIndex.foreach((grant, index) => tui.println(s"  ${index + 1}. ${grant.describe}"))
+    def revoke(grant: SessionGrant): Unit =
+      policy.revoke(grant)
+      agent.notePermissionRevoked(grant.describe)
+      tui.success(s"Revoked ${grant.describe} for future operations.")
+    arg.trim.split("\\s+", 2).toList match
+      case "" :: Nil =>
+        tui.println(policy.summary)
+        list()
+        if grants.nonEmpty then tui.info("Use /perms revoke to remove a session grant; /kill stops existing processes.")
+      case "revoke" :: "all" :: Nil => grants.foreach(revoke)
+      case "revoke" :: number :: Nil =>
+        number.toIntOption.flatMap(n => grants.lift(n - 1)) match
+          case Some(grant) => revoke(grant)
+          case None => tui.error("Unknown grant number. Run /perms to list current grants.")
+      case "revoke" :: Nil =>
+        if !tui.menusAvailable || grants.isEmpty then list()
+        else
+          val rows = grants.zipWithIndex.map((grant, index) => s"${index + 1}. ${grant.describe}")
+          tui.choose("Revoke a session grant", rows).flatMap(row => grants.lift(rows.indexOf(row))).foreach(revoke)
+      case _ => tui.error("Usage: /perms [revoke [number|all]]")
+
+  /** `/config`: the layers, key names and scalar settings. */
   private def showConfig(): Unit =
     tui.println("config layers, in order:")
     configuration.layers.foreach(l => tui.println(l.describe))
@@ -421,6 +487,7 @@ final class App(args: Cli.Args):
   private def switchModel(arg: String): Unit =
     setModel(arg, "model", describe(agent.model)) { spec =>
       agent.model = modelFor(spec)
+      updateStatusContext()
       refreshPrediction()
       tui.success(s"model -> ${describe(agent.model)}" + remember("model", Some(spec)))
     }
@@ -505,12 +572,12 @@ final class App(args: Cli.Args):
         val previous = policy.mode
         policy.mode = m
         if restartSession(s"the sandbox mode changed to ${m.label}") then
+          updateStatusContext()
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
     }
 
 object App:
-  private val SandboxUnavailable = "the sandbox is not running (a restart failed); try /reset"
 
   /** Presentation only: references and provider requests continue to use the
     * configured alias and backend model id. */

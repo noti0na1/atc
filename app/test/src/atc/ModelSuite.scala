@@ -22,13 +22,6 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(CompletionStop.fromReason("refusal"), CompletionStop.Blocked)
     assertEquals(CompletionStop.fromReason("end_turn"), CompletionStop.Complete)
 
-  test("stream cancellation is checked before probing the network-backed iterator"):
-    var generated = false
-    val events = java.util.stream.Stream.generate(() => { generated = true; "event" })
-    try intercept[CancelledException](Streaming.drain(events, () => true)(_ => ()))
-    finally events.close()
-    assert(!generated)
-
   // ── OpenAI reasoning effort for non-thinking calls ──────────────
 
   test("the lowest reasoning effort follows the model family, and is not sent to models not known to reason"):

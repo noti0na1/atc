@@ -46,6 +46,15 @@ class TuiSuite extends munit.FunSuite:
       Tui.discardEscapeSequence(() => input.next())
       assertEquals(input.next(), 'x'.toInt)
 
+  test("malformed escape sequences cannot retain the terminal reader indefinitely"):
+    var reads = 0
+    val sequence = Tui.readEscapeSequence(() =>
+      reads += 1
+      if reads == 1 then '['.toInt else ';'.toInt
+    )
+    assertEquals(reads, 64)
+    assertEquals(sequence.length, 64)
+
   test("glyphs fall back to ASCII when a dumb terminal has no encoding"):
     assertEquals(Tui.glyphs(null, forceAscii = false), Glyphs.ascii)
     assertEquals(Tui.glyphs(StandardCharsets.UTF_8, forceAscii = false), Glyphs.unicode)

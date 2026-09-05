@@ -16,10 +16,10 @@ class SlashCommandSuite extends munit.FunSuite:
     val lines = helpText.linesIterator.toList
     assertEquals(lines.head, "Commands:")
     assertEquals(lines.size, values.length + 1)
-    // Usage in a 24-column field after two spaces; the description follows.
+    // Long usage strings still leave space before the aligned descriptions.
     lines.tail.zip(values).foreach { (line, c) =>
       assert(line.startsWith(s"  ${c.usage}"), line)
-      assertEquals(line.drop(26), c.help, line)
+      assertEquals(line.drop(2 + helpWidth), c.help, line)
     }
 
   test("parse resolves names and aliases case-insensitively and splits off the argument"):

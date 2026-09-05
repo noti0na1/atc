@@ -1,9 +1,10 @@
 package atc.ui
 
 import atc.{Debug, ProcessEnvironment}
-import atc.agent.AgentUI
+import atc.agent.{AgentUI, TurnOutcome}
 import atc.lib.{Todo, TodoStatus}
 import atc.perms.*
+import atc.host.FileChange
 import atc.sandbox.{ExecutionResult, ReplSession}
 
 import org.jline.prompt.{CheckboxResult, ListResult, PromptBuilder, PromptResult, PrompterConfig, PrompterFactory}
@@ -26,7 +27,7 @@ import org.jline.reader.impl.{DefaultHighlighter, DefaultParser, LineReaderImpl}
 import org.jline.reader.impl.history.DefaultHistory
 import org.jline.terminal.{Attributes, Terminal, TerminalBuilder}
 import org.jline.terminal.impl.DumbTerminal
-import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader}
+import org.jline.utils.{AttributedString, AttributedStringBuilder, AttributedStyle, InfoCmp, NonBlockingReader, Status}
 
 import java.io.{InputStream, OutputStream}
 import java.nio.charset.StandardCharsets
@@ -193,6 +194,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Set while an agent turn is running; Ctrl-C sets it. */
   val interrupted = AtomicBoolean(false)
   @volatile private var busy = false
+  @volatile private var closed = false
   /** The last two characters written: tells whether we are at a line start / after a blank line. */
   @volatile private var tail = "\n\n"
   private var spinner: Option[Spinner] = None
@@ -204,6 +206,38 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Agent-visible text printed during the current tool call, as it appears in
     * the REPL's captured output; `toolEnd` subtracts it from the result panel. */
   private val printed = StringBuilder()
+  private val liveCaptured = StringBuilder()
+  private var liveTruncated = false
+  private val fileChanges = collection.mutable.ListBuffer[FileChange]()
+  private val toolHistory = ToolHistory()
+  private var currentCode = ""
+  private var popupDepth = 0
+  private val pendingProcessEvents = collection.mutable.Queue[String]()
+
+  def fileChanged(change: FileChange): Unit = synchronized:
+    if toolOpen && fileChanges.size < 50 then fileChanges += change
+
+  def clearOutputHistory(): Unit = synchronized(toolHistory.clear())
+
+  def showOutput(argument: String): Unit = synchronized:
+    val parts = argument.trim.split("\\s+").toList.filter(_.nonEmpty)
+    if parts.isEmpty then
+      if toolHistory.list.isEmpty then info("No retained tool output.")
+      else toolHistory.list.foreach(println)
+    else if parts.size > 2 || parts.lift(1).exists(value => !value.toIntOption.exists(_ >= 1)) then
+      error("Use /output <id|last> [line], with a positive line number.")
+    else
+      val id = if parts.head == "last" then toolHistory.latest.map(_.id) else parts.head.toIntOption
+      val from = parts.drop(1).headOption.flatMap(_.toIntOption).getOrElse(1)
+      id.flatMap(toolHistory.get) match
+        case Some(entry) =>
+          val lines = entry.render.linesIterator.toVector
+          if from > lines.size then error(s"Tool ${entry.id} has ${lines.size} lines of retained output.")
+          else
+            val end = (from.toLong - 1 + 200).min(lines.size.toLong).toInt
+            lines.slice(from - 1, end).foreach(println)
+            if lines.size > end then info(s"More output: /output ${entry.id} ${end + 1}")
+        case _ => error("Output is unavailable. Use /output to list retained results.")
   /** TODO list changed during the current tool call; drawn once when it ends. */
   @volatile private var pendingTodos: Option[List[Todo]] = None
   /** Ctrl-O: show thinking in full and never fold output. Sticks for the session. */
@@ -211,6 +245,45 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** Extra action on Ctrl-C during a turn (e.g. interrupt the REPL evaluation). */
   @volatile var onInterrupt: () => Unit = () => ()
+  @volatile var onSubmit: String => Unit = _ => ()
+  @volatile var contextLabel: String = ""
+  @volatile var queuedInputs: () => Int = () => 0
+  @volatile private var operation = "ready"
+  @volatile private var turnStarted = 0L
+  @volatile private var draftInput = ""
+  private val statusLine = if plain then None else Option(Status.getStatus(terminal))
+  private var statusSize = (0, 0)
+  statusLine.foreach(_.setBorder(false))
+
+  private def refreshStatus(): Unit =
+    if closed then return
+    val elapsed = if busy then s" ${Tui.duration((System.nanoTime() - turnStarted) / 1e9)}" else ""
+    val queued = queuedInputs()
+    val waiting = if queued > 0 then s" ${g.dot} $queued message${if queued == 1 then "" else "s"} queued" else ""
+    val label =
+      if draftInput.nonEmpty then
+        s"Update: ${draftInput.takeRight((width - 30).max(10))} ${g.dot} Enter to send$waiting"
+      else s"${operation.take((width / 2).max(20))}$elapsed$waiting ${g.dot} $contextLabel"
+    val singleLine = Ansi.sanitize(label).replace('\n', ' ').replace('\t', ' ')
+    statusLine.foreach { status =>
+      val size = terminal.getSize
+      val dimensions = (size.getColumns, size.getRows)
+      if dimensions != statusSize then
+        status.resize(size)
+        statusSize = dimensions
+      status.update(List(AttributedString(fit(singleLine, 0))).asJava)
+    }
+
+  override def inputAccepted(text: String): Unit = synchronized:
+    beginBlock()
+    write(styled(s"${g.arrow} applying update: ${Ansi.sanitize(text)}", Cyan) + "\n")
+    refreshStatus()
+
+  private def withOperation[A](label: String)(body: => A): A =
+    val previous = operation
+    synchronized { operation = label; refreshStatus() }
+    try body
+    finally synchronized { operation = previous; refreshStatus() }
   /** Whether an exhausted tool budget asks the human to continue (off for `-p` runs). */
   @volatile var askToContinue: Boolean = true
 
@@ -223,7 +296,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def beginTurn(): Unit =
     interrupted.set(false)
+    turnStarted = System.nanoTime()
     busy = true
+    operation = "starting turn · Enter sends an update"
+    refreshStatus()
     keys.start()
   /** End the turn: close open blocks, say what the turn cost (`stats`) and
     * leave one blank line before the next prompt — the agent is idle again. */
@@ -231,6 +307,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     synchronized:
       stopSpinner()
       busy = false
+      operation = stats.fold("ready")(_.outcome.label)
       thinking.end()
       closeProse()
       liveOutput.end()
@@ -241,11 +318,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         val calls = Tui.plural(s.toolCalls, "tool call")
         val context = Tui.contextUsage(s.context, s.window)
         write(styled(
-          s"${g.bullet} worked for ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens ${g.dot} $context",
+          s"${g.bullet} ${s.outcome.label} in ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens ${g.dot} $context",
           Dim
         ) + "\n")
       }
       blankLine()
+      refreshStatus()
     keys.stop() // outside the lock: the key thread may be waiting for it
   def isInterrupted: Boolean = interrupted.get()
 
@@ -256,6 +334,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       out.print(s)
       out.flush()
       tail = (tail + s).takeRight(2)
+      refreshStatus()
 
   private def atLineStart: Boolean = tail.endsWith("\n")
   private def afterBlankLine: Boolean = tail == "\n\n"
@@ -289,7 +368,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     // Reserve the ellipsis's actual width: "…" is one cell but ASCII "..." is three,
     // so budgeting a single column would let a truncated ASCII line overflow and wrap.
     val ell = math.max(1, Tui.displayWidth(g.ellipsis))
-    if room <= ell || Tui.displayWidth(line) <= room then line
+    if room <= 0 then ""
+    else if Tui.displayWidth(line) <= room then line
+    else if room <= ell then g.ellipsis.take(room)
     else
       // Whole code points until the width budget (minus the ellipsis) is spent.
       val budget = room - ell
@@ -342,7 +423,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   // ── thinking (streamed reasoning) ─────────────────────────────────
 
-  def thinkingDelta(text: String): Unit = synchronized(thinking.delta(Ansi.sanitize(text)))
+  def thinkingDelta(text: String): Unit = synchronized:
+    operation = "reasoning"
+    thinking.delta(Ansi.sanitize(text))
 
   /** The model's reasoning as it streams. Compact view: a live window over the
     * last lines that collapses to a one-line summary when the reasoning ends.
@@ -410,6 +493,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   // ── assistant prose (streamed) ────────────────────────────────────
 
   def assistantDelta(text: String): Unit = synchronized:
+    operation = "responding"
     stopSpinner()
     val clean = Ansi.sanitize(text) // model text: no terminal control may reach the screen
     prose match
@@ -451,6 +535,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def toolStart(code: String): Unit = toolStart(code, "run_scala")
   /** Open a code block titled `title`: the agent's `run_scala`, or the user's own `/run`. */
   def toolStart(code: String, title: String): Unit = synchronized:
+    operation = "compiling and running Scala"
     beginBlock()
     write(styled(g.bullet, Magenta) + " " + styled(title, Magenta, Bold) + "\n")
     // The code is model-written: sanitize before highlighting/printing.
@@ -459,6 +544,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     toolOpen = true
     outputStarted = false
     printed.clear()
+    liveCaptured.clear()
+    liveTruncated = false
+    fileChanges.clear()
+    currentCode = code
     liveOutput.start()
     if !plain then spin(Indent, "running") // until the first output line / the result
 
@@ -478,18 +567,29 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * what it writes as it comes (`commandOutput`), in the same output section
     * as the prints. Not part of the tool result, so not remembered in `printed`. */
   def commandRunning(commandLine: String): Unit = synchronized:
+    operation = s"running $commandLine"
+    refreshStatus()
     openOutputSection()
     liveOutput.emit(styled(s"$$ ${Ansi.sanitize(commandLine)}", Cyan) + "\n")
   def commandOutput(text: String): Unit = synchronized:
+    val room = Tui.MaxHeldChars - liveCaptured.length
+    if room > 0 then liveCaptured.append(text.take(room))
+    if text.length > room then liveTruncated = true
     openOutputSection()
     liveOutput.emit(Ansi.sanitize(text))
-  /** A spawned process started / was sent input / exited. Shown inside the tool
-    * block it happens in; an exit between turns is not printed (it would land in
-    * the prompt line), `/ps` shows the state. */
+  /** Process notifications preserve the current prompt and wait until any menu closes. */
   def processEvent(text: String): Unit = synchronized:
+    if closed then ()
+    else if popupDepth > 0 then
+      if pendingProcessEvents.size >= 100 then pendingProcessEvents.dequeue()
+      pendingProcessEvents.enqueue(text.take(2000))
+    else displayProcessEvent(text)
+
+  private def displayProcessEvent(text: String): Unit =
     if toolOpen then
       openOutputSection()
       liveOutput.emit(styled(Ansi.sanitize(text), Cyan) + "\n")
+    else reader.printAbove(styled(Ansi.sanitize(text), Cyan))
 
   /** The first program output of a tool block opens its `├ output` section. */
   private def openOutputSection(): Unit =
@@ -577,6 +677,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * then the verdict. Long bodies are cut in the middle (unless expanded) so
     * both the first diagnostics and the tail stay visible. */
   def toolEnd(r: ExecutionResult, millis: Long): Unit = synchronized:
+    operation = if r.success then "tool completed" else "tool failed"
+    val live = liveCaptured.toString + (if liveTruncated then "\n[retained live output limit reached]" else "")
+    val record = toolHistory.add(currentCode, r, millis, live, fileChanges.toList)
     stopSpinner()
     liveOutput.end()
     ensureNewline()
@@ -602,9 +705,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       else
         write(section("error", Red))
         shown.foreach(l => write(gutter(Red) + l + "\n"))
+    fileChanges.foreach(change =>
+      write(Indent + styled(s"${Ansi.sanitize(change.path)}: ${change.summary}", Cyan) + "\n")
+    )
     val verdict =
       if r.success then styled(s"${g.end} ok ${millis} ms", Green) else styled(s"${g.end} failed ${millis} ms", Red)
-    write(Indent + verdict + "\n")
+    write(Indent + verdict + styled(s" · /output ${record.id}", Dim) + "\n")
     toolOpen = false
     flushTodos()
 
@@ -636,21 +742,24 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       while running do
         val secs = (System.nanoTime() - started) / 1_000_000_000L
         val elapsed = if secs >= 2 then s" $secs s" else ""
-        out.print(ClearLine + prefix + styled(s"${g.spinner(i % g.spinner.length)} $text${g.ellipsis}$elapsed", Dim))
-        out.flush()
+        Tui.this.synchronized:
+          if running then
+            out.print(ClearLine + prefix +
+              styled(s"${g.spinner(i % g.spinner.length)} $text${g.ellipsis}$elapsed", Dim))
+            out.flush()
         i += 1
         try Thread.sleep(80)
         catch case _: InterruptedException => running = false
     def stopAndClear(): Unit =
       running = false
       interrupt()
-      try join(200)
-      catch case _: InterruptedException => ()
       out.print(ClearLine) // back to the line start we began on; `tail` still ends with "\n"
       out.flush()
 
   /** Show progress ("model is thinking"); ends the current prose block. */
   def status(text: String): Unit = synchronized:
+    operation = text
+    refreshStatus()
     stopSpinner()
     thinking.end()
     closeProse()
@@ -668,10 +777,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   // ── keys during a turn (Ctrl-O toggle, type-ahead) ────────────────
 
-  /** While a turn runs the terminal is in raw mode and this thread reads
-    * single keys: Ctrl-O toggles the expanded view, everything printable is
-    * kept as type-ahead for the next prompt. Paused around pop-ups, which
-    * read the terminal themselves. Never used without a real terminal. */
+  /** During turns, read corrections and Ctrl-O in raw mode. Enter submits a correction;
+    * unsent text becomes the next prompt's draft. Menus take exclusive control of input. */
   private object keys:
     private var thread: Option[Thread] = None
     private var saved: Option[Attributes] = None
@@ -680,12 +787,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       * while the key thread is inside `read`, and the key thread may not start
       * a read once a pop-up asked for the pause. */
     private val pauseLock = Object()
-    private var paused = false
+    private var pauseDepth = 0
     private var reading = false
     val typeAhead = StringBuilder()
 
     def start(): Unit = if !plain && thread.isEmpty then
       saved = Some(terminal.enterRawMode())
+      out.print(Ansi.Esc + "[?2004h")
+      out.flush()
       running = true
       val t = Thread(() => loop(), "atc-keys")
       t.setDaemon(true)
@@ -695,66 +804,98 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     def stop(): Unit =
       running = false
       pauseLock.synchronized(pauseLock.notifyAll())
-      thread.foreach(t => t.join(500))
+      thread.foreach(t => t.join(2500))
       thread = None
       saved.foreach(terminal.setAttributes)
       saved = None
+      if !plain then
+        out.print(Ansi.Esc + "[?2004l")
+        out.flush()
 
     /** Run `body` with the key thread idle (a pop-up is about to read the terminal). */
     def withPaused[T](body: => T): T =
-      pauseLock.synchronized:
-        paused = true
-        // A read in flight finishes within its 100 ms timeout; the loop cannot
-        // start a new one now (it checks `paused` under the same lock).
-        val deadline = System.nanoTime() + 300_000_000L
-        while reading && System.nanoTime() < deadline do pauseLock.wait(5)
-      try body
-      finally pauseLock.synchronized:
-          paused = false
+      pauseLock.synchronized { pauseDepth += 1 }
+      try
+        pauseLock.synchronized:
+          while reading do pauseLock.wait(50)
+        body
+      finally
+        pauseLock.synchronized:
+          pauseDepth -= 1
+          if pauseDepth == 0 && running then
+            out.print(Ansi.Esc + "[?2004h")
+            out.flush()
           pauseLock.notifyAll()
 
     /** Swallow the rest of an escape sequence (arrow keys, function keys): its
       * bytes are all ≥ 32 and would otherwise land in the type-ahead as
       * `[A`-style garbage. */
-    private def drainEscape(in: NonBlockingReader): Unit =
-      Tui.discardEscapeSequence(() => in.read(30L))
-
     private def loop(): Unit =
       val in: NonBlockingReader = terminal.reader()
       var skipLf = false // a CR already added the newline of a CRLF
+      var pasting = false
+      def submit(): Unit =
+        val text = typeAhead.toString.trim
+        if text.nonEmpty then
+          onSubmit(text)
+          typeAhead.clear()
       while running do
         val mayRead = pauseLock.synchronized:
-          while paused && running do pauseLock.wait(50)
+          while pauseDepth > 0 && running do pauseLock.wait(50)
           reading = running
           reading
         if mayRead then
-          val c =
-            try in.read(100L)
-            catch case _: Exception => -1
-          pauseLock.synchronized:
-            reading = false
-            pauseLock.notifyAll()
-          c match
-            case NonBlockingReader.READ_EXPIRED | -1 => () // no key read: leave skipLf pending
-            case '\r' => typeAhead.append('\n'); skipLf = true
-            // Collapse only a CRLF pair: an LF right after a CR. Any other real key
-            // clears the latch, so a later lone LF is not wrongly swallowed as the
-            // tail of an old CR (`skipLf` is reset in every branch below but '\r').
-            case '\n' => if !skipLf then typeAhead.append('\n'); skipLf = false
-            case other =>
-              skipLf = false
-              other match
-                case 15 => toggleExpanded() // Ctrl-O
-                case 27 => drainEscape(in)
-                case 127 | 8 => if typeAhead.nonEmpty then typeAhead.setLength(typeAhead.length - 1)
-                // ch.toChar alone would truncate a non-BMP code point; UTF-16 units
-                // (a reader that delivers surrogates) pass through reassembled.
-                case ch if ch > 0xffff => typeAhead.append(String(Character.toChars(ch)))
-                case ch if ch >= 32 => typeAhead.append(ch.toChar)
-                case _ => ()
+          try
+            val c =
+              try in.read(100L)
+              catch case _: Exception => -1
+            c match
+              case NonBlockingReader.READ_EXPIRED | -1 => () // no key read: leave skipLf pending
+              case '\r' =>
+                if pasting then typeAhead.append('\n') else submit()
+                skipLf = true
+              // Collapse only a CRLF pair: an LF right after a CR. Any other real key
+              // clears the latch, so a later lone LF is not wrongly swallowed as the
+              // tail of an old CR (`skipLf` is reset in every branch below but '\r').
+              case '\n' =>
+                if !skipLf then
+                  if pasting then typeAhead.append('\n') else submit()
+                skipLf = false
+              case other =>
+                skipLf = false
+                other match
+                  case 15 => toggleExpanded() // Ctrl-O
+                  case 27 => Tui.readEscapeSequence(() => in.read(30L)) match
+                      case "[200~" => pasting = true
+                      case "[201~" => pasting = false
+                      case _ => ()
+                  case 127 | 8 =>
+                    if typeAhead.nonEmpty then
+                      val end = typeAhead.length
+                      val removed =
+                        if end >= 2 && Character.isSurrogatePair(typeAhead.charAt(end - 2), typeAhead.charAt(end - 1))
+                        then 2
+                        else 1
+                      typeAhead.setLength(end - removed)
+                  // ch.toChar alone would truncate a non-BMP code point; UTF-16 units
+                  // (a reader that delivers surrogates) pass through reassembled.
+                  case ch if ch > 0xffff => typeAhead.append(String(Character.toChars(ch)))
+                  case ch if ch >= 32 => typeAhead.append(ch.toChar)
+                  case _ => ()
+            Tui.this.synchronized:
+              draftInput = typeAhead.toString
+              refreshStatus()
+          finally
+            pauseLock.synchronized:
+              reading = false
+              pauseLock.notifyAll()
 
     /** Hand the type-ahead to the next prompt. */
-    def takeTypeAhead(): String = { val s = typeAhead.toString; typeAhead.clear(); s }
+    def takeTypeAhead(): String =
+      val text = typeAhead.toString
+      typeAhead.clear()
+      draftInput = ""
+      text
 
   // ── pop-ups: permission requests and questions from the agent ─────
 
@@ -808,10 +949,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** A pop-up is a block of its own: a pending TODO panel is drawn first, then
     * `body` (which reads the terminal), then the blank line that ends the block. */
-  private def popupBlock[T](body: => T): T =
-    synchronized { flushTodos(); beginBlock() }
+  private def popupBlock[T](body: => T): T = keys.withPaused:
+    synchronized:
+      popupDepth += 1
+      liveOutput.end()
+      flushTodos()
+      beginBlock()
     try body
-    finally blankLine()
+    finally synchronized:
+        blankLine()
+        popupDepth -= 1
+        if popupDepth == 0 then
+          while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
 
   /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
     * `None` when there is no terminal for menus, no options, or the user
@@ -822,35 +971,36 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       val clean = options.map(Ansi.sanitize)
       popupBlock(menuIndex(Ansi.sanitize(title), clean)).flatMap(options.lift)
 
-  def askPermission(req: PermissionRequest): Decision = popupBlock:
-    // The request embeds model-chosen paths and command lines: sanitize.
-    write(Indent + styled(s"${g.warn} Permission request: ${Ansi.sanitize(req.title)}", Yellow, Bold) + "\n")
-    req.details.foreach(d => write(Indent + Indent + styled(Ansi.sanitize(d), Yellow) + "\n"))
-    val decision =
-      if plain then
-        Tui.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
-      else
-        var selected: Option[Decision] = None
-        while selected.isEmpty do
-          selected = menu("Allow?", List(Tui.AllowOnce, Tui.AllowSession, Tui.DenyLabel, Tui.ReviseLabel)) match
-            case Some(Tui.AllowOnce) => Some(Decision.AllowOnce)
-            case Some(Tui.AllowSession) => Some(Decision.AllowSession)
-            case Some(Tui.ReviseLabel) =>
-              info("Describe what to change. The current request will not be approved.")
-              freeText(styled("instructions> ", Cyan)).map(Decision.Revise(_))
-            case _ => Some(Decision.Deny)
-        selected.get
-    // The menu already echoes the choice; confirm only what the user did not see.
-    decision match
-      case Decision.Revise(instructions) =>
-        write(Indent + styled(s"${g.arrow} instructions sent: ${Ansi.sanitize(instructions)}", Cyan) + "\n")
-      case _ if plain || decision == Decision.Deny =>
-        val label = if decision == Decision.AllowOnce then styled(s"${g.arrow} allowed once", Green)
-        else if decision == Decision.AllowSession then styled(s"${g.arrow} allowed for this session", Green)
-        else styled(s"${g.arrow} denied", Red)
-        write(Indent + label + "\n")
-      case _ => ()
-    decision
+  def askPermission(req: PermissionRequest): Decision = withOperation("waiting for permission"):
+    popupBlock:
+      // The request embeds model-chosen paths and command lines: sanitize.
+      write(Indent + styled(s"${g.warn} Permission request: ${Ansi.sanitize(req.title)}", Yellow, Bold) + "\n")
+      req.details.foreach(d => write(Indent + Indent + styled(Ansi.sanitize(d), Yellow) + "\n"))
+      val decision =
+        if plain then
+          Tui.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
+        else
+          var selected: Option[Decision] = None
+          while selected.isEmpty do
+            selected = menu("Allow?", List(Tui.AllowOnce, Tui.AllowSession, Tui.DenyLabel, Tui.ReviseLabel)) match
+              case Some(Tui.AllowOnce) => Some(Decision.AllowOnce)
+              case Some(Tui.AllowSession) => Some(Decision.AllowSession)
+              case Some(Tui.ReviseLabel) =>
+                info("Describe what to change. The current request will not be approved.")
+                freeText(styled("instructions> ", Cyan)).map(Decision.Revise(_))
+              case _ => Some(Decision.Deny)
+          selected.get
+      // The menu already echoes the choice; confirm only what the user did not see.
+      decision match
+        case Decision.Revise(instructions) =>
+          write(Indent + styled(s"${g.arrow} instructions sent: ${Ansi.sanitize(instructions)}", Cyan) + "\n")
+        case _ if plain || decision == Decision.Deny =>
+          val label = if decision == Decision.AllowOnce then styled(s"${g.arrow} allowed once", Green)
+          else if decision == Decision.AllowSession then styled(s"${g.arrow} allowed for this session", Green)
+          else styled(s"${g.arrow} denied", Red)
+          write(Indent + label + "\n")
+        case _ => ()
+      decision
 
   /** A yes/no question from the app itself (setup, not the agent): a menu
     * when there is a terminal, a `[y/N]` line otherwise. Cancelling means no. */
@@ -867,36 +1017,38 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Ask the user a question on behalf of the agent. Options render as a
     * menu (or checkboxes when `multiple`), always with a custom-answer
     * entry; no options → a free-text line. `None` on Ctrl-C/Ctrl-D. */
-  def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = popupBlock:
-    // The question and options are model-written: sanitize.
-    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
-    val cleanOptions = options.map(Ansi.sanitize(_))
-    val answerPrompt = styled("answer> ", Cyan)
-    val answer: Option[String] =
-      if cleanOptions.isEmpty || plain then
-        cleanOptions.foreach(o => write(Indent + Indent + styled(s"- $o", Cyan) + "\n"))
-        if cleanOptions.nonEmpty then info("Choose a listed answer or type your own answer or instructions.")
-        freeText(answerPrompt)
-      else if multiple then
-        checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.AddAnswerLabel) match
-          case None => None
-          case Some(ids) =>
-            val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
-            if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
-            else if chosen.isEmpty then None
-            else Some(chosen.mkString("; "))
-      else
-        menuIndex("Choose an answer", cleanOptions :+ Tui.OtherLabel) match
-          case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
-          case Some(i) => cleanOptions.lift(i)
-          case None => None
-    // A single-choice menu echoes the selection itself; confirm the other outcomes.
-    answer match
-      case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
-        write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
-      case Some(_) => ()
-      case None => write(Indent + styled(s"${g.arrow} (no answer)", Red) + "\n")
-    answer
+  def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
+    withOperation("waiting for your answer"):
+      popupBlock:
+        // The question and options are model-written: sanitize.
+        write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
+        val cleanOptions = options.map(Ansi.sanitize(_))
+        val answerPrompt = styled("answer> ", Cyan)
+        val answer: Option[String] =
+          if cleanOptions.isEmpty || plain then
+            cleanOptions.foreach(o => write(Indent + Indent + styled(s"- $o", Cyan) + "\n"))
+            if cleanOptions.nonEmpty then info("Choose a listed answer or type your own answer or instructions.")
+            freeText(answerPrompt)
+          else if multiple then
+            checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.AddAnswerLabel) match
+              case None => None
+              case Some(ids) =>
+                val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
+                if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
+                else if chosen.isEmpty then None
+                else Some(chosen.mkString("; "))
+          else
+            menuIndex("Choose an answer", cleanOptions :+ Tui.OtherLabel) match
+              case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
+              case Some(i) => cleanOptions.lift(i)
+              case None => None
+        // A single-choice menu echoes the selection itself; confirm the other outcomes.
+        answer match
+          case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
+            write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
+          case Some(_) => ()
+          case None => write(Indent + styled(s"${g.arrow} (no answer)", Red) + "\n")
+        answer
 
   private def freeText(prompt: String): Option[String] = keys.withPaused:
     try Tui.readAnswer(reader.readLine(prompt))
@@ -954,7 +1106,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         ))
         again = false
       catch
-        case _: UserInterruptException => again = !blockMode
+        case _: UserInterruptException =>
+          Thread.interrupted()
+          again = !blockMode
         case e: EndOfFileException =>
           Debug.log(s"EOF on input: ${e.getMessage}"); Debug.trace(e)
           result = None; again = false
@@ -979,8 +1133,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def suggestionsAvailable: Boolean = !plain
 
   def close(): Unit =
+    closed = true
     stopSpinner()
     keys.stop()
+    statusLine.foreach(_.close())
     try reader.getHistory.save()
     catch case _: Exception => ()
     terminal.close()
@@ -1007,15 +1163,24 @@ object Tui:
 
   /** Consume CSI/SS3 bytes after ESC, stopping on a final byte, EOF or timeout. */
   private[atc] def discardEscapeSequence(read: () => Int): Unit =
+    readEscapeSequence(read)
+    ()
+
+  private[atc] def readEscapeSequence(read: () => Int): String =
+    val result = StringBuilder()
     def next(): Int =
-      try read()
+      try
+        val char = read()
+        if char >= 0 then result.append(char.toChar)
+        char
       catch case _: java.io.IOException => -1
     next() match
       case '[' =>
         var char = next()
-        while char >= 0 && !(char >= 0x40 && char <= 0x7e) do char = next()
+        while result.length < 64 && char >= 0 && !(char >= 0x40 && char <= 0x7e) do char = next()
       case 'O' => next(); ()
       case _ => ()
+    result.toString
 
   /** A scripted `-p` run never needs console discovery or raw mode. Giving it
     * a known dumb UTF-8 terminal also avoids platform-specific null encodings
@@ -1076,7 +1241,14 @@ object Tui:
   /** Cap on the text a live tail window retains (the front is dropped whole lines). */
   val MaxHeldChars = 1024 * 1024
   /** What a turn cost, for the summary line `endTurn` prints. */
-  final case class TurnStats(seconds: Double, toolCalls: Int, tokens: Long, context: Long, window: Option[Int])
+  final case class TurnStats(
+    seconds: Double,
+    toolCalls: Int,
+    tokens: Long,
+    context: Long,
+    window: Option[Int],
+    outcome: TurnOutcome = TurnOutcome.Finished,
+  )
 
   /** `context 45.2k/200k (23%)`, or `context ~45.2k` when the model's window is unknown. */
   def contextUsage(tokens: Long, window: Option[Int]): String = window match

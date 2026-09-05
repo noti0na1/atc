@@ -17,7 +17,8 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
         "/mode [name]",
         "cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL",
       )
-  case Perms extends SlashCommand("/perms", "show the effective permission policy", "/permissions")
+  case Perms
+      extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
   case Config extends SlashCommand("/config", "show config files and settings")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run
@@ -33,6 +34,10 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Ps extends SlashCommand("/ps", "list the processes the agent started with spawn", "/processes")
   case Kill extends SlashCommand("/kill [id|all]", "kill a process the agent started (p2, 2, or all)")
   case Cost extends SlashCommand("/cost", "show token usage and how full the context is", "/usage", "/context")
+  case Output extends SlashCommand("/output [number|last] [line]", "inspect retained tool output and file changes")
+  case Task extends SlashCommand("/task", "show the retained task goal, constraints and progress")
+  case Save extends SlashCommand("/save [file]", "save the conversation and task notes to a new file")
+  case Resume extends SlashCommand("/resume <file>", "restore a saved conversation with fresh permissions and REPL")
   case Quit extends SlashCommand("/quit", "exit", "/exit", "/q")
 
   /** The name as typed, e.g. `/help`. */
@@ -43,8 +48,9 @@ object SlashCommand:
   /** The names, in `/help` order, for Tab completion (aliases are accepted but not offered). */
   def names: List[String] = values.toList.map(_.name)
 
-  lazy val helpText
-    : String = ("Commands:" :: values.toList.map(c => s"  ${c.usage.padTo(24, ' ')}${c.help}")).mkString("\n")
+  private[atc] val helpWidth: Int = values.map(_.usage.length).max.max(22) + 2
+  lazy val helpText: String =
+    ("Commands:" :: values.toList.map(c => s"  ${c.usage.padTo(helpWidth, ' ')}${c.help}")).mkString("\n")
 
   /** The command a typed line names (case-insensitively), with its argument:
     * the rest of the line, trimmed. `Left(typed)` when nothing answers to it. */

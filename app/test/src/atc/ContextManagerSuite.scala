@@ -5,6 +5,16 @@ import atc.agent.ContextManager.ModelContext
 import atc.llm.{Msg, NativeTurn, ToolCall, ToolResult}
 
 class ContextManagerSuite extends munit.FunSuite:
+  test("context cuts retain task constraints alongside the latest request"):
+    val manager = ContextManager()
+    val model = ContextManager.ModelContext("m", "p", "m", Some(1000))
+    val history = List(Msg.User("original goal"), Msg.Assistant("x" * 6000, Nil, None), Msg.User("continue"))
+    val notes = "Goal: finish the change. Constraint: preserve the public API. Remaining: run tests."
+    val result = manager.prepareWithContext(10, history, model, notes)
+    assertEquals(result.dropped, 2)
+    val text = result.history.head.asInstanceOf[Msg.User].text
+    assert(text.contains(notes), text)
+    assert(text.endsWith("continue"), text)
   private def user(text: String): Msg = Msg.User(text)
   private def assistant(text: String): Msg = Msg.Assistant(text, Nil, None)
 

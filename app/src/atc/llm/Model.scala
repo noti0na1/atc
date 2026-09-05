@@ -91,18 +91,6 @@ case class Reply(text: String, usage: TokenUsage)
 /** Thrown when the user cancels a streaming completion. */
 class CancelledException extends RuntimeException("cancelled")
 
-private[atc] object Streaming:
-  /** Feed the events of a provider stream to `f`, polling `cancelled` before each one. */
-  def drain[E](events: java.util.stream.Stream[E], cancelled: () => Boolean)(f: E => Unit): Unit =
-    val it = events.iterator()
-    // Check before `hasNext`: for a network-backed iterator even probing for
-    // the next event may block, and an already-cancelled request should not do so.
-    while
-      if cancelled() then throw CancelledException()
-      it.hasNext
-    do
-      f(it.next())
-
 /** Where a streaming completion reports progress. */
 trait StreamSink:
   /** A piece of the answer text. */
@@ -124,6 +112,8 @@ object StreamSink:
       def thinking(delta: String): Unit = onThinking(delta)
 
 trait ChatModel:
+  /** Release provider resources when the application closes. */
+  def close(): Unit = ()
   /** Alias from the config. */
   def alias: String
   /** The name that identifies this model unambiguously (`provider/alias`). */

@@ -2,9 +2,8 @@ package atc.llm
 
 import atc.config.{ModelConfig, ModelSpec}
 
-import com.openai.client.OpenAIClient
+import com.openai.client.{OpenAIClient, OpenAIClientImpl}
 import com.openai.core.JsonValue
-import com.openai.client.okhttp.OpenAIOkHttpClient
 import com.openai.errors.BadRequestException
 
 import java.time.Duration
@@ -25,7 +24,26 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   * the client, the vendor `thinking` switch, and the guessed lowest reasoning
   * effort for non-thinking calls with its one-time fallback. */
 private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel(spec):
-  protected lazy val client: OpenAIClient = Providers.openAiClient(spec)
+  private var openedClient: Option[(OpenAIClient, okhttp3.OkHttpClient)] = None
+  private def connection: (OpenAIClient, okhttp3.OkHttpClient) = synchronized {
+    openedClient.getOrElse {
+      val timeout = com.openai.core.Timeout.builder().request(Providers.RequestTimeout).build()
+      val http = Providers.httpClient(timeout.connect(), timeout.read(), timeout.write(), timeout.request())
+      val created = (Providers.openAiClient(spec, com.openai.client.okhttp.OkHttpClient(http)), http)
+      openedClient = Some(created)
+      created
+    }
+  }
+  protected def client: OpenAIClient = connection._1
+  protected def streamingClient: OpenAIClient =
+    val (base, transport) = connection
+    base.withOptions(_.httpClient(Providers.borrowed(
+      com.openai.client.okhttp.OkHttpClient(ModelRequest.scopedHttpClient(transport))
+    )))
+  override def close(): Unit = synchronized {
+    openedClient.foreach(_._1.close())
+    openedClient = None
+  }
 
   /** Set once the model rejected the reasoning-effort parameter: it takes no such parameter. */
   @volatile private var effortRejected = false
@@ -63,6 +81,28 @@ private[atc] object Providers:
   /** Generous on purpose: a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
 
+  def httpClient(connect: Duration, read: Duration, write: Duration, request: Duration): okhttp3.OkHttpClient =
+    okhttp3.OkHttpClient.Builder().retryOnConnectionFailure(false)
+      .connectTimeout(connect).readTimeout(read).writeTimeout(write).callTimeout(request).build()
+
+  /** Request clients share the model's connection pool and executor. SDK cleanup, including
+    * garbage collection, must not close these resources; the model owns their lifetime. */
+  def borrowed(transport: com.openai.core.http.HttpClient): com.openai.core.http.HttpClient =
+    new com.openai.core.http.HttpClient:
+      def execute(request: com.openai.core.http.HttpRequest, options: com.openai.core.RequestOptions) =
+        transport.execute(request, options)
+      def executeAsync(request: com.openai.core.http.HttpRequest, options: com.openai.core.RequestOptions) =
+        transport.executeAsync(request, options)
+      def close(): Unit = ()
+
+  def borrowed(transport: com.anthropic.core.http.HttpClient): com.anthropic.core.http.HttpClient =
+    new com.anthropic.core.http.HttpClient:
+      def execute(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        transport.execute(request, options)
+      def executeAsync(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        transport.executeAsync(request, options)
+      def close(): Unit = ()
+
   /** Whether a 400 specifically rejects the guessed reasoning-effort setting.
     * Do not retry arbitrary bad requests: that duplicates traffic and can
     * permanently misclassify a model as not supporting effort. */
@@ -93,11 +133,11 @@ private[atc] object Providers:
     * is one, else the SDK's own environment resolution — except against a
     * custom `url` (Ollama, vLLM, LM Studio, ...), where a placeholder stands
     * in for the key such servers ignore. */
-  def openAiClient(spec: ModelSpec): OpenAIClient =
-    val b = OpenAIOkHttpClient.builder().timeout(RequestTimeout)
+  def openAiClient(spec: ModelSpec, transport: com.openai.core.http.HttpClient): OpenAIClient =
+    val b = com.openai.core.ClientOptions.builder().httpClient(transport).timeout(RequestTimeout)
     spec.apiKey match
       case Some(key) => b.apiKey(key)
       case None if spec.baseUrl.isDefined => b.apiKey("none")
       case None => b.fromEnv()
     spec.baseUrl.foreach(b.baseUrl)
-    b.build()
+    OpenAIClientImpl(b.build())

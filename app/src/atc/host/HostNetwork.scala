@@ -20,7 +20,7 @@ private[host] trait HostNetwork:
     user: UserIO,
     parent: Network
   ): T =
-    val patterns = hosts.toList.map(_.trim).filter(_.nonEmpty)
+    val patterns = hosts.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted
     inScope(policy.requestNet(scopeOf(parent), patterns, reason))(id => op(using NetworkImpl(id)))
 
   private val http = HttpClient.newBuilder().nn

@@ -38,6 +38,13 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
 
   // ── Read-only vs full views ─────────────────────────────────────
 
+  test("new file helpers retain read-only restrictions and task notes cannot receive classified data"):
+    assertOk(run("""readRange("a.txt", 1, 1)"""))
+    assertOk(run("""search(".", "content", "*.txt", SearchOptions(maxMatches = 1))"""))
+    assertFails(run("""val ro: FileSystem^{fs.rd} = fs; replaceExact("a.txt", "content", "changed")(using ro)"""))
+    assertOk(run("""setTaskNotes(TaskNotes(goal = "finish", constraints = List("keep the API")))"""))
+    assertFails(run("""classify("secret").map(s => setTaskNotes(TaskNotes(goal = s)))"""))
+
   test("a full capability widens to its read-only view"):
     assertOk(run("""val ro: IOCap^{io.rd} = io; val rofs: FileSystem^{fs.rd} = fs; 1"""))
 

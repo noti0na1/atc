@@ -9,7 +9,6 @@ import com.openai.models.chat.completions.*
 
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
-import scala.util.Using
 
 /** OpenAI Chat Completions API — also the adapter for any OpenAI-compatible
   * server (Ollama, vLLM, LM Studio, OpenRouter, ...) via `baseUrl`. */
@@ -91,8 +90,10 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     cancelled: () => Boolean
   ): Completion =
     val acc = ChatCompletionAccumulator.create()
-    Using.resource(client.chat().completions().createStreaming(params(system, history, tools))) { stream =>
-      Streaming.drain(stream.stream(), cancelled) { chunk =>
+    val stream = streamingClient.async().chat().completions().createStreaming(params(system, history, tools))
+    ModelRequest.awaitStream(() => stream.close()) {
+      stream.subscribe { chunk =>
+        if cancelled() then throw CancelledException()
         acc.accumulate(chunk)
         chunk.choices().asScala.headOption.foreach { ch =>
           val delta = ch.delta()
@@ -102,7 +103,7 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
             Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala).foreach(sink.thinking)
           }
         }
-      }
+      }.onCompleteFuture()
     }
     extract(acc.chatCompletion())
 

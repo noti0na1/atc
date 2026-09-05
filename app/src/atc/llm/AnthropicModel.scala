@@ -3,15 +3,13 @@ package atc.llm
 import atc.Debug
 import atc.config.ModelSpec
 
-import com.anthropic.client.AnthropicClient
-import com.anthropic.client.okhttp.AnthropicOkHttpClient
+import com.anthropic.client.{AnthropicClient, AnthropicClientImpl}
 import com.anthropic.core.JsonValue
 import com.anthropic.helpers.MessageAccumulator
 import com.anthropic.models.messages.*
 
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
-import scala.util.Using
 
 /** Anthropic Messages API (official Java SDK), streaming, with the
   * server-side web-search tool when enabled. */
@@ -19,13 +17,43 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   val providerKey: String = "anthropic"
   override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(32000))
 
-  private lazy val client: AnthropicClient =
-    val b = AnthropicOkHttpClient.builder().timeout(Providers.RequestTimeout)
-    spec.apiKey match
-      case Some(key) => b.apiKey(key)
-      case None => b.fromEnv()
-    spec.baseUrl.foreach(b.baseUrl)
-    b.build()
+  private final case class Connection(
+    client: AnthropicClient,
+    http: okhttp3.OkHttpClient,
+    backend: com.anthropic.backends.AnthropicBackend
+  )
+  private var openedClient: Option[Connection] = None
+  private def connection: Connection = synchronized {
+    openedClient.getOrElse {
+      val backendBuilder = com.anthropic.backends.AnthropicBackend.builder()
+      spec.apiKey match
+        case Some(key) => backendBuilder.apiKey(key)
+        case None => backendBuilder.fromEnv()
+      spec.baseUrl.foreach(backendBuilder.baseUrl)
+      val backend = backendBuilder.build()
+      val timeout = com.anthropic.core.Timeout.builder().request(Providers.RequestTimeout).build()
+      val http = Providers.httpClient(timeout.connect(), timeout.read(), timeout.write(), timeout.request())
+      val transport = com.anthropic.client.okhttp.OkHttpClient(http, backend)
+      val options = com.anthropic.core.ClientOptions.builder().httpClient(transport)
+        .baseUrl(backend.baseUrl()).timeout(Providers.RequestTimeout)
+      backend.applyCredentials(transport, options)
+      val created = Connection(AnthropicClientImpl(options.build()), http, backend)
+      openedClient = Some(created)
+      created
+    }
+  }
+  private def client: AnthropicClient = connection.client
+  private def streamingClient: AnthropicClient =
+    val opened = connection
+    opened.client.withOptions(_.httpClient(Providers.borrowed(com.anthropic.client.okhttp.OkHttpClient(
+      ModelRequest.scopedHttpClient(opened.http),
+      opened.backend
+    ))))
+
+  override def close(): Unit = synchronized {
+    openedClient.foreach(_.client.close())
+    openedClient = None
+  }
 
   private def toolUnion(t: ToolSpec): Tool =
     val schema = ujson.read(t.parametersJson)
@@ -130,8 +158,10 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     cancelled: () => Boolean
   ): Completion =
     val acc = MessageAccumulator.create()
-    Using.resource(client.messages().createStreaming(params(system, history, tools))) { stream =>
-      Streaming.drain(stream.stream(), cancelled) { ev =>
+    val stream = streamingClient.async().messages().createStreaming(params(system, history, tools))
+    ModelRequest.awaitStream(() => stream.close()) {
+      stream.subscribe { ev =>
+        if cancelled() then throw CancelledException()
         acc.accumulate(ev)
         ev.contentBlockStart().toScala.foreach { start =>
           val cb = start.contentBlock()
@@ -142,7 +172,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
           d.delta().text().toScala.foreach(t => sink.text(t.text()))
           d.delta().thinking().toScala.foreach(t => sink.thinking(t.thinking()))
         }
-      }
+      }.onCompleteFuture()
     }
     val m = acc.message()
     Debug.log(

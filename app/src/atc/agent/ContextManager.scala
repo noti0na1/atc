@@ -63,6 +63,12 @@ final class ContextManager:
     prepare(fixedTokens, history, ModelContext.from(model))
 
   def prepare(fixedTokens: Long, history: List[Msg], model: ModelContext): Preparation =
+    prepareWithContext(fixedTokens, history, model, "")
+
+  def prepare(fixedTokens: Long, history: List[Msg], model: ChatModel, retained: String): Preparation =
+    prepareWithContext(fixedTokens, history, ModelContext.from(model), retained)
+
+  def prepareWithContext(fixedTokens: Long, history: List[Msg], model: ModelContext, retained: String): Preparation =
     // Leave both estimation slack and, when configured, the full output
     // allowance. A maxTokens larger than the window intentionally leaves no
     // room and triggers the actionable warning below.
@@ -71,12 +77,17 @@ final class ContextManager:
       Allowance(window, reserve, window.toLong - reserve)
     }
     val (fitted, dropped) = allowance match
-      case Some(a) => fitToContext(history, (a.input / tokenCalibration).toLong - fixedTokens, estimateFor(_, model))
+      case Some(a) =>
+        val budget = (a.input / tokenCalibration).toLong - fixedTokens
+        val reserve = if history.map(estimateFor(_, model)).sum > budget then estimateTokens(retained) else 0L
+        fitToContext(history, budget - reserve, estimateFor(_, model))
       case None => (history, 0)
     contextDropped += dropped
     val preparedHistory = fitted match
       case Msg.User(text) :: rest if dropped > 0 =>
-        Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}\n\n$text") :: rest
+        val notes = if retained.isEmpty then ""
+        else s"\n\n[retained task context; current user instructions take precedence]\n$retained"
+        Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}$notes\n\n$text") :: rest
       case other => other
 
     // Estimate the final history once; the overflow check below reuses the

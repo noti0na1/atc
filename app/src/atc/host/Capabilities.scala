@@ -88,6 +88,13 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     * one-based number. CR, LF and CRLF have the same line semantics as
     * [[forEachLine]], including no phantom line after a final terminator. */
   private[host] def forEachCappedLine(maxChars: Int)(op: (String, Long, Int) => Unit): Unit =
+    scanLines(maxChars) { (line, chars, number) => op(line, chars, number); true }
+
+  /** Stop and close the stream as soon as the callback returns false. */
+  private[host] def scanLines(
+    maxChars: Int,
+    maxReadChars: Long = Long.MaxValue
+  )(op: (String, Long, Int) => Boolean): Boolean =
     if maxChars < 0 then throw IllegalArgumentException(s"maxChars must be non-negative (got $maxChars)")
     requireReadable("forEachLine", "readClassified()")
     val reader = java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8)
@@ -97,17 +104,19 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
       var lineChars = 0L
       var lineNumber = 0
       var afterCr = false
+      var continue = true
+      var consumed = 0L
 
       def emit(): Unit =
         lineNumber += 1
-        op(prefix.toString, lineChars, lineNumber)
+        continue = op(prefix.toString, lineChars, lineNumber)
         prefix.clear()
         lineChars = 0L
 
       var read = r.read(input)
-      while read >= 0 do
+      while continue && consumed < maxReadChars && read >= 0 do
         var index = 0
-        while index < read do
+        while continue && consumed < maxReadChars && index < read do
           val char = input(index)
           if afterCr && char == '\n' then afterCr = false
           else
@@ -120,9 +129,11 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
               if lineChars < maxChars.toLong then prefix.append(char)
               lineChars += 1
           index += 1
-        read = r.read(input)
+          consumed += 1
+        if continue && consumed < maxReadChars then read = r.read(input)
 
-      if lineChars > 0 then emit()
+      if continue && lineChars > 0 then emit()
+      consumed >= maxReadChars
     }
 
   /** Open this file for streaming reads; checked like `read`. The caller must
@@ -144,8 +155,10 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
         try Files.isSameFile(source.canonicalPath, p)
         catch case _: java.nio.file.NoSuchFileException => false
     if !sameFile then
-      host.ensureParent(p)
-      Using.resource(Files.newOutputStream(p).nn)(out => in.transferTo(out))
+      host.withFileChange(p, "copied") {
+        host.ensureParent(p)
+        Using.resource(Files.newOutputStream(p).nn)(out => in.transferTo(out))
+      }
 
   def write(content: String): Unit =
     host.writeFile(scope, p, content, append = false)
@@ -157,12 +170,14 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     host.writeFile(scope, p, content, append = true)
 
   def delete(): Unit =
-    host.requireWrite(scope, p, "delete")
-    Files.delete(p)
+    val permission = host.requireWrite(scope, p, "delete")
+    if permission.classified then Files.delete(p)
+    else host.withFileChange(p, "deleted")(Files.delete(p))
 
   def mkdir(): Unit =
-    host.requireWrite(scope, p, "mkdir")
-    Files.createDirectories(p)
+    val permission = host.requireWrite(scope, p, "mkdir")
+    if permission.classified then Files.createDirectories(p)
+    else host.withFileChange(p, "directory created")(Files.createDirectories(p))
     ()
 
   def children: List[FileEntry] =
@@ -172,6 +187,10 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   def walk(): List[FileEntry] =
     requireReadable("walk", "walkClassified")
     host.walkPaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
+
+  private[host] def walkIterator: Iterator[FileEntryImpl] =
+    requireReadable("walk", "walkClassified")
+    host.iteratePaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
 
   def readClassified(): Classified[String] =
     asClassified("readClassified")(Files.readString(p, UTF_8).nn)

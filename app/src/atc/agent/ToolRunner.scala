@@ -12,12 +12,13 @@ private[atc] trait ToolRunner:
 
 /** The model's Scala REPL tool, bound to the sandbox session for one turn. */
 private[atc] final class ScalaToolRunner(
-  session: ReplSession,
+  session: => ReplSession,
   policy: Policy,
   ui: AgentUI,
   maxOutputChars: Int,
 ) extends ToolRunner:
   val tools: List[ToolSpec] = ScalaToolRunner.tools
+  private lazy val repl = session
 
   def run(call: ToolCall): ToolResult = call.name match
     case Prompts.ToolName => runScala(call)
@@ -35,9 +36,11 @@ private[atc] final class ScalaToolRunner(
       ui.toolStart(code)
       val start = System.nanoTime()
       val decisionsBefore = policy.decisionCount
-      val result = session.run(code)
+      val current = repl
+      ui.status("compiling and running Scala")
+      val result = current.run(code)
       // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
-      val millis = (System.nanoTime() - start - session.clock.paused) / 1_000_000L
+      val millis = (System.nanoTime() - start - repl.clock.paused) / 1_000_000L
       ui.toolEnd(result, millis)
       val decisions = policy.decisionsSince(decisionsBefore)
       val rendered = ToolOutput.renderForModel(result, maxOutputChars, decisions)

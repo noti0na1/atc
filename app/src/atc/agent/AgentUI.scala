@@ -15,6 +15,8 @@ trait AgentUI:
   def toolEnd(result: ExecutionResult, millis: Long): Unit
   def status(text: String): Unit
   def warn(text: String): Unit
+  /** A queued correction has entered the conversation at a tool boundary. */
+  def inputAccepted(text: String): Unit = ()
   /** The turn has used its tool budget (`used` calls; `budget` is the configured
     * allocation): may it go on for another `budget`? */
   def confirmMoreToolCalls(used: Int, budget: Int): Boolean = false

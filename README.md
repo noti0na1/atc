@@ -709,6 +709,42 @@ terminal (`-p` in a pipe) everything is printed plainly; `ATC_ASCII=1` draws wit
 glyphs. The content shapes, keys and multi-line rules are in
 [doc/development.md](doc/development.md#the-terminal).
 
+While the agent is working, type a correction and press Enter. The status line shows your
+draft and queued messages. A submitted correction cancels an active model response or waits
+for the current Scala call to finish, then reaches the agent before more tool calls run.
+Bracketed pastes retain their newlines until you press Enter. Ctrl-C interrupts the turn.
+
+The status line shows the current operation, elapsed time, model, mode and working
+directory. Turn summaries distinguish finished, interrupted, blocked, failed and limit-reached
+responses. In scripted runs, finished responses exit with `0`, interruptions with `130`,
+and other stopped outcomes with `1`. A finished response does not certify that every tool
+succeeded. The REPL starts on the first Scala call, so ordinary conversation needs no compiler startup.
+
+Additional inspection and session commands:
+
+| Command | Purpose |
+|---|---|
+| `/output` | List recent tool results |
+| `/output last` or `/output 3` | Inspect retained output and file-change previews |
+| `/output 3 201` | Continue from a line in a long result |
+| `/task` | Show the task goal, constraints, completed work and remaining steps |
+| `/perms revoke` | Select a session grant to revoke |
+| `/perms revoke 2` or `/perms revoke all` | Revoke grants from the current list; configured rules remain |
+| `/save [file]` | Save to a new file; default location is `.atc/sessions/` |
+| `/resume <file>` | Restore conversation and task notes with fresh permissions and REPL state |
+
+File API edits produce compact change summaries; `/output` includes bounded text diffs.
+Existing background processes are managed separately with `/kill`, and their exits are
+reported above the input prompt. Output retention excludes classified terminal text.
+Saved sessions are owner-only on POSIX systems and never overwrite an existing file.
+Resuming does not replay tool calls or restore previous permission grants.
+
+For agent code, `replaceExact(path, expected, replacement)` checks that literal text occurs
+exactly once before writing. `readRange(path, from, to)` and
+`search(dir, pattern, glob, SearchOptions(...))` provide bounded reads and searches; inspect
+`SearchResult.limited` before treating a search as exhaustive. The agent maintains
+`TaskNotes` alongside its TODO list so important task state survives context trimming.
+
 ## License
 
 Apache-2.0.

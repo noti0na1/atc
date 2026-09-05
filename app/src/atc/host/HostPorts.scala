@@ -6,6 +6,8 @@ import atc.lib.Todo
 
 /** Where the agent's `println` output goes. */
 trait HostOutput:
+  /** Preview of a successful unclassified file operation. */
+  def fileChanged(change: FileChange): Unit = ()
   /** One print by the agent. `agentText` is what the model sees (appended to
     * the current tool result); `userText` is what the human sees. They differ
     * only for classified values (`Classified(***)` vs. the content). */

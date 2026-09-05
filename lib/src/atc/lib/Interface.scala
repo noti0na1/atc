@@ -195,6 +195,25 @@ case class GrepMatch(file: String, lineNumber: Int, line: String)
 @assumeSafe
 object GrepMatch
 
+/** Limits for search. A reached limit is reported in SearchResult. */
+@assumeSafe
+case class SearchOptions(maxMatches: Int = 100, maxFiles: Int = 1000, maxLinesPerFile: Int = 10000,
+                         maxLineChars: Int = 2000, maxCharsPerFile: Int = 1000000)
+@assumeSafe
+object SearchOptions
+
+@assumeSafe
+case class SearchResult(matches: List[GrepMatch], filesScanned: Int, limited: Boolean)
+@assumeSafe
+object SearchResult
+
+/** Working notes retained across context cuts and saved sessions. Never include classified content. */
+@assumeSafe
+case class TaskNotes(goal: String = "", constraints: List[String] = Nil,
+                     completed: List[String] = Nil, remaining: List[String] = Nil)
+@assumeSafe
+object TaskNotes
+
 @assumeSafe
 case class ProcessResult(exitCode: Int, stdout: String, stderr: String)
 @assumeSafe
@@ -348,6 +367,11 @@ trait Interface:
   /** Read a file as lines. */
   def readLines(path: String)(using FileSystem): List[String]
 
+  /** Read an inclusive 1-based window of at most 1000 lines, stopping at `to`.
+   *  Returned lines use LF; long lines are capped at 2000 characters with a marker.
+   *  Scanning stops after two million characters and reports that limit if reached. */
+  def readRange(path: String, from: Int, to: Int)(using FileSystem): String
+
   /** Print a file with 1-based line numbers, like `cat -n` (`     1\tline`); the
    *  first form stops after 400 lines with a note saying which `cat(path, from, to)`
    *  shows the rest, the second prints lines `from` to `to` inclusive, like
@@ -395,6 +419,10 @@ trait Interface:
    */
   def sed(path: String, pattern: String, replacement: String)(using FileSystem^): Int
 
+  /** Replace one exact occurrence of `expected`; no regex or replacement escapes.
+   *  Missing or ambiguous text throws before writing. */
+  def replaceExact(path: String, expected: String, replacement: String)(using FileSystem^): Unit
+
   /** A regex that matches `text` literally (`\Q…\E`), for a `sed` pattern. */
   def quote(text: String): String
   /** `text` as a literal `sed` replacement: its `\` and `$` escaped. */
@@ -436,6 +464,11 @@ trait Interface:
    *  `glob`, every file. */
   def grepRecursive(dir: String, pattern: String)(using FileSystem): List[GrepMatch]
   def grepRecursive(dir: String, pattern: String, glob: String)(using FileSystem): List[GrepMatch]
+
+  /** Search readable, unclassified files, with explicit work and output limits.
+   *  Matching examines retained line prefixes only; `limited` reports any cap reached.
+   *  Glob syntax is the same as `find`. Narrow the directory or raise limits when needed. */
+  def search(dir: String, pattern: String, glob: String, options: SearchOptions)(using FileSystem): SearchResult
 
   /** The files under `dir` selected by `glob`: a plain glob (`"*.scala"`, `"Test?.txt"`)
    *  matches the file name; one containing `/` or `**` matches the path relative to
@@ -561,6 +594,10 @@ trait Interface:
 
   /** Set the status of the item whose text exactly equals `text`; throws if absent. */
   def markTodo(text: String, status: TodoStatus)(using UserIO^): Unit
+
+  /** Update the goal, user constraints, completed work and next steps for a multi-step task. */
+  def setTaskNotes(notes: TaskNotes)(using UserIO^): Unit
+  def taskNotes(using UserIO): TaskNotes
 
   // ── Classified ──────────────────────────────────────────────────
 

@@ -21,7 +21,7 @@ private[host] trait HostProcesses:
     requestExec(commands, "")(op)
 
   def requestExec[T](commands: Iterable[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
-    val patterns = commands.toList.map(_.trim).filter(_.nonEmpty)
+    val patterns = commands.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted
     inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id)))
 
   def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, ExecOptions())

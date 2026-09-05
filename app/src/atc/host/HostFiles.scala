@@ -70,25 +70,32 @@ private[host] trait HostFiles:
 
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
 
+  private[host] def withFileChange[A](path: Path, operation: String)(body: => A): A =
+    val before = FileChange.snapshot(path)
+    val result = body
+    try
+      FileChange.between(display(PlatformPath.portable(path)), operation, before, FileChange.snapshot(path))
+        .foreach(output.fileChanged)
+    catch case NonFatal(error) => atc.Debug.trace(error)
+    result
+
   private[atc] def writeFile(scope: ScopeId, path: Path, content: String, append: Boolean): Unit =
     val permission = requireWrite(scope, path, if append then "append" else "write")
     requireNotClassified(permission, path, "write", "writeClassified(path, classify(content))")
-    ensureParent(path)
-    if append then
-      Files.writeString(
-        path,
-        content,
-        StandardCharsets.UTF_8,
-        StandardOpenOption.CREATE,
-        StandardOpenOption.APPEND
-      )
-    else Files.writeString(path, content, StandardCharsets.UTF_8)
+    withFileChange(path, "updated") {
+      ensureParent(path)
+      if append then
+        Files.writeString(path, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
+      else Files.writeString(path, content, StandardCharsets.UTF_8)
+    }
 
   private[atc] def writeFileBytes(scope: ScopeId, path: Path, content: Array[Byte]): Unit =
     val permission = requireWrite(scope, path, "writeBytes")
     requireNotClassified(permission, path, "writeBytes", "writeClassified(path, classify(content))")
-    ensureParent(path)
-    Files.write(path, content)
+    withFileChange(path, "updated") {
+      ensureParent(path)
+      Files.write(path, content)
+    }
     ()
 
   private[atc] def writeClassifiedFile(scope: ScopeId, path: Path, content: Try[String]): Unit =
@@ -141,11 +148,14 @@ private[host] trait HostFiles:
   /** Visible descendants in pre-order. Classified trees require an explicit
     * classified traversal, and symlinked directories are never followed. */
   private[atc] def walkPaths(scope: ScopeId, dir: Path, intoClassified: Boolean): List[Path] =
+    iteratePaths(scope, dir, intoClassified).toList
+
+  private[host] def iteratePaths(scope: ScopeId, dir: Path, intoClassified: Boolean): Iterator[Path] =
     def descendInto(child: Path, isLink: Boolean): Boolean =
       !isLink && Files.isDirectory(child) && (intoClassified || !policy.effective(scope, child).classified)
-    def visit(current: Path): List[Path] =
-      visibleEntries(scope, current).flatMap { (child, isLink) =>
-        child :: (if descendInto(child, isLink) then visit(child) else Nil)
+    def visit(current: Path): Iterator[Path] =
+      visibleEntries(scope, current).iterator.flatMap { (child, isLink) =>
+        Iterator.single(child) ++ (if descendInto(child, isLink) then visit(child) else Iterator.empty)
       }
     visit(dir)
 
@@ -176,6 +186,19 @@ private[host] trait HostFiles:
   def read(path: String)(using fs: FileSystem): String = fs.access(path).read()
 
   def readLines(path: String)(using fs: FileSystem): List[String] = fs.access(path).readLines()
+
+  def readRange(path: String, from: Int, to: Int)(using fs: FileSystem): String =
+    if from < 1 || to < from || to.toLong - from >= 1000 then
+      throw IllegalArgumentException(
+        "readRange: use an inclusive range of 1 to 1000 lines, starting at line 1 or later"
+      )
+    val lines = List.newBuilder[String]
+    val limited = impl(fs.access(path)).scanLines(Host.CatMaxLineChars, 2000000) { (line, chars, number) =>
+      if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
+      number < to
+    }
+    if limited then lines += "[read limit reached before completing the requested range]"
+    lines.result().mkString("\n")
 
   /** Print a numbered view capped at [[Host.CatMaxLines]]. Lines are streamed,
     * so a large file or line is never loaded whole: only the shown prefixes
@@ -208,9 +231,10 @@ private[host] trait HostFiles:
     val entry = impl(fs.access(path))
     val kept = collection.mutable.ListBuffer[CappedLine]()
     var lineCount = 0
-    entry.forEachCappedLine(Host.CatMaxLineChars) { (prefix, chars, number) =>
+    entry.scanLines(Host.CatMaxLineChars) { (prefix, chars, number) =>
       lineCount = number
       if lineCount >= from && lineCount <= to then kept += CappedLine(prefix, chars)
+      number < to
     }
     val text =
       if from > lineCount then s"[nothing to show: $path has $lineCount lines]\n"
@@ -309,6 +333,16 @@ private[host] trait HostFiles:
 
   def quoteReplacement(text: String): String = java.util.regex.Matcher.quoteReplacement(text).nn
 
+  def replaceExact(path: String, expected: String, replacement: String)(using fs: FileSystem): Unit =
+    if expected.isEmpty then throw IllegalArgumentException("replaceExact: expected text must not be empty")
+    val entry = fs.access(path)
+    val before = entry.read()
+    val index = before.indexOf(expected)
+    if index < 0 then throw IllegalArgumentException("replaceExact: expected text was not found; read the file again")
+    if before.lastIndexOf(expected) != index then
+      throw IllegalArgumentException("replaceExact: expected text is ambiguous; include more surrounding context")
+    entry.write(before.substring(0, index) + replacement + before.substring(index + expected.length))
+
   def replaceLines(path: String, from: Int, to: Int, text: String)(using fs: FileSystem): String =
     val entry = fs.access(path)
     val document = TextFiles.splitLines(entry.read())
@@ -378,9 +412,39 @@ private[host] trait HostFiles:
   def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
     filesNamed(dir, glob).map(entry => display(entry.path))
 
+  def search(dir: String, pattern: String, glob: String, options: SearchOptions)(using fs: FileSystem): SearchResult =
+    if options.maxMatches < 1 || options.maxMatches > 10000 || options.maxFiles < 1 || options.maxFiles > 100000 ||
+      options.maxLinesPerFile < 1 || options.maxLinesPerFile > 1000000 || options.maxLineChars < 1 ||
+      options.maxLineChars > 10000 ||
+      options.maxCharsPerFile < 1 || options.maxCharsPerFile > 10000000
+    then
+      throw IllegalArgumentException(
+        "search: limits must be positive (maxMatches <= 10000, maxFiles <= 100000, maxLinesPerFile <= 1000000, maxLineChars <= 10000, maxCharsPerFile <= 10000000)"
+      )
+    val regex = pattern.r
+    val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.isClassified)
+    val matches = collection.mutable.ListBuffer[GrepMatch]()
+    var scanned = 0
+    var limited = false
+    while matches.size < options.maxMatches && scanned < options.maxFiles && entries.hasNext do
+      val entry = entries.next()
+      scanned += 1
+      val readLimit = impl(entry).scanLines(options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
+        if chars > line.length then limited = true
+        if regex.findFirstIn(line).isDefined then matches += GrepMatch(display(entry.path), number, line)
+        val continue = matches.size < options.maxMatches && number < options.maxLinesPerFile
+        if !continue then limited = true
+        continue
+      }
+      if readLimit then limited = true
+    SearchResult(matches.toList, scanned, limited || scanned >= options.maxFiles)
+
   /** Select non-directory descendants by filename or relative-path glob. */
   private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntry] =
-    val files = fs.access(dir).walk().filterNot(_.isDirectory)
+    matchingFiles(fs.access(dir).walk().iterator, dir, glob).toList
+
+  private def matchingFiles(files0: Iterator[FileEntry], dir: String, glob: String): Iterator[FileEntry] =
+    val files = files0.filterNot(_.isDirectory)
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)
       val regex = PathGlob.regex(glob)

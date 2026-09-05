@@ -330,6 +330,11 @@ ATC's file and HTTP permissions do not constrain the internals of those commands
 
 ## The sandbox
 
+`App.ensureSession` initializes the REPL on the first Scala tool call or `/run`.
+Text-only turns do not start a compiler. Reset and mode changes discard the previous
+session; initialization remains deferred. `Agent.turn` and `ScalaToolRunner` accept the
+session lazily, and cancellation is checked after initialization before executing code.
+
 `ReplSession` persists definitions until a reset, new session or mode change. Safe mode is
 imported after the trusted preamble. Compiler diagnostics and runtime results are returned
 as `ExecutionResult`; an exception recorded by `CappedRendering` marks evaluation failure.
@@ -357,7 +362,7 @@ whitespace in capture because subtraction uses exact text.
 | `/clear` | Conversation, queued notes and usage accounting |
 | `/reset` | REPL and spawned processes; conversation and session grants remain |
 | `/mode` | REPL and spawned processes, with the selected capabilities |
-| `/new` | REPL, conversation, TODOs, usage and session grants |
+| `/new` | REPL, conversation, task notes, TODOs, retained output, usage and session grants |
 
 REPL restarts queue a notice for the model's next turn. `/run` queues the user's code and
 its result because definitions are shared with the agent. Closed sessions reject further
@@ -415,6 +420,13 @@ asks only for permissions not already held. `AllowOnce` applies to the child sco
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
 
+Permission requests display numbered command or host rows. The host sorts and deduplicates
+requested patterns so the displayed order agrees with decision notes. `Policy.sessionGrants`
+provides the current grant list; `/perms revoke` selects from it and `Policy.revoke` removes
+the selected grant from future checks. Configuration rules and open-scope semantics remain
+separate. Revoking a command grant does not terminate an existing process; `/kill` does that.
+The agent receives a queued notice after a user revokes a grant.
+
 `Decision.Revise(instructions)` records user feedback without granting access or opening a
 scope. The pending request throws a permission error. `ToolOutput` appends the complete,
 JSON-quoted instructions after the bounded execution output. A revision is distinct from
@@ -448,6 +460,25 @@ one pass and rejects zero matches. `replaceLines` returns the replaced text; cal
 account for line-number changes between edits. `copy` and `move` stream data, check both
 paths and avoid truncating a file copied onto itself or a hard-link alias. `move` checks
 source write permission before copying but is not atomic.
+
+`replaceExact` requires one non-empty literal occurrence and validates it before any write.
+It does not interpret regex or replacement escapes. `readRange` stops at the requested
+line boundary, with caps of 1000 returned lines, 2000 characters per line and two million
+scanned characters. Line-window `cat` also stops once it reaches `to`.
+
+`search` uses lazy descendant traversal and `FileEntryImpl.scanLines`, which closes its
+stream when the callback stops or a character budget is reached. `SearchOptions` bounds
+matched rows, scanned files, lines per file, line prefixes and characters read per file.
+`limited` means a cap was reached, not that another match is known to exist. Regex matching
+examines retained prefixes only. Directory listings still use the existing visibility and
+sorting rules; traversal does not follow directory symlinks or enter classified trees.
+
+Successful unclassified file operations report `FileChange` through `HostOutput`. Snapshots
+read at most 64001 bytes; binary and larger files get a summary without a text preview.
+The preview uses common line prefixes/suffixes and one replacement block, capped at 40
+lines. It is a compact explanation, not a general diff or undo engine. Classified writes
+and deletions never enter this preview path. External-command changes are not automatically
+captured by file API callbacks.
 
 `CommandLine` parses quoted arguments, pipelines, `<`, `>`, `>>` and `2>&1`. It rejects shell
 control operators and does not expand variables or globs. Explicit argument sequences are
@@ -535,6 +566,31 @@ or blocked responses are not executed. Output limits add `Msg.Continuation`; ser
 pauses can resume directly. Resume and tool-budget rejection counts bound repeated work.
 The interactive tool budget may be extended by the user; non-interactive runs stop at it.
 
+`TurnOutcome` records why the loop ended. `Finished` means the model produced a final
+response, not that the user's overall objective was independently verified. Interruption,
+provider refusal, exhausted limits and empty terminal responses have distinct outcomes.
+`App` maps them to summary labels and process exit codes; uncaught execution errors remain
+exceptions within the loop and are reported as `Failed` by the application.
+
+`ModelRequest` runs at most one unfinished provider call per agent. The provider adapters
+use SDK asynchronous streams, register their close callbacks before waiting for completion,
+and accumulate events through the existing SDK accumulators. This permits cancellation
+before HTTP headers arrive as well as during streaming. The caller polls cancellation every
+50 ms, closes the stream and interrupts its worker. A provider that does not stop prevents
+another worker from accumulating behind it and produces a clear retry message. Stream
+sinks reject late output after the request ends. Provider clients are closed at application
+shutdown. Interrupted calls may not supply a final token-usage report.
+
+Cancellation tracks the underlying OkHttp call through a request-scoped event listener.
+It calls `Call.cancel()` before closing the SDK's buffered reader: closing that reader alone
+can wait on a lock held by a stalled read. The listener captures the request scope so retries
+on SDK threads remain cancellable. Temporary SDK clients borrow the model's connection pool
+and executor through transports whose `close` is a no-op. Only the owning model closes
+these resources. This also prevents SDK garbage-collection cleanup from shutting down the
+executor between tool calls. Provider tests cover authentication, cancellation before headers,
+cancellation between chunked events, subsequent requests and garbage collection. Error messages
+include a bounded cause chain; `ATC_DEBUG=1` adds the complete stack trace.
+
 `Conversation` repairs pending tool results after a failure and inserts assistant markers
 when needed. Pending REPL notices are prepended to the next user message. Real user input
 and internal continuation messages remain distinct for context fitting and prediction.
@@ -555,6 +611,27 @@ History fitting computes message sizes and prefix sums once, then chooses a real
 boundary. It never cuts between a tool request and its results or drops only part of the
 latest exchange. `Msg.Continuation` is excluded from those boundaries so an automatic
 resume cannot remove the user request it is continuing.
+
+`HostInteraction` retains immutable `TaskNotes` (goal, constraints, completed work and
+remaining steps), limited to 16000 characters. The agent prompt asks it to maintain these
+alongside TODOs. `Conversation` separately retains the first user request and up to eight
+recent requests, bounded to 8000 characters each. When history is cut, `ContextManager`
+reserves room for a JSON representation of the task notes, bounded recent instructions and
+TODO state, and inserts it with the cut notice. This leaves the stable system prefix intact.
+Current user instructions and actual permissions take precedence over working notes.
+
+Submitted updates enter a concurrent queue. While a model is generating, an update cancels
+that request; while Scala is running, it waits for the call to return. Remaining calls in
+the old completion receive skipped results. `Conversation.steer` adds the correction as a
+user message, inserting an assistant bridge after tool results when needed. The next model
+request therefore sees the correction before choosing another operation.
+
+`SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
+state and TODOs. It excludes SDK replay payloads, REPL definitions and permission grants.
+Files are limited to 8 MiB, created exclusively and owner-only on POSIX systems. `/resume`
+validates the file before clearing current state, checks tool-call/result pairing, creates
+fresh permission and REPL state, and adds explicit notices about lost definitions and
+grants. It retains the currently selected model and never executes saved tool calls.
 
 When a permission prompt returns feedback, `ScalaToolRunner` sets `ToolResult.needsReplan`
 from the recorded decision, even if the snippet caught the permission exception. `Agent`
@@ -581,9 +658,23 @@ accepts a prediction; the right arrow also accepts predictions. Ctrl-D exits.
 
 `Continuation` handles open brackets, strings and comments for `/run`. Shift+Enter and
 backslash followed by Enter insert a newline. An empty line submits a code block; Ctrl-C
-cancels block input. During a turn, a separate reader retains typed input for the next
-prompt and discards escape sequences, stopping on timeout or EOF. Menu reads pause that
+cancels block input. During a turn, a separate reader collects corrections and unsent
+draft text and handles escape sequences, stopping on timeout or EOF. Menu reads pause that
 reader.
+
+During a turn, Enter submits a correction and unsent text is shown in the status line.
+Bracketed pastes are collected without submitting individual lines. The status line uses
+JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
+operation, elapsed time and model/mode/directory context. Spinner writes and status updates
+share the TUI lock. Background process events between turns use `LineReader.printAbove`
+so notifications do not overwrite the user's input.
+
+`ToolHistory` retains up to 20 results within an eight-million-character budget. Each
+result retains at most two million output characters plus bounded code and file previews;
+live command output is capped separately at one million characters. `/output` displays
+200-line windows without evaluating code again. Classified terminal-only output is never
+added to the history, and `/new` clears it. These records are for inspection and are not
+part of saved conversations.
 
 Permission menus include **Tell the agent what to change**, followed by free-text input.
 Empty or cancelled feedback returns to the menu. `Tui.readAnswer` consumes JLine's
@@ -611,10 +702,14 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
   capability requirements, REPL state and interruption.
 - `PolicySuite`, `PermissionSuite`, `HostSuite`, `ClassifiedSuite`: permission rules and
   host effects, including classified values and local HTTP requests.
+- `HostEditingSuite`: literal replacements, bounded reads and searches, file previews and classified exclusions.
+- `ModelRequestSuite`, `ProviderCancellationSuite`: cancellation and HTTP client ownership across requests.
+- `SessionStoreSuite`: portable conversation persistence, validation and file permissions.
 - `ConfigSuite`, `LayerSuite`, `ModelSuite`, `GitIgnoreSuite`: configuration and lookup.
 - `AgentCoreLoopSuite`, `AgentLoopSuite`, `CompletionPolicySuite`, `ContextManagerSuite`:
   loop decisions, transcript repair, context fitting and the real REPL integration.
-- `TuiSuite`, `RenderSuite`, `InputPredictorSuite`: terminal helpers, rendering and prediction.
+- `TuiSuite`, `ToolHistorySuite`, `RenderSuite`, `InputPredictorSuite`, `DebugSuite`:
+  terminal helpers, retained output, rendering, prediction and error reporting.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
 
 `TestEnv` supplies temporary directories, scripted permissions and recording host ports.
@@ -627,8 +722,8 @@ All Scala modules use explicit null checks where configured; Java APIs may requi
 Use `Platform` and `PlatformPath` for OS decisions and `ScalaSource` for generated Scala
 literals. Keep model/provider escaping, shell quoting and terminal sanitization separate.
 Scalafmt uses a 120-column configuration that preserves existing layout. `Interface.scala`
-is excluded because the formatter cannot parse its capture-checking syntax; format it by
-hand. Preserve tests for capability contracts when editing it.
+and `Runtime.scala` are excluded because the formatter cannot parse their capture-checking
+syntax; format them by hand. Preserve tests for capability contracts when editing them.
 
 ## Wrappers, releases and CI
 

@@ -72,11 +72,21 @@ case class FileRequest(path: Path, access: Access, current: Perm, reason: String
 
 case class ExecRequest(commands: List[String], reason: String) extends PermissionRequest:
   def title = "Run commands"
-  protected def fields = List("patterns" -> commands.mkString(", "))
+  protected def fields = commands.zipWithIndex.map((command, index) => s"command ${index + 1}" -> command)
 
 case class NetRequest(hosts: List[String], reason: String) extends PermissionRequest:
   def title = "Network access"
-  protected def fields = List("hosts" -> hosts.mkString(", "))
+  protected def fields = hosts.zipWithIndex.map((host, index) => s"host ${index + 1}" -> host)
+
+enum SessionGrant:
+  case File(path: Path, access: Access)
+  case Command(pattern: String)
+  case Host(pattern: String)
+
+  def describe: String = this match
+    case File(path, access) => s"${access.label} on ${PlatformPath.portable(path)}"
+    case Command(pattern) => s"commands: $pattern"
+    case Host(pattern) => s"hosts: $pattern"
 
 /** Shows the permission pop-up to the user. */
 trait PermissionPrompter:
@@ -359,6 +369,19 @@ final class Policy(
       matchingRulesCache.clear()
 
   def openScopeCount: Int = scopes.size - 1
+
+  /** Current session grants, in display order. Configuration rules are separate. */
+  def sessionGrants: List[SessionGrant] =
+    base.fileGrants.reverse.map((path, access) => SessionGrant.File(path, access)) ++
+      base.commands.distinct.map(SessionGrant.Command(_)) ++ base.hosts.distinct.map(SessionGrant.Host(_))
+
+  /** Remove a session grant from future permission checks. Existing processes are managed by /kill. */
+  def revoke(grant: SessionGrant): Unit = base.synchronized {
+    grant match
+      case SessionGrant.File(path, access) => base.fileGrants = base.fileGrants.filterNot(_ == (path -> access))
+      case SessionGrant.Command(pattern) => base.commands = base.commands.filterNot(_ == pattern)
+      case SessionGrant.Host(pattern) => base.hosts = base.hosts.filterNot(_ == pattern)
+  }
 
   /** Number of canonical paths currently memoized (tests and diagnostics). */
   private[atc] def matchingRulesCacheSize: Int = matchingRulesCache.synchronized(matchingRulesCache.size)

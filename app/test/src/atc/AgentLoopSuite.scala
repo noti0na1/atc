@@ -83,12 +83,15 @@ final class RecordingUI extends AgentUI:
   val deltas, notes, statuses, warnings, toolStarts = ListBuffer[String]()
   val toolEnds = ListBuffer[Boolean]()
   var ends = 0
+  var onEnd: () => Unit = () => ()
   /** When set, `toolStart` throws — a stand-in for anything that can fail while a
     * tool call is being run, after its `Msg.Assistant` is in history. */
   var toolStartThrows: Boolean = false
   def assistantDelta(text: String): Unit = deltas += text
   def assistantNote(text: String): Unit = notes += text
-  def assistantEnd(): Unit = ends += 1
+  def assistantEnd(): Unit =
+    ends += 1
+    onEnd()
   def toolStart(code: String): Unit =
     if toolStartThrows then throw RuntimeException("render blew up")
     toolStarts += code
@@ -474,15 +477,16 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(agent.history.last, Msg.Assistant("I can't help with that.", Nil, None))
 
   test("cancellation before a tool runs yields a cancelled result and interrupted turn"):
-    val (_, s, _, agent) = setup(ScriptedModel(
+    val (_, s, ui, agent) = setup(ScriptedModel(
       "m",
       Seq(
         ScriptedModel.tool("1 + 1"),
         ScriptedModel.Reply("unreached"),
       )
     ))
-    var checks = 0
-    agent.turn(s, "go", () => { checks += 1; checks >= 2 }) // after the completion, before execution
+    var cancelled = false
+    ui.onEnd = () => cancelled = true
+    agent.turn(s, "go", () => cancelled)
     val tr = toolResults(agent).head.results.head
     assert(tr.isError)
     assert(tr.output.contains("Cancelled"), tr.output)
@@ -499,8 +503,9 @@ class AgentLoopSuite extends munit.FunSuite:
   test("cancelling between resume rounds does not create consecutive assistant messages"):
     val model = ScriptedModel("m", Seq(ScriptedModel.unfinished("partial"), ScriptedModel.Reply("next turn")))
     val (_, s, ui, agent) = setup(model)
-    var checks = 0
-    agent.turn(s, "first", () => { checks += 1; checks >= 3 })
+    var cancelled = false
+    ui.onEnd = () => cancelled = true
+    agent.turn(s, "first", () => cancelled)
     assertEquals(model.i, 1)
     assertEquals(assistants(agent).map(_.text), List("partial"))
     assert(ui.warnings.exists(_.contains("interrupted")), ui.warnings.toString)
@@ -782,7 +787,8 @@ class AgentLoopSuite extends munit.FunSuite:
   test("the system prompt describes whether safe mode is actually enabled"):
     val (_, _, _, safe) = setup(ScriptedModel("safe", Nil), cfg = Config(safeMode = true))
     assert(safe.systemPrompt.text.contains("Safe mode is ON"), safe.systemPrompt.text)
-    assert(safe.systemPrompt.text.contains("import language.experimental.safe"), safe.systemPrompt.text)
+    assert(safe.systemPrompt.text.contains("safe mode is already enabled"), safe.systemPrompt.text)
+    assert(safe.systemPrompt.text.contains("Do not add `scala.language` or `language.experimental` imports"))
     val (_, _, _, unsafe) = setup(ScriptedModel("unsafe", Nil), cfg = Config(safeMode = false))
     assert(unsafe.systemPrompt.text.contains("Safe mode is OFF"), unsafe.systemPrompt.text)
     assert(unsafe.systemPrompt.text.contains("top-level mutable state"), unsafe.systemPrompt.text)

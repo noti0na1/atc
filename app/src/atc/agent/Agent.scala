@@ -18,6 +18,7 @@ final class Agent(
   /** The model that may see classified data; switchable with `/classifiedmodel`. */
   var classifiedModel: Option[ChatModel],
   extraInstructions: Option[String],
+  taskState: () => (atc.lib.TaskNotes, List[atc.lib.Todo]) = () => (atc.lib.TaskNotes(), Nil),
 ):
   private var currentModel = initialModel
   def model: ChatModel = currentModel
@@ -30,6 +31,29 @@ final class Agent(
 
   private val conversation = Conversation()
   def history: List[Msg] = conversation.history
+  def snapshot: SessionSnapshot =
+    val (notes, todos) = taskState()
+    SessionSnapshot(history, conversation.notes, conversation.userRequests, notes, todos, model.ref)
+
+  def restore(saved: SessionSnapshot): Unit =
+    clear()
+    conversation.restore(saved.history, saved.pendingNotes, saved.userRequests)
+    noteSandboxRestarted("a saved conversation was resumed; previous tool calls were not replayed")
+    conversation.queueNote(
+      "[permissions] Grants from the saved session are no longer active. Check the current policy and request any permissions still needed."
+    )
+
+  private def retainedContext: String =
+    val (notes, todos) = taskState()
+    ujson.write(ujson.Obj(
+      "originalRequest" -> conversation.userRequests.headOption.getOrElse(""),
+      "recentUserInstructions" -> ujson.Arr.from(conversation.userRequests.drop(1).takeRight(8).map(_.take(2000))),
+      "goal" -> notes.goal,
+      "constraints" -> ujson.Arr.from(notes.constraints),
+      "completed" -> ujson.Arr.from(notes.completed),
+      "remaining" -> ujson.Arr.from(notes.remaining),
+      "todos" -> ujson.Arr.from(todos.take(50).map(todo => s"${todo.status}: ${todo.text.take(200)}")),
+    ))
   /** Every model call since the last `clear()`, grouped by purpose
     * ([[Agent.Turns]], [[Agent.Chat]], ...) in order of first use. Access is
     * synchronized because next-input prediction records usage on another thread. */
@@ -37,6 +61,20 @@ final class Agent(
   /** Tool calls actually run since the last `clear()`. */
   var toolCalls: Int = 0
   private val context = ContextManager()
+  private val request = ModelRequest()
+  private val queuedInput = java.util.concurrent.ConcurrentLinkedQueue[String]()
+
+  def submit(input: String): Unit =
+    if input.trim.nonEmpty then queuedInput.add(input.trim)
+
+  def queuedInputCount: Int = queuedInput.size()
+
+  private def acceptQueuedInput(): Unit =
+    var input = queuedInput.poll()
+    while input != null do
+      conversation.steer(input)
+      ui.inputAccepted(input)
+      input = queuedInput.poll()
 
   /** Everything spent on the model(s) since the last `clear()`. */
   def usage: TokenUsage = synchronized(usageBy.values.foldLeft(TokenUsage())(_ + _))
@@ -78,6 +116,11 @@ final class Agent(
   def noteSandboxRestarted(reason: String): Unit =
     conversation.queueNote(AgentMessages.sandboxRestarted(reason))
 
+  def notePermissionRevoked(grant: String): Unit =
+    conversation.queueNote(
+      s"[permissions] The user revoked the session grant for $grant. Do not assume it remains available."
+    )
+
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
     * continues in, and the result may be what the next request is about. */
@@ -92,13 +135,14 @@ final class Agent(
     synchronized { usageBy.clear() }
     toolCalls = 0
     context.reset()
+    queuedInput.clear()
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
-  def turn(session: ReplSession, input: String, cancelled: () => Boolean): Unit =
+  def turn(session: => ReplSession, input: String, cancelled: () => Boolean): TurnOutcome =
     runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars), input, cancelled)
 
   /** Core entry point, with concrete tool execution supplied by the host adapter. */
-  private[atc] def runTurn(runner: ToolRunner, input: String, cancelled: () => Boolean): Unit =
+  private[atc] def runTurn(runner: ToolRunner, input: String, cancelled: () => Boolean): TurnOutcome =
     tools = runner.tools
     conversation.beginTurn(input)
     context.beginTurn()
@@ -107,7 +151,7 @@ final class Agent(
   private enum Outcome:
     /** Something was appended to the history; ask the model again. */
     case Continue
-    case Done
+    case Done(result: TurnOutcome)
 
   /** One turn: the round loop plus the counters the bounds are checked against. */
   private final class Turn(runner: ToolRunner, cancelled: () => Boolean):
@@ -117,10 +161,17 @@ final class Agent(
     private var resumes = 0
     private var budgetRejections = 0
 
-    def run(): Unit =
-      var outcome = Continue
-      try while outcome == Continue do outcome = round()
+    def run(): TurnOutcome =
+      @scala.annotation.tailrec
+      def loop(): TurnOutcome = round() match
+        case Continue => loop()
+        case Done(result) => result
+      try loop()
       catch
+        case error: CancelledException =>
+          conversation.repairAfter(error)
+          interrupted()
+          TurnOutcome.Interrupted
         // Keep the transcript valid after a failed turn. Providers reject consecutive
         // user messages and tool requests without matching results:
         //  - If tool execution failed before its results were recorded, add an error
@@ -137,11 +188,15 @@ final class Agent(
     private def round(): Outcome =
       if cancelled() then interrupted()
       else
-        val prepared = context.prepare(fixedTokens, history, model)
+        acceptQueuedInput()
+        val prepared = context.prepare(fixedTokens, history, model, retainedContext)
         conversation.useHistory(prepared.history)
         prepared.warnings.foreach(ui.warn)
         ui.status(AgentMessages.thinkingStatus(model.alias))
         completeRound() match
+          case None if !cancelled() && !queuedInput.isEmpty =>
+            conversation.interrupt()
+            Continue
           case None => interrupted()
           case Some(raw) =>
             recordUsage(Agent.Turns, raw.usage)
@@ -152,8 +207,14 @@ final class Agent(
             accepted.warnings.foreach(ui.warn)
             accepted.next match
               case CompletionPolicy.Next.RunTools(calls) => runTools(calls)
-              case CompletionPolicy.Next.Blocked => Done
-              case CompletionPolicy.Next.Finish => if cancelled() then interrupted() else Done
+              case CompletionPolicy.Next.Blocked =>
+                if !queuedInput.isEmpty then Continue else Done(TurnOutcome.Blocked)
+              case CompletionPolicy.Next.Finish =>
+                if cancelled() then interrupted()
+                else if !queuedInput.isEmpty then Continue
+                else if budgetRejections > 0 then Done(TurnOutcome.LimitReached)
+                else if raw.text.trim.isEmpty then Done(TurnOutcome.Failed)
+                else Done(TurnOutcome.Finished)
               case CompletionPolicy.Next.Resume(needsContinuation) =>
                 if cancelled() then interrupted()
                 else if resumes < Agent.MaxResumes then
@@ -161,13 +222,25 @@ final class Agent(
                   resume()
                 else
                   ui.warn(AgentMessages.resumeExhaustedWarning(model.alias, Agent.MaxResumes))
-                  Done
+                  Done(TurnOutcome.LimitReached)
 
     private def completeRound(): Option[Completion] =
-      try Some(model.complete(systemPrompt, history, tools, sink, cancelled))
+      val active = java.util.concurrent.atomic.AtomicBoolean(true)
+      val current = model
+      val prompt = systemPrompt
+      val messages = history
+      val guarded = StreamSink(
+        text => if active.get() then sink.text(text),
+        text => if active.get() then sink.note(text),
+        text => if active.get() then sink.thinking(text),
+      )
+      val stop = () => cancelled() || !queuedInput.isEmpty
+      try Some(request.run(stop)(current.complete(prompt, messages, tools, guarded, stop)))
       catch
         case _: CancelledException => None
-      finally ui.assistantEnd()
+      finally
+        active.set(false)
+        ui.assistantEnd()
 
     /** Run the requested tools in order, honouring cancellation and the per-turn budget. */
     private def runTools(calls: List[ToolCall]): Outcome =
@@ -175,7 +248,8 @@ final class Agent(
       var needsReplan = false
       val results = calls.map { call =>
         if cancelled() then ToolResult(call.id, AgentMessages.cancelledBeforeExecution, isError = true)
-        else if needsReplan then ToolResult(call.id, AgentMessages.skippedAfterFeedback, isError = true)
+        else if needsReplan || !queuedInput.isEmpty then
+          ToolResult(call.id, AgentMessages.skippedAfterFeedback, isError = true)
         else if used >= budget && !extendBudget() then
           overBudget = true
           ToolResult(
@@ -199,7 +273,7 @@ final class Agent(
         if budgetRejections < Agent.MaxBudgetRejections then Continue
         else
           ui.warn(AgentMessages.toolBudgetLoopWarning)
-          Done
+          Done(TurnOutcome.LimitReached)
 
     /** Treat the budget as a checkpoint by asking the user for another
       * `maxToolCalls` allocation. A budget of zero disables tools and cannot be
@@ -227,7 +301,7 @@ final class Agent(
       // alternation. User/tool-result endings do need a closing assistant.
       conversation.interrupt()
       ui.warn(AgentMessages.interruptedWarning)
-      Done
+      Done(TurnOutcome.Interrupted)
 
 object Agent:
   /** Purposes a model call is recorded under (`/cost`). */

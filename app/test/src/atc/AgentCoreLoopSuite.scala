@@ -1,6 +1,6 @@
 package atc
 
-import atc.agent.{Agent, AgentEnvironment, AgentMessages, ToolRunner}
+import atc.agent.{Agent, AgentEnvironment, AgentMessages, ToolRunner, TurnOutcome}
 import atc.config.Config
 import atc.llm.*
 import atc.perms.{Decision, Policy}
@@ -97,13 +97,13 @@ class AgentCoreLoopSuite extends munit.FunSuite:
   test("mid-batch cancellation preserves the complete call/result alignment"):
     val ids = List("ran", "cancelled-one", "cancelled-two")
     val (_, ui, agent) = setup(Seq(toolStep(ids*)))
-    val runner = RecordingRunner()
-    var checks = 0
-    def cancelled(): Boolean =
-      checks += 1
-      checks >= 3 // round check, first call check, then cancellation
+    var cancelled = false
+    val runner = RecordingRunner(call =>
+      cancelled = true
+      ToolResult(call.id, s"result:${call.id}", isError = false)
+    )
 
-    agent.runTurn(runner, "go", cancelled)
+    agent.runTurn(runner, "go", () => cancelled)
 
     assertEquals(runner.calls.map(_.id).toList, List("ran"))
     val results = toolResults(agent).head.results
@@ -138,3 +138,35 @@ class AgentCoreLoopSuite extends munit.FunSuite:
       case _ => false
     }
     assertEquals(agent.history(requestIndex + 1), Msg.ToolResults(results))
+
+  test("turn outcomes distinguish completion, interruption, refusal and budget limits"):
+    val (_, _, finished) = setup(Seq(ScriptedModel.Reply("done")))
+    assertEquals(finished.runTurn(RecordingRunner(), "go", () => false), TurnOutcome.Finished)
+    val (_, _, interrupted) = setup(Nil)
+    assertEquals(interrupted.runTurn(RecordingRunner(), "go", () => true), TurnOutcome.Interrupted)
+    val (_, _, blocked) = setup(Seq(ScriptedModel.refusal("refused")))
+    assertEquals(blocked.runTurn(RecordingRunner(), "go", () => false), TurnOutcome.Blocked)
+    val (_, _, limited) = setup(Seq(toolStep("one"), ScriptedModel.Reply("stopped")), Config(maxToolCalls = 0))
+    assertEquals(limited.runTurn(RecordingRunner(), "go", () => false), TurnOutcome.LimitReached)
+    val (_, _, empty) = setup(Seq(ScriptedModel.Reply("")))
+    assertEquals(empty.runTurn(RecordingRunner(), "go", () => false), TurnOutcome.Failed)
+
+  test("a text-only turn does not initialize the Scala REPL"):
+    val (_, _, agent) = setup(Seq(ScriptedModel.Reply("explanation")))
+    var initialized = false
+    def session: atc.sandbox.ReplSession =
+      initialized = true
+      throw IllegalStateException("REPL should not start")
+    assertEquals(agent.turn(session, "explain", () => false), TurnOutcome.Finished)
+    assert(!initialized)
+
+  test("a queued correction skips stale calls and becomes a user message before the next model request"):
+    val (model, _, agent) = setup(Seq(toolStep("first", "stale"), toolStep("revised"), ScriptedModel.Reply("done")))
+    val runner = RecordingRunner(call =>
+      if call.id == "first" then agent.submit("Skip deployment; run only unit tests.")
+      ToolResult(call.id, "ok", isError = false)
+    )
+    agent.runTurn(runner, "deploy", () => false)
+    assertEquals(runner.calls.map(_.id).toList, List("first", "revised"))
+    assertEquals(model.seenHistories(1).last, Msg.User("Skip deployment; run only unit tests."))
+    assertEquals(agent.queuedInputCount, 0)
