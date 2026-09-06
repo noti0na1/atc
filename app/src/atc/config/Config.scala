@@ -270,7 +270,7 @@ object Config:
   /** Settings that are policy: a narrowing layer may only make these stricter,
     * so they are taken from the granting layers and then tightened. Everything
     * else (models, providers, instructions, and the `commands` / `hosts` lists,
-    * which every layer may add to) simply merges in layer order. */
+    * which every layer may add to) merges in layer order. */
   private val PolicyKeys =
     Set("files", "denyCommands", "denyHosts") ++
       Set("mode", "safeMode", "respectGitignore") ++

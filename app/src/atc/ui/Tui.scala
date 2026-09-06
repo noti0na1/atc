@@ -525,7 +525,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** The model's reasoning as it streams. Compact view: a live window over the
     * last lines that collapses to a one-line summary when the reasoning ends.
     * Plain or expanded view: written out in full, the block staying open so
-    * later deltas simply append. */
+    * later deltas append. */
   private object thinking:
     private val buf = Tui.TailBuffer(Tui.MaxHeldChars)
     private var region: Option[LiveRegion] = None
@@ -565,7 +565,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         streaming = false
 
     /** Thinking ended (answer text or a tool call follows): a window collapses
-      * to a summary line, reasoning shown in full just ends. */
+      * to a summary line, reasoning shown in full ends. */
     def end(): Unit = if active then
       val collapses = region.isDefined
       detach()

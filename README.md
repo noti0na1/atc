@@ -247,7 +247,7 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 ```
 
 `io` is the common capture root for every published machine capability. Local and full mode
-expose it as `IOCap^`; local simply omits `net`. The derivations are sandbox-internal, so
+expose it as `IOCap^`. The derivations are sandbox-internal, so
 holding the root does not create a capability omitted by the current mode.
 Command operations require both full capabilities, `Exec^` and `FileSystem^`; every mode that
 publishes `ex` also publishes a full `fs` under the same root.
@@ -397,7 +397,7 @@ agent can express at all, before the permission policy even comes up.
 
 In read-only mode, a write is an `update` call through a read-only view (the error shown
 [above](#example)); in local mode the preamble deliberately omits the `Network`
-capability, so a network call simply has no given to resolve. The derivation API is internal: full
+capability, so a network call has no given to resolve. The derivation API is internal: full
 `io` records the common capture root but is not an agent-callable factory for `net`. Either
 way a mode can withdraw an effect while leaving the conversation intact. The agent can
 therefore always explain what it *would* have done; the system prompt directs it to do so
@@ -411,8 +411,8 @@ default is full.
 
 ## Asking for more
 
-Anything the configuration already permits just works. When an operation is denied, the
-exception names the block that can ask for it, and the agent wraps just that operation:
+Anything the configuration already permits works. When an operation is denied, the
+exception names the block that can ask for it, and the agent wraps only that operation:
 
 ```scala
 requestFiles(".cache/atc", Access.Write, reason = "cache build outputs") {

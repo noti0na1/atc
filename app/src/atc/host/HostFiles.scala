@@ -431,7 +431,7 @@ private[host] trait HostFiles:
     while matches.size < options.maxMatches && scanned < options.maxFiles && entries.hasNext do
       val entry = entries.next()
       scanned += 1
-      // `limited` only when something was really left out: a line beyond the per-file
+      // `limited` only when something was left out: a line beyond the per-file
       // budget, or a match beyond the cap (a cap reached on a file's last line cut nothing).
       val readLimit = impl(entry).scanLines(options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
         if number > options.maxLinesPerFile then { limited = true; false }

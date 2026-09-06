@@ -17,7 +17,7 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
   def get(name: String): Option[String] =
     files.iterator.flatMap((_, bindings) => bindings.get(name)).nextOption()
       // The live process-environment lookup follows the platform's name rules;
-      // notably, Windows names are case-insensitive while a copied Scala Map is not.
+      // Windows names are case-insensitive, while a copied Scala Map is not.
       .orElse(ProcessEnvironment.get(name).filter(_.nonEmpty))
 
   /** The names these files bind, for `/config`. Never the values. */

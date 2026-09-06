@@ -58,7 +58,7 @@ final class Agent(
     * ([[Agent.Turns]], [[Agent.Chat]], ...) in order of first use. Access is
     * synchronized because next-input prediction records usage on another thread. */
   private val usageBy = scala.collection.mutable.LinkedHashMap[String, TokenUsage]()
-  /** Tool calls actually run since the last `clear()`. */
+  /** Tool calls that ran since the last `clear()`. */
   var toolCalls: Int = 0
   private val context = ContextManager()
   private val request = ModelRequest()
