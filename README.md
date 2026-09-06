@@ -731,12 +731,19 @@ Additional inspection and session commands:
 | `/perms revoke` | Select a session grant to revoke |
 | `/perms revoke 2` or `/perms revoke all` | Revoke grants from the current list; configured rules remain |
 | `/save [file]` | Save to a new file; default location is `.atc/sessions/` |
-| `/resume <file>` | Restore conversation and task notes with fresh permissions and REPL state |
+| `/resume [file]` | Resume the last session for this directory, or restore a saved file |
+
+Interactive terminal sessions save automatically when you leave with `/quit`, `exit` or
+Ctrl-D. The next launch in the same directory offers **Resume last session** or
+**Start a new session**. You can also use `/resume` after starting fresh. Exiting an empty
+session preserves the previous save. Automatic saves live under `~/.atc/sessions/`,
+separately for each working directory; scripted `-p` runs do not update them.
 
 File API edits produce compact change summaries; `/output` includes bounded text diffs.
 Existing background processes are managed separately with `/kill`, and their exits are
 reported above the input prompt. Output retention excludes classified terminal text.
-Saved sessions are owner-only on POSIX systems and never overwrite an existing file.
+Saved sessions are owner-only on POSIX systems. `/save` never overwrites an existing file;
+automatic saves replace the last checkpoint after writing a complete new one.
 Resuming does not replay tool calls or restore previous permission grants.
 
 For agent code, `replaceExact(path, expected, replacement)` checks that literal text occurs

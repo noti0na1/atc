@@ -53,3 +53,35 @@ class SessionStoreSuite extends munit.FunSuite:
     val mismatched =
       snapshot.copy(history = history.updated(2, Msg.ToolResults(List(ToolResult("other", "42", false)))))
     intercept[IllegalArgumentException](SessionStore.decode(SessionStore.encode(mismatched)))
+
+  test("automatic saves use a stable path for each canonical working directory"):
+    val home = Files.createTempDirectory("atc-session-home").nn
+    val first = Files.createDirectory(home.resolve("first")).nn
+    val second = Files.createDirectory(home.resolve("second")).nn
+    val path = SessionStore.autoSavePath(home, first)
+    assertEquals(path, SessionStore.autoSavePath(home, first.resolve(".").nn))
+    assertNotEquals(path, SessionStore.autoSavePath(home, second))
+    assert(path.startsWith(home.resolve(".atc/sessions")))
+
+  test("checkpoints replace the last save and preserve it when a new save fails"):
+    val root = Files.createTempDirectory("atc-session-checkpoint").nn
+    val path = root.resolve("last.json").nn
+    SessionStore.checkpoint(path, snapshot)
+    SessionStore.checkpoint(path, snapshot.copy(model = "updated"))
+    assertEquals(SessionStore.read(path).model, "updated")
+    if !Platform.isWindows then
+      assertEquals(Files.getPosixFilePermissions(path), PosixFilePermissions.fromString("rw-------"))
+    val before = Files.readString(path)
+    val oversized = snapshot.copy(history = List(Msg.User("x" * (8 * 1024 * 1024))))
+    intercept[IllegalArgumentException](SessionStore.checkpoint(path, oversized))
+    assertEquals(Files.readString(path), before)
+    val files = Files.list(root).nn
+    try assertEquals(files.count(), 1L)
+    finally files.close()
+
+  test("empty sessions do not replace previous work, while user-run code and task notes are retained"):
+    val empty = SessionSnapshot(Nil, Nil, Nil, TaskNotes(), Nil, "p/m")
+    assert(!empty.nonEmpty)
+    assert(empty.copy(pendingNotes = List("User ran: println(42)")).nonEmpty)
+    assert(empty.copy(task = TaskNotes(goal = "finish the tests")).nonEmpty)
+    assert(empty.copy(history = List(Msg.User("hello"))).nonEmpty)

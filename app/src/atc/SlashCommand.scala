@@ -37,8 +37,9 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Output extends SlashCommand("/output [number|last] [line]", "inspect retained tool output and file changes")
   case Task extends SlashCommand("/task", "show the retained task goal, constraints and progress")
   case Save extends SlashCommand("/save [file]", "save the conversation and task notes to a new file")
-  case Resume extends SlashCommand("/resume <file>", "restore a saved conversation with fresh permissions and REPL")
-  case Quit extends SlashCommand("/quit", "exit", "/exit", "/q")
+  case Resume
+      extends SlashCommand("/resume [file]", "resume the last session or a saved file with fresh permissions and REPL")
+  case Quit extends SlashCommand("/quit", "save the current session and exit", "/exit", "/q")
 
   /** The name as typed, e.g. `/help`. */
   def name: String = usage.takeWhile(_ != ' ')

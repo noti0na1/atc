@@ -5,8 +5,10 @@ import atc.llm.{Msg, ToolCall, ToolResult}
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.{Files, Path, StandardOpenOption}
+import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, StandardCopyOption, StandardOpenOption}
 import java.nio.file.attribute.PosixFilePermissions
+import java.security.MessageDigest
+import java.util.{HexFormat, UUID}
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
@@ -18,10 +20,29 @@ private[atc] final case class SessionSnapshot(
   task: TaskNotes,
   todos: List[Todo],
   model: String,
-)
+):
+  def nonEmpty: Boolean =
+    history.nonEmpty || pendingNotes.nonEmpty || userRequests.nonEmpty || task != TaskNotes() || todos.nonEmpty
 
 private[atc] object SessionStore:
   private val MaxBytes = 8 * 1024 * 1024
+
+  /** Keep automatic saves outside the project and separate them by canonical working directory. */
+  def autoSavePath(home: Path, cwd: Path): Path =
+    val digest = MessageDigest.getInstance("SHA-256").nn.digest(cwd.toRealPath().nn.toString.getBytes(UTF_8))
+    home.resolve(".atc/sessions").nn.resolve(s"${HexFormat.of().nn.formatHex(digest)}.json").nn
+
+  /** Publish a complete checkpoint. A failed write leaves the previous save available. */
+  def checkpoint(path: Path, session: SessionSnapshot): Unit =
+    val target = path.toAbsolutePath.nn.normalize.nn
+    val temporary = target.resolveSibling(s".${target.getFileName}.${UUID.randomUUID()}.tmp").nn
+    try
+      write(temporary, session)
+      try Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+      catch
+        case _: AtomicMoveNotSupportedException =>
+          Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
+    finally Files.deleteIfExists(temporary)
 
   def write(path: Path, session: SessionSnapshot): Unit =
     val bytes = encode(session).getBytes(UTF_8)

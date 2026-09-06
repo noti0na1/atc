@@ -628,10 +628,28 @@ request therefore sees the correction before choosing another operation.
 
 `SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
 state and TODOs. It excludes SDK replay payloads, REPL definitions and permission grants.
-Files are limited to 8 MiB, created exclusively and owner-only on POSIX systems. `/resume`
+Files are limited to 8 MiB, created exclusively and owner-only on POSIX systems. `/resume [file]`
 validates the file before clearing current state, checks tool-call/result pairing, creates
 fresh permission and REPL state, and adds explicit notices about lost definitions and
 grants. It retains the currently selected model and never executes saved tool calls.
+
+Interactive terminal sessions save on normal exit (`/quit`, its aliases, or Ctrl-D).
+`SessionStore.autoSavePath` hashes the canonical working directory with SHA-256 to select
+a checkpoint under `~/.atc/sessions/`. This works with read-only project directories and
+keeps different working directories separate. Startup offers to resume that checkpoint;
+bare `/resume` opens it later. Empty sessions leave it unchanged, so declining the startup
+offer and immediately quitting does not erase previous work. Conversation messages, pending
+notes from `/run`, task notes or TODOs make a session non-empty. Manual `/save` files remain
+independent. Scripted runs and redirected input do not save or prompt automatically.
+
+`checkpoint` writes an exclusive temporary file with the usual size limit and permissions,
+closes it, then replaces the previous save with an atomic move. Filesystems without atomic
+move support use a replacement move. Failed writes leave the previous checkpoint intact;
+temporary files are removed. Concurrent instances in one directory share the checkpoint,
+so the last successful save becomes the resume point. A missing or invalid checkpoint never
+prevents startup. This is normal-exit persistence; it does not install a shutdown hook or
+promise recovery after a forced termination. Restoring state waits for a new user request
+before any model or tool runs.
 
 When a permission prompt returns feedback, `ScalaToolRunner` sets `ToolResult.needsReplan`
 from the recorded decision, even if the snippet caught the permission exception. `Agent`

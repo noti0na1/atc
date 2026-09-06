@@ -1,7 +1,7 @@
 package atc
 
 import atc.SlashCommand as Cmd
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, SessionStore, TurnOutcome}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, SessionSnapshot, SessionStore, TurnOutcome}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -190,7 +190,9 @@ final class App(args: Cli.Args):
           runTurn(p).exitCode
         case None =>
           banner()
+          if tui.menusAvailable then offerResume()
           interactive()
+          if tui.menusAvailable then saveOnExit()
           0
     finally
       predictor.invalidate()
@@ -201,6 +203,49 @@ final class App(args: Cli.Args):
         catch case scala.util.control.NonFatal(error) => Debug.trace(error)
       }
       tui.close()
+
+  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, cwd)
+
+  private def offerResume(): Unit =
+    try
+      if Files.exists(autoSaveFile) then
+        val saved = SessionStore.read(autoSaveFile)
+        if saved.nonEmpty then
+          saved.userRequests.lastOption.foreach(text =>
+            tui.info(s"Last request: ${text.replace('\n', ' ').take(160)}")
+          )
+          tui.choose(
+            "Continue your last session in this directory?",
+            List("Resume last session", "Start a new session")
+          ) match
+            case Some("Resume last session") => restoreSession(saved)
+            case _ => ()
+    catch
+      case scala.util.control.NonFatal(error) =>
+        tui.warn(s"Could not load the previous session: ${Debug.describe(error)}")
+        Debug.trace(error)
+
+  private def saveOnExit(): Unit =
+    val saved = agent.snapshot
+    if saved.nonEmpty then
+      try
+        SessionStore.checkpoint(autoSaveFile, saved)
+        tui.info("Session saved. Start ATC in this directory to resume.")
+      catch
+        case scala.util.control.NonFatal(error) =>
+          tui.error(s"Could not save the session: ${Debug.describe(error)}")
+          Debug.trace(error)
+
+  private def restoreSession(saved: SessionSnapshot): Unit =
+    predictor.invalidate()
+    if newSession() then
+      host.restoreTaskState(saved.task, saved.todos)
+      agent.restore(saved)
+      if saved.model != agent.model.ref then
+        tui.info(s"Using ${agent.model.ref}; the saved session used ${saved.model}.")
+      tui.success(
+        s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
+      )
 
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   private def describe(m: ChatModel): String =
@@ -356,18 +401,11 @@ final class App(args: Cli.Args):
       SessionStore.write(path, agent.snapshot)
       tui.success(s"Saved conversation to ${App.pretty(path)}")
     case Cmd.Resume =>
-      if arg.isEmpty then tui.error("Usage: /resume <file>")
+      val path = if arg.isEmpty then autoSaveFile else sessionPath(arg)
+      if arg.isEmpty && !Files.exists(path) then tui.info("No saved session for this directory.")
       else
-        val saved = SessionStore.read(sessionPath(arg))
-        predictor.invalidate()
-        if newSession() then
-          host.restoreTaskState(saved.task, saved.todos)
-          agent.restore(saved)
-          if saved.model != agent.model.ref then
-            tui.info(s"Using ${agent.model.ref}; the saved session used ${saved.model}.")
-          tui.success(
-            s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
-          )
+        val saved = SessionStore.read(path)
+        restoreSession(saved)
     case Cmd.Quit => () // `command` ends the loop instead
 
   /** `/run`: the user runs Scala in the sandbox themselves, against the same
