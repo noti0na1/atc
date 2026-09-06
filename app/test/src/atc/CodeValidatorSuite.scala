@@ -361,6 +361,25 @@ class CodeValidatorSuite extends munit.FunSuite:
   test("reject catch of VirtualMachineError"):
     assertRejected("try f() catch case _: VirtualMachineError => ()", "catch-fatal")
   test("reject catch of Any") { assertRejected("try f() catch case _: Any => ()", "catch-fatal") }
+  test("reject catch of Throwable's supertypes, aliased or renamed on import in every mode"):
+    for t <- List("Object", "Serializable", "Matchable", "java.lang.Object", "(RuntimeException | Object)") do
+      assertRejected(s"try f() catch case _: $t => ()", "catch-fatal")
+    assertRejected("type X = Object\ntry f() catch case _: X => ()", "catch-fatal-alias")
+    // Safe mode allows import aliases, but renaming a fatal type is a catch in disguise.
+    val renamed = "import java.lang.Throwable as Fatal\ntry f() catch case _: Fatal => ()"
+    assert(CodeValidator.validate(renamed, strictImportAliases = false).map(_.ruleId).contains("import-fatal-alias"))
+    assertRejected("import java.lang.{Error => E}\ntry f() catch case _: E => ()", "import-fatal-alias")
+    assertRejected("import java.lang.{\n  Object as O\n}\ntry f() catch case _: O => ()", "import-fatal-alias")
+    val harmless = "import scala.collection.immutable.{Map as IMap}\nval m = IMap(1 -> 2)"
+    assertEquals(CodeValidator.validate(harmless, strictImportAliases = false), Nil)
+  test("reject a catch handler that is not case arms, and a fatal ascription spanning lines"):
+    assertRejected("val h: PartialFunction[Throwable, Int] = { case _ => 1 }\ntry f() catch h", "catch-handler")
+    assertRejected("try f() catch { h }", "catch-handler")
+    assertRejected("try f() catch {\n  case _:\n    Throwable => ()\n}", "catch-fatal")
+    assertRejected("try f() catch\n  case e:\n    (RuntimeException | Error) => ()", "catch-fatal")
+    assertAllowed("try f() catch { case _: Exception => () }")
+    assertAllowed("try f() catch\n  case e: Exception => ()")
+    assertAllowed("try f() catch {\n  case e:\n    Exception => ()\n}")
   test("reject catch of a fully-qualified Throwable"):
     assertRejected("try f() catch case _: java.lang.Throwable => ()", "catch-fatal")
   test("reject catch of Throwable split across lines"):

@@ -1,7 +1,9 @@
 package atc
 
 import atc.SlashCommand as Cmd
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, SessionSnapshot, SessionStore, TurnOutcome}
+import atc.agent.{
+  Agent, AgentEnvironment, InputPredictor, Prompts, ScalaToolRunner, SessionSnapshot, SessionStore, TurnOutcome
+}
 import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -18,9 +20,8 @@ import scala.collection.mutable
   * host, sandbox session, agent loop and terminal UI together, then runs
   * either one non-interactive turn (`-p`) or the interactive loop with its
   * slash commands. */
-final class App(args: Cli.Args):
+final class App(args: Cli.Args, val tui: Tui):
   val cwd: Path = args.cwd
-  val tui = Tui(PlatformPath.userHome.resolve(".atc").nn.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
     * first-run offers of [[App.setup]] (which may end the program instead). */
@@ -203,7 +204,6 @@ final class App(args: Cli.Args):
         try model.close()
         catch case scala.util.control.NonFatal(error) => Debug.trace(error)
       }
-      tui.close()
 
   private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, cwd)
 
@@ -422,14 +422,9 @@ final class App(args: Cli.Args):
     tui.beginTurn()
     try
       tui.toolStart(code, "/run")
-      val start = System.nanoTime()
       val s = ensureSession()
-      tui.status("running Scala")
-      val decisionsBefore = policy.decisionCount
-      val result = s.run(code)
-      val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
-      tui.toolEnd(result, millis)
-      agent.noteUserRan(code, result, policy.decisionsSince(decisionsBefore))
+      val (result, decisions) = ScalaToolRunner.evaluate(s, policy, tui, code)
+      agent.noteUserRan(code, result, decisions)
     catch
       case e: Exception =>
         tui.error(Debug.describe(e))
@@ -702,7 +697,6 @@ object App:
         s"Fill in the API keys in ${pretty(global.getParent.nn.resolve(Config.KeysFile).nn)} " +
           "(or export them in the environment), then start atc again."
       )
-      tui.close()
       throw Exit(0)
     configuration
 

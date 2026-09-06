@@ -22,6 +22,12 @@ class JsonSuite extends munit.FunSuite:
     assertEquals(Json.parse(j.render), j)
     assertEquals(j.toString, j.render)
 
+  test("nesting is bounded so bad input throws the documented exception, not a stack overflow"):
+    assertEquals(Json.parse("[" * 500 + "]" * 500).render, "[" * 500 + "]" * 500)
+    intercept[IllegalArgumentException](Json.parse("[" * 600 + "]" * 600))
+    val deep = (1 to 600).foldLeft(Json.Null: Json)((inner, _) => Json.Arr(List(inner)))
+    intercept[IllegalArgumentException](deep.render)
+
   test("missing keys and indices give Null so chains are safe; leaf readers throw on the wrong kind"):
     val j = Json.parse("""{"a": {"b": [10, 20]}}""")
     assert(j("x")("y")(3).isNull)

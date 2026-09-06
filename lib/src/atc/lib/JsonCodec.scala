@@ -19,6 +19,7 @@ private[atc] object JsonCodec:
     def newline(depth: Int): Unit =
       if pretty then sb.append('\n').append("  " * depth)
     def go(j: Json, depth: Int): Unit = j match
+      case _ if depth > MaxDepth => throw IllegalArgumentException(s"JSON nested deeper than $MaxDepth levels")
       case Json.Null => sb.append("null")
       case Json.Bool(b) => sb.append(b)
       case Json.Num(d) => sb.append(number(d))
@@ -84,8 +85,12 @@ private[atc] object JsonCodec:
     if p.i < text.length then p.fail("unexpected text after the value")
     v
 
+  /** Deeper input would overflow the stack, which agent code cannot catch (a fatal error). */
+  private val MaxDepth = 512
+
   private final class Parser(s: String):
     var i: Int = 0
+    private var depth = 0
 
     def fail(msg: String): Nothing =
       val near = s.slice(i, math.min(s.length, i + 20))
@@ -98,14 +103,20 @@ private[atc] object JsonCodec:
     def value(): Json =
       if i >= s.length then fail("unexpected end of input")
       s.charAt(i) match
-        case '{' => obj()
-        case '[' => arr()
+        case '{' => nested(obj())
+        case '[' => nested(arr())
         case '"' => Json.Str(str())
         case 't' => lit("true", Json.Bool(true))
         case 'f' => lit("false", Json.Bool(false))
         case 'n' => lit("null", Json.Null)
         case c if c == '-' || (c >= '0' && c <= '9') => number()
         case c => fail(s"unexpected character '$c'")
+
+    private def nested(parse: => Json): Json =
+      depth += 1
+      if depth > MaxDepth then fail(s"nested deeper than $MaxDepth levels")
+      try parse
+      finally depth -= 1
 
     private def lit(word: String, v: Json): Json =
       if s.startsWith(word, i) then

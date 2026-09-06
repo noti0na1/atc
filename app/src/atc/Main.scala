@@ -1,7 +1,8 @@
 package atc
 
 import atc.config.Config
-import atc.ui.Ansi
+import atc.platform.PlatformPath
+import atc.ui.{Ansi, Tui}
 
 import java.nio.file.Path
 
@@ -53,7 +54,10 @@ object Main:
     sys.exit(exitCode)
 
   private def run(args: Cli.Args): Int =
-    try App(args).run()
+    // Opened here so it is closed even when App's constructor fails (a bad config, an
+    // unknown model): the terminal has a status footer and signal handlers by then.
+    val tui = Tui(PlatformPath.userHome.resolve(".atc").nn.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
+    try App(args, tui).run()
     catch
       case App.Exit(code) => code
       case e: Throwable =>
@@ -61,6 +65,7 @@ object Main:
         System.err.println(Ansi.sanitize(s"atc: $message"))
         Debug.trace(e)
         1
+    finally tui.close()
 
   /** `--init` / `--init-global`: say what was written, or refuse to overwrite. */
   private def report(target: Path, created: List[Path], todo: String): Int =

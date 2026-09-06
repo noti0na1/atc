@@ -35,6 +35,10 @@ class GitIgnoreSuite extends munit.FunSuite:
       List(true, true, false, true, true, true, true)
     )
 
+  test("`**` inside a name is two ordinary stars and does not cross directories"):
+    val root = repo("src/a**b\n", "src/axb" -> "", "src/a/b" -> "", "src/ab" -> "")
+    assertEquals(ignoredIn(root, "src/axb", "src/a/b", "src/ab"), List(true, false, true))
+
   test("anchored patterns are relative to the .gitignore's directory"):
     val root = repo("/out\nbuild/gen\n", "out/x" -> "", "src/out/y" -> "", "build/gen/z" -> "", "src/build/gen/w" -> "")
     assertEquals(

@@ -28,9 +28,6 @@ case class FileRule(
   classified: Option[Boolean],
   locked: Boolean = false,
   grantsWithin: Option[Path] = None,
-  /** Where the rule comes from, when that is not "a `files` entry"; shown by
-    * `/perms` so a rule nobody wrote is not a mystery. */
-  why: Option[String] = None
 ):
   /** Whether this rule may grant `p` access, or only take it away. */
   def grants(p: Path): Boolean = grantsWithin.forall(root => p == root || p.startsWith(root))
@@ -43,9 +40,7 @@ case class FileRule(
       classified.filter(identity).map(_ => "classified"),
       Option.when(locked)("locked"),
     ).flatten
-    val note = why.orElse(grantsWithin.map(root =>
-      s"from the project config, granting only inside ${PlatformPath.portable(root)}"
-    ))
+    val note = grantsWithin.map(root => s"from the project config, granting only inside ${PlatformPath.portable(root)}")
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(" — " + _)}"
 
 /** What the user answers to a permission prompt. */
@@ -231,7 +226,7 @@ final class Policy(
       if current.locked then
         throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
       decide(FileRequest(p, access, current, reason), s"${access.label} on '$shown'") {
-        base.fileGrants ::= (p -> access)
+        base.synchronized { base.fileGrants ::= (p -> access) }
       }
     openScope(parent, fileGrants = List(p -> access))
 
@@ -256,7 +251,9 @@ final class Policy(
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
-      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") { base.commands ++= missing }
+      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") {
+        base.synchronized { base.commands ++= missing }
+      }
     openScope(parent, commands = commands)
 
   // ── network ───────────────────────────────────────────────────────
@@ -280,7 +277,9 @@ final class Policy(
     // an exact `::1` grant covers the equivalent expanded IPv6 spelling.
     val missing = hosts.filterNot(host => hostPatterns(parent).exists(GlobMatcher.matchesHost(host, _)))
     if missing.nonEmpty then
-      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") { base.hosts ++= missing }
+      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") {
+        base.synchronized { base.hosts ++= missing }
+      }
     openScope(parent, hosts = hosts)
 
   /** Refuse a `request*` whose patterns collide with the deny list, before the
@@ -360,9 +359,10 @@ final class Policy(
   def resetSession(): Unit =
     scopes.clear()
     scopes.put(ScopeId.Base, base)
-    base.fileGrants = Nil
-    base.commands = Nil
-    base.hosts = Nil
+    base.synchronized:
+      base.fileGrants = Nil
+      base.commands = Nil
+      base.hosts = Nil
     decisionLog.synchronized:
       decisionLog.clear()
     matchingRulesCache.synchronized:

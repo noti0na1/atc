@@ -4,7 +4,7 @@ package atc.llm
   * replies with the user's text; a message of the form `run: <scala>` makes it
   * call `run_scala` with that code and then report the result. */
 object EchoModel:
-  def apply(alias: String, ref: String, contextWindow: Option[Int] = None): EchoModel =
+  def apply(alias: String, ref: String, contextWindow: Option[Int]): EchoModel =
     new EchoModel(alias, ref, contextWindow)
   /** An echo model that is its own reference (tests and smoke runs). */
   def apply(alias: String): EchoModel = new EchoModel(alias, alias, None)

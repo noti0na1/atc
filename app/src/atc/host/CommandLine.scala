@@ -185,10 +185,12 @@ private[atc] object CommandLine:
     var stdinFile: Option[String] = None
     var stdoutFile: Option[String] = None
     var append = false
+    var stageCount = 0
 
     def endStage(why: String): Unit =
       if wordCount == 0 then throw IllegalArgumentException(s"exec: empty command $why in: $line")
       stages += Stage(arguments.result(), mergeErr)
+      stageCount += 1
       arguments = List.newBuilder[String]
       wordCount = 0
       mergeErr = false
@@ -204,6 +206,8 @@ private[atc] object CommandLine:
         wordCount += 1
         parse(more)
       case Token.Pipe :: more =>
+        if stdoutFile.isDefined then
+          throw IllegalArgumentException(s"exec: '>' / '>>' must follow the last command of the pipeline in: $line")
         endStage("before '|'")
         parse(more)
       case Token.MergeErr :: more =>
@@ -212,6 +216,8 @@ private[atc] object CommandLine:
       case Token.In :: more =>
         val (file, remaining) = fileAfter("<", more)
         if stdinFile.isDefined then throw IllegalArgumentException(s"exec: more than one '<' in: $line")
+        if stageCount > 0 then
+          throw IllegalArgumentException(s"exec: '<' must be on the first command of the pipeline in: $line")
         stdinFile = Some(file)
         parse(remaining)
       case (token @ (Token.Out | Token.Append)) :: more =>

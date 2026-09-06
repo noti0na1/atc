@@ -234,12 +234,25 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     config.executionTimeoutMs match
       case None =>
         // No worker thread here: a fatal error in agent code must be reported like
-        // the worker path's "no result" case, not crash the whole process. The stop
-        // signal itself (ThreadDeath) still propagates.
+        // the worker path's "no result" case, not crash the whole process. This thread
+        // is the one `interrupt()` must reach for blocking calls, and a stop signal
+        // (ThreadDeath) it asked for is an interruption, not a crash.
+        val previousIndex = state.objectIndex
+        evalThread = Thread.currentThread()
         try adopt(res, evaluate(res))
         catch
+          case _: ThreadDeath if stopRequested =>
+            skipInvalidWrapper(previousIndex)
+            ExecutionResult(
+              false,
+              "",
+              Some("Execution interrupted by the user (completed effects are not rolled back)")
+            )
           case t: ThreadDeath => throw t
           case _: Throwable => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
+        finally
+          evalThread = null
+          Thread.interrupted() // an interrupt meant for the evaluation must not hit this thread's later work
       case Some(limit) => dispatchWithTimeout(res, limit)
 
   /** `started` is released once the output stream is ours (or we gave up waiting for it). */

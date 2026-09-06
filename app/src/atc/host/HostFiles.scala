@@ -38,27 +38,17 @@ private[host] trait HostFiles:
     )
 
   private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
-    val permission = policy.effective(scope, path)
-    if !permission.canRead then
-      val shown = PlatformPath.portable(path)
-      throw denied(
-        path,
-        operation,
-        permission,
-        s"Use requestFiles(${ScalaSource.stringLiteral(shown)}, Access.Read, reason) { ... } to ask the user."
-      )
-    permission
+    require(scope, path, operation, write = false)
 
   private[atc] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
+    require(scope, path, operation, write = true)
+
+  private def require(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
     val permission = policy.effective(scope, path)
-    if !permission.canWrite then
-      val shown = PlatformPath.portable(path)
-      throw denied(
-        path,
-        operation,
-        permission,
-        s"Use requestFiles(${ScalaSource.stringLiteral(shown)}, Access.Write, reason) { ... } to ask the user."
-      )
+    if !(if write then permission.canWrite else permission.canRead) then
+      val access = if write then "Access.Write" else "Access.Read"
+      val shown = ScalaSource.stringLiteral(PlatformPath.portable(path))
+      throw denied(path, operation, permission, s"Use requestFiles($shown, $access, reason) { ... } to ask the user.")
     permission
 
   private[atc] def requireNotClassified(
@@ -131,7 +121,7 @@ private[host] trait HostFiles:
   /** Visible children paired with whether the original directory entry was a
     * symlink. Policy checks use canonical paths; gitignore checks use the entry. */
   private def visibleEntries(scope: ScopeId, dir: Path): List[(Path, Boolean)] =
-    Using.resource(Files.list(dir).nn) { stream =>
+    val entries = Using.resource(Files.list(dir).nn) { stream =>
       stream.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).flatMap { entry =>
         try
           // Canonicalize every entry. Windows junctions/reparse points are not
@@ -146,6 +136,9 @@ private[host] trait HostFiles:
         catch case _: Exception => None
       }
     }
+    // A link beside its own target resolves to the same path: list that path once, as the plain entry.
+    val plain = entries.collect { case (path, false) => path }.toSet
+    entries.filter((path, link) => !link || !plain.contains(path)).distinctBy(_._1)
 
   private[atc] def visibleChildren(scope: ScopeId, dir: Path): List[Path] = visibleEntries(scope, dir).map(_._1)
 
@@ -197,10 +190,11 @@ private[host] trait HostFiles:
         "readRange: use an inclusive range of 1 to 1000 lines, starting at line 1 or later"
       )
     val lines = List.newBuilder[String]
-    val limited = impl(fs.access(path)).scanLines(Host.CatMaxLineChars, 2000000) { (line, chars, number) =>
-      if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
-      number < to
-    }
+    val limited =
+      impl(fs.access(path)).scanLines(Host.CatMaxLineChars, Host.ReadRangeMaxChars) { (line, chars, number) =>
+        if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
+        number < to
+      }
     if limited then lines += "[read limit reached before completing the requested range]"
     lines.result().mkString("\n")
 
@@ -211,20 +205,24 @@ private[host] trait HostFiles:
     val entry = impl(fs.access(path))
     val kept = collection.mutable.ListBuffer[CappedLine]()
     var lineCount = 0
-    entry.forEachCappedLine(Host.CatMaxLineChars) { (prefix, chars, number) =>
+    // Counting the lines beyond the shown window is bounded like `readRange`: a huge file
+    // must not cost the whole snippet timeout for 400 lines of output.
+    val cut = entry.scanLines(Host.CatMaxLineChars, Host.CatMaxReadChars) { (prefix, chars, number) =>
       lineCount = number
       if lineCount <= Host.CatMaxLines then kept += CappedLine(prefix, chars)
+      true
     }
     val text =
       if lineCount == 0 then "[empty file]\n"
       else
         val body = numbered(kept.toList, 1)
-        if lineCount <= Host.CatMaxLines then body
+        val more = if cut then "+" else ""
+        if lineCount <= Host.CatMaxLines && !cut then body
         else
-          val next = math.min(lineCount, 2 * Host.CatMaxLines)
+          val next = math.min(math.max(lineCount, Host.CatMaxLines + 1), 2 * Host.CatMaxLines)
           body +
-            s"... [${lineCount - Host.CatMaxLines} more lines ($lineCount in all): cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines +
-                1}, $next) shows the next]\n"
+            s"... [${(lineCount - Host.CatMaxLines).max(0)}$more more lines ($lineCount$more in all): cat(${ScalaSource
+                .stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
     output.print(text, text)
 
   /** Print an inclusive, one-based range with line numbers. Streamed: only the
@@ -433,19 +431,24 @@ private[host] trait HostFiles:
     while matches.size < options.maxMatches && scanned < options.maxFiles && entries.hasNext do
       val entry = entries.next()
       scanned += 1
+      // `limited` only when something was really left out: a line beyond the per-file
+      // budget, or a match beyond the cap (a cap reached on a file's last line cut nothing).
       val readLimit = impl(entry).scanLines(options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
-        if chars > line.length then limited = true
-        if regex.findFirstIn(line).isDefined then matches += GrepMatch(display(entry.path), number, line)
-        val continue = matches.size < options.maxMatches && number < options.maxLinesPerFile
-        if !continue then limited = true
-        continue
+        if number > options.maxLinesPerFile then { limited = true; false }
+        else
+          if chars > line.length then limited = true
+          val hit = regex.findFirstIn(line).isDefined
+          if hit && matches.size >= options.maxMatches then { limited = true; false }
+          else
+            if hit then matches += GrepMatch(display(entry.path), number, line)
+            true
       }
       if readLimit then limited = true
-    SearchResult(matches.toList, scanned, limited || scanned >= options.maxFiles)
+    SearchResult(matches.toList, scanned, limited || entries.hasNext)
 
   /** Select non-directory descendants by filename or relative-path glob. */
   private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntry] =
-    matchingFiles(fs.access(dir).walk().iterator, dir, glob).toList
+    matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).toList
 
   private def matchingFiles(files0: Iterator[FileEntry], dir: String, glob: String): Iterator[FileEntry] =
     val files = files0.filterNot(_.isDirectory)

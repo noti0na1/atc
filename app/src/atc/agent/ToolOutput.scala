@@ -63,7 +63,7 @@ object ToolOutput:
       else
         val head = hinted.take(maxChars * 2 / 3)
         val tail = hinted.takeRight(maxChars / 3)
-        s"$head\n... [${hinted.length - maxChars} characters omitted] ...\n$tail"
+        s"$head\n... [${hinted.length - head.length - tail.length} characters omitted] ...\n$tail"
     if decisions.isEmpty then bounded else s"$bounded\n${decisionNote(decisions)}"
 
   /** What the user decided at the prompts of one call, for the model:

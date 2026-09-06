@@ -108,7 +108,7 @@ object CodeValidator:
     // fatal type (`case _: Foo if Throwable.check() =>`) is not a false positive.
     Forbidden(
       "catch-fatal",
-      raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef)\b".r,
+      raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable)\b".r,
       "Catching Throwable/Error/a fatal error is forbidden; catch a specific non-fatal type instead, e.g. case _: Exception (or a RuntimeException subtype)"
     ),
     // An erased type parameter bounded by a fatal type would defeat `catch-fatal`:
@@ -133,7 +133,7 @@ object CodeValidator:
     // not cross a `[`.
     Forbidden(
       "catch-fatal-alias",
-      raw"\btype\s+\w+(?:\[[^\]\n]*\])?\s*=\s*(?:[^\[=\n|&]*[|&]\s*)*(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|InterruptedException|ThreadDeath)\b".r,
+      raw"\btype\s+\w+(?:\[[^\]\n]*\])?\s*=\s*(?:[^\[=\n|&]*[|&]\s*)*(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable|InterruptedException|ThreadDeath)\b".r,
       "Aliasing Throwable/Error/a fatal error type is forbidden; it would defeat the ban on catching fatal throwables"
     ),
     Forbidden(
@@ -253,26 +253,58 @@ object CodeValidator:
   private val CatchAllDescription: String =
     "A bare catch-all also catches fatal errors and the sandbox stop signal; catch a specific non-fatal type instead, e.g. case _: Exception"
 
+  /** The names `catch-fatal` rejects in an ascription: renaming one on import (`import
+    * java.lang.Throwable as Fatal`) would otherwise defeat it, in every mode. */
+  private val FatalTypeNames: Set[String] = Set(
+    "Throwable",
+    "ControlThrowable",
+    "Error",
+    "VirtualMachineError",
+    "StackOverflowError",
+    "OutOfMemoryError",
+    "Any",
+    "AnyRef",
+    "Object",
+    "Serializable",
+    "Matchable",
+    "InterruptedException",
+    "ThreadDeath",
+  )
+  private val FatalTypeRe = raw"\b(?:[\w.]+\.)?(?:${FatalTypeNames.mkString("|")})\b".r
+  private val FatalImportAliasDescription: String =
+    "Renaming Throwable/Error/a fatal type on import is forbidden; it would defeat the ban on catching fatal throwables"
+  private val CatchHandlerDescription: String =
+    "The handler of `catch` must be written as `case` arms; a handler value (a PartialFunction) cannot be checked for catching fatal errors"
+
+  /** `kw` at `i` as a whole word. */
+  private def keywordAt(code: String, i: Int, kw: String): Boolean =
+    code.regionMatches(i, kw, 0, kw.length) &&
+      (i == 0 || !isIdentChar(code.charAt(i - 1))) &&
+      (i + kw.length >= code.length || !isIdentChar(code.charAt(i + kw.length)))
+
   private val ImportAliasDescription: String =
     "Import aliases are forbidden when safe mode is off because they can hide restricted packages, classes, and methods from validation"
 
-  /** Offsets of `as` / `=>` aliases inside import statements. Imports may have
-    * selectors over several lines, so a per-line regex is not sufficient. */
-  private def importAliasOffsets(code: String): List[Int] =
+  /** Offsets of `as` / `=>` aliases inside import statements, and separately those that
+    * rename a fatal type. Imports may have selectors over several lines, so a per-line
+    * regex is not sufficient. */
+  private final case class ImportAliases(all: List[Int], fatal: List[Int])
+  private def importAliasOffsets(code: String): ImportAliases =
     val hits = scala.collection.mutable.ListBuffer[Int]()
+    val fatal = scala.collection.mutable.ListBuffer[Int]()
     val len = code.length
-    def keywordAt(i: Int, keyword: String): Boolean =
-      code.regionMatches(i, keyword, 0, keyword.length) &&
-        (i == 0 || !isIdentChar(code.charAt(i - 1))) &&
-        (i + keyword.length >= len || !isIdentChar(code.charAt(i + keyword.length)))
     var i = 0
     while i < len do
-      if keywordAt(i, "import") then
+      if keywordAt(code, i, "import") then
         var k = i + "import".length
         var braces = 0
         var brackets = 0
         var parens = 0
         var stop = false
+        var previousName = "" // the selector an `as`/`=>` renames
+        def alias(at: Int): Unit =
+          hits += at
+          if FatalTypeNames.contains(previousName) then fatal += at
         while k < len && !stop do
           code.charAt(k) match
             case '{' => braces += 1; k += 1
@@ -281,11 +313,11 @@ object CodeValidator:
             case ']' => brackets = math.max(0, brackets - 1); k += 1
             case '(' => parens += 1; k += 1
             case ')' => parens = math.max(0, parens - 1); k += 1
-            case '=' if k + 1 < len && code.charAt(k + 1) == '>' => hits += k; k += 2
+            case '=' if k + 1 < len && code.charAt(k + 1) == '>' => alias(k); k += 2
             case c if isIdentStart(c) =>
               val start = k
               while k < len && isIdentChar(code.charAt(k)) do k += 1
-              if keywordAt(start, "as") then hits += start
+              if keywordAt(code, start, "as") then alias(start) else previousName = code.substring(start, k).nn
             case ';' if braces == 0 && brackets == 0 && parens == 0 => stop = true; k += 1
             case '\n' if braces == 0 && brackets == 0 && parens == 0 =>
               var before = k - 1
@@ -298,7 +330,7 @@ object CodeValidator:
             case _ => k += 1
         i = k
       else i += 1
-    hits.toList
+    ImportAliases(hits.toList, fatal.toList)
 
   /** Quick diagnostic for a bare catch-all arm (`case _ =>`, `case e =>`,
     * `case e if ...`), which also catches fatal errors and the ThreadDeath stop
@@ -315,11 +347,18 @@ object CodeValidator:
     * `match` with a `case _` inside such an arm is an accepted false positive;
     * braced nested matches are never flagged).
     *
-    * Returns the character offsets of the offending `case` keywords. */
-  private def catchAllOffsets(code: String): List[Int] =
-    if !code.contains("catch") then return Nil // the common case: no catch, no scan
+    * Returns the character offsets of the offending `case` keywords (`catchAlls`), of
+    * typed arms whose ascription spans lines and names a fatal type (`fatalArms`: the
+    * per-line `catch-fatal` rule cannot see `case _:\n Throwable =>`), and of `catch`
+    * handlers that are not `case` arms at all (`handlers`: a PartialFunction value
+    * hides its arms from every rule here). */
+  private final case class CatchScan(catchAlls: List[Int], fatalArms: List[Int], handlers: List[Int])
+  private def scanCatches(code: String): CatchScan =
+    if !code.contains("catch") then return CatchScan(Nil, Nil, Nil) // the common case: no catch, no scan
     val len = code.length
     val hits = scala.collection.mutable.ListBuffer[Int]()
+    val fatalArms = scala.collection.mutable.ListBuffer[Int]()
+    val handlers = scala.collection.mutable.ListBuffer[Int]()
     def skipWs(from: Int): Int =
       var k = from
       while k < len && { val c = code.charAt(k); c == ' ' || c == '\t' || c == '\n' || c == '\r' } do k += 1
@@ -328,10 +367,29 @@ object CodeValidator:
       var k = from
       while k < len && isIdentChar(code.charAt(k)) do k += 1
       k
-    def keywordAt(i: Int, kw: String): Boolean =
-      code.regionMatches(i, kw, 0, kw.length) &&
-        (i == 0 || !isIdentChar(code.charAt(i - 1))) &&
-        (i + kw.length >= len || !isIdentChar(code.charAt(i + kw.length)))
+    /** The ascription starting after the `:` at `colon`, up to the arm's `=>` or guard. */
+    def ascription(colon: Int): String =
+      var k = colon + 1
+      var depth = 0
+      var done = false
+      while k < len && !done do
+        val c = code.charAt(k)
+        if depth == 0 && ((c == '=' && k + 1 < len && code.charAt(k + 1) == '>') || keywordAt(code, k, "if")) then
+          done = true
+        else
+          if c == '(' || c == '[' then depth += 1
+          else if c == ')' || c == ']' then depth -= 1
+          k += 1
+      code.substring(colon + 1, k).nn
+    /** One arm at `caseOffset` (its pattern starting at `i0`): a bare catch-all, or a typed
+      * arm whose multi-line ascription names a fatal type. */
+    def checkArm(caseOffset: Int, i0: Int): Unit =
+      if isBareCatchAll(i0) then hits += caseOffset
+      else
+        val colon = code.indexOf(':', i0)
+        if colon >= 0 && colon < code.indexOf("=>", i0).max(colon + 1) then
+          val typed = ascription(colon)
+          if typed.contains('\n') && FatalTypeRe.findFirstIn(typed).isDefined then fatalArms += caseOffset
     /** Does the arm whose pattern starts at `i0` begin with a bare catch-all —
       * `_`, a lower-case binder, an `@`-binder over one, or any of those in
       * parentheses (`case (e) =>`, `case e @ _ =>`) — with no type ascription
@@ -347,7 +405,7 @@ object CodeValidator:
           val c = code.charAt(k)
           if c == '=' && k + 1 < len && code.charAt(k + 1) == '>' then { result = sawBinder; done = true }
           else if c == ':' then done = true // a type ascription: left to `catch-fatal`
-          else if keywordAt(k, "if") then { result = sawBinder; done = true }
+          else if keywordAt(code, k, "if") then { result = sawBinder; done = true }
           else if c == '(' || c == ')' || c == '@' || c == '|' || c == ' ' || c == '\t' || c == '\n' || c == '\r'
           then k += 1
           else if c == '_' then { sawBinder = true; k += 1 }
@@ -364,7 +422,7 @@ object CodeValidator:
         else if c == '}' then { depth -= 1; k += 1 }
         else if depth == 1 && isIdentStart(c) then
           val end = identEnd(k)
-          if keywordAt(k, "case") && isBareCatchAll(end) then hits += k
+          if keywordAt(code, k, "case") then checkArm(k, end)
           k = end
         else k += 1
     /** Braceless form: arms at depth 0 until the region ends (see above). */
@@ -388,22 +446,25 @@ object CodeValidator:
               case '\n' => ind = 0; tok += 1
               case _ => scanning = false
           if tok >= len then stop = true
-          else if keywordAt(tok, "case") then () // a further arm; keep scanning
-          else if keywordAt(tok, "finally") then stop = true
+          else if keywordAt(code, tok, "case") then () // a further arm; keep scanning
+          else if keywordAt(code, tok, "finally") then stop = true
           else if ind <= catchIndent then stop = true
           k += 1
         else if depth == 0 && isIdentStart(c) then
           val end = identEnd(k)
-          if keywordAt(k, "case") && isBareCatchAll(end) then hits += k
+          if keywordAt(code, k, "case") then checkArm(k, end)
           k = end
         else k += 1
     var i = 0
     while i < len do
       if isIdentStart(code.charAt(i)) then
         val end = identEnd(i)
-        if keywordAt(i, "catch") then
+        if keywordAt(code, i, "catch") then
           val j = skipWs(end)
-          if j < len && code.charAt(j) == '{' then scanBraced(j)
+          if j < len && code.charAt(j) == '{' then
+            // `catch { h }` is a handler value as much as `catch h`: the arms must be right there.
+            if keywordAt(code, skipWs(j + 1), "case") then scanBraced(j) else handlers += i
+          else if !keywordAt(code, j, "case") then handlers += i
           else
             // the indent of the catch keyword's own line
             var s = i
@@ -414,7 +475,7 @@ object CodeValidator:
             scanBraceless(j, ind)
         i = end
       else i += 1
-    hits.toList
+    CatchScan(hits.toList, fatalArms.toList, handlers.toList)
 
   private val stringStrippedPatterns: Set[String] = Set("directive-using", "directive-import", "language-import")
 
@@ -495,18 +556,17 @@ object CodeValidator:
         (line, idx) <- lines
         if pattern.regex.findFirstIn(line).isDefined
       yield violation(pattern, idx, line)
-    val catchAlls =
-      for pos <- catchAllOffsets(stripped)
-      yield
-        val idx = stripped.substring(0, pos).count(_ == '\n')
-        Violation("catch-all", CatchAllDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+    def at(id: String, description: String, pos: Int): Violation =
+      val idx = stripped.substring(0, pos).count(_ == '\n')
+      Violation(id, description, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+    val catches = scanCatches(stripped)
+    val catchAlls = catches.catchAlls.map(at("catch-all", CatchAllDescription, _)) ++
+      catches.fatalArms.map(at("catch-fatal", forbidden.find(_.id == "catch-fatal").get.description, _)) ++
+      catches.handlers.map(at("catch-handler", CatchHandlerDescription, _))
+    val aliases = importAliasOffsets(stripped)
     val importAliases =
-      if !strictImportAliases then Nil
-      else
-        for pos <- importAliasOffsets(stripped)
-        yield
-          val idx = stripped.substring(0, pos).count(_ == '\n')
-          Violation("import-alias", ImportAliasDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
+      aliases.fatal.map(at("import-fatal-alias", FatalImportAliasDescription, _)) ++
+        (if strictImportAliases then aliases.all.map(at("import-alias", ImportAliasDescription, _)) else Nil)
     val typeParams = typeParamNames(stripped)
     val typeParamCatches =
       if typeParams.isEmpty then Nil

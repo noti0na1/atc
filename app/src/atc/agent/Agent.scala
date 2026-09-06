@@ -16,11 +16,11 @@ final class Agent(
   ui: AgentUI,
   initialModel: ChatModel,
   /** The model that may see classified data; switchable with `/classifiedmodel`. */
-  var classifiedModel: Option[ChatModel],
+  @volatile var classifiedModel: Option[ChatModel],
   extraInstructions: Option[String],
   taskState: () => (atc.lib.TaskNotes, List[atc.lib.Todo]) = () => (atc.lib.TaskNotes(), Nil),
 ):
-  private var currentModel = initialModel
+  @volatile private var currentModel = initialModel
   def model: ChatModel = currentModel
   /** Switching model changes both the tokenizer and often the wire payload.
     * Keep the conversation, but discard calibration learned from the previous

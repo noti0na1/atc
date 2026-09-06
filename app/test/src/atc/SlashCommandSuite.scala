@@ -12,16 +12,6 @@ class SlashCommandSuite extends munit.FunSuite:
     assertEquals(names.last, "/quit")
     assert(names.forall(_.startsWith("/")))
 
-  test("the help text has one aligned line per command"):
-    val lines = helpText.linesIterator.toList
-    assertEquals(lines.head, "Commands:")
-    assertEquals(lines.size, values.length + 1)
-    // Long usage strings still leave space before the aligned descriptions.
-    lines.tail.zip(values).foreach { (line, c) =>
-      assert(line.startsWith(s"  ${c.usage}"), line)
-      assertEquals(line.drop(2 + helpWidth), c.help, line)
-    }
-
   test("parse resolves names and aliases case-insensitively and splits off the argument"):
     assertEquals(parse("/help"), Right((Help, "")))
     assertEquals(parse("/?"), Right((Help, "")))

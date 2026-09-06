@@ -12,6 +12,10 @@ class TextLayoutSuite extends munit.FunSuite:
     assertEquals(lines.map(plain).mkString(" "), "Read the 中文 source and check the result")
     assert(lines.forall(_.contains("\u001b[36m")))
 
+  test("tabs measure as tab stops, so a tabbed line is wrapped rather than let through"):
+    assertEquals(TextLayout.width("a\tb"), 9)
+    assertEquals(TextLayout.wrap("a\tb", 4).map(plain), List("a", "b"))
+
   test("long unbroken text wraps without dropping characters"):
     for text <- List("abcdefghijklmnopqrstuvwxyz", "中文漢字" * 8, "e\u0301" * 20) do
       val lines = TextLayout.wrap(text, 7)

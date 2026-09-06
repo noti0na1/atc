@@ -15,7 +15,9 @@ import scala.jdk.OptionConverters.*
   * server-side web-search tool when enabled. */
 final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   val providerKey: String = "anthropic"
-  override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(32000))
+  private val DefaultMaxTokens = 32000
+  /** What the request asks for: the context fitter reserves exactly this. */
+  override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(DefaultMaxTokens))
 
   private final case class Connection(
     client: AnthropicClient,
@@ -63,6 +65,10 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     ))
     val is = Tool.InputSchema.builder().properties(props.build())
     schema.obj.get("required").foreach(r => is.required(r.arr.map(_.str).toList.asJava))
+    // The rest of the schema (`additionalProperties: false`, ...) as the OpenAI adapters send it.
+    schema.obj.filterNot((k, _) => k == "type" || k == "properties" || k == "required").foreach((k, v) =>
+      is.putAdditionalProperty(k, JsonValue.from(Json.toJava(v)))
+    )
     Tool.builder().name(t.name).description(t.description).inputSchema(is.build()).build()
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): MessageCreateParams =
@@ -73,7 +79,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     val systemBlock = TextBlockParam.builder().text(system.text).cacheControl(cache).build()
     val b = MessageCreateParams.builder()
       .model(modelId)
-      .maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(32000L))
+      .maxTokens(maxOutputTokens.get.toLong)
       .systemOfTextBlockParams(List(systemBlock).asJava)
     configuredThinking(b)
     // `temperature` is not applied: current Anthropic models reject sampling parameters.
@@ -141,13 +147,9 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     val stop = m.stopReason().toScala.map(_.toString).getOrElse("end_turn").toLowerCase(java.util.Locale.ROOT)
     val toolCalls = calls.result()
     val lastBlock = m.content().asScala.lastOption
-    val paused = stop == "pause_turn" ||
-      (toolCalls.isEmpty && lastBlock.exists(b =>
-        b.serverToolUse().isPresent || b.webSearchToolResult().isPresent
-      ))
-    val status = CompletionStop.fromReason(stop) match
-      case CompletionStop.Complete if paused => CompletionStop.Resume
-      case other => other
+    val paused = toolCalls.isEmpty &&
+      lastBlock.exists(b => b.serverToolUse().isPresent || b.webSearchToolResult().isPresent)
+    val status = CompletionStop.fromReason(stop, paused)
     Completion(text.toString, toolCalls, Some(NativeTurn(providerKey, ref, m.toParam())), usage, stop, status)
 
   def complete(

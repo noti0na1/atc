@@ -60,14 +60,19 @@ object CompletionStop:
   private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens")
   private val BlockedReasons = Set("content_filter", "refusal")
 
-  /** Normalize a provider's raw reason at the adapter boundary. Adapters may
-    * additionally identify a server-side pause from the response's shape. */
+  /** Normalize a provider's raw reason at the adapter boundary. */
   def fromReason(reason: String): CompletionStop =
     val normalized = reason.trim.toLowerCase(java.util.Locale.ROOT).replace('-', '_')
     if ResumeReasons.contains(normalized) then CompletionStop.Resume
     else if TruncatedReasons.contains(normalized) then CompletionStop.Truncated
     else if BlockedReasons.contains(normalized) then CompletionStop.Blocked
     else CompletionStop.Complete
+
+  /** As [[fromReason]], where the adapter also identified a server-side pause from the
+    * response's shape (it ended in a server tool call): a complete-looking stop is a pause. */
+  def fromReason(reason: String, paused: Boolean): CompletionStop = fromReason(reason) match
+    case CompletionStop.Complete if paused => CompletionStop.Resume
+    case other => other
 
 case class Completion(
   text: String,

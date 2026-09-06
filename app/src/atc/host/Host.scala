@@ -43,6 +43,11 @@ object Host:
   val CatMaxLines: Int = 400
   /** `cat` cuts a line beyond this many characters (minified files) with a marker. */
   val CatMaxLineChars: Int = 2000
+  /** How much of a file `readRange` reads before giving up on finding the requested lines. */
+  val ReadRangeMaxChars: Long = 2000000L
+  /** How much of a file `cat` reads to count the lines after the shown window: a giant
+    * file must not cost the whole snippet timeout for 400 lines of output. */
+  val CatMaxReadChars: Long = 64000000L
   /** How much stderr `execOutput` quotes when a command fails. */
   val ExecErrorTailChars: Int = 2000
   /** Live `spawn`ed processes per session; beyond it `spawn` asks to `kill()` one. */

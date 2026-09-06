@@ -55,7 +55,9 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
                 )
                 .build())
             }
-            b.addMessage(ab.build())
+            // A resumed pause leaves an empty assistant turn behind; without its native
+            // form (a restored session) there is nothing to send for it.
+            if text.nonEmpty || calls.nonEmpty then b.addMessage(ab.build())
       case Msg.ToolResults(results) =>
         results.foreach { r =>
           b.addMessage(ChatCompletionToolMessageParam.builder().toolCallId(r.callId).content(r.output).build())
@@ -98,10 +100,11 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
         chunk.choices().asScala.headOption.foreach { ch =>
           val delta = ch.delta()
           delta.content().toScala.foreach(sink.text)
-          // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`, OpenRouter `reasoning`.
-          List("reasoning_content", "reasoning").foreach { key =>
-            Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala).foreach(sink.thinking)
-          }
+          // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
+          // OpenRouter `reasoning`; a gateway echoing both must not double the stream.
+          List("reasoning_content", "reasoning").iterator
+            .flatMap(key => Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala))
+            .nextOption().foreach(sink.thinking)
         }
       }.onCompleteFuture()
     }

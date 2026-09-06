@@ -122,8 +122,11 @@ object GitIgnore:
             if atSegmentStart && i + 2 < glob.length && glob.charAt(i + 2) == '/' then
               out ++= "(?:.*/)?" // `**/` — zero or more directories
               i += 3
+            else if atSegmentStart && i + 2 == glob.length then
+              out ++= ".*" // `/**` at the end — everything inside
+              i += 2
             else
-              out ++= ".*" // `/**` at the end, or `**` inside a name
+              out ++= "[^/]*" // `**` inside a name is two ordinary stars (git's rule)
               i += 2
           case '*' =>
             out ++= "[^/]*"

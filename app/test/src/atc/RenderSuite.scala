@@ -71,6 +71,11 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(m.push("```sca"), "")
     assertEquals(m.push("la\nval a = 1\n```\n"), "G H:val a = 1\n")
 
+  test("the closing fence of a ```markdown wrapper does not open a code block"):
+    assertEquals(render("```markdown\n# T\n```\nplain text after\n"), s"${B}T${R}\nplain text after\n")
+    // A real fence inside the wrapper still opens and closes on its own.
+    assertEquals(render("```md\nx\n```scala\nval a = 1\n```\ny\n```\nz\n"), "x\nG H:val a = 1\ny\nz\n")
+
   test("pipe tables are laid out in columns once complete, with the delimiter's alignment"):
     val src = "| Name | N | Where |\n|:--|--:|:-:|\n| Alice | 30 | Paris |\n| **Bob** | 7 | `Rome` |\n"
     val out = render(src)

@@ -398,7 +398,9 @@ class HostSuite extends munit.FunSuite:
         "a << EOF",
         "",
         "a < x < y",
-        "a > x > y"
+        "a > x > y",
+        "a > x | b", // a redirection belongs to the stage it is written on
+        "a | b < x"
       )
     do
       intercept[IllegalArgumentException](CommandLine.parsePipeline(bad))
@@ -420,6 +422,9 @@ class HostSuite extends munit.FunSuite:
         !PathGlob.regex("a/[!x]*.{md,txt}").matches("a/x.md")
     )
     assert(!PathGlob.regex("a/*.md").matches("a/b/c.md"))
+    assert(PathGlob.regex("{a,{b,c}}").matches("c"))
+    for bad <- List("a/{b,c", "[abc", "[]]") do
+      assert(intercept[IllegalArgumentException](PathGlob.regex(bad)).getMessage.nn.contains("bad glob"), bad)
     if Platform.isWindows then assert(PathGlob.regex("SRC/**/*.SCALA").matches("src/main/A.scala"))
 
   test("Windows path validation rejects device aliases and ambiguous components"):
@@ -716,6 +721,7 @@ class HostSuite extends munit.FunSuite:
     // List and evaluate the link as its target.
     val top = ls(".")
     assert(top.contains("real"), top.toString)
+    assertEquals(top.count(_ == "real"), 1, top.toString) // the link resolves to it: listed once
     assert(!top.exists(_.contains("dirlink")), top.toString)
     // Walk the real directory once without traversing the link.
     val walked = walk(".").map(rel)

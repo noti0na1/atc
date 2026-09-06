@@ -258,7 +258,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   statusLine.foreach { status =>
     status.setBorder(false)
     // Reserve the footer before writing content; growing it later scrolls the first lines away.
-    status.update(List(AttributedString("")).asJava)
+    Tui.drawStatus(terminal, status, "")
   }
 
   def setContext(model: String, mode: String, directory: String): Unit = synchronized:
@@ -289,7 +289,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       val text = fit(singleLine, 0)
       if resized || text != lastStatus then
         flushOutput()
-        status.update(List(AttributedString(text)).asJava)
+        Tui.drawStatus(terminal, status, text)
         lastStatus = text
     }
 
@@ -334,11 +334,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   )
 
   def beginTurn(): Unit =
-    interrupted.set(false)
-    turnStarted = System.nanoTime()
-    busy = true
-    operation = "starting turn"
-    refreshStatus()
+    frame:
+      interrupted.set(false)
+      turnStarted = System.nanoTime()
+      busy = true
+      operation = "starting turn"
+      refreshStatus()
     keys.start()
   /** End the turn: close open blocks, say what the turn cost (`stats`) and
     * leave one blank line before the next prompt — the agent is idle again. */
@@ -392,6 +393,11 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       outputDirty = true
       tail = if s.length >= 2 then s.takeRight(2) else (tail + s).takeRight(2)
 
+  /** A style sequence: printed like `write`, but it takes no columns and leaves `tail` alone. */
+  private def writeStyle(s: String): Unit =
+    out.print(s)
+    outputDirty = true
+
   private def atLineStart: Boolean = tail.endsWith("\n")
   private def afterBlankLine: Boolean = tail == "\n\n"
   private def ensureNewline(): Unit = if !atLineStart then write("\n")
@@ -440,12 +446,17 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       val sb = StringBuilder()
       var w = 0
       var i = 0
+      var styledText = false
       while i < line.length && w < budget do
-        val cp = line.codePointAt(i)
-        val cw = Tui.cellWidth(cp, w)
-        if w + cw > budget then i = line.length
-        else { sb.append(String(Character.toChars(cp))); w += cw; i += Character.charCount(cp) }
-      sb.toString + g.ellipsis
+        val styleEnd = Tui.sgrEnd(line, i)
+        if styleEnd > 0 then { sb.append(line, i, styleEnd); styledText = true; i = styleEnd } // takes no cells
+        else
+          val cp = line.codePointAt(i)
+          val cw = Tui.cellWidth(cp, w)
+          if w + cw > budget then i = line.length
+          else { sb.append(String(Character.toChars(cp))); w += cw; i += Character.charCount(cp) }
+      // A cut may have dropped the line's own reset: never let its style leak into the next row.
+      sb.toString + (if styledText then Reset else "") + g.ellipsis
 
   /** Update only changed rows in a live preview. Clearing the rest of the screen would
     * also erase the footer, forcing unrelated output to be repainted on every token. */
@@ -453,7 +464,6 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     private var drawn = 0
     private var tailBefore = tail
     private var previousLines = List.empty[String]
-    def active: Boolean = drawn > 0
     def redraw(lines: List[String], force: Boolean = false): Unit =
       if !force && lines == previousLines then return
       if drawn == 0 then { ensureNewline(); tailBefore = tail }
@@ -539,7 +549,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         clearRegion()
         beginBlock()
         write(styled(g.bullet, Dim) + " " + styled("thinking", Dim) + "\n")
-        if colors > 0 then out.print(Ansi.sgr(Dim))
+        if colors > 0 then writeStyle(Ansi.sgr(Dim))
         streaming = true
         writeGuttered(buf.text.dropWhile(_ == '\n'), Indent)
       else
@@ -550,7 +560,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     def detach(): Unit =
       clearRegion()
       if streaming then
-        if colors > 0 then out.print(Reset)
+        if colors > 0 then writeStyle(Reset)
         ensureNewline()
         streaming = false
 
@@ -1234,6 +1244,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def suggestionsAvailable: Boolean = !plain
 
   def close(): Unit =
+    if closed then return
     closed = true
     stopSpinner()
     keys.stop()
@@ -1244,6 +1255,15 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     terminal.close()
 
 object Tui:
+  /** Draw the one-line footer and flush it. JLine's `Status.update` flushes the text itself
+    * but leaves the closing synchronized-update sequence (`ESC[?2026l`) in the buffered
+    * writer: a terminal honouring mode 2026 (xterm.js/VS Code, iTerm2, kitty, Ghostty, WezTerm)
+    * then keeps rendering frozen until something else flushes, so a footer repainted from the
+    * input-poll clock stalled the whole window for up to a poll interval per repaint. */
+  private[atc] def drawStatus(terminal: Terminal, status: Status, text: String): Unit =
+    status.update(List(AttributedString(text)).asJava)
+    terminal.writer().flush()
+
   /** Replace owned rows with the cursor initially just below them. Leave everything below
     * that region intact and finish immediately below the replacement. */
   private[atc] def replaceRows(before: List[String], after: List[String], force: Boolean = false): String =
@@ -1278,10 +1298,6 @@ object Tui:
           case _ => Decision.Revise(text)
 
   /** Consume CSI/SS3 bytes after ESC, stopping on a final byte, EOF or timeout. */
-  private[atc] def discardEscapeSequence(read: () => Int): Unit =
-    readEscapeSequence(read)
-    ()
-
   private[atc] def readEscapeSequence(read: () => Int): String =
     val result = StringBuilder()
     def next(): Int =
@@ -1392,15 +1408,26 @@ object Tui:
   private def cellWidth(cp: Int, col: Int): Int =
     if cp == '\t' then 8 - (col % 8) else math.max(0, org.jline.utils.WCWidth.wcwidth(cp))
 
-  /** Display width in terminal cells of `s` starting at column 0. */
+  /** Display width in terminal cells of `s` starting at column 0; SGR sequences take none. */
   def displayWidth(s: String): Int =
     var w = 0
     var i = 0
     while i < s.length do
-      val cp = s.codePointAt(i)
-      w += cellWidth(cp, w)
-      i += Character.charCount(cp)
+      val styleEnd = sgrEnd(s, i)
+      if styleEnd > 0 then i = styleEnd
+      else
+        val cp = s.codePointAt(i)
+        w += cellWidth(cp, w)
+        i += Character.charCount(cp)
     w
+
+  /** The end of the SGR sequence (`ESC [ … m`) starting at `i`, or -1 when there is none. */
+  private[atc] def sgrEnd(s: String, i: Int): Int =
+    if i + 1 < s.length && s.charAt(i) == '\u001b' && s.charAt(i + 1) == '[' then
+      var k = i + 2
+      while k < s.length && (s.charAt(k).isDigit || s.charAt(k) == ';') do k += 1
+      if k < s.length && s.charAt(k) == 'm' then k + 1 else -1
+    else -1
 
   /** Bounded output buffer with incremental line counts. `tail(n)` scans backward
     * for the requested lines. Overflow discards a prefix at a line boundary when
@@ -1408,18 +1435,8 @@ object Tui:
   private[atc] final class TailBuffer(cap: Int):
     private val sb = StringBuilder()
     private var newlines = 0L
-    private var contentLineCount = 0L // completed lines that held non-whitespace
-    private var curHasContent = false // has the in-progress last line any non-whitespace yet?
     def append(text: String): Unit =
-      var i = 0
-      while i < text.length do
-        val ch = text.charAt(i)
-        if ch == '\n' then
-          newlines += 1
-          if curHasContent then contentLineCount += 1
-          curHasContent = false
-        else if !ch.isWhitespace then curHasContent = true
-        i += 1
+      newlines += text.count(_ == '\n')
       sb.append(text)
       if sb.length > cap then
         val nl = sb.indexOf("\n", sb.length - cap)
@@ -1428,8 +1445,6 @@ object Tui:
     def text: String = sb.toString
     /** Lines ever appended (each `\n` ends one), plus an unfinished last line. */
     def lineCount: Long = newlines + (if sb.nonEmpty && sb.charAt(sb.length - 1) != '\n' then 1 else 0)
-    /** Non-blank lines ever appended (a paragraph-separated stream is not doubled). */
-    def contentLines: Long = contentLineCount + (if curHasContent then 1 else 0)
     /** The last `n` lines (an unfinished last line counts; a trailing newline is not a line). */
     def tail(n: Int): List[String] =
       var i = if sb.nonEmpty && sb.charAt(sb.length - 1) == '\n' then sb.length - 2 else sb.length - 1
@@ -1442,7 +1457,7 @@ object Tui:
       text.split("\n", -1).toList match
         case init :+ "" => init
         case ls => ls
-    def clear(): Unit = { sb.clear(); newlines = 0; contentLineCount = 0; curHasContent = false }
+    def clear(): Unit = { sb.clear(); newlines = 0 }
 
   /** `1 line`, `2 lines`. */
   def plural(n: Long, noun: String): String = s"$n $noun${if n == 1 then "" else "s"}"

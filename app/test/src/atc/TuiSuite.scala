@@ -88,7 +88,7 @@ class TuiSuite extends munit.FunSuite:
       )
     do
       val input = (sequence :+ 'x'.toInt).iterator
-      Tui.discardEscapeSequence(() => input.next())
+      Tui.readEscapeSequence(() => input.next())
       assertEquals(input.next(), 'x'.toInt)
 
   test("malformed escape sequences cannot retain the terminal reader indefinitely"):
@@ -114,6 +114,31 @@ class TuiSuite extends munit.FunSuite:
     try
       assertEquals(terminal.getType, org.jline.terminal.Terminal.TYPE_DUMB)
       assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
+    finally terminal.close()
+
+  test("drawStatus leaves the terminal outside a synchronized update (JLine buffers the closer)"):
+    val output = ByteArrayOutputStream()
+    val terminal = org.jline.terminal.impl.ExternalTerminal(
+      "test",
+      "xterm-256color",
+      ByteArrayInputStream(Array.emptyByteArray),
+      output,
+      StandardCharsets.UTF_8,
+    )
+    try
+      terminal.setSize(org.jline.terminal.Size(80, 24): org.jline.terminal.Sized)
+      val status = org.jline.utils.Status.getStatus(terminal)
+      assert(status != null)
+      Tui.drawStatus(terminal, status, "ready")
+      Tui.drawStatus(terminal, status, "reasoning 1.0 s")
+      val written = output.toString(StandardCharsets.UTF_8)
+      def count(sub: String): Int = written.sliding(sub.length).count(_ == sub)
+      val begins = count("\u001b[?2026h")
+      val ends = count("\u001b[?2026l")
+      assertEquals(begins, 2)
+      assertEquals(ends, 2)
+      assert(written.lastIndexOf("\u001b[?2026l") > written.lastIndexOf("\u001b[?2026h"))
+      assert(written.contains("ready")) // the second draw only rewrites the changed suffix
     finally terminal.close()
 
   test("withoutPrinted removes the live-shown prints and keeps diagnostics and echoes"):
@@ -215,6 +240,7 @@ class TuiSuite extends munit.FunSuite:
   test("place counts wide (CJK) characters as two columns"):
     assertEquals(Tui.displayWidth("abc"), 3)
     assertEquals(Tui.displayWidth("中文"), 4)
+    assertEquals(Tui.displayWidth("\u001b[36m$ git status\u001b[0m"), 12) // styles take no cells
     assertEquals(Tui.place(0, "中" * 40 + "\n", 80, 4).rows, 2) // 4 + 80 columns: wraps
 
   test("TailBuffer: the tail is the last n lines; a trailing newline is not a line"):

@@ -29,6 +29,8 @@ class MarkdownStream(
   private var bold = false
   private var code = false
   private var inFence = false
+  /** Inside a dropped ```markdown wrapper: its bare closing fence must not open a code block. */
+  private var droppedFence = false
   private var fenceScala = false
   private val fenceText = StringBuilder()
   private var restStart = 0
@@ -85,6 +87,7 @@ class MarkdownStream(
     out.append(leaveTable())
     decided = false
     inFence = false
+    droppedFence = false
     out.toString
 
   // ── lines ─────────────────────────────────────────────────────────
@@ -128,7 +131,8 @@ class MarkdownStream(
         val lang = lang0.nn.toLowerCase(java.util.Locale.ROOT)
         restStart = line.length
         // Models like to wrap a whole answer in ```markdown: render its content, drop the fence.
-        if lang == "markdown" || lang == "md" then { dropLine = true; "" }
+        if lang == "markdown" || lang == "md" then { droppedFence = true; dropLine = true; "" }
+        else if droppedFence && lang.isEmpty then { droppedFence = false; dropLine = true; "" }
         else
           inFence = true
           fenceScala = lang == "scala" || lang == "sc" // anything else: no colouring, verbatim
@@ -172,7 +176,7 @@ class MarkdownStream(
 
   // ── tables ────────────────────────────────────────────────────────
 
-  private def isTableRow(line: String): Boolean = line.trim.startsWith("|")
+  private def isTableRow(line: String): Boolean = TableRow.matches(line) // the same shape `WholeLine` holds back
   private def isDelimiterRow(line: String): Boolean = DelimiterRow.matches(line)
 
   /** The cells of a row: outer pipes dropped, `\|` kept as a literal pipe. */
@@ -314,5 +318,6 @@ object MarkdownStream:
     * Fence lines (their language matters) and `|` lines (table rows are laid
     * out together) are always waited for in full. */
   private val MarkerPrefix = """^ {0,3}(?:#{0,6} ?|[-*+] ?|\d{0,3}\.? ?|> ?|`{0,3}|-{0,3}|\*{0,3}|_{0,3})$""".r
+  private val TableRow = """^ {0,3}\|.*$""".r
   private val WholeLine = """^ {0,3}(?:```|\|).*$""".r
   def couldStillBeMarker(s: String): Boolean = (s.length < 8 && MarkerPrefix.matches(s)) || WholeLine.matches(s)

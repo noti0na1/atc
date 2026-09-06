@@ -490,7 +490,9 @@ captured by file API callbacks.
 
 `CommandLine` parses quoted arguments, pipelines, `<`, `>`, `>>` and `2>&1`. It rejects shell
 control operators and does not expand variables or globs. Explicit argument sequences are
-passed verbatim. Each pipeline stage and redirected file is checked separately.
+passed verbatim. Each pipeline stage and redirected file is checked separately; a redirection
+must be written on the stage it applies to (`<` on the first command, `>`/`>>` on the last),
+anything else is refused like the other shell forms rather than silently moved.
 `WindowsExecutable` resolves bare commands from absolute PATH entries and validates batch
 arguments before launch.
 
@@ -697,6 +699,12 @@ not scroll the banner away. Its activity indicator replaces a separate spinner w
 terminal supports a status line. Idle state shows a short model, mode and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
+Every footer update goes through `Tui.drawStatus`, which flushes the terminal writer after
+JLine's `Status.update`: JLine flushes the footer text but leaves the closing
+synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honours mode 2026
+(xterm.js in VS Code, iTerm2, kitty, Ghostty, WezTerm) freezes rendering until it arrives.
+Without that flush, a footer repainted from the input-poll clock stalled the window for up to
+a poll interval per repaint (`TuiSuite` checks the closer is written).
 ASCII mode also selects ASCII menu markers and control separators.
 Streaming text is flushed at the end of each incoming update. Nested rendering helpers share
 that flush instead of flushing every gutter and style fragment. Live previews compare their

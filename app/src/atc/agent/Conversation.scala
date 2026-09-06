@@ -32,7 +32,7 @@ private[agent] final class Conversation:
     remember(input)
     messages.lastOption match
       case Some(Msg.User(text)) => messages = messages.init :+ Msg.User(s"$text\n\n$input")
-      case Some(_: Msg.ToolResults) =>
+      case Some(_: Msg.ToolResults | _: Msg.Continuation) =>
         append(Msg.Assistant("[paused to apply the user's update]", Nil, None))
         append(Msg.User(input))
       case _ => append(Msg.User(input))

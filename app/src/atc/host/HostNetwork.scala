@@ -23,7 +23,7 @@ private[host] trait HostNetwork:
     val patterns = hosts.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted
     inScope(policy.requestNet(scopeOf(parent), patterns, reason))(id => op(using NetworkImpl(id)))
 
-  private val http = HttpClient.newBuilder().nn
+  private lazy val http = HttpClient.newBuilder().nn
     .followRedirects(HttpClient.Redirect.NEVER).nn
     .connectTimeout(Duration.ofSeconds(20)).nn
     .build().nn

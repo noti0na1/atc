@@ -59,9 +59,6 @@ final class ContextManager:
     * checks. `dropped` counts this preparation, while `totalDropped` is the
     * cumulative count written into the context notice.
     */
-  def prepare(fixedTokens: Long, history: List[Msg], model: ChatModel): Preparation =
-    prepare(fixedTokens, history, ModelContext.from(model))
-
   def prepare(fixedTokens: Long, history: List[Msg], model: ModelContext): Preparation =
     prepareWithContext(fixedTokens, history, model, "")
 
@@ -90,8 +87,7 @@ final class ContextManager:
         Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}$notes\n\n$text") :: rest
       case other => other
 
-    // Estimate the final history once; the overflow check below reuses the
-    // same figure instead of scanning the messages a second time.
+    // The estimate of what will actually be sent, for the overflow check and `contextUsage`.
     val estimatedInput = fixedTokens + preparedHistory.map(estimateFor(_, model)).sum
     val calibratedInput = (estimatedInput * tokenCalibration).round
 

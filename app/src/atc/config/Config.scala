@@ -6,7 +6,10 @@ import atc.TextFiles
 import atc.perms.{Access, Mode, PathPattern}
 import atc.platform.PlatformPath
 
-import java.nio.file.{AtomicMoveNotSupportedException, Files, Path, Paths, StandardCopyOption}
+import java.nio.file.{
+  AtomicMoveNotSupportedException, FileAlreadyExistsException, Files, Path, Paths, StandardCopyOption,
+  StandardOpenOption
+}
 
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
@@ -156,21 +159,23 @@ object Config:
     ).flatten
 
   private def writeIfMissing(target: Path, content: String, ownerOnly: Boolean): Option[Path] =
-    Option.when(!Files.exists(target)) {
+    if Files.exists(target) then None
+    else
       Option(target.getParent).foreach(Files.createDirectories(_))
-      if ownerOnly then writeOwnerOnly(target, content) else Files.writeString(target, content)
-      target
-    }
+      try
+        if ownerOnly then writeOwnerOnly(target, content)
+        else Files.writeString(target, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+        Some(target)
+      catch case _: FileAlreadyExistsException => None // created meanwhile (another atc): not ours to overwrite
 
-  /** Write `content` to `target` with owner-only access on POSIX file systems,
-    * falling back to a regular write when POSIX permissions are unavailable. */
+  /** Create `target` with owner-only access on POSIX file systems, falling back
+    * to a regular (new-file) write when POSIX permissions are unavailable. */
   private def writeOwnerOnly(target: Path, content: String): Unit =
     import java.nio.file.attribute.PosixFilePermissions
     val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
-    try
-      Files.createFile(target, ownerOnly) // ensureGlobal/initProject call this only for missing files
-      Files.writeString(target, content)
-    catch case _: UnsupportedOperationException => Files.writeString(target, content)
+    try Files.createFile(target, ownerOnly)
+    catch case _: UnsupportedOperationException => Files.createFile(target)
+    Files.writeString(target, content)
 
   /** Create the starter project configuration for `dir` and ensure that its
     * `.gitignore` excludes `keys.properties`. The configuration belongs in the

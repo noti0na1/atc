@@ -107,9 +107,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     val toolCalls = calls.result()
     val lastItem = r.output().asScala.lastOption
     val paused = toolCalls.isEmpty && lastItem.exists(i => !i.isMessage && !i.isFunctionCall && !i.isReasoning)
-    val status = CompletionStop.fromReason(stop) match
-      case CompletionStop.Complete if paused => CompletionStop.Resume
-      case other => other
+    val status = CompletionStop.fromReason(stop, paused)
     Completion(text.toString, toolCalls, Some(NativeTurn(providerKey, ref, r.output())), usage, stop, status)
 
   def complete(

@@ -38,6 +38,12 @@ object Processes:
     def take(): String
     /** The first `n` unread characters, consumed. */
     def consume(n: Int): String
+    /** The unread text up to and including the first match of `pattern`, consumed; `None`
+      * (nothing consumed) when it does not match. One critical section: a tail buffer
+      * dropping its front between a peek and a consume would shift the offsets. */
+    def consumeThrough(pattern: java.util.regex.Pattern): Option[String] = synchronized:
+      val m = pattern.matcher(peek)
+      if m.find() then Some(consume(m.end())) else None
     /** Whether the cap ever dropped text (reported once, in `marker`). */
     def marker: String
     /** Wait (at most `ms`) for more text to arrive. */
@@ -62,8 +68,9 @@ object Processes:
       sb.clear()
       s
     def consume(n: Int): String = synchronized:
-      val s = sb.substring(0, n)
-      sb.delete(0, n)
+      val end = math.min(n, sb.length)
+      val s = sb.substring(0, end)
+      sb.delete(0, end)
       s
     def marker: String = synchronized(if !truncated then "" else TruncationMarker)
     def awaitChange(ms: Long): Unit = synchronized(wait(math.max(1L, ms)))
@@ -221,10 +228,7 @@ object Processes:
     def readUntil(regex: String, timeoutMs: Long): String =
       val pattern = java.util.regex.Pattern.compile(regex)
       val started = System.nanoTime()
-      def tryMatch(): Option[String] =
-        val text = stdoutBuf.peek
-        val m = pattern.matcher(text)
-        if m.find() then Some(stdoutBuf.consume(m.end())) else None
+      def tryMatch(): Option[String] = stdoutBuf.consumeThrough(pattern)
       var found = tryMatch()
       while found.isEmpty do
         if !isAlive then
