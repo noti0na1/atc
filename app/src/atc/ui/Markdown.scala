@@ -15,7 +15,11 @@ package atc.ui
   * @param glyphs    what to draw bullets, quote bars, rules, code gutters and tables with
   * @param highlight colours a whole fenced Scala block; only its last line is used per push
   */
-class MarkdownStream(glyphs: MarkdownStream.Glyphs, highlight: String => List[String]):
+class MarkdownStream(
+  glyphs: MarkdownStream.Glyphs,
+  highlight: String => List[String],
+  columns: () => Int = () => Int.MaxValue,
+):
   import MarkdownStream.*
   import Ansi.{sgr, Bold, Dim, Reset}
 
@@ -193,26 +197,47 @@ class MarkdownStream(glyphs: MarkdownStream.Glyphs, highlight: String => List[St
     val aligns = rows(1).map(alignmentOf)
     val (header, body) = (rows.head, rows.drop(2))
     val columns = (header :: body).map(_.length).max
-    val widths = (0 until columns).map(c => (header :: body).map(r => visibleLength(r.lift(c).getOrElse(""))).max)
+    val natural = (0 until columns).map(c => (header :: body).map(r => visibleLength(r.lift(c).getOrElse(""))).max)
+    val available = this.columns().max(10) - (columns - 1) * 3
+    val minimum = natural.map(_.min(12))
+    def renderCell(text: String, isHeader: Boolean): String =
+      lineStyle = if isHeader then List(Bold) else Nil
+      val rendered = current() + spans(text) + Reset
+      bold = false; code = false; lineStyle = Nil
+      rendered
+    val cramped = natural.sum > available && columns >= 3 && available / columns < 24
+    if minimum.sum > available || cramped then
+      return body.map(row =>
+        val fields = header.zipAll(row, "", "").map((label, text) => renderCell(label, true) -> renderCell(text, false))
+        TextLayout.fields(fields, this.columns()).mkString("\n") + "\n"
+      ).mkString("\n")
+    // Find a common column cap, allowing short columns to leave room for longer text.
+    var low = 0
+    var high = natural.max
+    while low < high do
+      val mid = low + (high - low + 1) / 2
+      if natural.indices.map(c => natural(c).min(mid).max(minimum(c))).sum <= available then low = mid
+      else high = mid - 1
+    val widths = natural.indices.map(c => natural(c).min(low).max(minimum(c)))
     def edge(c: Int): (String, String) = (if c == 0 then "" else " ", if c == columns - 1 then "" else " ")
     val bar = Reset + sgr(Dim) + glyphs.bar + Reset
     def draw(row: List[String], isHeader: Boolean): String =
-      lineStyle = if isHeader then List(Bold) else Nil
-      val line = (0 until columns).map { c =>
+      val cells = (0 until columns).map { c =>
         val text = row.lift(c).getOrElse("")
-        val padding = widths(c) - visibleLength(text)
-        val (left, right) = aligns.lift(c).getOrElse(Align.Left) match
-          case Align.Left => (0, padding)
-          case Align.Right => (padding, 0)
-          case Align.Center => (padding / 2, padding - padding / 2)
-        val (before, after) = edge(c)
-        val rendered = current() + spans(text) + Reset
-        bold = false; code = false // styles do not cross cells
-        val trailing = if c == columns - 1 then 0 else right // no padding after the last column
-        before + " " * left + rendered + " " * trailing + after
-      }.mkString(bar)
-      lineStyle = Nil
-      line + "\n"
+        TextLayout.wrap(renderCell(text, isHeader), widths(c))
+      }
+      (0 until cells.map(_.size).max).map { line =>
+        (0 until columns).map { c =>
+          val text = cells(c).lift(line).getOrElse("")
+          val padding = (widths(c) - TextLayout.width(text)).max(0)
+          val (left, right) = aligns.lift(c).getOrElse(Align.Left) match
+            case Align.Left => (0, padding)
+            case Align.Right => (padding, 0)
+            case Align.Center => (padding / 2, padding - padding / 2)
+          val (before, after) = edge(c)
+          before + " " * left + text + " " * (if c == columns - 1 then 0 else right) + after
+        }.mkString(bar) + "\n"
+      }.mkString
     val rule = sgr(Dim) + (0 until columns).map { c =>
       val (before, after) = edge(c)
       glyphs.rule * (widths(c) + before.length + after.length)

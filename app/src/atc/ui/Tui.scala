@@ -219,7 +219,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def clearOutputHistory(): Unit = synchronized(toolHistory.clear())
 
-  def showOutput(argument: String): Unit = synchronized:
+  def showOutput(argument: String): Unit = frame:
     val parts = argument.trim.split("\\s+").toList.filter(_.nonEmpty)
     if parts.isEmpty then
       if toolHistory.list.isEmpty then info("No retained tool output.")
@@ -246,35 +246,54 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Extra action on Ctrl-C during a turn (e.g. interrupt the REPL evaluation). */
   @volatile var onInterrupt: () => Unit = () => ()
   @volatile var onSubmit: String => Unit = _ => ()
-  @volatile var contextLabel: String = ""
+  @volatile private var contextLabel: String = ""
   @volatile var queuedInputs: () => Int = () => 0
   @volatile private var operation = "ready"
   @volatile private var turnStarted = 0L
   @volatile private var draftInput = ""
+  @volatile private var promptHint = ""
   private val statusLine = if plain then None else Option(Status.getStatus(terminal))
   private var statusSize = (0, 0)
-  statusLine.foreach(_.setBorder(false))
+  private var lastStatus = ""
+  statusLine.foreach { status =>
+    status.setBorder(false)
+    // Reserve the footer before writing content; growing it later scrolls the first lines away.
+    status.update(List(AttributedString("")).asJava)
+  }
+
+  def setContext(model: String, mode: String, directory: String): Unit = synchronized:
+    contextLabel = s"$model ${g.dot} $mode ${g.dot} $directory"
+    refreshStatus()
 
   private def refreshStatus(): Unit =
-    if closed then return
+    if closed || statusLine.isEmpty then return
     val elapsed = if busy then s" ${Tui.duration((System.nanoTime() - turnStarted) / 1e9)}" else ""
     val queued = queuedInputs()
     val waiting = if queued > 0 then s" ${g.dot} $queued message${if queued == 1 then "" else "s"} queued" else ""
     val label =
-      if draftInput.nonEmpty then
+      if promptHint.nonEmpty then promptHint
+      else if draftInput.nonEmpty then
         s"Update: ${draftInput.takeRight((width - 30).max(10))} ${g.dot} Enter to send$waiting"
-      else s"${operation.take((width / 2).max(20))}$elapsed$waiting ${g.dot} $contextLabel"
+      else if busy then
+        val frame = g.spinner(((System.nanoTime() - turnStarted) / 100_000_000L % g.spinner.length).toInt)
+        s"$frame ${operation.take((width / 2).max(20))}$elapsed$waiting ${g.dot} $contextLabel"
+      else contextLabel
     val singleLine = Ansi.sanitize(label).replace('\n', ' ').replace('\t', ' ')
     statusLine.foreach { status =>
       val size = terminal.getSize
       val dimensions = (size.getColumns, size.getRows)
-      if dimensions != statusSize then
+      val resized = dimensions != statusSize
+      if resized then
         status.resize(size)
         statusSize = dimensions
-      status.update(List(AttributedString(fit(singleLine, 0))).asJava)
+      val text = fit(singleLine, 0)
+      if resized || text != lastStatus then
+        flushOutput()
+        status.update(List(AttributedString(text)).asJava)
+        lastStatus = text
     }
 
-  override def inputAccepted(text: String): Unit = synchronized:
+  override def inputAccepted(text: String): Unit = frame:
     beginBlock()
     write(styled(s"${g.arrow} applying update: ${Ansi.sanitize(text)}", Cyan) + "\n")
     refreshStatus()
@@ -284,27 +303,47 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     synchronized { operation = label; refreshStatus() }
     try body
     finally synchronized { operation = previous; refreshStatus() }
+
+  private def setOperation(label: String): Unit =
+    if operation != label then
+      operation = label
+      refreshStatus()
+
+  private def withPromptHint[A](hint: String)(body: => A): A =
+    val previous = promptHint
+    synchronized { promptHint = hint; refreshStatus() }
+    try body
+    finally synchronized { promptHint = previous; refreshStatus() }
   /** Whether an exhausted tool budget asks the human to continue (off for `-p` runs). */
   @volatile var askToContinue: Boolean = true
 
   override def confirmMoreToolCalls(used: Int, budget: Int): Boolean =
     askToContinue && confirm(
-      s"The agent has made $used tool calls this turn (the budget is $budget). Let it continue with another $budget?"
+      s"Tool limit reached after ${Tui.plural(used, "call")}. Allow ${Tui.plural(budget, "more call")}?"
     )
 
   terminal.handle(Terminal.Signal.INT, _ => if busy then { interrupted.set(true); onInterrupt() })
+  terminal.handle(
+    Terminal.Signal.WINCH,
+    _ =>
+      frame {
+        refreshStatus()
+        thinking.resize()
+        liveOutput.resize()
+      }
+  )
 
   def beginTurn(): Unit =
     interrupted.set(false)
     turnStarted = System.nanoTime()
     busy = true
-    operation = "starting turn · Enter sends an update"
+    operation = "starting turn"
     refreshStatus()
     keys.start()
   /** End the turn: close open blocks, say what the turn cost (`stats`) and
     * leave one blank line before the next prompt — the agent is idle again. */
   def endTurn(stats: Option[Tui.TurnStats] = None): Unit =
-    synchronized:
+    frame:
       stopSpinner()
       busy = false
       operation = stats.fold("ready")(_.outcome.label)
@@ -317,10 +356,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         ensureNewline()
         val calls = Tui.plural(s.toolCalls, "tool call")
         val context = Tui.contextUsage(s.context, s.window)
-        write(styled(
-          s"${g.bullet} ${s.outcome.label} in ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens ${g.dot} $context",
-          Dim
-        ) + "\n")
+        val summary =
+          s"${g.bullet} ${s.outcome.label} in ${Tui.duration(s.seconds)} ${g.dot} $calls ${g.dot} ${Tui.count(s.tokens)} tokens ${g.dot} $context"
+        val lines = if plain then List(summary) else TextLayout.wrap(summary, width - Indent.length - 1)
+        lines.zipWithIndex.foreach((line, index) =>
+          write((if index == 0 then "" else Indent) + styled(line, Dim) + "\n")
+        )
       }
       blankLine()
       refreshStatus()
@@ -329,12 +370,27 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   // ── low-level writing ─────────────────────────────────────────────
 
+  private var outputDirty = false
+  private var frameDepth = 0
+
+  /** Flush complete updates rather than every gutter, style and text fragment. */
+  private def frame[A](body: => A): A = synchronized:
+    frameDepth += 1
+    try body
+    finally
+      frameDepth -= 1
+      if frameDepth == 0 then
+        flushOutput()
+
+  private def flushOutput(): Unit = if outputDirty then
+    out.flush()
+    outputDirty = false
+
   private def write(s: String): Unit =
     if s.nonEmpty then
       out.print(s)
-      out.flush()
-      tail = (tail + s).takeRight(2)
-      refreshStatus()
+      outputDirty = true
+      tail = if s.length >= 2 then s.takeRight(2) else (tail + s).takeRight(2)
 
   private def atLineStart: Boolean = tail.endsWith("\n")
   private def afterBlankLine: Boolean = tail == "\n\n"
@@ -348,15 +404,22 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * every line start. Empty lines get the gutter too unless it is blank
     * (indentation), so boxes stay closed and prose has no trailing spaces. */
   private def writeGuttered(text: String, gutter: String): Unit =
+    if !text.contains('\n') then
+      if atLineStart && text.nonEmpty then write(gutter + text) else write(text)
+      return
     val parts = text.split("\n", -1)
+    val rendered = StringBuilder()
+    var lineStart = atLineStart
     var i = 0
     while i < parts.length do
       val seg = parts(i)
       val last = i == parts.length - 1
-      if atLineStart && (seg.nonEmpty || (!last && !gutter.isBlank)) then write(gutter)
-      write(seg)
-      if !last then write("\n")
+      if lineStart && (seg.nonEmpty || (!last && !gutter.isBlank)) then rendered.append(gutter)
+      rendered.append(seg)
+      if !last then rendered.append('\n')
+      lineStart = !last
       i += 1
+    write(rendered.toString)
 
   private def gutter(code: Int): String = Indent + styled(g.bar, code) + " "
   /** Visible width of `gutter`: the indent plus the bar and its space. */
@@ -384,47 +447,69 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         else { sb.append(String(Character.toChars(cp))); w += cw; i += Character.charCount(cp) }
       sb.toString + g.ellipsis
 
-  /** A few lines at the bottom of the screen that are redrawn in place
-    * (cursor up + clear to end of screen). Lines must not wrap. */
+  /** Update only changed rows in a live preview. Clearing the rest of the screen would
+    * also erase the footer, forcing unrelated output to be repainted on every token. */
   private final class LiveRegion:
     private var drawn = 0
     private var tailBefore = tail
+    private var previousLines = List.empty[String]
     def active: Boolean = drawn > 0
-    def redraw(lines: List[String]): Unit =
-      if drawn > 0 then { out.print(s"\r${Ansi.Esc}[${drawn}A${Ansi.Esc}[J"); out.flush(); tail = tailBefore }
-      else { ensureNewline(); tailBefore = tail }
-      lines.foreach(l => write(l + "\n"))
+    def redraw(lines: List[String], force: Boolean = false): Unit =
+      if !force && lines == previousLines then return
+      if drawn == 0 then { ensureNewline(); tailBefore = tail }
+      write(Tui.replaceRows(previousLines, lines, force))
+      tail = lines.lastOption match
+        case Some("") => "\n\n"
+        case Some(last) => last.takeRight(1) + "\n"
+        case None => tailBefore
       drawn = lines.length
+      previousLines = lines
     def clear(): Unit = redraw(Nil)
     /** Keep what is drawn as ordinary output. */
-    def freeze(): Unit = drawn = 0
+    def freeze(): Unit =
+      drawn = 0
+      previousLines = Nil
 
   // ── plain lines (banner, slash commands, notices) ─────────────────
 
-  private def renderedLine(s: String): Unit = { stopSpinner(); ensureNewline(); write(s + "\n") }
+  private def renderedLine(s: String): Unit = frame:
+    stopSpinner()
+    ensureNewline()
+    val lines = if plain then s.split("\n", -1).toList else TextLayout.wrap(s, width - 1)
+    lines.foreach(line => write(line + "\n"))
   /** A plain line supplied by the application. Config values, policy summaries
     * and paths may be repository-controlled, so terminal controls never pass. */
   def println(s: String = ""): Unit = renderedLine(Ansi.sanitize(s))
   def info(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Dim))
+  def preview(s: String): Unit = info(fit(Ansi.sanitize(s).replace('\n', ' '), 0))
   def success(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Green))
   def warn(s: String): Unit = renderedLine(styled(s"${g.warn} ${Ansi.sanitize(s)}", Yellow))
   def error(s: String): Unit = renderedLine(styled(s"${g.cross} ${Ansi.sanitize(s)}", Red))
+
+  def showHelp(rows: List[(String, String)]): Unit = frame:
+    println("Commands:")
+    TextLayout.fields(
+      rows.map((command, description) =>
+        styled(Ansi.sanitize(command), Cyan) -> Ansi.sanitize(description)
+      ),
+      width
+    ).foreach(renderedLine)
   /** The start-up banner: a title, aligned `label → value` rows and a dim hint line. */
-  def banner(title: String, rows: List[(String, String)], hint: String): Unit =
+  def banner(title: String, rows: List[(String, String)], hint: String): Unit = frame:
     stopSpinner()
     ensureNewline()
     write(styled(s"${g.bullet} ${Ansi.sanitize(title)}", Cyan, Bold) + "\n")
-    val labelWidth = rows.map(_._1.length).maxOption.getOrElse(0)
     // Values can be paths (possibly named by an attacker in a cloned repo): sanitize.
-    rows.foreach((label, value) =>
-      write(Indent + styled(label.padTo(labelWidth, ' '), Dim) + "  " + Ansi.sanitize(value) + "\n")
-    )
-    write(Indent + styled(Ansi.sanitize(hint), Dim) + "\n")
+    TextLayout.fields(rows.map((label, value) => styled(Ansi.sanitize(label), Dim) -> Ansi.sanitize(value)), width)
+      .foreach(line => write(line + "\n"))
+    val separated = Ansi.sanitize(hint).replace(" · ", s" ${g.dot} ")
+    val controls = if g == Glyphs.ascii then separated.replace("→", "Right") else separated
+    TextLayout.wrap(controls, width - 3).foreach(line => write(Indent + styled(line, Dim) + "\n"))
 
   // ── thinking (streamed reasoning) ─────────────────────────────────
 
-  def thinkingDelta(text: String): Unit = synchronized:
-    operation = "reasoning"
+  def thinkingDelta(text: String): Unit = frame:
+    setOperation("reasoning")
     thinking.delta(Ansi.sanitize(text))
 
   /** The model's reasoning as it streams. Compact view: a live window over the
@@ -439,6 +524,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     private var started = 0L
 
     def active: Boolean = streaming || region.isDefined
+
+    def resize(): Unit = region.foreach(_.redraw(window(), force = true))
 
     def delta(text: String): Unit = if text.nonEmpty then
       stopSpinner()
@@ -481,7 +568,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     private def summary(): String =
       val secs = (System.nanoTime() - started) / 1e9
       styled(
-        s"${g.bullet} thought for ${Tui.duration(secs)} ${g.dot} ${Tui.plural(buf.contentLines, "line")}",
+        s"${g.bullet} reasoning ${g.dot} ${Tui.duration(secs)}",
         Dim
       ) + "\n"
 
@@ -492,8 +579,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   // ── assistant prose (streamed) ────────────────────────────────────
 
-  def assistantDelta(text: String): Unit = synchronized:
-    operation = "responding"
+  def assistantDelta(text: String): Unit = frame:
+    setOperation("responding")
     stopSpinner()
     val clean = Ansi.sanitize(text) // model text: no terminal control may reach the screen
     prose match
@@ -512,7 +599,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     if colors > 0 then
       MarkdownStream(
         MarkdownStream.Glyphs(g.bullet2, g.quote, g.rule, styled(g.bar, Blue) + " ", g.bar, g.junction),
-        Highlight.scala
+        Highlight.scala,
+        () => width - Indent.length - 1,
       )
     else MarkdownStream.plain
 
@@ -523,24 +611,25 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** Out-of-band note during streaming ("web search"): a spinner until the
     * next text; empty = paragraph break within the same prose block. */
-  def assistantNote(text: String): Unit = synchronized:
+  def assistantNote(text: String): Unit = frame:
     stopSpinner()
     thinking.end()
     ensureNewline()
     if text.nonEmpty then status(text)
-  def assistantEnd(): Unit = synchronized { stopSpinner(); thinking.end(); closeProse(); ensureNewline() }
+  def assistantEnd(): Unit = frame { stopSpinner(); thinking.end(); closeProse(); ensureNewline() }
 
   // ── tool blocks ───────────────────────────────────────────────────
 
   def toolStart(code: String): Unit = toolStart(code, "run_scala")
   /** Open a code block titled `title`: the agent's `run_scala`, or the user's own `/run`. */
-  def toolStart(code: String, title: String): Unit = synchronized:
-    operation = "compiling and running Scala"
+  def toolStart(code: String, title: String): Unit = frame:
+    setOperation("running Scala")
     beginBlock()
     write(styled(g.bullet, Magenta) + " " + styled(title, Magenta, Bold) + "\n")
     // The code is model-written: sanitize before highlighting/printing.
     val lines = if colors > 0 then Highlight.scala(Ansi.sanitize(code)) else Ansi.sanitize(code).linesIterator.toList
-    lines.foreach(l => write(gutter(Magenta) + l + "\n"))
+    lines.flatMap(line => TextLayout.wrap(line, width - GutterWidth - 1))
+      .foreach(line => write(gutter(Magenta) + line + "\n"))
     toolOpen = true
     outputStarted = false
     printed.clear()
@@ -549,13 +638,13 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     fileChanges.clear()
     currentCode = code
     liveOutput.start()
-    if !plain then spin(Indent, "running") // until the first output line / the result
+    if !plain && statusLine.isEmpty then spin(Indent, "running")
 
   /** Live output of the agent's `println` (see `HostOutput.print`). Classified
     * content — where the two texts differ — is marked so the user knows the
     * model cannot see it. `printed` keeps the RAW text (it is matched verbatim
     * against the REPL capture in `toolEnd`); only the display is sanitized. */
-  def agentPrint(agentText: String, userText: String): Unit = synchronized:
+  def agentPrint(agentText: String, userText: String): Unit = frame:
     // Text beyond the REPL capture limit cannot be subtracted from its result.
     val room = ReplSession.MaxOutputBytes - printed.length
     if room > 0 then printed.append(agentText.take(room))
@@ -566,19 +655,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** A command the agent runs (`exec`) is taking a while: name it, then show
     * what it writes as it comes (`commandOutput`), in the same output section
     * as the prints. Not part of the tool result, so not remembered in `printed`. */
-  def commandRunning(commandLine: String): Unit = synchronized:
-    operation = s"running $commandLine"
-    refreshStatus()
+  def commandRunning(commandLine: String): Unit = frame:
+    setOperation(s"running $commandLine")
     openOutputSection()
     liveOutput.emit(styled(s"$$ ${Ansi.sanitize(commandLine)}", Cyan) + "\n")
-  def commandOutput(text: String): Unit = synchronized:
+  def commandOutput(text: String): Unit = frame:
     val room = Tui.MaxHeldChars - liveCaptured.length
     if room > 0 then liveCaptured.append(text.take(room))
     if text.length > room then liveTruncated = true
     openOutputSection()
     liveOutput.emit(Ansi.sanitize(text))
   /** Process notifications preserve the current prompt and wait until any menu closes. */
-  def processEvent(text: String): Unit = synchronized:
+  def processEvent(text: String): Unit = frame:
     if closed then ()
     else if popupDepth > 0 then
       if pendingProcessEvents.size >= 100 then pendingProcessEvents.dequeue()
@@ -639,6 +727,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
     /** The output section is over: whatever the tail window shows stays on screen. */
     def end(): Unit =
+      region.foreach(_.redraw(window(interactive = false), force = true))
       region.foreach(_.freeze())
       region = None
       folding = false
@@ -654,18 +743,20 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
     def foldFromHere(): Unit = folding = true
     def showEverything(): Unit = folding = false
+    def resize(): Unit = region.foreach(_.redraw(window(), force = true))
 
     private def fold(text: String): Unit =
       held.append(text)
       val live = region.getOrElse { val r = LiveRegion(); region = Some(r); r }
       live.redraw(window())
 
-    private def window(): List[String] =
+    private def window(interactive: Boolean = true): List[String] =
       val lines = held.tail(Tui.FoldTail)
       val hidden = held.lineCount - lines.length
       val header =
         if hidden > 0 then
-          List(gutter(Dim) + styled(s"${g.ellipsis} ${Tui.plural(hidden, "more line")} (Ctrl-O to expand)", Dim))
+          val hint = if interactive then " (Ctrl-O to expand)" else ""
+          List(gutter(Dim) + styled(s"${g.ellipsis} ${Tui.plural(hidden, "more line")}$hint", Dim))
         else Nil
       header ++ lines.map(l => gutter(Dim) + fit(l, GutterWidth))
 
@@ -676,8 +767,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * prints (those were shown live) — diagnostics, echoed values, exceptions —
     * then the verdict. Long bodies are cut in the middle (unless expanded) so
     * both the first diagnostics and the tail stay visible. */
-  def toolEnd(r: ExecutionResult, millis: Long): Unit = synchronized:
-    operation = if r.success then "tool completed" else "tool failed"
+  def toolEnd(r: ExecutionResult, millis: Long): Unit = frame:
+    setOperation(if r.success then "tool completed" else "tool failed")
     val live = liveCaptured.toString + (if liveTruncated then "\n[retained live output limit reached]" else "")
     val record = toolHistory.add(currentCode, r, millis, live, fileChanges.toList)
     stopSpinner()
@@ -689,34 +780,33 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     if lines.nonEmpty then
       // REPL output holds the agent's raw prints and compiler diagnostics: sanitize
       // before display (the subtraction above happens in raw space, on purpose).
-      val cleaned = lines.map(Ansi.sanitize(_))
+      val cleaned = lines.map(Ansi.sanitize(_)).flatMap(line =>
+        if plain then List(line) else TextLayout.wrap(line, width - GutterWidth - 1)
+      )
       val kept =
         if cleaned.length <= Tui.MaxPanelLines || plain || expanded then cleaned
         else
           cleaned.take(Tui.MaxPanelLines * 2 / 3) ++
-            List(s"${g.ellipsis} ${cleaned.length - Tui.MaxPanelLines} lines omitted (Ctrl-O to expand next time)") ++
+            List(s"${g.ellipsis} ${cleaned.length - Tui.MaxPanelLines} lines omitted ${g.dot} /output ${record.id}") ++
             cleaned.takeRight(Tui.MaxPanelLines / 3)
-      // One row per line, so the panel's line budget really is a row budget:
-      // diagnostics and echoed values are often far wider than the terminal.
-      val shown = if plain || expanded then kept else kept.map(fit(_, GutterWidth))
       if r.success then
         write(section("result", Dim))
-        shown.foreach(l => write(gutter(Dim) + styled(l, Dim) + "\n"))
+        kept.foreach(l => write(gutter(Dim) + styled(l, Dim) + "\n"))
       else
         write(section("error", Red))
-        shown.foreach(l => write(gutter(Red) + l + "\n"))
+        kept.foreach(l => write(gutter(Red) + l + "\n"))
     fileChanges.foreach(change =>
       write(Indent + styled(s"${Ansi.sanitize(change.path)}: ${change.summary}", Cyan) + "\n")
     )
     val verdict =
       if r.success then styled(s"${g.end} ok ${millis} ms", Green) else styled(s"${g.end} failed ${millis} ms", Red)
-    write(Indent + verdict + styled(s" · /output ${record.id}", Dim) + "\n")
+    write(Indent + verdict + styled(s" ${g.dot} /output ${record.id}", Dim) + "\n")
     toolOpen = false
     flushTodos()
 
   // ── expanded / compact toggle (Ctrl-O) ────────────────────────────
 
-  private def toggleExpanded(): Unit = synchronized:
+  private def toggleExpanded(): Unit = frame:
     expanded = !expanded
     // Take down what is live, say what happened, then re-render it in the new view.
     val wasThinking = thinking.active
@@ -757,14 +847,15 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       out.flush()
 
   /** Show progress ("model is thinking"); ends the current prose block. */
-  def status(text: String): Unit = synchronized:
+  def status(text: String): Unit = frame:
     operation = text
     refreshStatus()
     stopSpinner()
     thinking.end()
     closeProse()
     ensureNewline()
-    if plain then write(styled(s"~ ${Ansi.sanitize(text)}...", Dim) + "\n") else spin("", Ansi.sanitize(text))
+    if plain then write(styled(s"~ ${Ansi.sanitize(text)}...", Dim) + "\n")
+    else if statusLine.isEmpty then spin("", Ansi.sanitize(text))
 
   private def spin(prefix: String, text: String): Unit =
     val s = Spinner(prefix, text)
@@ -882,7 +973,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
                   case ch if ch > 0xffff => typeAhead.append(String(Character.toChars(ch)))
                   case ch if ch >= 32 => typeAhead.append(ch.toChar)
                   case _ => ()
-            Tui.this.synchronized:
+            frame:
               draftInput = typeAhead.toString
               refreshStatus()
           finally
@@ -902,8 +993,13 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Run one jline-prompt pop-up named "a" and read its result; `None` on
     * Ctrl-C/Ctrl-D. jline-prompt echoes the chosen *id* after the message once
     * the user confirms, so menu ids are the visible labels (made unique). */
-  private def popup[R](define: PromptBuilder => Unit)(read: PromptResult[?] => Option[R]): Option[R] = keys.withPaused:
-    val prompter = PrompterFactory.create(terminal, PrompterConfig.defaults().withCancellableFirstPrompt(true))
+  private def popup[R](hint: String)(define: PromptBuilder => Unit)(read: PromptResult[?] => Option[R]): Option[R] =
+    keys.withPaused(withPromptHint(hint)(runPopup(define)(read)))
+
+  private def runPopup[R](define: PromptBuilder => Unit)(read: PromptResult[?] => Option[R]): Option[R] =
+    flushOutput()
+    val config = if g == Glyphs.ascii then PrompterConfig.windows() else PrompterConfig.defaults()
+    val prompter = PrompterFactory.create(terminal, config.withCancellableFirstPrompt(true))
     val builder = prompter.newBuilder()
     define(builder)
     try Option(prompter.prompt(List.empty[AttributedString].asJava, builder.build()).get("a")).flatMap(read)
@@ -917,7 +1013,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * not collapse into the first option. */
   private def menuIndex(message: String, labels: List[String]): Option[Int] =
     val byId = Tui.uniqueIds(labels).zip(labels)
-    popup { b =>
+    popup(s"Arrows move ${g.dot} Enter confirm ${g.dot} Ctrl-C cancel") { b =>
       val lp = b.createListPrompt().name("a").message(message)
       byId.foreach((id, l) => lp.add(id, l))
       lp.addPrompt()
@@ -933,7 +1029,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * the identity of duplicate labels. */
   private def checkboxIndices(message: String, labels: List[String]): Option[List[Int]] =
     val byId = Tui.uniqueIds(labels).zip(labels)
-    popup { b =>
+    popup(s"Space toggle ${g.dot} Enter confirm ${g.dot} Ctrl-C cancel") { b =>
       val cb = b.createCheckboxPrompt().name("a").message(message)
       byId.foreach((id, l) => cb.add(id, l))
       cb.addPrompt()
@@ -950,13 +1046,13 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** A pop-up is a block of its own: a pending TODO panel is drawn first, then
     * `body` (which reads the terminal), then the blank line that ends the block. */
   private def popupBlock[T](body: => T): T = keys.withPaused:
-    synchronized:
+    frame:
       popupDepth += 1
       liveOutput.end()
       flushTodos()
       beginBlock()
     try body
-    finally synchronized:
+    finally frame:
         blankLine()
         popupDepth -= 1
         if popupDepth == 0 then
@@ -975,7 +1071,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     popupBlock:
       // The request embeds model-chosen paths and command lines: sanitize.
       write(Indent + styled(s"${g.warn} Permission request: ${Ansi.sanitize(req.title)}", Yellow, Bold) + "\n")
-      req.details.foreach(d => write(Indent + Indent + styled(Ansi.sanitize(d), Yellow) + "\n"))
+      req.details.foreach { detail =>
+        TextLayout.wrap(Ansi.sanitize(detail), width - 5)
+          .foreach(line => write(Indent + Indent + styled(line, Yellow) + "\n"))
+      }
       val decision =
         if plain then
           Tui.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
@@ -1030,7 +1129,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             if cleanOptions.nonEmpty then info("Choose a listed answer or type your own answer or instructions.")
             freeText(answerPrompt)
           else if multiple then
-            checkboxIndices("Select (space to toggle, enter to confirm)", cleanOptions :+ Tui.AddAnswerLabel) match
+            checkboxIndices("Choose answers", cleanOptions :+ Tui.AddAnswerLabel) match
               case None => None
               case Some(ids) =>
                 val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
@@ -1047,12 +1146,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
             write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
           case Some(_) => ()
-          case None => write(Indent + styled(s"${g.arrow} (no answer)", Red) + "\n")
+          case None => write(Indent + styled(s"${g.arrow} No answer", Dim) + "\n")
         answer
 
   private def freeText(prompt: String): Option[String] = keys.withPaused:
-    try Tui.readAnswer(reader.readLine(prompt))
-    finally tail = "\n"
+    withPromptHint(s"Enter send ${g.dot} Ctrl-C cancel"):
+      flushOutput()
+      try Tui.readAnswer(reader.readLine(prompt))
+      finally tail = "\n"
 
   // ── TODO panel ────────────────────────────────────────────────────
 
@@ -1064,7 +1165,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     pendingTodos.foreach(showTodosNow)
     pendingTodos = None
 
-  def showTodosNow(todos: List[Todo]): Unit =
+  def showTodosNow(todos: List[Todo]): Unit = frame:
     stopSpinner()
     ensureNewline()
     val empty = if todos.isEmpty then styled(" (empty)", Dim) else ""
@@ -1075,7 +1176,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         case TodoStatus.Done => styled(s"${g.done} $text", Dim)
         case TodoStatus.InProgress => styled(s"${g.inProgress} $text", Yellow)
         case TodoStatus.Pending => s"${g.pending} $text"
-      write(Indent + Indent + line + "\n")
+      TextLayout.wrap(line, width - 5).foreach(row => write(Indent + Indent + row + "\n"))
     }
 
   // ── input ─────────────────────────────────────────────────────────
@@ -1136,12 +1237,27 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     closed = true
     stopSpinner()
     keys.stop()
+    synchronized(flushOutput())
     statusLine.foreach(_.close())
     try reader.getHistory.save()
     catch case _: Exception => ()
     terminal.close()
 
 object Tui:
+  /** Replace owned rows with the cursor initially just below them. Leave everything below
+    * that region intact and finish immediately below the replacement. */
+  private[atc] def replaceRows(before: List[String], after: List[String], force: Boolean = false): String =
+    val prefix = if force then 0 else before.zip(after).takeWhile((a, b) => a == b).size
+    val update = StringBuilder()
+    if before.size > prefix then update.append(s"\r${Ansi.Esc}[${before.size - prefix}A")
+    after.drop(prefix).foreach(line => update.append(Ansi.ClearLine).append(line).append('\n'))
+    val removed = (before.size - after.size).max(0)
+    for row <- 0 until removed do
+      if row > 0 then update.append(s"${Ansi.Esc}[1B")
+      update.append(Ansi.ClearLine)
+    if removed > 1 then update.append(s"${Ansi.Esc}[${removed - 1}A")
+    update.toString
+
   /** Cancel the input field and consume JLine's interrupt before another prompt reads. */
   private[atc] def readAnswer(read: => String): Option[String] =
     try Some(read).map(_.trim).filter(_.nonEmpty)
@@ -1345,9 +1461,9 @@ object Tui:
     else if n < 1_000_000 then short(n / 1e3, "k")
     else short(n / 1e6, "M")
 
-  val AllowOnce = "Yes, this time"
-  val AllowSession = "Yes, for the rest of this session"
-  val DenyLabel = "No"
+  val AllowOnce = "Allow once"
+  val AllowSession = "Allow for this session"
+  val DenyLabel = "Deny this request"
   val ReviseLabel = "Tell the agent what to change"
   val OtherLabel = "Write a different answer"
   val AddAnswerLabel = "Add an answer or instructions"

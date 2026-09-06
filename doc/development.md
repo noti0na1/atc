@@ -352,6 +352,14 @@ including lazy preamble initialization. Lock acquisition has a timeout: an evalu
 cannot stop must not block every subsequent request indefinitely. Such a stuck evaluation
 requires restarting ATC.
 
+After interruption or timeout, the stopped wrapper is excluded from future imports while
+earlier definitions remain available. The driver may already have advanced `objectIndex`;
+advancing it again would create a valid index with no registered wrapper and make later
+definitions fail with `key not found`. The recovery path compares the pre-evaluation and
+returned indexes and invalidates only the stopped wrapper. Run `ReplInterruptionSuite`
+separately as well as in the full suite: unrelated compiler sessions can populate Scala's
+shared wrapper-name table and hide this failure.
+
 Output capture retains at most 4 MiB and reports truncation. Top-level value echoes have a
 separate character limit. User-visible prints also enter the REPL capture; the TUI records
 a bounded prefix to subtract already-displayed output from result panels. Preserve leading
@@ -684,8 +692,35 @@ During a turn, Enter submits a correction and unsent text is shown in the status
 Bracketed pastes are collected without submitting individual lines. The status line uses
 JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
 operation, elapsed time and model/mode/directory context. Spinner writes and status updates
-share the TUI lock. Background process events between turns use `LineReader.printAbove`
+share the TUI lock. The footer is reserved before the first content line, so adding it does
+not scroll the banner away. Its activity indicator replaces a separate spinner when the
+terminal supports a status line. Idle state shows a short model, mode and directory label;
+menus and answer fields replace it with the applicable keyboard controls.
+Resize signals update the footer even while a menu has paused the turn's key reader.
+ASCII mode also selects ASCII menu markers and control separators.
+Streaming text is flushed at the end of each incoming update. Nested rendering helpers share
+that flush instead of flushing every gutter and style fragment. Live previews compare their
+rows with the previous view and immediately repaint only changed rows. They use line erasure,
+not erase-to-end-of-screen, so updating a preview cannot erase the footer. Footer work runs on
+state changes and the existing input-loop clock; writing text does not trigger a footer redraw.
+There is no frame-rate cap or deferred stream queue. `TuiSuite` checks preview growth,
+replacement, shrinkage and clearing while preserving a footer outside the owned rows.
+Background process events between turns use `LineReader.printAbove`
 so notifications do not overwrite the user's input.
+
+`TextLayout` wraps complete lines by terminal cell width, preserving ANSI styles and whole
+Unicode code points. It scans long lines once, with word boundaries preferred over hard
+breaks. Help and banner fields retain aligned continuation lines; when their value column
+would be too narrow, values move below labels. Tool code, diagnostics, permission details
+and TODOs use the same wrapping rules. Diagnostic folding counts the resulting display
+rows, so a long first error remains readable and `/output` exposes the complete result.
+
+Markdown tables retain their natural columns when they fit. Wider tables cap column widths
+and wrap individual cells. A table with three or more columns switches to labeled records
+when wrapping would leave fewer than 24 cells per column on average; tables whose minimum
+column widths cannot fit use the same fallback. This preserves information without turning
+long identifiers and sentences into narrow strips. Completed output panels remove the
+Ctrl-O hint once that live view is no longer active.
 
 `ToolHistory` retains up to 20 results within an eight-million-character budget. Each
 result retains at most two million output characters plus bounded code and file previews;
@@ -726,8 +761,9 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
 - `ConfigSuite`, `LayerSuite`, `ModelSuite`, `GitIgnoreSuite`: configuration and lookup.
 - `AgentCoreLoopSuite`, `AgentLoopSuite`, `CompletionPolicySuite`, `ContextManagerSuite`:
   loop decisions, transcript repair, context fitting and the real REPL integration.
-- `TuiSuite`, `ToolHistorySuite`, `RenderSuite`, `InputPredictorSuite`, `DebugSuite`:
+- `TuiSuite`, `TextLayoutSuite`, `ToolHistorySuite`, `RenderSuite`, `InputPredictorSuite`, `DebugSuite`:
   terminal helpers, retained output, rendering, prediction and error reporting.
+- `ReplInterruptionSuite`: cancellation recovery in an isolated compiler process.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
 
 `TestEnv` supplies temporary directories, scripted permissions and recording host ports.

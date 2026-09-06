@@ -193,8 +193,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   /** End the session: stop a running evaluation (best effort) and refuse
     * further runs. The compiler and its class loader are not released here:
-    * they are collected once nothing refers to the session any more, which is
-    * why `/new` asks for a GC after dropping it. */
+    * they are collected once nothing refers to the session any more. */
   def close(): Unit =
     closed = true
     interrupt()
@@ -265,13 +264,14 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
   /** Take over the new state and turn the evaluation into the agent-visible result. */
   private def adopt(res: ParseResult, evaluated: Evaluated): ExecutionResult =
     val Evaluated(newState, output, thrown, failed) = evaluated
+    val previousIndex = state.objectIndex
     state = newState
     if stopRequested then
       // The evaluation was interrupted: its wrapper class may be half-initialized
       // (`ThreadDeath` from the stop check surfaces as an `ExceptionInInitializerError`
       // the REPL renders as normal output). Skip that wrapper index so the next
       // line does not collide with the invalid class, and report the abort.
-      skipInvalidWrapper()
+      skipInvalidWrapper(previousIndex)
       ExecutionResult(false, "", Some("Execution interrupted by the user (completed effects are not rolled back)"))
     else
       thrown match
@@ -282,15 +282,17 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
             case _ => false
           ExecutionResult(!compileFailed && !failed, output)
 
-  /** After a stopped evaluation, advance past the potentially invalid wrapper
-    * index and mark it invalid, so a later line does not reuse the class name. */
-  private def skipInvalidWrapper(): Unit =
+  /** Exclude the stopped wrapper while preserving every earlier definition. The driver may
+    * already have advanced its index; advancing again would leave an unregistered valid index. */
+  private def skipInvalidWrapper(previousIndex: Int): Unit =
+    val stoppedIndex = state.objectIndex.max(previousIndex + 1)
     state = state.copy(
-      objectIndex = state.objectIndex + 1,
-      invalidObjectIndexes = state.invalidObjectIndexes + state.objectIndex,
+      objectIndex = stoppedIndex,
+      invalidObjectIndexes = state.invalidObjectIndexes + stoppedIndex,
     )
 
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
+    val previousIndex = state.objectIndex
     val resultRef = java.util.concurrent.atomic.AtomicReference[Evaluated]()
     val started = CountDownLatch(1)
     val worker = Thread(() => resultRef.set(evaluate(res, started)))
@@ -312,7 +314,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       if worker.isAlive then
         interrupt()
         worker.join(2000)
-        skipInvalidWrapper()
+        val evaluated = resultRef.get()
+        if evaluated != null then state = evaluated.state
+        skipInvalidWrapper(previousIndex)
         val note = if worker.isAlive then "; the evaluation could not be stopped and is still running" else ""
         ExecutionResult(
           false,

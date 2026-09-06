@@ -50,7 +50,7 @@ class AgentMessagesSuite extends munit.FunSuite:
     )
     assertEquals(AgentMessages.cancelledBeforeExecution, "Cancelled by the user before execution.")
     assertEquals(AgentMessages.missingCodeArgument, "Missing 'code' argument.")
-    assertEquals(AgentMessages.thinkingStatus("sonnet"), "sonnet is thinking")
+    assertEquals(AgentMessages.thinkingStatus, "waiting for model")
     assertEquals(
       AgentMessages.unknownTool("delete_everything", "run_scala"),
       "Unknown tool 'delete_everything'. Only run_scala is available; everything else is a Scala function."

@@ -95,6 +95,18 @@ class RenderSuite extends munit.FunSuite:
     val text = "| 名 | N |\n|---|---|\n| e\u0301 | 1 |\n"
     assertEquals(plain(render(text)), "名 │ N\n───┼──\ne\u0301  │ 1\n")
 
+  test("wide tables wrap within the terminal width without losing cell content"):
+    val table = "| File | Finding | Action |\n|---|---|---|\n" +
+      "| source.py | A long description of the observed failure | Add a regression test before changing behavior |\n"
+    for columns <- List(24, 64, 100) do
+      val renderer = MarkdownStream(glyphs, _.linesIterator.toList, () => columns)
+      val output = renderer.push(table) + renderer.finish()
+      val lines = plain(output).linesIterator.toList
+      assert(lines.forall(line => atc.ui.TextLayout.width(line) <= columns), output)
+      assert(output.contains("source.py"), output)
+      assert(output.contains("regression"), output)
+      assert(output.contains("behavior"), output)
+
   test("a table ends at the first non-row line, an unterminated one at finish, and a lone | line is text"):
     assertEquals(plain(render("| a | b |\n|---|---|\n| 1 | 2 |\nafter\n")), "a │ b\n──┼──\n1 │ 2\nafter\n")
     assertEquals(plain(render("| a | b |\n|---|---|\n| 1 | 2 |")), "a │ b\n──┼──\n1 │ 2\n")

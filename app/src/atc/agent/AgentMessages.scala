@@ -18,7 +18,7 @@ object AgentMessages:
     "Not executed: the user supplied new instructions. Revise the plan before requesting more tools."
   val missingCodeArgument: String = "Missing 'code' argument."
 
-  def thinkingStatus(modelAlias: String): String = s"$modelAlias is thinking"
+  val thinkingStatus: String = "waiting for model"
 
   val truncationContinuation: String =
     "[continuation request] Continue exactly where the previous response was truncated. " +

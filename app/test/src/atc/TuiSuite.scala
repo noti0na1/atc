@@ -10,6 +10,51 @@ import java.nio.file.Files
 /** The terminal front-end's pure helpers (the rest needs a real terminal). */
 class TuiSuite extends munit.FunSuite:
 
+  test("live row updates preserve the footer while growing, shrinking and clearing the preview"):
+    val cases = List(
+      List("header", "old") -> List("header", "new"),
+      List("first") -> List("first", "second"),
+      List("first", "second", "third") -> List("first"),
+      List("first", "second") -> Nil,
+      Nil -> List("first"),
+      List("same") -> List("same"),
+    )
+    val control = "\u001b\\[([0-9]+)([ABK])".r
+    for
+      (before, after) <- cases
+      force <- List(false, true)
+    do
+      val rows = Array.fill(12)("")
+      before.zipWithIndex.foreach((line, index) => rows(index) = line)
+      rows(11) = "footer must remain"
+      var row = before.size
+      var column = 0
+      var remaining = Tui.replaceRows(before, after, force)
+      while remaining.nonEmpty do
+        control.findPrefixMatchOf(remaining) match
+          case Some(sequence) =>
+            val count = sequence.group(1).nn.toInt
+            sequence.group(2) match
+              case "A" => row -= count
+              case "B" => row += count
+              case "K" => assertEquals(count, 2); rows(row) = ""
+              case _ => fail("Unexpected cursor operation")
+            remaining = remaining.drop(sequence.end)
+          case None =>
+            remaining.head match
+              case '\r' => column = 0
+              case '\n' => row += 1; column = 0
+              case '\u001b' => fail("A row update must not erase the screen")
+              case char =>
+                rows(row) = rows(row).take(column).padTo(column, ' ') + char + rows(row).drop(column + 1)
+                column += 1
+            remaining = remaining.tail
+      assertEquals(rows.take(after.size).toList, after)
+      assert(rows.slice(after.size, 11).forall(_.isEmpty))
+      assertEquals(rows(11), "footer must remain")
+      assertEquals(row, after.size)
+    assert(!Tui.replaceRows(List("header", "old"), List("header", "new")).contains("header"))
+
   test("cancelling a text answer clears JLine's interrupt before returning to the menu"):
     try
       val answer = Tui.readAnswer {

@@ -5,6 +5,21 @@ import atc.lib.{FileSystem, SearchOptions}
 import atc.perms.*
 
 class HostEditingSuite extends munit.FunSuite:
+  test("locked file denials do not suggest an impossible permission request"):
+    val env = TestEnv(mkRules =
+      root =>
+        TestEnv.defaultRules(root) :+
+          FileRule(PathPattern("locked", root), Some(Access.None), None, locked = true)
+    )
+    env.file("locked/note.txt", "unchanged")
+    given FileSystem = FileSystemImpl(ScopeId.Base, env.host)
+    val read = intercept[SecurityException](env.host.read("locked/note.txt"))
+    val write = intercept[SecurityException](env.host.write("locked/note.txt", "changed"))
+    for error <- List(read, write) do
+      assert(error.getMessage.nn.contains("Permission requests cannot widen access"))
+      assert(!error.getMessage.nn.contains("Use requestFiles"))
+    assertEquals(env.contents("locked/note.txt"), "unchanged")
+
   test("literal replacement checks uniqueness before writing and preserves literal replacement characters"):
     val env = TestEnv()
     given FileSystem = FileSystemImpl(ScopeId.Base, env.host)

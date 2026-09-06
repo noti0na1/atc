@@ -37,7 +37,7 @@ private[atc] final class ScalaToolRunner(
       val start = System.nanoTime()
       val decisionsBefore = policy.decisionCount
       val current = repl
-      ui.status("compiling and running Scala")
+      ui.status("running Scala")
       val result = current.run(code)
       // Time the snippet spent waiting for the user (prompts, questions) is not execution time.
       val millis = (System.nanoTime() - start - repl.clock.paused) / 1_000_000L

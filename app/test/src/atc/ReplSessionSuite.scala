@@ -254,10 +254,13 @@ class ReplSessionSuite extends munit.FunSuite:
   // ── Timeouts and interruption ───────────────────────────────────
 
   test("execution timeout is reported and the session stays usable"):
+    assertOk(quick.run("val beforeTimeout = 40"))
     val r = quick.run("while true do ()")
     assert(!r.success)
     assert(r.error.exists(_.contains("timed out")), r.error.toString)
     assert(assertOk(quick.run("1 + 1")).output.contains("2"))
+    assertOk(quick.run("val afterTimeout = beforeTimeout + 2"))
+    assert(assertOk(quick.run("afterTimeout")).output.contains("42"))
   test("time spent waiting for the user is not counted against the timeout"):
     val outside = TestEnv.outsideDir("slow-user")
     envQuick.onRequest = _ =>
@@ -274,6 +277,7 @@ class ReplSessionSuite extends munit.FunSuite:
   test("interrupt() aborts a running evaluation"):
     val env = TestEnv(prefix = "atc-repl-interrupt")
     val s = env.newSession(timeoutMs = Some(60000L))
+    assertOk(s.run("val beforeInterrupt = 40"))
     @volatile var result: Option[ExecutionResult] = None
     val t = Thread(() => result = Some(s.run("while true do ()")))
     t.setDaemon(true)
@@ -284,6 +288,8 @@ class ReplSessionSuite extends munit.FunSuite:
     assert(!t.isAlive, "evaluation did not stop after interrupt")
     assert(result.exists(!_.success), result.toString)
     assert(assertOk(s.run("2 + 2")).output.contains("4"))
+    assertOk(s.run("val afterInterrupt = beforeInterrupt + 2"))
+    assert(assertOk(s.run("afterInterrupt")).output.contains("42"))
 
   test("close() interrupts a running evaluation and refuses later runs"):
     val env = TestEnv(prefix = "atc-repl-close")

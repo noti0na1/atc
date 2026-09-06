@@ -86,9 +86,9 @@ approve the request in a pop-up:
     patterns: npm *
     reason:   install dependencies and run the test suite
     Allow?
-    › Yes, this time
-      Yes, for the rest of this session
-      No
+    › Allow once
+      Allow for this session
+      Deny this request
       Tell the agent what to change
 ```
 
@@ -427,9 +427,9 @@ requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github
 
 Permission prompts offer these choices:
 
-- **Yes, this time:** grant the request for the current block.
-- **Yes, for the rest of this session:** retain the grant for later calls.
-- **No:** reject the submitted request.
+- **Allow once:** grant the request for the current block.
+- **Allow for this session:** retain the grant for later calls.
+- **Deny this request:** reject the submitted request.
 - **Tell the agent what to change:** send instructions so the agent can revise its request.
 
 For example, if a request includes five commands, choose **Tell the agent what to change**

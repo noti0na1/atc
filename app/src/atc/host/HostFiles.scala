@@ -29,8 +29,12 @@ private[host] trait HostFiles:
 
   private def denied(path: Path, operation: String, permission: Perm, hint: String): SecurityException =
     val shown = PlatformPath.portable(path)
+    val guidance =
+      if permission.locked then
+        "The file rule is locked. Permission requests cannot widen access; the user must change the configuration."
+      else hint
     SecurityException(
-      s"Access denied: $operation on '$shown' is not permitted (current permission: ${permission.describe}). $hint"
+      s"Access denied: $operation on '$shown' is not permitted (current permission: ${permission.describe}). $guidance"
     )
 
   private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =

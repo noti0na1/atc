@@ -192,7 +192,7 @@ final class Agent(
         val prepared = context.prepare(fixedTokens, history, model, retainedContext)
         conversation.useHistory(prepared.history)
         prepared.warnings.foreach(ui.warn)
-        ui.status(AgentMessages.thinkingStatus(model.alias))
+        ui.status(AgentMessages.thinkingStatus)
         completeRound() match
           case None if !cancelled() && !queuedInput.isEmpty =>
             conversation.interrupt()

@@ -125,7 +125,8 @@ final class App(args: Cli.Args):
   tui.queuedInputs = () => agent.queuedInputCount
 
   private def updateStatusContext(): Unit =
-    tui.contextLabel = s"${agent.model.ref} | ${policy.mode.label} | ${App.pretty(cwd)}"
+    val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)
+    tui.setContext(catalog.label(catalog.find(agent.model.ref)), policy.mode.label, directory)
   updateStatusContext()
 
   // ── running ───────────────────────────────────────────────────────
@@ -212,7 +213,7 @@ final class App(args: Cli.Args):
         val saved = SessionStore.read(autoSaveFile)
         if saved.nonEmpty then
           saved.userRequests.lastOption.foreach(text =>
-            tui.info(s"Last request: ${text.replace('\n', ' ').take(160)}")
+            tui.preview(s"Last request: $text")
           )
           tui.choose(
             "Continue your last session in this directory?",
@@ -252,25 +253,15 @@ final class App(args: Cli.Args):
     App.describe(m, catalog.find(m.ref))
 
   private def banner(): Unit =
-    val noClassifiedModel = "(none — set \"classifiedModel\" in the config to use classifiedChat)"
-    val noConfig = "(none; built-in defaults — try `atc --init`)"
     tui.banner(
       s"atc ${Main.Version}",
       List(
         "model" -> describe(agent.model),
-        "classified model" -> agent.classifiedModel.map(describe).getOrElse(noClassifiedModel),
-        "cwd" -> App.pretty(cwd),
-        "config" -> (if configFiles.isEmpty then noConfig else configFiles.map(App.pretty).mkString(", ")),
         "mode" -> policy.mode.describe,
-        "sandbox" -> List(
-          s"safe mode ${if config.safeMode then "on" else "off"}",
-          config.executionTimeoutMs.map(ms => s"timeout ${ms / 1000} s").getOrElse("no timeout"),
-          s"max ${config.maxToolCalls} tool calls/turn"
-        ).mkString(" · "),
-      ),
-      (List("Type a request", "/help commands", "Shift-Tab or /mode cycle mode")
-        ++ Option.when(predicting)("Tab or → accept the suggested next request")
-        ++ List("Ctrl-C interrupt", "Ctrl-O expand/collapse", "Ctrl-D quit")).mkString(" · "),
+        "directory" -> App.pretty(cwd),
+      ) ++ agent.classifiedModel.map(model => "classified model" -> describe(model)),
+      (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
+        ++ Option.when(predicting)("Tab or → accept the suggested next request")).mkString(" · "),
     )
 
   // ── next-input prediction ─────────────────────────────────────────
@@ -362,7 +353,7 @@ final class App(args: Cli.Args):
         true
 
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
-    case Cmd.Help => tui.println(SlashCommand.helpText)
+    case Cmd.Help => tui.showHelp(SlashCommand.values.toList.map(command => command.usage -> command.help))
     case Cmd.Model => switchModel(arg)
     case Cmd.ClassifiedModel => switchClassifiedModel(arg)
     case Cmd.Models => showModels()
@@ -389,17 +380,23 @@ final class App(args: Cli.Args):
     case Cmd.Output => tui.showOutput(arg)
     case Cmd.Task =>
       val notes = host.currentTaskNotes
-      tui.println(s"Goal: ${notes.goal}")
-      List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
-        .foreach((label, values) =>
-          tui.println(s"$label:")
-          values.foreach(value => tui.println(s"  - $value"))
-        )
+      if notes == atc.lib.TaskNotes() then tui.info("No task notes yet.")
+      else
+        if notes.goal.nonEmpty then tui.println(s"Goal: ${notes.goal}")
+        List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
+          .filter(_._2.nonEmpty).foreach((label, values) =>
+            tui.println(s"$label:")
+            values.foreach(value => tui.println(s"  - $value"))
+          )
     case Cmd.Save =>
       val path = if arg.isEmpty then cwd.resolve(s".atc/sessions/session-${System.currentTimeMillis()}.json").nn
       else sessionPath(arg)
-      SessionStore.write(path, agent.snapshot)
-      tui.success(s"Saved conversation to ${App.pretty(path)}")
+      try
+        SessionStore.write(path, agent.snapshot)
+        tui.success(s"Saved conversation to ${App.pretty(path)}")
+      catch
+        case _: java.nio.file.FileAlreadyExistsException =>
+          tui.error(s"Save file already exists: ${App.pretty(path)}. Choose another filename.")
     case Cmd.Resume =>
       val path = if arg.isEmpty then autoSaveFile else sessionPath(arg)
       if arg.isEmpty && !Files.exists(path) then tui.info("No saved session for this directory.")
@@ -427,6 +424,7 @@ final class App(args: Cli.Args):
       tui.toolStart(code, "/run")
       val start = System.nanoTime()
       val s = ensureSession()
+      tui.status("running Scala")
       val decisionsBefore = policy.decisionCount
       val result = s.run(code)
       val millis = (System.nanoTime() - start - s.clock.paused) / 1_000_000L
@@ -455,6 +453,7 @@ final class App(args: Cli.Args):
       if grants.isEmpty then tui.info("No session grants.")
       else grants.zipWithIndex.foreach((grant, index) => tui.println(s"  ${index + 1}. ${grant.describe}"))
     def revoke(grant: SessionGrant): Unit =
+      predictor.invalidate()
       policy.revoke(grant)
       agent.notePermissionRevoked(grant.describe)
       tui.success(s"Revoked ${grant.describe} for future operations.")

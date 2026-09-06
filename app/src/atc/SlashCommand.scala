@@ -3,43 +3,43 @@ package atc
 /** Slash-command names, aliases and help text. Parsing and completion share
   * this table; [[App]] implements the command actions. */
 enum SlashCommand(val usage: String, val help: String, val aliases: String*):
-  case Help extends SlashCommand("/help", "this help", "/h", "/?")
-  case Model extends SlashCommand("/model [ref]", "switch the agent model (no argument: pick from a list)")
+  case Help extends SlashCommand("/help", "show commands", "/h", "/?")
+  case Model extends SlashCommand("/model [ref]", "choose or switch the agent model")
   case ClassifiedModel
       extends SlashCommand(
         "/classifiedmodel [ref]",
-        "switch the model that may see classified data (\"off\" to unset)",
+        "choose a classified model; off disables it",
         "/classified",
       )
   case Models extends SlashCommand("/models", "list configured models")
   case Mode
       extends SlashCommand(
         "/mode [name]",
-        "cycle the sandbox mode (readonly → local → full), or set it; restarts the REPL",
+        "change mode and restart the REPL",
       )
   case Perms
       extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
-  case Config extends SlashCommand("/config", "show config files and settings")
+  case Config extends SlashCommand("/config", "show the active configuration")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run
       extends SlashCommand(
         "/run [code]",
-        "run Scala in the sandbox yourself, as the agent would (no code: type lines, an empty one runs them)",
+        "run Scala; omit code for multiline input",
         "/scala",
       )
-  case New extends SlashCommand("/new", "start over: fresh REPL, conversation, TODOs and session grants forgotten")
-  case Reset extends SlashCommand("/reset", "restart the sandbox REPL (keeps the conversation)")
-  case Clear extends SlashCommand("/clear", "forget the conversation (keeps the REPL)")
-  case Todos extends SlashCommand("/todos", "show the agent's TODO list", "/todo")
-  case Ps extends SlashCommand("/ps", "list the processes the agent started with spawn", "/processes")
-  case Kill extends SlashCommand("/kill [id|all]", "kill a process the agent started (p2, 2, or all)")
-  case Cost extends SlashCommand("/cost", "show token usage and how full the context is", "/usage", "/context")
+  case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")
+  case Reset extends SlashCommand("/reset", "restart the REPL; keep the conversation")
+  case Clear extends SlashCommand("/clear", "clear the conversation; keep the REPL")
+  case Todos extends SlashCommand("/todos", "show tasks and progress", "/todo")
+  case Ps extends SlashCommand("/ps", "list background processes", "/processes")
+  case Kill extends SlashCommand("/kill [id|all]", "stop one or all background processes")
+  case Cost extends SlashCommand("/cost", "show token usage and context", "/usage", "/context")
   case Output extends SlashCommand("/output [number|last] [line]", "inspect retained tool output and file changes")
-  case Task extends SlashCommand("/task", "show the retained task goal, constraints and progress")
-  case Save extends SlashCommand("/save [file]", "save the conversation and task notes to a new file")
+  case Task extends SlashCommand("/task", "show the task goal, constraints and progress")
+  case Save extends SlashCommand("/save [file]", "save conversation and task notes to a new file")
   case Resume
-      extends SlashCommand("/resume [file]", "resume the last session or a saved file with fresh permissions and REPL")
-  case Quit extends SlashCommand("/quit", "save the current session and exit", "/exit", "/q")
+      extends SlashCommand("/resume [file]", "restore the last session or a saved file")
+  case Quit extends SlashCommand("/quit", "save the session and exit", "/exit", "/q")
 
   /** The name as typed, e.g. `/help`. */
   def name: String = usage.takeWhile(_ != ' ')
