@@ -13,6 +13,19 @@ class ClassifiedSuite extends munit.FunSuite:
 
   private val nl = System.lineSeparator
 
+  val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-classified")
+  import env.given
+  import env.host.*
+  given fs: FileSystem = env.host.fileSystem
+
+  env.file("public.txt", "public data")
+  env.file("secrets/data.txt", "TOP SECRET DATA")
+  env.file("secrets/docs/deep.txt", "DEEPER SECRET")
+  env.file(".env", "API_KEY=abc")
+  env.file("config/.env", "NESTED=1")
+
+  private def secret(rel: String): FileEntry = access(env.root.resolve(rel).toString)
+
   // ── ClassifiedImpl as a value ────────────────────────────────────
 
   test("wrap creates a classified value whose toString hides the content"):
@@ -95,19 +108,6 @@ class ClassifiedSuite extends munit.FunSuite:
     intercept[SecurityException](ClassifiedImpl.get(foreign))
 
   // ── Host-level enforcement ──────────────────────────────────────
-
-  val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-classified")
-  import env.given
-  import env.host.*
-  given fs: FileSystem = env.host.fileSystem
-
-  env.file("public.txt", "public data")
-  env.file("secrets/data.txt", "TOP SECRET DATA")
-  env.file("secrets/docs/deep.txt", "DEEPER SECRET")
-  env.file(".env", "API_KEY=abc")
-  env.file("config/.env", "NESTED=1")
-
-  private def secret(rel: String): FileEntry = access(env.root.resolve(rel).toString)
 
   test("isClassified reflects the policy"):
     assert(secret("secrets/data.txt").isClassified)

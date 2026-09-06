@@ -5,6 +5,9 @@ import atc.platform.{Platform, PlatformPath}
 import java.nio.file.{Files, Path}
 
 class PolicySuite extends munit.FunSuite:
+
+  val root: Path = Files.createTempDirectory("atc-policy").toRealPath()
+
   test("revoking a session grant removes only that grant and preserves configured access"):
     val policy = Policy(Nil, List("git status"), Nil, _ => Decision.AllowSession)
     policy.closeScope(policy.requestExec(ScopeId.Base, List("npm test"), "test"))
@@ -14,7 +17,6 @@ class PolicySuite extends munit.FunSuite:
     assert(policy.commandAllowed(ScopeId.Base, "git status"))
     assert(policy.hostAllowed(ScopeId.Base, "example.com"))
     assertEquals(policy.sessionGrants, List(SessionGrant.Host("example.com")))
-  val root: Path = Files.createTempDirectory("atc-policy").toRealPath()
   Files.createDirectories(root.resolve("src/main"))
   Files.createDirectories(root.resolve("build"))
   Files.createDirectories(root.resolve("secrets/inner"))

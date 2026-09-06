@@ -126,7 +126,7 @@ class TuiSuite extends munit.FunSuite:
       StandardCharsets.UTF_8,
     )
     try
-      terminal.setSize(org.jline.terminal.Size(80, 24): org.jline.terminal.Sized)
+      terminal.setSize(org.jline.terminal.Size.of(80, 24): org.jline.terminal.Sized)
       val status = org.jline.utils.Status.getStatus(terminal)
       assert(status != null)
       Tui.drawStatus(terminal, status, "ready")

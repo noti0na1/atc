@@ -25,6 +25,8 @@ trait AtcScalaModule extends ScalaModule, ScalafmtModule:
     "-deprecation", "-feature", "-unchecked",
     "-release:17",
     "-language:experimental.modularity",
+    "-Yexplicit-nulls",
+    "-Wsafe-init",
   )
   trait AtcTests extends ScalaTests, TestModule.Munit, ScalafmtModule:
     def mvnDeps = Seq(mvn"org.scalameta::munit:${Versions.munit}")
@@ -36,8 +38,6 @@ trait AtcScalaModule extends ScalaModule, ScalafmtModule:
 object lib extends AtcScalaModule:
   def scalacOptions = super.scalacOptions() ++ Seq(
     "-language:experimental.captureChecking",
-    "-Yexplicit-nulls",
-    "-Wsafe-init",
   )
   /** The agent-facing API source; the app bundles it for the system prompt. */
   def interfaceSource = Task.Source("src/atc/lib/Interface.scala")
@@ -46,7 +46,6 @@ object lib extends AtcScalaModule:
 /** The agent application: TUI, LLM providers, permission policy, sandbox host. */
 object app extends AtcScalaModule:
   def moduleDeps = Seq(lib)
-  def scalacOptions = super.scalacOptions() ++ Seq("-Yexplicit-nulls")
   def mainClass = Some("atc.Main")
   def mvnDeps = Seq(
     mvn"org.scala-lang::scala3-compiler:${Versions.scala}",
