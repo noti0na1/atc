@@ -180,6 +180,20 @@ object ContextManager:
     // double-counting every assistant turn.
     neutral.max(native.map(turn => (turn.payloadChars + 3L) / 4).getOrElse(0L)) + 4
 
+  /** Preserve the largest suffix of whole user exchanges within the budget.
+    * Unlike overflow fitting, even the latest exchange may be summarized if
+    * it cannot fit. Continuations and tool results never introduce a boundary. */
+  def splitForCompaction(
+    history: List[Msg],
+    budget: Long,
+    estimate: Msg => Long = ContextManager.estimateTokens,
+  ): (List[Msg], List[Msg]) =
+    val suffixSizes = history.map(estimate).scanRight(0L)(_ + _).toVector
+    val start = history.zipWithIndex.collectFirst {
+      case (Msg.User(_), index) if suffixSizes(index) <= budget => index
+    }.getOrElse(history.size)
+    history.splitAt(start)
+
   /** Cut history to an estimated token budget by dropping whole exchanges
     * from the front. A cut starts at a real user message, and the last real
     * user message plus everything following it is always retained. Linear in

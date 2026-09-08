@@ -13,6 +13,7 @@ class SlashCommandSuite extends munit.FunSuite:
     assert(names.forall(_.startsWith("/")))
 
   test("parse resolves names and aliases case-insensitively and splits off the argument"):
+    assertEquals(parse("/compact preserve paths"), Right((Compact, "preserve paths")))
     assertEquals(parse("/help"), Right((Help, "")))
     assertEquals(parse("/?"), Right((Help, "")))
     assertEquals(parse("/Q"), Right((Quit, "")))

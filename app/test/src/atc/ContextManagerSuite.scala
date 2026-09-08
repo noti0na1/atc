@@ -135,3 +135,30 @@ class ContextManagerSuite extends munit.FunSuite:
     manager.reset()
     assertEquals(manager.calibration, 1.0)
     assertEquals(manager.droppedMessages, 0)
+
+  test("compaction keeps the largest recent suffix within its token budget"):
+    val first = List(user("old"), assistant("x" * 4000))
+    val second = List(user("middle"), assistant("y" * 400))
+    val last = List(user("latest"), assistant("z" * 40))
+    val history = first ++ second ++ last
+    val recent = second ++ last
+    val budget = recent.map(ContextManager.estimateTokens).sum
+    assertEquals(ContextManager.splitForCompaction(history, budget), (first, recent))
+    assertEquals(ContextManager.splitForCompaction(history, budget - 1), (first ++ second, last))
+    assertEquals(ContextManager.splitForCompaction(history, 0), (history, Nil))
+    assertEquals(ContextManager.splitForCompaction(history, 100000), (Nil, history))
+    assertEquals(ContextManager.splitForCompaction(Nil, 10), (Nil, Nil))
+
+  test("compaction never splits tool exchanges or continuations to meet a retention budget"):
+    val older = List(user("old"), assistant("done"))
+    val recent = List(
+      user("current"),
+      Msg.Assistant("run", List(ToolCall("call", "run_scala", "{}")), None),
+      Msg.ToolResults(List(ToolResult("call", "result", false))),
+      assistant("partial"),
+      Msg.Continuation("continue"),
+      assistant("finished"),
+    )
+    val budget = recent.map(ContextManager.estimateTokens).sum
+    assertEquals(ContextManager.splitForCompaction(older ++ recent, budget), (older, recent))
+    assertEquals(ContextManager.splitForCompaction(older ++ recent, budget - 1), (older ++ recent, Nil))

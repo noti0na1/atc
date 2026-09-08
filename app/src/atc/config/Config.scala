@@ -120,6 +120,12 @@ case class Config(
     * it as ghost text at the prompt (Tab / → accepts). One extra, small model
     * call per turn; `false` turns it off. */
   predictInput: Boolean = true,
+  /** After a turn, compact when estimated context usage reaches this fraction
+    * of the model's context window. Zero disables automatic compaction. */
+  autoCompactThreshold: Double = 0.8,
+  /** Fraction of the context window reserved for recent verbatim exchanges
+    * during manual or automatic compaction. Zero summarizes everything. */
+  compactKeepRatio: Double = 0.2,
 ) derives ReadWriter
 
 object Config:
@@ -433,6 +439,14 @@ object Config:
   def validate(config: Config): Config =
     requirePositive("maxToolOutputChars", config.maxToolOutputChars)
     requireValid(config.maxToolCalls >= 0, s"maxToolCalls must be non-negative (was ${config.maxToolCalls})")
+    requireValid(
+      config.autoCompactThreshold.isFinite && config.autoCompactThreshold >= 0 && config.autoCompactThreshold <= 1,
+      s"autoCompactThreshold must be between 0 and 1 (0 disables it; was ${config.autoCompactThreshold})"
+    )
+    requireValid(
+      config.compactKeepRatio.isFinite && config.compactKeepRatio >= 0 && config.compactKeepRatio <= 1,
+      s"compactKeepRatio must be between 0 and 1 (was ${config.compactKeepRatio})"
+    )
     config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
     config.mode.foreach { m =>
       try Mode.parse(m)

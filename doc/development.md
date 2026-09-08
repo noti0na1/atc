@@ -617,6 +617,45 @@ tokens update the provider/estimate ratio, clamped to `[0.25, 8.0]`. Estimates i
 native payloads eligible for replay to the selected model and avoid counting native and
 neutral assistant content twice. This is an estimate, not provider tokenization.
 
+`Agent.compact` implements `/compact [focus]` with a tool-free request to the selected
+model through `ModelRequest`. `ContextCompaction` serializes neutral transcript data and
+builds a user/assistant summary exchange, including retained task context. It commits only
+complete, nonempty summaries smaller than the older prefix they replace; the result is an
+`Agent.CompactOutcome` (compacted, nothing to compact, summary not smaller) so `/compact`
+can say which. Pending notes, user request tracking, task state and REPL definitions are
+unchanged; usage is recorded separately. Before the summary request is sent, the transcript
+is estimated against the model's input allowance (window minus an eighth) and refused with
+an actionable message when it cannot fit, since it goes to the same model as one message.
+
+`Agent.autoCompact` runs at the top of every round, after queued input is accepted and
+before `ContextManager.prepare` fits the request: before the first request of a turn and
+between tool rounds, so a long tool loop can be summarized while it runs, but never between
+a tool request and its results (the history would be invalid) and never after the final
+answer (a `-p` run would pay for a summary nobody reads). It compares calibrated
+next-request usage with `contextWindow * autoCompactThreshold`. This fraction defaults to
+`0.8`, accepts `[0, 1]`, and uses zero to disable automatic compaction. It is a non-policy
+setting merged with later-layer precedence and shown in `/config`. When the exchange in
+progress is itself summarized (nothing fits the retention budget), a
+`Msg.Continuation` (`AgentMessages.compactionContinuation`) closes the request so that the
+model continues from the summary instead of being asked to complete an assistant message.
+
+Both manual and automatic compaction use `ContextManager.splitForCompaction` to retain the
+largest suffix of whole user exchanges within `contextWindow * compactKeepRatio`, divided
+by the current token calibration. The ratio defaults to `0.2`, accepts `[0, 1]`, and follows
+normal layer precedence. Estimates include native payloads replayable by the current model.
+Tool results and continuations cannot create cut boundaries. An oversized latest exchange
+is summarized too; an unknown window or zero ratio retains no verbatim suffix. When all
+history fits, no summary request is made. The replacement summary precedes the untouched
+suffix, and must be smaller than the older prefix. This budget covers only retained history,
+not the summary or fixed prompt.
+
+An automatic attempt that fails or produces no smaller summary warns once, leaves the
+request to ordinary trimming, and is not repeated until calibrated usage has grown by a tenth
+of the window past the failed attempt (`compactRetryAt`, reset by any successful
+compaction, including a manual one). Ctrl-C during the summary request interrupts the turn
+like any other request, with history unchanged; queued input skips the attempt so the next
+round can accept it first. Summary messages persist through the existing session format.
+
 History fitting computes message sizes and prefix sums once, then chooses a real user
 boundary. It never cuts between a tool request and its results or drops only part of the
 latest exchange. `Msg.Continuation` is excluded from those boundaries so an automatic

@@ -70,5 +70,7 @@
   "respectGitignore": true,
   "executionTimeoutMs": 300000,
   "maxToolCalls": 200,
-  "maxToolOutputChars": 40000
+  "maxToolOutputChars": 40000,
+  "autoCompactThreshold": 0.8,
+  "compactKeepRatio": 0.2
 }

@@ -626,3 +626,42 @@ class ConfigSuite extends munit.FunSuite:
     Config.setTopLevel(link, "model", ujson.Str("b"))
     assert(Files.isSymbolicLink(link), "an intentional shared-config symlink must survive")
     assertEquals(ujson.read(Files.readString(victim))("model").str, "b")
+
+  test("autoCompactThreshold defaults to 80 percent and validates fractions including off"):
+    assertEquals(upickle.default.read[Config]("{}").autoCompactThreshold, 0.8)
+    List(0.0, 0.7, 1.0).foreach { value =>
+      val parsed = upickle.default.read[Config](s"""{"autoCompactThreshold": $value}""")
+      assertEquals(Config.validate(parsed).autoCompactThreshold, value)
+    }
+    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach { value =>
+      val error = intercept[IllegalArgumentException](Config.validate(Config(autoCompactThreshold = value)))
+      assert(error.getMessage.nn.contains("autoCompactThreshold"))
+    }
+
+  test("autoCompactThreshold follows normal global, project and explicit precedence"):
+    def layer(origin: Origin, json: String): ConfigLayer =
+      val obj = ujson.read(json).obj
+      ConfigLayer(origin, None, obj, upickle.default.read[Config](obj), None)
+    val global = layer(Origin.Global, """{"autoCompactThreshold": 0.9}""")
+    val project = layer(Origin.Project, """{"autoCompactThreshold": 0.6}""")
+    val explicit = layer(Origin.Explicit, """{"autoCompactThreshold": 0}""")
+    assertEquals(Config.combine(List(global, project)).settings.autoCompactThreshold, 0.6)
+    assertEquals(Config.combine(List(global, project, explicit)).settings.autoCompactThreshold, 0.0)
+
+  test("compactKeepRatio validates fractions and follows layer precedence"):
+    assertEquals(upickle.default.read[Config]("{}").compactKeepRatio, 0.2)
+    List(0.0, 0.3, 1.0).foreach { ratio =>
+      val parsed = upickle.default.read[Config](s"""{"compactKeepRatio": $ratio}""")
+      assertEquals(Config.validate(parsed).compactKeepRatio, ratio)
+    }
+    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach { ratio =>
+      intercept[IllegalArgumentException](Config.validate(Config(compactKeepRatio = ratio)))
+    }
+    def layer(origin: Origin, ratio: Double): ConfigLayer =
+      val json = ujson.Obj("compactKeepRatio" -> ratio)
+      ConfigLayer(origin, None, json, upickle.default.read[Config](json), None)
+    val global = layer(Origin.Global, 0.3)
+    val project = layer(Origin.Project, 0.4)
+    val explicit = layer(Origin.Explicit, 0.1)
+    assertEquals(Config.combine(List(global, project)).settings.compactKeepRatio, 0.4)
+    assertEquals(Config.combine(List(global, project, explicit)).settings.compactKeepRatio, 0.1)

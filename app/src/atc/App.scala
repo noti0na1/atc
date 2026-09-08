@@ -372,6 +372,20 @@ final class App(args: Cli.Args, val tui: Tui):
       agent.clear()
       predictor.invalidate()
       tui.success("conversation cleared")
+    case Cmd.Compact =>
+      predictor.invalidate()
+      tui.beginTurn()
+      try
+        agent.compact(arg, () => tui.isInterrupted) match
+          case Agent.CompactOutcome.Compacted => tui.success("conversation context compacted")
+          case Agent.CompactOutcome.NothingToCompact =>
+            tui.info("Nothing to compact: the conversation fits the retention budget; history unchanged.")
+          case Agent.CompactOutcome.SummaryNotSmaller =>
+            tui.warn("The summary was no smaller than the history it would replace; history unchanged.")
+      catch case _: atc.llm.CancelledException => tui.info("Compaction cancelled; history unchanged.")
+      finally
+        tui.endTurn()
+        if predicting then predictor.start()
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
@@ -477,7 +491,7 @@ final class App(args: Cli.Args, val tui: Tui):
     if keys.sources.nonEmpty then
       tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
     tui.println(
-      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput}"
+      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput} autoCompactThreshold=${config.autoCompactThreshold} compactKeepRatio=${config.compactKeepRatio}"
     )
     tui.println(s"open permission scopes: ${policy.openScopeCount}")
 

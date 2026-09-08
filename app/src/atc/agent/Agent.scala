@@ -137,6 +137,90 @@ final class Agent(
     context.reset()
     queuedInput.clear()
 
+  /** Summarize the older exchanges with the current model (`/compact`). History
+    * is replaced only after a complete summary smaller than what it replaces
+    * has been received; a cancellation, an incomplete reply or a transcript
+    * that cannot fit the model leaves it unchanged (the last two throw). */
+  def compact(focus: String, cancelled: () => Boolean): Agent.CompactOutcome =
+    compactHistory(focus, cancelled, inTurn = false)
+
+  private def compactHistory(focus: String, cancelled: () => Boolean, inTurn: Boolean): Agent.CompactOutcome =
+    val current = model
+    def size(messages: List[Msg]): Long =
+      messages.map(ContextManager.estimateTokens(_, current.providerKey, current.ref)).sum
+    val budget = current.contextWindow.map(window =>
+      (window.toDouble * config.compactKeepRatio / context.calibration).toLong
+    ).getOrElse(0L)
+    val (older, recent) =
+      ContextManager.splitForCompaction(
+        history,
+        budget,
+        ContextManager.estimateTokens(_, current.providerKey, current.ref)
+      )
+    if older.isEmpty then return Agent.CompactOutcome.NothingToCompact
+    val input = ContextCompaction.transcript(older, focus)
+    // The transcript goes to the same model as one message: refuse before paying for a
+    // request the provider would reject, with a way out (a bigger model for the summary).
+    current.contextWindow.foreach { window =>
+      val allowance = window.toLong - window.toLong / 8
+      val needed =
+        ((ContextManager.estimateTokens(ContextCompaction.prompt.text) + size(input)) * context.calibration).round
+      if needed > allowance then
+        throw IllegalStateException(
+          s"the transcript to summarize (about ${atc.ui.Tui.count(needed)} tokens) exceeds the ${current.alias} input allowance " +
+            s"(${atc.ui.Tui.count(allowance)}); run /compact with a model that has a larger context window, or /clear"
+        )
+    }
+    val retained = retainedContext
+    ui.status("Compacting context…")
+    val result = request.run(cancelled) {
+      current.complete(ContextCompaction.prompt, input, Nil, StreamSink(_ => (), _ => (), _ => ()), cancelled)
+    }
+    recordUsage(Agent.Compaction, result.usage)
+    if cancelled() then throw CancelledException()
+    if result.stop != CompletionStop.Complete || result.toolCalls.nonEmpty || result.text.trim.isEmpty then
+      throw IllegalStateException("the model did not produce a complete summary")
+    val replacement = ContextCompaction.replacement(result.text.trim, retained)
+    if size(replacement) >= size(older) then Agent.CompactOutcome.SummaryNotSmaller
+    else
+      // Mid-turn, the current exchange itself may have been summarized: the request must
+      // still end with a user-role message asking the model to carry on from the summary.
+      val continuation =
+        if inTurn && recent.isEmpty then List(Msg.Continuation(AgentMessages.compactionContinuation)) else Nil
+      conversation.useHistory(replacement ++ recent ++ continuation)
+      compactRetryAt = 0
+      Agent.CompactOutcome.Compacted
+
+  /** Calibrated context usage below which an automatic attempt is not repeated after
+    * one that produced nothing smaller or failed; reset by a successful compaction. */
+  private var compactRetryAt: Long = 0
+
+  /** Before a request is prepared: when the next request would reach the threshold,
+    * summarize the older exchanges so that ordinary trimming has less to cut. Runs
+    * between rounds only, never between a tool request and its results, and never
+    * after the final answer (nothing would read the summary in a `-p` run). A
+    * failure is a warning, trimming still fits the request; Ctrl-C interrupts the
+    * turn like any other request, but queued input just skips the attempt. */
+  private def autoCompact(cancelled: () => Boolean): Unit =
+    val stop = () => cancelled() || !queuedInput.isEmpty
+    if config.autoCompactThreshold > 0 && !stop() then
+      val usage = contextUsage
+      val due = usage.window.exists(window => usage.tokens.toDouble >= window.toDouble * config.autoCompactThreshold)
+      if due && usage.tokens >= compactRetryAt then
+        def retryLater(): Unit = compactRetryAt = usage.tokens + usage.window.getOrElse(0) / 10
+        try
+          compactHistory("", stop, inTurn = true) match
+            case Agent.CompactOutcome.Compacted => ui.warn("Conversation compacted into a summary.")
+            case Agent.CompactOutcome.NothingToCompact => ()
+            case Agent.CompactOutcome.SummaryNotSmaller =>
+              retryLater()
+              ui.warn("Context compaction produced no smaller summary; history unchanged.")
+        catch
+          case e: CancelledException => if cancelled() then throw e
+          case e if scala.util.control.NonFatal(e) =>
+            retryLater()
+            ui.warn(s"Context compaction failed (${atc.Debug.describe(e)}); history unchanged.")
+
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
   def turn(session: => ReplSession, input: String, cancelled: () => Boolean): TurnOutcome =
     runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars), input, cancelled)
@@ -189,6 +273,7 @@ final class Agent(
       if cancelled() then interrupted()
       else
         acceptQueuedInput()
+        autoCompact(cancelled)
         val prepared = context.prepare(fixedTokens, history, model, retainedContext)
         conversation.useHistory(prepared.history)
         prepared.warnings.foreach(ui.warn)
@@ -309,6 +394,16 @@ object Agent:
   val Chat = "chat()"
   val ClassifiedChat = "classifiedChat()"
   val Prediction = "next-input prediction"
+  val Compaction = "context compaction"
+
+  /** What [[Agent.compact]] did; the two "unchanged" cases read differently to the user. */
+  enum CompactOutcome:
+    /** The older exchanges were replaced by a summary. */
+    case Compacted
+    /** Every exchange fits the retention budget, so no request was made. */
+    case NothingToCompact
+    /** The summary was no smaller than what it would replace, so history was kept. */
+    case SummaryNotSmaller
 
   /** Server-side tool pauses (web search) per turn; a research turn can take many. */
   val MaxResumes = 20

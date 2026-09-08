@@ -24,6 +24,10 @@ object AgentMessages:
     "[continuation request] Continue exactly where the previous response was truncated. " +
       "Do not repeat completed work; finish the user's original request."
 
+  val compactionContinuation: String =
+    "[continuation request] The exchange in progress was compacted into the summary above. " +
+      "Continue the task from that summary; do not repeat completed work."
+
   def sandboxRestarted(reason: String): String =
     s"[sandbox notice] The Scala REPL was restarted ($reason). Every `val`, `def` and `import` " +
       "you defined earlier is gone, so re-create anything you still need. The conversation itself is unchanged."

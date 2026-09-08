@@ -537,6 +537,8 @@ the final authority. The exact rules are in
   "executionTimeoutMs": 300000,
   "maxToolCalls": 200,
   "predictInput": true,
+  "autoCompactThreshold": 0.8,
+  "compactKeepRatio": 0.2,
   "instructions": "Use 2-space indentation."
 }
 ```
@@ -696,9 +698,9 @@ the agent did not list. In a plain terminal, type your answer directly.
 model sees), `/run <code>` (run Scala in the sandbox yourself, with the agent's API and
 permissions; the agent is told what you ran), `/ps` and `/kill [id|all]` (the processes the agent
 started with `spawn`), `/reset` (fresh REPL, kills them too), `/clear` (forget the
-conversation), `/new` (both, plus the session's grants), `/quit`. Ctrl-C interrupts the
-turn, Ctrl-O shows folded output and reasoning in full, Shift-Tab cycles the mode, Ctrl-D
-quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a
+conversation), `/compact [focus]` (summarize the conversation, keeping the REPL), `/new`
+(both, plus the session's grants), `/quit`. Ctrl-C interrupts the turn, Ctrl-O shows folded
+output and reasoning in full, Shift-Tab cycles the mode, Ctrl-D quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a
 `/run` also continues while a bracket is open; Enter on an empty line submits.
 
 After each turn, the model predicts your next request and displays it as ghost text (Tab or
@@ -751,6 +753,36 @@ exactly once before writing. `readRange(path, from, to)` and
 `search(dir, pattern, glob, SearchOptions(...))` provide bounded reads and searches; inspect
 `SearchResult.limited` before treating a search as exhaustive. The agent maintains
 `TaskNotes` alongside its TODO list so important task state survives context trimming.
+
+`/compact` asks the current model for a concise summary of the older part of the
+conversation and replaces that part with it. Add a focus, such as
+`/compact preserve debugging findings`, to guide it. Task notes, pending notices, permissions
+and the live REPL remain available. Summaries are included in saved sessions; model usage
+is listed under **context compaction** in `/cost`. Ctrl-C cancels without replacing history.
+Both manual and automatic compaction keep the most recent complete user exchanges verbatim,
+as many as fit within `compactKeepRatio` of the model's context window (default `0.2`, or
+20%, using the same calibrated token estimates as `/cost`), and summarize everything before
+them; tool calls, their results and continuations always stay with their exchange. If even
+the latest exchange exceeds the budget, it is summarized too. Set the ratio to `0` to
+summarize everything; valid values are `0` through `1`. Without a known context window,
+manual compaction summarizes everything. When the whole conversation fits the retention
+budget there is nothing to compact and no request is made, and a summary that would not be
+smaller than what it replaces is discarded; `/compact` says which happened. The summary
+itself must fit the model: a transcript larger than the model's input allowance is refused
+with a message suggesting a larger model or `/clear`.
+
+Automatic compaction runs just before a request when the estimated size of that request
+(system prompt, tools and history) reaches `autoCompactThreshold` times the selected
+model's `contextWindow`: before the first request of a turn, and between tool rounds, so a
+long tool loop is summarized while it runs; the summary is followed by a request to carry
+on. The default is `0.8` (80%); set `"autoCompactThreshold": 0.6` for 60%, or `0` to
+disable it. Values must be between `0` and `1`. No automatic compaction runs without a
+configured context window, and none runs after a final answer. Global, project and explicit
+configs can set it; the later layer wins. A failed attempt, or one whose summary is not
+smaller, is reported and not repeated until the conversation has grown by a tenth of the
+window; ordinary context trimming still protects the request meanwhile. Ctrl-C during the
+summary interrupts the turn with the conversation unchanged. Compaction is lossy; keep
+essential details in task notes or files.
 
 ## License
 
