@@ -10,16 +10,40 @@
 # The binary still needs a JDK 17+ at run time, named by -Djava.home: the compiler
 # reads the JDK's class metadata from its jrt: file system, and runtime class
 # loading falls back to it for JDK classes the image does not carry.
-# Environment: ATC_NATIVE_XMX (builder heap, default 20g), ATC_NATIVE_THREADS
+# Environment: ATC_NATIVE_XMX (builder heap, default: memory minus 3 GB), ATC_NATIVE_THREADS
 # (builder threads, default: all cores), ATC_NATIVE_MARCH (default compatibility).
 # Extra native-image arguments are passed through.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# Physical memory in GiB (Linux, macOS, Git Bash on Windows), 16 when unknown.
+memory_gib() {
+  local kib bytes
+  if [[ -r /proc/meminfo ]]; then
+    kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); echo $(( kib / 1048576 ))
+  elif command -v sysctl >/dev/null 2>&1 && bytes=$(sysctl -n hw.memsize 2>/dev/null); then
+    echo $(( bytes / 1073741824 ))
+  elif command -v wmic >/dev/null 2>&1; then
+    bytes=$(wmic ComputerSystem get TotalPhysicalMemory 2>/dev/null | tr -dc '0-9'); echo $(( ${bytes:-0} / 1073741824 ))
+  else
+    echo 16
+  fi
+}
+
+default_heap() {
+  local gib; gib=$(memory_gib)
+  if (( gib - 3 > 24 )); then echo "24g"
+  elif (( gib - 3 >= 8 )); then echo "$(( gib - 3 ))g"
+  else echo "8g"
+  fi
+}
 : "${GRAALVM_HOME:?set GRAALVM_HOME to a GraalVM 25.3+ installation}"
 DIST="$ROOT/out/dist.dest"
 OUT="$ROOT/out/native"
-# Builder heap: 20g on a 32 GB machine; GitHub's 16 GB runners get 12g.
-XMX="${ATC_NATIVE_XMX:-20g}"
+# Builder heap: by default all physical memory but 3 GB (the builder's own
+# native memory and the OS), at most 24g, so a bigger machine is used without
+# configuration; ATC_NATIVE_XMX overrides (13g on a 16 GB runner is the edge).
+XMX="${ATC_NATIVE_XMX:-$(default_heap)}"
 # x64 images target the baseline ISA so one binary runs on every x64 machine;
 # arm64 images take native-image's default.
 MARCH="${ATC_NATIVE_MARCH:-compatibility}"
@@ -56,7 +80,7 @@ NATIVE_IMAGE="$GRAALVM_HOME/bin/native-image"
 #                           classes of the responses it happened to see)
 exec "$NATIVE_IMAGE" \
   "-J-Xmx$XMX" \
-  ${THREADS:+-H:NumberOfThreads=$THREADS} \
+  ${THREADS:+--parallelism=$THREADS} \
   -H:DeadlockWatchdogInterval=30 \
   -Ob \
   -march="$MARCH" \

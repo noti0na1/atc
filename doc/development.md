@@ -96,9 +96,11 @@ are ahead-of-time compiled. The pieces that make it work:
   `_field()` getters, `putAdditionalProperty`). Registering every method of every SDK class
   instead makes 870k methods reachable and the build runs out of memory; preserving the
   whole app jar crashes the builder.
-- `-Ob` (quick build) and `ATC_NATIVE_XMX` of builder heap (20 GB on a developer machine,
-  12 to 13 GB on CI's 16 GB runners, where the build is GC-bound and takes about 20
-  minutes; `ATC_NATIVE_THREADS` caps the builder threads, fewer need less heap). An `-O2`
+- `-Ob` (quick build) and a builder heap of the machine's memory minus 3 GB, at most 24 GB
+  (`ATC_NATIVE_XMX` overrides; 13 GB, all a 16 GB runner has, is the edge: the build is
+  GC-bound and takes about 20 minutes; `ATC_NATIVE_THREADS` caps the builder threads,
+  fewer need less heap). CI picks the runner per target from repository variables, see
+  `native/README.md` "CI runners". An `-O2`
   image runs faster but builds much longer. `-march=compatibility` on x64 so one binary
   runs on every x64 machine. Do not drop the JNI metadata of preserved types
   (`-H:-PreserveIncludesJNI`) to save memory: the interpreter then cannot call

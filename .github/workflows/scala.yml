@@ -87,11 +87,21 @@ jobs:
   # the build job produced. Each is run-tested against the mock LLM server and
   # uploaded as atc-native-<os>-<arch>.tar.gz (Windows: .zip). Needs GraalVM 25.3+,
   # which the community edition publishes for linux-x64, linux-arm64, macos-arm64
-  # and windows-x64 only (no macOS Intel, no Windows arm64), and 12 to 13 GB of
-  # builder heap on a 16 GB runner (the build then spends much of its time in
-  # GC; expect 20 minutes); the standard macOS Apple Silicon runner has 7 GB, so
-  # that target and the untested Windows one are continue-on-error until they
-  # get a larger or self-hosted runner (set the target's `runner`).
+  # and windows-x64 only (no macOS Intel, no Windows arm64).
+  #
+  # The build wants about 14 GB of builder heap and takes 7 minutes on a 32 GB
+  # machine; on the standard 16 GB runners it fits only just (Linux x64: 19
+  # minutes, 40% of it in GC; arm64 and Windows are at the edge) and the 7 GB
+  # macOS runner cannot build it at all. Point a target at a bigger machine by
+  # setting a repository variable (Settings > Secrets and variables > Actions >
+  # Variables) to a runner label; see native/README.md, "CI runners":
+  #   ATC_RUNNER_LINUX_X64, ATC_RUNNER_LINUX_ARM64, ATC_RUNNER_MACOS_ARM64,
+  #   ATC_RUNNER_WINDOWS_X64
+  # e.g. a self-hosted runner ("self-hosted" or a custom label), a GitHub larger
+  # runner (an organization on the Team plan), or a third-party runner service.
+  # native/build.sh sizes the builder heap from the machine's memory and uses
+  # every core unless `threads` says otherwise; the thread caps below are what
+  # the standard runners need.
   native:
     name: Native image (${{ matrix.target }})
     needs: build
@@ -99,25 +109,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        # xmx: builder heap on a 16 GB runner (7 GB on macOS arm64); threads: builder
-        # threads, fewer need less heap in the compile phase (arm64 code is larger).
         - target: linux-x64
-          runner: ubuntu-latest
-          xmx: 13g
-          threads: 4
+          runner: ${{ vars.ATC_RUNNER_LINUX_X64 || 'ubuntu-latest' }}
+          threads: ${{ vars.ATC_RUNNER_LINUX_X64 && '' || '4' }}
         - target: linux-arm64
-          runner: ubuntu-24.04-arm
-          xmx: 13g
-          threads: 2
+          runner: ${{ vars.ATC_RUNNER_LINUX_ARM64 || 'ubuntu-24.04-arm' }}
+          threads: ${{ vars.ATC_RUNNER_LINUX_ARM64 && '' || '2' }}
         - target: macos-arm64
-          runner: macos-latest
-          xmx: 5g
-          threads: 2
-          experimental: true
+          runner: ${{ vars.ATC_RUNNER_MACOS_ARM64 || 'macos-latest' }}
+          threads: ${{ vars.ATC_RUNNER_MACOS_ARM64 && '' || '2' }}
+          experimental: ${{ !vars.ATC_RUNNER_MACOS_ARM64 }}
         - target: windows-x64
-          runner: windows-latest
-          xmx: 13g
-          threads: 3
+          runner: ${{ vars.ATC_RUNNER_WINDOWS_X64 || 'windows-latest' }}
+          threads: ${{ vars.ATC_RUNNER_WINDOWS_X64 && '' || '3' }}
           experimental: true
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental || false }}
@@ -141,7 +145,6 @@ jobs:
     - name: Build the native image
       shell: bash
       env:
-        ATC_NATIVE_XMX: ${{ matrix.xmx }}
         ATC_NATIVE_THREADS: ${{ matrix.threads }}
       run: GRAALVM_HOME="$JAVA_HOME" native/build.sh
     - name: Run test against the mock LLM server (native)

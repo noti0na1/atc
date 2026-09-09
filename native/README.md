@@ -29,10 +29,51 @@ CI (`native` in `.github/workflows/scala.yml`) builds one binary per target from
 jars the `build` job produced, on every push and pull request as well as on a release,
 run-tests each one against the mock LLM server (`tests/run_test.sh native`) and keeps it
 as a workflow artifact; publishing a release only downloads the artifacts and attaches
-them beside the jars. Targets no standard GitHub runner can build are marked
-`continue-on-error`: macOS Apple Silicon runners have 7 GB of memory against the 12 GB
-the build needs (a larger or self-hosted runner fixes that; set the target's `runner`),
-and the Windows build, though it completes, has not been run on a Windows machine.
+them beside the jars.
+
+## CI runners
+
+The build wants about 14 GB of builder heap and takes 7 minutes on a 32 GB machine. On
+GitHub's standard runners (16 GB, 4 cores; 7 GB on macOS Apple Silicon) it only just fits:
+Linux x64 takes 19 minutes with 40% of the time in GC, Linux arm64 and Windows need the
+builder throttled to 2 or 3 threads and still fail some runs, and macOS arm64 cannot be
+built at all. Those targets are `continue-on-error` so the rest of CI stays meaningful.
+
+The fix is a bigger machine per target, chosen with a repository variable (Settings >
+Secrets and variables > Actions > Variables) holding a runner label; the workflow falls
+back to the standard runner when the variable is unset, and `build.sh` sizes the builder
+heap from the machine's memory (all but 3 GB, at most 24 GB) and uses every core:
+
+| Variable | Target | Standard runner |
+|---|---|---|
+| `ATC_RUNNER_LINUX_X64` | linux-x64 | `ubuntu-latest` |
+| `ATC_RUNNER_LINUX_ARM64` | linux-arm64 | `ubuntu-24.04-arm` |
+| `ATC_RUNNER_MACOS_ARM64` | macos-arm64 | `macos-latest` (7 GB, cannot build) |
+| `ATC_RUNNER_WINDOWS_X64` | windows-x64 | `windows-latest` |
+
+Three kinds of label work:
+
+- **A self-hosted runner** (free; any plan, personal repositories included). Register a
+  machine with 32 GB or more under the repository (Settings > Actions > Runners > New
+  self-hosted runner), give it a label such as `atc-native-macos-arm64`, and set the
+  variable to that label. A developer's own Mac covers macOS arm64 in about 7 minutes; a
+  Linux box or VM covers the Linux targets. Self-hosted runners on a public repository
+  run whatever a pull request submits, so keep GitHub's default of requiring approval
+  for workflows from first-time contributors, or restrict the `native` job to pushes
+  and releases (`if: github.event_name != 'pull_request'`) when opening the repository
+  to outside pull requests.
+- **GitHub larger runners** (organizations on the Team or Enterprise plan; billed per
+  minute even for public repositories). Move the repository into an organization on
+  the Team plan, create runners in the organization's runner groups (for example an
+  8-core, 32 GB Linux x64 and arm64 runner, and a macOS xlarge for arm64), and set the
+  variables to their labels. A 7-minute build on an 8-core Linux runner costs a few cents.
+- **A third-party runner service** (Blacksmith, Namespace, Depot, BuildJet, RunsOn and
+  the like): install the service's GitHub App and set the variables to the labels it
+  documents. Check that it offers the architecture you need; most have Linux x64 and
+  arm64, fewer have macOS.
+
+When a variable is set, the thread cap for that target is dropped and `experimental`
+is lifted for macOS arm64, so a failing build there fails the run as it should.
 
 ## Build and run from a checkout
 
@@ -45,8 +86,9 @@ atcn dev .                                                   # or install it as 
 ```
 
 Needs GraalVM 25.3 or newer (`native-image` with `-H:+RuntimeClassLoading`), about
-8 minutes and a builder heap of `ATC_NATIVE_XMX` (default 20g; CI's 16 GB runners use
-12g to 13g and take about 20 minutes, most of it in GC). The result is about 600 MB.
+8 minutes on a 32 GB machine and a builder heap of `ATC_NATIVE_XMX` (default: the
+machine's memory minus 3 GB, at most 24 GB; 13 GB, the most a 16 GB runner has, is the
+edge and takes about 20 minutes). The result is about 600 MB.
 `ATC_NATIVE_THREADS` caps the builder threads (fewer threads need less heap),
 `ATC_NATIVE_MARCH` (default `compatibility`) sets the x64 target ISA; extra
 `native-image` arguments are passed through.
