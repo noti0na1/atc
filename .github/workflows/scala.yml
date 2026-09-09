@@ -11,6 +11,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a branch cancels the run it supersedes (the native builds take
+# long and a stale run would hold the runners for an hour or more).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Unit tests, the wrapper tests, the jars, and a run test of the jars against
   # the mock LLM server. The jars are uploaded once (from Linux) as the artifact
@@ -90,9 +96,11 @@ jobs:
   # and windows-x64 only (no macOS Intel, no Windows arm64).
   #
   # The build wants about 14 GB of builder heap and takes 7 minutes on a 32 GB
-  # machine; on the standard 16 GB runners it fits only just (Linux x64: 19
-  # minutes, 40% of it in GC; arm64 and Windows are at the edge) and the 7 GB
-  # macOS runner cannot build it at all. Point a target at a bigger machine by
+  # machine; on the standard 16 GB runners only Linux x64 fits (19 minutes, 40%
+  # of it in GC): arm64 ran out of memory after 110 minutes at 2 threads, Windows
+  # fits one run in three, and the 7 GB macOS runner cannot build it at all, so
+  # those three are continue-on-error until a variable names a bigger machine.
+  # Point a target at a bigger machine by
   # setting a repository variable (Settings > Secrets and variables > Actions >
   # Variables) to a runner label; see native/README.md, "CI runners":
   #   ATC_RUNNER_LINUX_X64, ATC_RUNNER_LINUX_ARM64, ATC_RUNNER_MACOS_ARM64,
@@ -115,6 +123,7 @@ jobs:
         - target: linux-arm64
           runner: ${{ vars.ATC_RUNNER_LINUX_ARM64 || 'ubuntu-24.04-arm' }}
           threads: ${{ vars.ATC_RUNNER_LINUX_ARM64 && '' || '2' }}
+          experimental: ${{ !vars.ATC_RUNNER_LINUX_ARM64 }}
         - target: macos-arm64
           runner: ${{ vars.ATC_RUNNER_MACOS_ARM64 || 'macos-latest' }}
           threads: ${{ vars.ATC_RUNNER_MACOS_ARM64 && '' || '2' }}

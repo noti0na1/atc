@@ -34,10 +34,11 @@ them beside the jars.
 ## CI runners
 
 The build wants about 14 GB of builder heap and takes 7 minutes on a 32 GB machine. On
-GitHub's standard runners (16 GB, 4 cores; 7 GB on macOS Apple Silicon) it only just fits:
-Linux x64 takes 19 minutes with 40% of the time in GC, Linux arm64 and Windows need the
-builder throttled to 2 or 3 threads and still fail some runs, and macOS arm64 cannot be
-built at all. Those targets are `continue-on-error` so the rest of CI stays meaningful.
+GitHub's standard runners (16 GB, 4 cores; 7 GB on macOS Apple Silicon) only Linux x64
+fits, taking 19 minutes with 40% of the time in GC. Linux arm64 ran out of memory after
+110 minutes even throttled to 2 builder threads, Windows fits one run in three, and
+macOS arm64 cannot be built at all; those three targets are `continue-on-error` until a
+variable names a bigger machine, so the rest of CI stays meaningful.
 
 The fix is a bigger machine per target, chosen with a repository variable (Settings >
 Secrets and variables > Actions > Variables) holding a runner label; the workflow falls
