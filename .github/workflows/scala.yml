@@ -85,10 +85,13 @@ jobs:
 
   # The native image (native/README.md), one binary per platform, from the jars
   # the build job produced. Each is run-tested against the mock LLM server and
-  # uploaded as atc-native-<os>-<arch>.tar.gz (Windows: .zip). Needs GraalVM 25.3+
-  # and about 12 GB of builder heap; the standard macOS Apple Silicon runner has
-  # 7 GB, so that target and the untested Windows ones are continue-on-error
-  # until they get a larger or self-hosted runner (set the target's `runner`).
+  # uploaded as atc-native-<os>-<arch>.tar.gz (Windows: .zip). Needs GraalVM 25.3+,
+  # which the community edition publishes for linux-x64, linux-arm64, macos-arm64
+  # and windows-x64 only (no macOS Intel, no Windows arm64), and 12 to 13 GB of
+  # builder heap on a 16 GB runner (the build then spends much of its time in
+  # GC; expect 20 minutes); the standard macOS Apple Silicon runner has 7 GB, so
+  # that target and the untested Windows one are continue-on-error until they
+  # get a larger or self-hosted runner (set the target's `runner`).
   native:
     name: Native image (${{ matrix.target }})
     needs: build
@@ -98,23 +101,16 @@ jobs:
         include:
         - target: linux-x64
           runner: ubuntu-latest
-          xmx: 12g
+          xmx: 13g
         - target: linux-arm64
           runner: ubuntu-24.04-arm
-          xmx: 12g
-        - target: macos-x64
-          runner: macos-15-intel
-          xmx: 11g
+          xmx: 13g
         - target: macos-arm64
           runner: macos-latest
           xmx: 5g
           experimental: true
         - target: windows-x64
           runner: windows-latest
-          xmx: 12g
-          experimental: true
-        - target: windows-arm64
-          runner: windows-11-arm
           xmx: 12g
           experimental: true
     runs-on: ${{ matrix.runner }}

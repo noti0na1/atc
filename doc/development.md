@@ -88,16 +88,21 @@ are ahead-of-time compiled. The pieces that make it work:
   removed: Jackson's internals, kotlin-reflect, the TLS providers, JLine.
 - The provider SDKs (de)serialize requests and responses with Jackson over reflection, and
   the trace only covers the response types a run happened to see. `native/sdk-reflection.py`
-  reads the class files of `com.openai.{models,core}` and `com.anthropic.{models,core}` from
-  the jar and registers, per class, the constructors (concrete classes only: registering an
+  reads the class files of the packages the adapters use (`com.openai.models.{responses,chat,
+  completions}`, `com.anthropic.models.messages`, the shared types beside them, both `core`
+  packages; the SDKs' other services are never reached) and registers, per class, the constructors (concrete classes only: registering an
   abstract class's constructor crashes the builder) and the Jackson-annotated methods and
   fields, which is exactly the shape the trace shows Jackson invoking (`<init>`, the
   `_field()` getters, `putAdditionalProperty`). Registering every method of every SDK class
   instead makes 870k methods reachable and the build runs out of memory; preserving the
   whole app jar crashes the builder.
-- `-Ob` (quick build) and `ATC_NATIVE_XMX` of builder heap (20 GB here, 12 GB in CI). An
-  `-O2` image runs faster but builds much longer. `-march=compatibility` on x64 so one binary
-  runs on every x64 machine.
+- `-Ob` (quick build) and `ATC_NATIVE_XMX` of builder heap (20 GB on a developer machine,
+  12 to 13 GB on CI's 16 GB runners, where the build is GC-bound and takes about 20
+  minutes; `ATC_NATIVE_THREADS` caps the builder threads, fewer need less heap). An `-O2`
+  image runs faster but builds much longer. `-march=compatibility` on x64 so one binary
+  runs on every x64 machine. Do not drop the JNI metadata of preserved types
+  (`-H:-PreserveIncludesJNI`) to save memory: the interpreter then cannot call
+  caller-sensitive methods such as `MethodHandles.lookup`, which Scala's lazy vals need.
 
 Two GraalVM tools estimate the metadata need without a JVM agent: `-H:TrackDynamicAccess=all`
 at build time writes `out/native/dynamic-access/<jar>/{reflection,resource}-calls.json`, a map
@@ -122,7 +127,9 @@ next-input prediction, `/cost` and `/quit`. The binary starts, compiles and runs
 one-line snippet in about 0.4 s wall (2.5 s and 8 s of CPU on the JVM) at about 220 MB peak
 RSS (390 MB); a tight 20-million-iteration loop in agent code takes 2 s interpreted against
 0.09 s JIT-compiled. Execution timeouts and interrupts work (the `StopRepl` flag is honoured
-by the interpreter). The image is about 850 MB and a quick build takes 10 minutes. Every run
+by the interpreter). The image is about 600 MB and a quick build takes 8 minutes at 20 GB
+(430k reachable methods: the app's 190k, the preserved Scala library and JDK packages, and
+the SDK model classes' constructors and Jackson members). Every run
 prints JDK 25's `sun.misc.Unsafe` deprecation warning for `scala.runtime.LazyVals` on
 stderr. Not part of `dist` or the tested build; released and installed as described under "Publishing" above.
 

@@ -32,7 +32,7 @@ as a workflow artifact; publishing a release only downloads the artifacts and at
 them beside the jars. Targets no standard GitHub runner can build are marked
 `continue-on-error`: macOS Apple Silicon runners have 7 GB of memory against the 12 GB
 the build needs (a larger or self-hosted runner fixes that; set the target's `runner`),
-and the Windows builds are untested.
+and the Windows build, though it completes, has not been run on a Windows machine.
 
 ## Build and run from a checkout
 
@@ -45,9 +45,11 @@ atcn dev .                                                   # or install it as 
 ```
 
 Needs GraalVM 25.3 or newer (`native-image` with `-H:+RuntimeClassLoading`), about
-10 minutes and a builder heap of `ATC_NATIVE_XMX` (default 20g; 12g is enough and is
-what CI uses). The result is about 850 MB. `ATC_NATIVE_MARCH` (default `compatibility`)
-sets the x64 target ISA; extra `native-image` arguments are passed through.
+8 minutes and a builder heap of `ATC_NATIVE_XMX` (default 20g; CI's 16 GB runners use
+12g to 13g and take about 20 minutes, most of it in GC). The result is about 600 MB.
+`ATC_NATIVE_THREADS` caps the builder threads (fewer threads need less heap),
+`ATC_NATIVE_MARCH` (default `compatibility`) sets the x64 target ISA; extra
+`native-image` arguments are passed through.
 
 `start.sh` loads `.env` like the top-level `start.sh`, then finds a JDK for the
 binary: `ATC_JAVA_HOME`, `JAVA_HOME`, `/usr/libexec/java_home`, then the `java` on
@@ -86,10 +88,13 @@ out, and reflection, resources, JNI and proxies only work for elements listed in
 2. **The provider SDKs.** They (de)serialize requests and responses with Jackson
    over reflection: constructors, `@JsonProperty` getters, `@JsonAnySetter`. Which
    classes are touched depends on what the model sends back, so a trace of one run
-   never covers them all. `sdk-reflection.py` reads the class files of
-   `com.openai.{models,core}` and `com.anthropic.{models,core}` and registers, per
-   class, its constructors (concrete classes only) and every Jackson-annotated
-   method and field: the exact shape the trace shows Jackson invoking.
+   never covers them all. `sdk-reflection.py` reads the class files of the packages
+   the adapters use (`com.openai.models.{responses,chat,completions}`,
+   `com.anthropic.models.messages`, the shared types beside them and both `core`
+   packages; the SDKs' other services are several times larger and never reached)
+   and registers, per class, its constructors (concrete classes only) and every
+   Jackson-annotated method and field: the exact shape the trace shows Jackson
+   invoking.
 3. **Everything else.** The compiler, JLine, okhttp, Jackson's own internals,
    kotlin-reflect, the TLS providers. This is what the tracing agent records and
    what `metadata/reachability-metadata.json` holds.
@@ -172,4 +177,4 @@ name the data-driven targets.
   OpenAI adapter's first run did.
 - Agent code reaching a JDK package outside the preserved list (`java.security`,
   `javax.crypto`, ...) fails with `Unable to call AOT method`; add the package to
-  `-H:Preserve` in `build.sh`. The image is about 850 MB.
+  `-H:Preserve` in `build.sh`. The image is about 600 MB.

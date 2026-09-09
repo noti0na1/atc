@@ -10,8 +10,9 @@
 # The binary still needs a JDK 17+ at run time, named by -Djava.home: the compiler
 # reads the JDK's class metadata from its jrt: file system, and runtime class
 # loading falls back to it for JDK classes the image does not carry.
-# Environment: ATC_NATIVE_XMX (builder heap, default 20g), ATC_NATIVE_MARCH
-# (default compatibility). Extra native-image arguments are passed through.
+# Environment: ATC_NATIVE_XMX (builder heap, default 20g), ATC_NATIVE_THREADS
+# (builder threads, default: all cores), ATC_NATIVE_MARCH (default compatibility).
+# Extra native-image arguments are passed through.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 : "${GRAALVM_HOME:?set GRAALVM_HOME to a GraalVM 25.3+ installation}"
@@ -22,6 +23,9 @@ XMX="${ATC_NATIVE_XMX:-20g}"
 # x64 images target the baseline ISA so one binary runs on every x64 machine;
 # arm64 images take native-image's default.
 MARCH="${ATC_NATIVE_MARCH:-compatibility}"
+# Builder threads: fewer threads compile fewer methods at once and need less heap
+# (GitHub's runners have 4 cores; 12 GB with 10 threads runs out of memory).
+THREADS="${ATC_NATIVE_THREADS:-}"
 mkdir -p "$OUT/metadata"
 PYTHON=python3; command -v python3 >/dev/null 2>&1 || PYTHON=python
 "$PYTHON" "$ROOT/native/sdk-reflection.py" "$DIST/atc.jar" "$OUT/metadata/reachability-metadata.json"
@@ -34,9 +38,13 @@ NATIVE_IMAGE="$GRAALVM_HOME/bin/native-image"
 #                           packages agent code can reach (the validator blocks java.io/nio/net
 #                           and reflection); without it runtime-loaded code dies on the first
 #                           member the app itself never used ("Unable to call AOT method").
-#                           Preserved types get no JNI metadata (agent code has no JNI). All of
+#                           (Do not add -H:-PreserveIncludesJNI to save memory: the interpreter
+#                           then cannot call caller-sensitive methods such as
+#                           MethodHandles.lookup, which Scala's lazy vals need.) All of
 #                           java.base fits but needs a 20 GB builder heap and 12 minutes.
 # -Ob                       quick build (an -O2 image is faster but builds much longer)
+# DeadlockWatchdogInterval  a GC-bound phase on a small runner can go 10 minutes without
+#                           progress; the default watchdog would abort the build
 # native/metadata           reachability metadata from the tracing agent: echo-model runs and
 #                           real turns over the OpenAI Responses and chat-completions
 #                           adapters (Jackson internals, kotlin-reflect, TLS providers),
@@ -48,6 +56,8 @@ NATIVE_IMAGE="$GRAALVM_HOME/bin/native-image"
 #                           classes of the responses it happened to see)
 exec "$NATIVE_IMAGE" \
   "-J-Xmx$XMX" \
+  ${THREADS:+-H:NumberOfThreads=$THREADS} \
+  -H:DeadlockWatchdogInterval=30 \
   -Ob \
   -march="$MARCH" \
   -H:+UnlockExperimentalVMOptions \
@@ -58,7 +68,6 @@ exec "$NATIVE_IMAGE" \
   -H:+ReportExceptionStackTraces \
   "$@" \
   -cp "$DIST/atc-lib.jar" \
-  -H:-PreserveIncludesJNI \
   -H:Preserve=path="$DIST/atc-lib.jar",package=java.lang,package=java.lang.invoke,package=java.util,package=java.util.regex,package=java.util.function,package=java.util.stream,package=java.time,package=java.time.format,package=java.time.temporal,package=java.text,package=java.math \
   -jar "$DIST/atc.jar" \
   -o "$OUT/atc"

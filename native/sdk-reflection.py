@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Reflection metadata for the provider SDKs' model classes, written as GraalVM
-reachability metadata. The SDKs (de)serialize requests and responses with
+"""Reflection metadata for the provider SDKs' model classes (the packages the
+adapters use), written as GraalVM reachability metadata. The SDKs (de)serialize requests and responses with
 Jackson over reflection, and the tracing agent only records the classes of the
 responses it happened to see; this registers the same shape for every model
 class: its constructors (concrete classes only: registering those of abstract
@@ -13,7 +13,12 @@ thousands of methods reachable and the build runs out of memory.
 """
 import json, struct, sys, zipfile
 
-PREFIXES = ("com/openai/models/", "com/openai/core/", "com/anthropic/models/", "com/anthropic/core/")
+# The packages the adapters use (Responses, chat completions, Messages) and the
+# shared types beside them. The SDKs' other services (beta, admin, evals,
+# fine-tuning, audio, ...) are several times larger and never reached.
+PREFIXES = ("com/openai/models/responses/", "com/openai/models/chat/", "com/openai/models/completions/",
+            "com/openai/core/", "com/anthropic/models/messages/", "com/anthropic/core/")
+TOP_LEVEL = ("com/openai/models/", "com/anthropic/models/")  # classes directly in these packages
 JACKSON = ("Lcom/fasterxml/jackson/annotation/", "Lcom/fasterxml/jackson/databind/annotation/")
 ACC_INTERFACE, ACC_ABSTRACT = 0x0200, 0x0400
 PRIMITIVES = {"B": "byte", "C": "char", "D": "double", "F": "float", "I": "int", "J": "long", "S": "short", "Z": "boolean", "V": "void"}
@@ -90,7 +95,10 @@ jar, out = sys.argv[1], sys.argv[2]
 entries, methods_total = [], 0
 with zipfile.ZipFile(jar) as z:
     for name in sorted(z.namelist()):
-        if not name.endswith(".class") or not name.startswith(PREFIXES):
+        if not name.endswith(".class"):
+            continue
+        top_level = any(name.startswith(p) and "/" not in name[len(p):] for p in TOP_LEVEL)
+        if not name.startswith(PREFIXES) and not top_level:
             continue
         cf = ClassFile(z.read(name))
         concrete = not cf.flags & (ACC_INTERFACE | ACC_ABSTRACT)
