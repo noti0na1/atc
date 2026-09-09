@@ -55,7 +55,11 @@ requests are echoed. It needs no API key or network connection.
 ## Native image (experimental)
 
 `native/build.sh` builds `out/native/atc` with GraalVM's `native-image` (GraalVM 25.3 or
-newer, set `GRAALVM_HOME`; run `./mill dist` first). The REPL defines the agent's classes at
+newer, set `GRAALVM_HOME`; run `./mill dist` first), and `native/start.sh` runs it like
+`start.sh` does the JVM build: it loads `.env`, finds a JDK (`ATC_JAVA_HOME`, `JAVA_HOME`,
+`/usr/libexec/java_home`, then the `java` on `PATH`) for `-Djava.home`, sets the library
+classpath and version, and passes every flag through (`ATC_NATIVE_OPTS` adds runtime
+options). The REPL defines the agent's classes at
 run time, so the build enables GraalVM's early *runtime class loading*
 (`-H:+RuntimeClassLoading`): classes defined at run time are interpreted, never compiled,
 while the compiler, the REPL and the rest of the application are ahead-of-time compiled.
