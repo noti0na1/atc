@@ -47,6 +47,9 @@ object lib extends AtcScalaModule:
 object app extends AtcScalaModule:
   def moduleDeps = Seq(lib)
   def mainClass = Some("atc.Main")
+  /** A plain jar: the launchers run `java -jar`, and Mill's default shell-script
+    * prefix hides the jar's resources from GraalVM's `native-image`. */
+  def prependShellScript = ""
   def mvnDeps = Seq(
     mvn"org.scala-lang::scala3-compiler:${Versions.scala}",
     mvn"org.scala-lang::scala3-repl:${Versions.scala}",
@@ -69,6 +72,20 @@ object app extends AtcScalaModule:
   def resources = Task {
     os.copy(lib.interfaceSource().path, Task.dest / "atc" / "Interface.scala.txt", createFolders = true)
     os.write(Task.dest / "atc" / "version.txt", Versions.atc)
+    // The REPL's interrupt instrumentation gives each REPL class loader its own
+    // copy of `StopRepl`, read as a `.class` resource. A native image (see
+    // `native/build.sh`) bundles no class files, so the sandbox loader serves the
+    // bytes from this renamed copy instead (`Sandbox.StopReplBytes`).
+    val replJar = compileClasspath().map(_.path).find(_.last.startsWith("scala3-repl_3")).getOrElse(
+      sys.error("scala3-repl jar not on the compile classpath")
+    )
+    val zip = new java.util.zip.ZipFile(replJar.toIO)
+    try
+      val entry = zip.getEntry("dotty/tools/repl/StopRepl.class")
+      val in = zip.getInputStream(entry)
+      try os.write(Task.dest / "atc" / "StopRepl.class.bin", in.readAllBytes())
+      finally in.close()
+    finally zip.close()
     super.resources() ++ Seq(PathRef(Task.dest))
   }
   def forkArgs = Task { Seq(libClasspathArg(), "-Dfile.encoding=UTF-8") }

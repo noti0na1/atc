@@ -52,6 +52,42 @@ For development without packaging, use `./mill -i app.run`. For manual REPL chec
 An `echo` provider supports local testing: `run: <Scala code>` invokes the REPL; other
 requests are echoed. It needs no API key or network connection.
 
+## Native image (experimental)
+
+`native/build.sh` builds `out/native/atc` with GraalVM's `native-image` (GraalVM 25.3 or
+newer, set `GRAALVM_HOME`; run `./mill dist` first). The REPL defines the agent's classes at
+run time, so the build enables GraalVM's early *runtime class loading*
+(`-H:+RuntimeClassLoading`): classes defined at run time are interpreted, never compiled,
+while the compiler, the REPL and the rest of the application are ahead-of-time compiled.
+The pieces that make it work:
+
+- `-H:Preserve=path=atc-lib.jar,module=java.base` keeps every member of the agent-facing
+  library, the Scala standard library and `java.base` in the image. Native image otherwise
+  drops whatever the application never used, and runtime-loaded code dies on the first such
+  member (`Unable to call AOT method ...`).
+- `-H:+AllowJRTFileSystem` plus `-Djava.home=<jdk>` at run time: the compiler reads the JDK's
+  class metadata from that JDK's `jrt:` file system, and runtime class loading falls back to
+  it for JDK classes outside the image. Any JDK 17+ works (a GraalVM home is not required),
+  so the binary is not self-contained.
+- The REPL's interrupt instrumentation gives each REPL class loader its own copy of
+  `dotty.tools.repl.StopRepl`, read as a `.class` resource, which an image never carries.
+  The build copies its bytes to `atc/StopRepl.class.bin` and `Sandbox.SandboxLoader` serves
+  them under the class-file name.
+- The app assembly is a plain jar (`prependShellScript = ""`): the launcher-script prefix
+  Mill adds by default hides every resource of the jar from `native-image`.
+- `native/metadata/reachability-metadata.json` is the tracing agent's output for echo-model
+  runs (`-agentlib:native-image-agent=config-output-dir=...` on the GraalVM JVM), with the
+  REPL wrapper classes (`rs$line$N`) removed.
+
+Measured on an M-series Mac with the echo model and a one-line snippet: the binary starts,
+compiles and runs the snippet in about 0.4 s wall (2.5 s and 8 s of CPU on the JVM) at
+about 220 MB peak RSS (390 MB); a tight 20-million-iteration loop in agent code takes 2 s
+interpreted against 0.09 s JIT-compiled. Execution timeouts and interrupts work (the
+`StopRepl` flag is honoured by the interpreter). The image is about 650 MB and takes
+around 12 minutes and 16 GB of builder heap. Every run prints JDK 25's `sun.misc.Unsafe`
+deprecation warning for `scala.runtime.LazyVals` on stderr. Not part of `dist`, releases
+or CI.
+
 ## Architecture
 
 | Component | Responsibility |
