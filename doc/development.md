@@ -64,10 +64,13 @@ early *runtime class loading* (`-H:+RuntimeClassLoading`): classes defined at ru
 interpreted, never compiled, while the compiler, the REPL and the rest of the application
 are ahead-of-time compiled. The pieces that make it work:
 
-- `-H:Preserve=path=atc-lib.jar,module=java.base` keeps every member of the agent-facing
-  library, the Scala standard library and `java.base` in the image. Native image otherwise
+- `-H:Preserve=path=atc-lib.jar,package=java.lang.*,...` keeps every member of the
+  agent-facing library, the Scala standard library and the JDK packages agent code can reach
+  (`java.lang`, `java.util`, `java.time`, `java.text`, `java.math` and their subpackages; the
+  validator blocks `java.io`/`nio`/`net` and reflection) in the image. Native image otherwise
   drops whatever the application never used, and runtime-loaded code dies on the first such
-  member (`Unable to call AOT method ...`).
+  member (`Unable to call AOT method ...`). All of `java.base` works too but needs a 20 GB
+  builder heap; the package list fits GitHub's 16 GB runners (`ATC_NATIVE_XMX=12g`).
 - `-H:+AllowJRTFileSystem` plus `-Djava.home=<jdk>` at run time: the compiler reads the JDK's
   class metadata from that JDK's `jrt:` file system, and runtime class loading falls back to
   it for JDK classes outside the image. Any JDK 17+ works (a GraalVM home is not required),
@@ -80,7 +83,8 @@ are ahead-of-time compiled. The pieces that make it work:
   Mill adds by default hides every resource of the jar from `native-image`.
 - `native/metadata/reachability-metadata.json` is the tracing agent's output
   (`-agentlib:native-image-agent=config-output-dir=...` on the GraalVM JVM) for echo-model
-  runs and real DeepSeek and Kimi turns, with the REPL wrapper classes (`rs$line$N`)
+  runs and real turns over the OpenAI Responses and chat-completions adapters, with the
+  REPL wrapper classes (`rs$line$N`)
   removed: Jackson's internals, kotlin-reflect, the TLS providers, JLine.
 - The provider SDKs (de)serialize requests and responses with Jackson over reflection, and
   the trace only covers the response types a run happened to see. `native/sdk-reflection.py`
@@ -91,11 +95,28 @@ are ahead-of-time compiled. The pieces that make it work:
   `_field()` getters, `putAdditionalProperty`). Registering every method of every SDK class
   instead makes 870k methods reachable and the build runs out of memory; preserving the
   whole app jar crashes the builder.
-- `-Ob` (quick build) and 20 GB of builder heap. An `-O2` image runs faster but builds much
-  longer, and the builder spends most of its time in GC below about 17 GB.
+- `-Ob` (quick build) and `ATC_NATIVE_XMX` of builder heap (20 GB here, 12 GB in CI). An
+  `-O2` image runs faster but builds much longer. `-march=compatibility` on x64 so one binary
+  runs on every x64 machine.
 
-Verified on an M-series Mac: the echo-model smoke run, DeepSeek (Responses API, streaming,
-reasoning, tool calls) and Kimi (chat completions) editing a scratch project in `-p` runs,
+Two GraalVM tools estimate the metadata need without a JVM agent: `-H:TrackDynamicAccess=all`
+at build time writes `out/native/dynamic-access/<jar>/{reflection,resource}-calls.json`, a map
+from reflective API to the call sites using it in reachable code (for atc.jar: 24 APIs, 314
+call sites, most in Jackson, kotlin-reflect and the compiler), and `-H:+MetadataTracingSupport`
+at build time plus `-XX:TraceMetadata=path=<dir>` at run time makes the binary itself write
+the metadata a run used, including from interpreted agent code (a `java.time` snippet
+records `java.time.LocalDate`). Both are experimental in 25.3 and cost build memory, so
+`native/build.sh` takes them as extra arguments rather than enabling them by default.
+
+**Publishing.** `atcn` (repo root) installs and runs the native image the way `atc` does
+the jars: it sources `atc` and overrides the asset list, the install step, the digest
+bookkeeping, `dev` and `run` (tests: `tests/atcn_test.sh`). The release workflow's
+`publish-native` job builds `atc-native-<os>-<arch>.tar.gz` (Windows: `.zip`) on one
+runner per target and uploads it beside the jars; targets no standard runner can build
+(macOS arm64 at 7 GB, the untested Windows ones) are `continue-on-error`.
+
+Verified on macOS arm64: the echo-model smoke run, a Responses API model (streaming,
+reasoning, tool calls) and a chat-completions model editing a small project in `-p` runs,
 and an interactive session through a pty with a permission pop-up, a second turn,
 next-input prediction, `/cost` and `/quit`. The binary starts, compiles and runs a
 one-line snippet in about 0.4 s wall (2.5 s and 8 s of CPU on the JVM) at about 220 MB peak
@@ -103,7 +124,7 @@ RSS (390 MB); a tight 20-million-iteration loop in agent code takes 2 s interpre
 0.09 s JIT-compiled. Execution timeouts and interrupts work (the `StopRepl` flag is honoured
 by the interpreter). The image is about 850 MB and a quick build takes 10 minutes. Every run
 prints JDK 25's `sun.misc.Unsafe` deprecation warning for `scala.runtime.LazyVals` on
-stderr. Not part of `dist`, releases or CI.
+stderr. Not part of `dist` or the tested build; released and installed as described under "Publishing" above.
 
 ## Architecture
 
@@ -858,6 +879,19 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
 - `HostEditingSuite`: literal replacements, bounded reads and searches, file previews and classified exclusions.
 - `ModelRequestSuite`, `ProviderCancellationSuite`: cancellation and HTTP client ownership across requests.
 - `SessionStoreSuite`: portable conversation persistence, validation and file permissions.
+
+The **run test** (`tests/run_test.sh jar|native|cmd <command>`) drives the built program
+rather than the classes: `tests/mock-llm/server.py` (standard library only) speaks the
+OpenAI Responses, OpenAI chat-completions and Anthropic Messages protocols over SSE and
+answers every conversation the same way, thinking, a `run_scala` call with the code from
+the user's `run: ...` message, then a text answer quoting the tool result, with fixed usage
+numbers. The harness starts it on a free port, writes a config with one provider per
+protocol, redirects `HOME` so the developer's own config stays out, runs one `-p` turn per
+adapter and asserts on the transcript (thinking shown, the call, the sandbox result, the
+final answer, the usage). It is what CI runs against the jars and against each native
+binary, and the way to exercise an adapter's streaming path without an API key: the mock's
+streams carry exactly what the SDK accumulators need, so an SDK upgrade that tightens
+parsing fails here first.
 - `ConfigSuite`, `LayerSuite`, `ModelSuite`, `GitIgnoreSuite`: configuration and lookup.
 - `AgentCoreLoopSuite`, `AgentLoopSuite`, `CompletionPolicySuite`, `ContextManagerSuite`:
   loop decisions, transcript repair, context fitting and the real REPL integration.
@@ -911,7 +945,12 @@ Windows updates replace the launchers and JARs together. Native Windows launcher
 Unicode application arguments through private `ATC_INTERNAL_*` environment variables;
 ATC removes those variables from tool-process environments.
 
-CI builds distributions and runs application tests on Linux, macOS and Windows. Linux
-checks formatting; Unix jobs run the Bash wrapper tests. Published release tags must match
+CI has three jobs. `build` runs on Linux, macOS and Windows: the Bash wrapper tests (`atc`
+and `atcn`, Unix only), formatting (Linux), `dist`, the application tests and the run test
+of the jars against the mock LLM server; Linux uploads the jars as the `atc-jars` artifact.
+`native` builds the native image on one runner per target from that artifact, run-tests it
+and uploads `atc-native-<target>`; it runs on every push and pull request too, so a change
+that breaks the image is caught before a release. `publish-release` only downloads the
+artifacts and attaches them to the release; nothing is rebuilt for publishing. Published release tags must match
 `Versions.atc` (with an optional `v` prefix). The release job builds and uploads the two
 JARs and Windows launchers after the platform jobs succeed.

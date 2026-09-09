@@ -12,6 +12,9 @@ permissions:
   contents: read
 
 jobs:
+  # Unit tests, the wrapper tests, the jars, and a run test of the jars against
+  # the mock LLM server. The jars are uploaded once (from Linux) as the artifact
+  # the native builds and the release job consume.
   build:
     name: Build and test (${{ matrix.os }})
     strategy:
@@ -31,10 +34,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
-    - name: Test the Unix wrapper script
+    - name: Test the Unix wrapper scripts
       if: runner.os != 'Windows'
       shell: bash
-      run: bash tests/atc_test.sh
+      run: bash tests/atc_test.sh && bash tests/atcn_test.sh
     - name: Set up JDK 17
       uses: actions/setup-java@v5
       with:
@@ -62,13 +65,113 @@ jobs:
       if: ${{ !cancelled() && runner.os == 'Windows' }}
       shell: pwsh
       run: ./mill.bat app.test
+    - name: Run test against the mock LLM server (jars)
+      if: ${{ !cancelled() && runner.os != 'Windows' }}
+      shell: bash
+      run: bash tests/run_test.sh jar
+    - name: Upload the jars
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: atc-jars
+        path: |
+          out/dist.dest/atc.jar
+          out/dist.dest/atc-lib.jar
+          out/dist.dest/atc.cmd
+          out/dist.dest/atc.ps1
+          out/dist.dest/version.txt
+        if-no-files-found: error
+        retention-days: 14
 
-  # Publishing a GitHub release (tag vX.Y.Z) builds the distribution and
-  # attaches both jars and the Windows launchers; the Unix `atc` wrapper downloads
-  # the two jars and checks them against the digests GitHub records.
+  # The native image (native/README.md), one binary per platform, from the jars
+  # the build job produced. Each is run-tested against the mock LLM server and
+  # uploaded as atc-native-<os>-<arch>.tar.gz (Windows: .zip). Needs GraalVM 25.3+
+  # and about 12 GB of builder heap; the standard macOS Apple Silicon runner has
+  # 7 GB, so that target and the untested Windows ones are continue-on-error
+  # until they get a larger or self-hosted runner (set the target's `runner`).
+  native:
+    name: Native image (${{ matrix.target }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: linux-x64
+          runner: ubuntu-latest
+          xmx: 12g
+        - target: linux-arm64
+          runner: ubuntu-24.04-arm
+          xmx: 12g
+        - target: macos-x64
+          runner: macos-15-intel
+          xmx: 11g
+        - target: macos-arm64
+          runner: macos-latest
+          xmx: 5g
+          experimental: true
+        - target: windows-x64
+          runner: windows-latest
+          xmx: 12g
+          experimental: true
+        - target: windows-arm64
+          runner: windows-11-arm
+          xmx: 12g
+          experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    timeout-minutes: 120
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Download the jars
+      uses: actions/download-artifact@v4
+      with:
+        name: atc-jars
+        path: out/dist.dest
+    - name: Set up GraalVM 25.3 (JDK 25)
+      uses: graalvm/setup-graalvm@v1
+      with:
+        distribution: 'graalvm-community'
+        version: '25.3'
+        java-version: '25'
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        native-image-job-reports: 'true'
+    - name: Build the native image
+      shell: bash
+      env:
+        ATC_NATIVE_XMX: ${{ matrix.xmx }}
+      run: GRAALVM_HOME="$JAVA_HOME" native/build.sh
+    - name: Run test against the mock LLM server (native)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        ATC_JAVA_HOME: ${{ env.JAVA_HOME }}
+      run: bash tests/run_test.sh native
+    - name: Package
+      shell: bash
+      run: |
+        cd out/native
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          7z a -tzip "atc-native-${{ matrix.target }}.zip" atc.exe *.dll
+        else
+          tar -czf "atc-native-${{ matrix.target }}.tar.gz" atc
+        fi
+        ls -la atc-native-*
+    - name: Upload the binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: atc-native-${{ matrix.target }}
+        path: out/native/atc-native-${{ matrix.target }}.*
+        if-no-files-found: error
+        retention-days: 14
+
+  # Publishing a GitHub release (tag vX.Y.Z) attaches what the jobs above built:
+  # the two jars and the Windows launchers (the `atc` wrapper downloads the jars
+  # and checks them against the digests GitHub records) and every native binary
+  # that was built (the `atcn` wrapper downloads its platform's archive).
   publish-release:
     if: github.event_name == 'release'
-    needs: build
+    needs: [build, native]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -86,19 +189,25 @@ jobs:
           echo "::error::release tag '$TAG' does not match Versions.atc = \"$version\" in build.mill (atc --version would disagree with the tag); bump the version, move the tag and publish again"
           exit 1
         fi
-    - name: Set up JDK 17
-      uses: actions/setup-java@v5
+    - name: Download the jars
+      uses: actions/download-artifact@v4
       with:
-        java-version: '17'
-        distribution: 'temurin'
-    - name: Cache Mill and Coursier
-      uses: coursier/cache-action@v8
-    - name: Build distribution
-      run: ./mill dist
-    - name: Upload the jars to the GitHub release
+        name: atc-jars
+        path: release/jars
+    - name: Download the native binaries
+      uses: actions/download-artifact@v4
+      with:
+        pattern: atc-native-*
+        path: release/native
+        merge-multiple: true
+    - name: Upload the assets to the GitHub release
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name }}
       run: |
-        gh release upload "$TAG" out/dist.dest/atc.jar out/dist.dest/atc-lib.jar out/dist.dest/atc.cmd out/dist.dest/atc.ps1 --clobber
+        ls -la release/jars release/native
+        gh release upload "$TAG" release/jars/atc.jar release/jars/atc-lib.jar release/jars/atc.cmd release/jars/atc.ps1 --clobber
+        if ls release/native/atc-native-* >/dev/null 2>&1; then
+          gh release upload "$TAG" release/native/atc-native-* --clobber
+        fi
         gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

@@ -16,12 +16,17 @@ SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/${OWNER_REPO}/refs/heads/ma
 DEFAULT_CACHE_DIR="${HOME}/.atc/jars"
 CACHE_DIR="${ATC_CACHE_DIR:-${DEFAULT_CACHE_DIR}}"
 INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
-INSTALL_PATH="${INSTALL_DIR}/atc"
+WRAPPER_NAME="atc"
+INSTALL_PATH="${INSTALL_DIR}/${WRAPPER_NAME}"
 APP_JAR_NAME="atc.jar"
 LIB_JAR_NAME="atc-lib.jar"
 APP_JAR="${CACHE_DIR}/${APP_JAR_NAME}"
 LIB_JAR="${CACHE_DIR}/${LIB_JAR_NAME}"
 RELEASE_MARKER="${CACHE_DIR}/release.txt"
+# The release assets this wrapper needs, in download order. `atcn` (the native
+# image's wrapper) sources this script and replaces the list, `installed_paths`
+# and `install_downloaded_asset` with its own; everything else is shared.
+ASSET_NAMES=("$APP_JAR_NAME" "$LIB_JAR_NAME")
 # 'atc dev <checkout>' copies the jars a checkout's `./mill dist` built from
 # this directory, and marks the cache with "dev|<that directory>".
 DIST_SUBDIR="out/dist.dest"
@@ -86,6 +91,24 @@ fail() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required but was not found."
+}
+
+# The files a complete installation consists of, one per line (what `run`
+# needs, what `uninstall` removes). Assets are installed under their own name.
+installed_paths() {
+  local name
+  for name in "${ASSET_NAMES[@]}"; do printf '%s\n' "${CACHE_DIR}/${name}"; done
+}
+
+# Put a verified download in place: <asset name> <downloaded file>.
+install_downloaded_asset() {
+  mv "$2" "${CACHE_DIR}/$1" || fail "cannot install $1."
+}
+
+is_required_asset() {
+  local name
+  for name in "${ASSET_NAMES[@]}"; do [[ "$name" == "$1" ]] && return 0; done
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -203,27 +226,42 @@ extract_assets() {
 }
 
 extract_assets_jq() {
-  local json="$1" parsed
+  local json="$1" parsed names name
 
-  parsed="$(printf '%s' "$json" | jq -r --arg app "$APP_JAR_NAME" --arg lib "$LIB_JAR_NAME" '
+  names="$(printf '%s\n' "${ASSET_NAMES[@]}" | jq -R . | jq -sc .)"
+  parsed="$(printf '%s' "$json" | jq -r --argjson names "$names" '
     [ .assets[]?
-      | select(.name == $app or .name == $lib)
+      | select(.name as $n | $names | index($n))
       | "\(.name)\t\(.browser_download_url)\t\(.digest // "")"
     ] | unique | .[]
   ' 2>/dev/null)" || fail "failed to parse the latest release metadata with jq."
 
-  printf '%s\n' "$parsed" | grep -qF "${APP_JAR_NAME}"$'\t' \
-    || fail "required asset ${APP_JAR_NAME} not found in the latest release."
-  printf '%s\n' "$parsed" | grep -qF "${LIB_JAR_NAME}"$'\t' \
-    || fail "required asset ${LIB_JAR_NAME} not found in the latest release."
+  for name in "${ASSET_NAMES[@]}"; do
+    printf '%s\n' "$parsed" | grep -qF "${name}"$'\t' \
+      || fail "required asset ${name} not found in the latest release."
+  done
 
   printf '%s\n' "$parsed"
 }
 
 extract_assets_grep() {
-  local json="$1"
-  local app_url="" app_digest="" lib_url="" lib_digest=""
-  local current_name="" current_digest="" token
+  local json="$1" tokens name line
+
+  tokens="$(printf '%s' "$json" | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"|"digest"[[:space:]]*:[[:space:]]*"[^"]+"|"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"')"
+  for name in "${ASSET_NAMES[@]}"; do
+    line="$(extract_asset_grep "$tokens" "$name")" \
+      || fail "required asset ${name} not found in the latest release."
+    printf '%s\n' "$line"
+  done
+}
+
+# "name<TAB>url<TAB>digest" of the first asset called <name> in the token
+# stream (a "name", "digest" and "browser_download_url" token per asset, in
+# that order). First match wins: the whole document is scanned (no structure),
+# and the free-text release notes follow the assets array, so tokens there
+# must not overwrite the real asset's URL or digest.
+extract_asset_grep() {
+  local tokens="$1" wanted="$2" current_name="" current_digest="" token
 
   while IFS= read -r token; do
     if [[ "$token" =~ \"name\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
@@ -235,26 +273,15 @@ extract_assets_grep() {
       continue
     fi
     if [[ "$token" =~ \"browser_download_url\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
-      # First match wins: the whole document is scanned (no structure), and the
-      # free-text release notes follow the assets array, so tokens there must
-      # not overwrite the real asset's URL or digest.
-      case "$current_name" in
-        "$APP_JAR_NAME")
-          if [[ -z "$app_url" ]]; then app_url="${BASH_REMATCH[1]}"; app_digest="$current_digest"; fi ;;
-        "$LIB_JAR_NAME")
-          if [[ -z "$lib_url" ]]; then lib_url="${BASH_REMATCH[1]}"; lib_digest="$current_digest"; fi ;;
-      esac
+      if [[ "$current_name" == "$wanted" ]]; then
+        printf '%s\t%s\t%s\n' "$wanted" "${BASH_REMATCH[1]}" "$current_digest"
+        return 0
+      fi
       current_name=""
       current_digest=""
     fi
-  done < <(printf '%s' "$json" | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"|"digest"[[:space:]]*:[[:space:]]*"[^"]+"|"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"')
-
-  [[ -n "$app_url" ]] || fail "required asset ${APP_JAR_NAME} not found in the latest release."
-  [[ -n "$lib_url" ]] || fail "required asset ${LIB_JAR_NAME} not found in the latest release."
-
-  printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
-    "$APP_JAR_NAME" "$app_url" "$app_digest" \
-    "$LIB_JAR_NAME" "$lib_url" "$lib_digest"
+  done <<< "$tokens"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -294,8 +321,9 @@ verify_jar() {
 }
 
 cached_release_matches() {
-  local release_key="$1"
-  [[ -f "$APP_JAR" && -f "$LIB_JAR" && -f "$RELEASE_MARKER" ]] || return 1
+  local release_key="$1" path
+  [[ -f "$RELEASE_MARKER" ]] || return 1
+  while IFS= read -r path; do [[ -f "$path" ]] || return 1; done < <(installed_paths)
   [[ "$(cat "$RELEASE_MARKER")" == "$release_key" ]]
 }
 
@@ -327,7 +355,7 @@ cached_jars_match_digests() {
 # ---------------------------------------------------------------------------
 
 download_latest_release() (
-  local json release_key assets_info tmp_dir name url _digest digest
+  local json release_key assets_info tmp_dir name url _digest digest path
 
   mkdir -p "$CACHE_DIR" || fail "cannot create the cache directory ${CACHE_DIR}."
   # Startup passes the metadata the user approved, avoiding a second release lookup.
@@ -360,7 +388,8 @@ download_latest_release() (
     echo "Cached ATC jars failed checksum verification; downloading again."
     # Invalidate first: if the download fails, 'atc run' must not keep using
     # jars that just failed verification.
-    rm -f "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" || fail "cannot remove the invalid cached release."
+    rm -f "$RELEASE_MARKER" || fail "cannot remove the invalid cached release."
+    while IFS= read -r path; do rm -f -- "$path" || fail "cannot remove the invalid cached release."; done < <(installed_paths)
   fi
 
   tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")" || fail "cannot create a download directory."
@@ -390,8 +419,9 @@ download_latest_release() (
     verify_jar "${tmp_dir}/${name}" "$digest"
   done <<< "$assets_info"
 
-  mv "${tmp_dir}/${APP_JAR_NAME}" "$APP_JAR" || fail "cannot install ${APP_JAR_NAME}."
-  mv "${tmp_dir}/${LIB_JAR_NAME}" "$LIB_JAR" || fail "cannot install ${LIB_JAR_NAME}."
+  for name in "${ASSET_NAMES[@]}"; do
+    install_downloaded_asset "$name" "${tmp_dir}/${name}"
+  done
   # Write the marker in the private temp directory first, then rename it: a
   # pre-existing release.txt symlink must never redirect this write.
   printf '%s\n' "$release_key" > "${tmp_dir}/release.txt" || fail "cannot write the release marker."
@@ -404,8 +434,7 @@ download_latest_release() (
   rmdir "$tmp_dir" 2>/dev/null || true
 
   echo "ATC $(release_tag_of_key "$release_key") is ready:"
-  echo "- ${APP_JAR}"
-  echo "- ${LIB_JAR}"
+  while IFS= read -r path; do echo "- ${path}"; done < <(installed_paths)
 )
 
 # ---------------------------------------------------------------------------
@@ -563,7 +592,7 @@ install_self() (
   source_path="$(self_path)"
   mkdir -p "$INSTALL_DIR"
   if [[ "$source_path" != "$INSTALL_PATH" ]]; then
-    tmp_path="$(mktemp "${INSTALL_DIR}/atc.install.XXXXXX")"
+    tmp_path="$(mktemp "${INSTALL_DIR}/${WRAPPER_NAME}.install.XXXXXX")"
     trap '[[ -z "$tmp_path" ]] || rm -f -- "$tmp_path"' EXIT
     cp "$source_path" "$tmp_path"
     chmod 755 "$tmp_path"
@@ -571,7 +600,7 @@ install_self() (
     tmp_path=""
   fi
   chmod +x "$INSTALL_PATH"
-  echo "Installed atc to ${INSTALL_PATH}"
+  echo "Installed ${WRAPPER_NAME} to ${INSTALL_PATH}"
 )
 
 download_latest_self() {
@@ -587,8 +616,11 @@ download_latest_self() {
 }
 
 require_cached_jars() {
-  [[ -f "$APP_JAR" && -f "$LIB_JAR" ]] \
-    || fail "No ATC jars were found in ${CACHE_DIR}. Run 'atc setup' (first time) or 'atc update'."
+  local path
+  while IFS= read -r path; do
+    [[ -f "$path" ]] \
+      || fail "No ATC release was found in ${CACHE_DIR}. Run '${WRAPPER_NAME} setup' (first time) or '${WRAPPER_NAME} update'."
+  done < <(installed_paths)
 }
 
 # ---------------------------------------------------------------------------
@@ -717,23 +749,30 @@ validate_cache_removal() {
   if [[ -f "$RELEASE_MARKER" ]] && grep -Eq '^([0-9]+\|[^|[:cntrl:]]+|dev\|.+)$' "$RELEASE_MARKER"; then
     marked=true
   fi
-  if [[ "$marked" != true && ! ( -f "$APP_JAR" && -f "$LIB_JAR" ) && "$(basename "$cache_real")" != "jars" ]]; then
-    fail "refusing to remove ${CACHE_DIR}: it has no valid ATC release marker or jar pair and is not the default 'jars' cache."
+  if [[ "$marked" != true && "$(basename "$cache_real")" != "$(basename "$DEFAULT_CACHE_DIR")" ]] && ! installed_files_present; then
+    fail "refusing to remove ${CACHE_DIR}: it has no valid ATC release marker or jar pair and is not the default '$(basename "$DEFAULT_CACHE_DIR")' cache."
   fi
 }
 
+installed_files_present() {
+  local path
+  while IFS= read -r path; do [[ -f "$path" ]] || return 1; done < <(installed_paths)
+}
+
 cmd_uninstall() {
+  local path
   validate_cache_removal
   if [[ -f "$INSTALL_PATH" ]]; then
     rm -f "$INSTALL_PATH"
     echo "Removed ${INSTALL_PATH}"
   else
-    echo "No installed atc wrapper was found at ${INSTALL_PATH}."
+    echo "No installed ${WRAPPER_NAME} wrapper was found at ${INSTALL_PATH}."
   fi
   if [[ -d "$CACHE_DIR" ]]; then
     # Remove known artifacts only. A dev.* or download.* directory name does not
     # establish ownership, especially when ATC_CACHE_DIR points to a shared directory.
-    rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp"
+    rm -f -- "$RELEASE_MARKER"
+    while IFS= read -r path; do rm -f -- "$path" "${path}.tmp"; done < <(installed_paths)
     if rmdir -- "$CACHE_DIR" 2>/dev/null; then
       echo "Removed ${CACHE_DIR}"
     else

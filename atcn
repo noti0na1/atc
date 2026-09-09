@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# atcn: install, update and run the native-image build of ATC (experimental) from
+# the binaries published on GitHub releases. Same commands as `atc`; it shares
+# that script's code and only swaps the assets, the cache directory and the
+# way ATC is started.
+#
+#   curl -fsSL https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atcn -o atcn
+#   chmod +x atcn && ./atcn setup    # installs ~/.local/bin/{atcn,atc}, downloads the binary
+#   atcn -C ~/my-project             # runs the native ATC (any argument that is not a command)
+#
+# The binary still needs a JDK 17+ on the machine: the sandbox compiles the
+# agent's Scala against that JDK's class metadata (-Djava.home). Linux and
+# macOS, x64 and arm64; Windows users run the published atc.exe by hand (see
+# native/README.md).
+set -euo pipefail
+
+ATCN_OWNER_REPO="noti0na1/atc"
+ATCN_SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/${ATCN_OWNER_REPO}/refs/heads/main/atcn"
+ATC_SCRIPT_SOURCE_URL="https://raw.githubusercontent.com/${ATCN_OWNER_REPO}/refs/heads/main/atc"
+ATCN_INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
+ATCN_DEFAULT_CACHE_DIR="${HOME}/.atc/native"
+NATIVE_BINARY_NAME="atc"
+NATIVE_LIB_JAR_NAME="atc-lib.jar"
+DIGESTS_FILE_NAME="digests.txt"
+NATIVE_DIST_SUBDIR="out/native"
+
+atcn_fail() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+atcn_self_dir() {
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd
+}
+
+# The `atc` wrapper is the library this script is built on: beside this script,
+# else installed; `atcn setup` downloads it when neither exists.
+atc_library_path() {
+  local candidate
+  for candidate in "$(atcn_self_dir)/atc" "${ATCN_INSTALL_DIR}/atc"; do
+    if [[ -f "$candidate" ]]; then printf '%s\n' "$candidate"; return 0; fi
+  done
+  return 1
+}
+
+download_atc_library() {
+  local target="${ATCN_INSTALL_DIR}/atc" tmp
+  command -v curl >/dev/null 2>&1 || atcn_fail "curl is required but was not found."
+  mkdir -p "$ATCN_INSTALL_DIR"
+  tmp="$(mktemp "${ATCN_INSTALL_DIR}/atc.install.XXXXXX")"
+  echo "Downloading the atc wrapper (the code atcn shares) from ${ATC_SCRIPT_SOURCE_URL}"
+  if ! curl -fsSL --proto =https --proto-redir =https -o "$tmp" "$ATC_SCRIPT_SOURCE_URL"; then
+    rm -f "$tmp"; atcn_fail "failed to download the atc wrapper."
+  fi
+  if ! "$BASH" -n "$tmp"; then
+    rm -f "$tmp"; atcn_fail "the downloaded atc wrapper is not a valid Bash script."
+  fi
+  chmod 755 "$tmp"
+  mv "$tmp" "$target"
+  printf '%s\n' "$target"
+}
+
+load_atc_library() {
+  local library
+  if ! library="$(atc_library_path)"; then
+    if [[ "${1:-}" == "setup" ]]; then
+      library="$(download_atc_library)"
+    else
+      atcn_fail "the atc wrapper was not found beside atcn or in ${ATCN_INSTALL_DIR}; run 'atcn setup' first."
+    fi
+  fi
+  # shellcheck source=./atc
+  source "$library" # the guarded main does not run
+}
+
+# Load the shared code first: the functions below replace some of its
+# definitions, so they must come after it.
+load_atc_library "${1:-}"
+
+# ---------------------------------------------------------------------------
+# What differs from atc: the assets, where they go, how ATC starts
+# ---------------------------------------------------------------------------
+
+# "macos" | "linux" and "x64" | "arm64" from uname; other platforms have no
+# wrapper-installable binary.
+native_platform() {
+  local os arch
+  case "$(uname -s)" in
+    Darwin) os="macos" ;;
+    Linux) os="linux" ;;
+    *) fail "no native ATC binary is published for $(uname -s); the JVM wrapper 'atc' works everywhere with Java 17+." ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch="x64" ;;
+    arm64|aarch64) arch="arm64" ;;
+    *) fail "no native ATC binary is published for the $(uname -m) architecture." ;;
+  esac
+  printf '%s-%s\n' "$os" "$arch"
+}
+
+native_asset_name() {
+  printf 'atc-native-%s.tar.gz\n' "$(native_platform)"
+}
+
+apply_native_overrides() {
+  WRAPPER_NAME="atcn"
+  INSTALL_PATH="${ATCN_INSTALL_DIR}/${WRAPPER_NAME}"
+  SCRIPT_SOURCE_URL="$ATCN_SCRIPT_SOURCE_URL"
+  DEFAULT_CACHE_DIR="$ATCN_DEFAULT_CACHE_DIR"
+  CACHE_DIR="${ATCN_CACHE_DIR:-${DEFAULT_CACHE_DIR}}"
+  RELEASE_MARKER="${CACHE_DIR}/release.txt"
+  NATIVE_BINARY="${CACHE_DIR}/${NATIVE_BINARY_NAME}"
+  NATIVE_LIB_JAR="${CACHE_DIR}/${NATIVE_LIB_JAR_NAME}"
+  DIGESTS_FILE="${CACHE_DIR}/${DIGESTS_FILE_NAME}"
+  NATIVE_ASSET="$(native_asset_name)"
+  ASSET_NAMES=("$NATIVE_LIB_JAR_NAME" "$NATIVE_ASSET")
+}
+
+installed_paths() {
+  printf '%s\n' "$NATIVE_BINARY" "$NATIVE_LIB_JAR" "$DIGESTS_FILE"
+}
+
+# The archive holds one file, the binary; the jar is installed as it is. Each
+# verified asset's digest is recorded so `update` can tell whether the cache
+# still matches the release without keeping the archive around.
+install_downloaded_asset() {
+  local name="$1" file="$2" digest tmp_dir
+  digest="$(sha256_of "$file")" || fail "cannot record the digest of ${name}: no sha256 tool found."
+  case "$name" in
+    "$NATIVE_LIB_JAR_NAME")
+      mv "$file" "$NATIVE_LIB_JAR" || fail "cannot install ${name}."
+      : > "$DIGESTS_FILE"
+      ;;
+    "$NATIVE_ASSET")
+      tmp_dir="$(mktemp -d "${CACHE_DIR}/extract.XXXXXX")" || fail "cannot create an extraction directory."
+      tar -xzf "$file" -C "$tmp_dir" || { rm -rf -- "$tmp_dir"; fail "cannot extract ${name}."; }
+      [[ -f "${tmp_dir}/${NATIVE_BINARY_NAME}" ]] || { rm -rf -- "$tmp_dir"; fail "${name} does not contain ${NATIVE_BINARY_NAME}."; }
+      chmod 755 "${tmp_dir}/${NATIVE_BINARY_NAME}"
+      mv "${tmp_dir}/${NATIVE_BINARY_NAME}" "$NATIVE_BINARY" || { rm -rf -- "$tmp_dir"; fail "cannot install ${NATIVE_BINARY_NAME}."; }
+      rm -rf -- "$tmp_dir" "$file"
+      ;;
+    *) fail "unexpected asset ${name}." ;;
+  esac
+  printf '%s\tsha256:%s\n' "$name" "$digest" >> "$DIGESTS_FILE" || fail "cannot record the digest of ${name}."
+}
+
+# Compare the release's digests with the ones recorded at install time (the
+# archive is not kept). 0 = match, 1 = mismatch (re-download), 2 = cannot tell.
+cached_jars_match_digests() {
+  local assets_info="$1" name _url digest recorded
+  [[ -f "$DIGESTS_FILE" ]] || return 2
+  while IFS=$'\t' read -r name _url digest; do
+    [[ -n "$name" ]] || return 1
+    [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || return 2
+    recorded="$(awk -F'\t' -v n="$name" '$1 == n { print $2; exit }' "$DIGESTS_FILE")"
+    [[ -n "$recorded" ]] || return 2
+    [[ "$(printf '%s' "$recorded" | tr 'A-F' 'a-f')" == "$(printf '%s' "$digest" | tr 'A-F' 'a-f')" ]] || return 1
+  done <<< "$assets_info"
+  return 0
+}
+
+# 'atcn dev <checkout>': the binary a checkout's native/build.sh built, with the
+# library jar of its ./mill dist.
+install_dev_build() (
+  local dir="$1" bin lib tmp_dir=""
+
+  [[ -n "$dir" ]] || fail "atcn dev needs the checkout directory: atcn dev <checkout> (build it first with native/build.sh)."
+  [[ -d "$dir" ]] || fail "${dir} does not exist."
+  dir="$(cd "$dir" && pwd)"
+  bin="${dir}/${NATIVE_DIST_SUBDIR}/${NATIVE_BINARY_NAME}"
+  lib="${dir}/${DIST_SUBDIR}/${NATIVE_LIB_JAR_NAME}"
+  [[ -f "$bin" ]] || fail "no native build in ${dir}/${NATIVE_DIST_SUBDIR}: run native/build.sh in ${dir} first."
+  [[ -f "$lib" ]] || fail "no ${NATIVE_LIB_JAR_NAME} in ${dir}/${DIST_SUBDIR}: run './mill dist' in ${dir} first."
+
+  mkdir -p "$CACHE_DIR"
+  tmp_dir="$(mktemp -d "${CACHE_DIR}/dev.XXXXXX")"
+  trap '[[ -z "$tmp_dir" ]] || rm -rf -- "$tmp_dir"' EXIT
+  cp "$bin" "${tmp_dir}/${NATIVE_BINARY_NAME}" && cp "$lib" "${tmp_dir}/${NATIVE_LIB_JAR_NAME}" \
+    || fail "failed to copy the build from ${dir}."
+  chmod 755 "${tmp_dir}/${NATIVE_BINARY_NAME}"
+  printf '%s%s\n' "$DEV_MARKER_PREFIX" "$dir" > "${tmp_dir}/release.txt"
+  : > "${tmp_dir}/${DIGESTS_FILE_NAME}"
+  mv "${tmp_dir}/${NATIVE_BINARY_NAME}" "$NATIVE_BINARY"
+  mv "${tmp_dir}/${NATIVE_LIB_JAR_NAME}" "$NATIVE_LIB_JAR"
+  mv "${tmp_dir}/${DIGESTS_FILE_NAME}" "$DIGESTS_FILE"
+  mv "${tmp_dir}/release.txt" "$RELEASE_MARKER"
+  rmdir "$tmp_dir"
+  tmp_dir=""
+
+  echo "Installed the local native build from ${dir} into ${CACHE_DIR}:"
+  echo "- ${NATIVE_BINARY}"
+  echo "- ${NATIVE_LIB_JAR}"
+  echo "'atcn' now runs it; 'atcn update' restores the latest release."
+)
+
+# The JDK whose class metadata the sandbox compiles against: ATC_JAVA_HOME,
+# JAVA_HOME, else the home of the `java` on PATH. Must be a JDK (lib/modules),
+# not a JRE.
+jdk_home() {
+  local home
+  for home in "${ATC_JAVA_HOME:-}" "${JAVA_HOME:-}"; do
+    [[ -n "$home" ]] || continue
+    [[ -f "${home}/lib/modules" ]] || fail "${home} has no lib/modules; ATC_JAVA_HOME/JAVA_HOME must name a JDK 17+, not a JRE."
+    printf '%s\n' "$home"
+    return 0
+  done
+  home="$(java_home_of_java)" || fail "cannot find the home of the 'java' on PATH; set ATC_JAVA_HOME to a JDK 17+."
+  [[ -f "${home}/lib/modules" ]] || fail "${home} (the 'java' on PATH) has no lib/modules; set ATC_JAVA_HOME to a JDK 17+, not a JRE."
+  printf '%s\n' "$home"
+}
+
+java_home_of_java() {
+  java_home_from_settings "$(java -XshowSettings:properties -version 2>&1)"
+}
+
+java_home_from_settings() {
+  local home
+  home="$(printf '%s\n' "$1" | sed -nE 's/^[[:space:]]*java\.home[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' | head -n1)"
+  [[ -n "$home" ]] || return 1
+  printf '%s\n' "$home"
+}
+
+cmd_setup() {
+  ensure_java
+  install_self
+  update_profile_path
+  download_latest_release
+}
+
+cmd_run() {
+  local dev_dir jdk
+  ensure_java
+  require_cached_jars
+  offer_startup_update "$@" || return $?
+  dev_dir="$(dev_source)"
+  [[ -z "$dev_dir" ]] || echo "atcn: running the local build from ${dev_dir} ('atcn update' restores the release)" >&2
+  jdk="$(jdk_home)"
+  # shellcheck disable=SC2086
+  exec "$NATIVE_BINARY" ${ATCN_OPTS:-} -Dfile.encoding=UTF-8 -Djava.home="$jdk" -Datc.lib.classpath="$NATIVE_LIB_JAR" "$@"
+}
+
+print_help() {
+  cat <<EOF
+atcn: install, update and run the native-image build of ATC (experimental)
+
+Usage:
+  atcn [atc-args...]       Run ATC with the downloaded native binary (same as 'atcn run').
+  atcn run [atc-args...]   Run ATC; every argument is passed to it ('atcn run --help').
+  atcn setup               Install this wrapper (and the 'atc' script it shares code
+                           with) into ~/.local/bin, put ~/.local/bin on PATH, check for
+                           a JDK 17+ and download the latest release's binary.
+  atcn update              Download the latest release when it is missing or out of date.
+  atcn self update         Replace this wrapper with the latest one from GitHub.
+  atcn self uninstall      Remove the wrapper, the downloaded binary and the PATH
+                           snippet (~/.atc/config.json, keys.properties and the JVM
+                           wrapper 'atc' are kept).
+  atcn dev <checkout>      Developers: install a checkout's native/build.sh output
+                           (<checkout>/${NATIVE_DIST_SUBDIR}/) in place of the release.
+  atcn help                Show this help.
+
+Locations:
+  Wrapper:   ${INSTALL_PATH}
+  Binary:    ${CACHE_DIR}/  (override with ATCN_CACHE_DIR)
+
+Environment:
+  ATC_JAVA_HOME        the JDK 17+ the sandbox compiles against (else JAVA_HOME,
+                       else the 'java' on PATH); a JRE is not enough
+  ATCN_OPTS            extra runtime options for the binary (-Xmx..., -D...)
+  ATC_CHECK_UPDATES=0  skip the release check on interactive startup
+  GITHUB_TOKEN         raises the GitHub API rate limit for release checks and downloads
+
+The native build starts in well under a second but runs the agent's own code
+interpreted, so tight loops in it are slower than on the JVM ('atc').
+EOF
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  apply_native_overrides
+  main "$@"
+fi

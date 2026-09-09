@@ -56,3 +56,6 @@ CLAUDE.md
 
 # local environment (API keys)
 .env
+
+# Python bytecode caches (native/sdk-reflection.py, tests/mock-llm/server.py)
+__pycache__/
