@@ -19,31 +19,6 @@ DIST="$ROOT/out/dist.dest"
 
 fail() { echo "run_test: $*" >&2; exit 1; }
 
-mode="${1:-jar}"; shift || true
-case "$mode" in
-  jar)
-    [[ -f "$DIST/atc.jar" && -f "$DIST/atc-lib.jar" ]] || fail "no jars in $DIST; run ./mill dist first"
-    launcher=(java -Dfile.encoding=UTF-8 "-Datc.lib.classpath=$DIST/atc-lib.jar" -jar "$DIST/atc.jar")
-    ;;
-  native)
-    [[ -x "$ROOT/out/native/atc" ]] || fail "no binary at out/native/atc; run native/build.sh first"
-    [[ -f "$DIST/atc-lib.jar" ]] || fail "no atc-lib.jar in $DIST; run ./mill dist first"
-    jdk="${ATC_JAVA_HOME:-${JAVA_HOME:-}}"
-    if [[ -z "$jdk" ]]; then
-      jdk="$(java -XshowSettings:properties -version 2>&1 | sed -nE 's/^[[:space:]]*java\.home[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' | head -n1)"
-    fi
-    [[ -n "$jdk" && -f "$jdk/lib/modules" ]] || fail "native mode needs a JDK (lib/modules): set ATC_JAVA_HOME"
-    launcher=("$ROOT/out/native/atc" -Dfile.encoding=UTF-8 "-Djava.home=$jdk" "-Datc.lib.classpath=$DIST/atc-lib.jar")
-    ;;
-  cmd)
-    [[ $# -gt 0 ]] || fail "cmd mode needs a command"
-    launcher=("$@")
-    ;;
-  *) fail "unknown mode '$mode' (jar | native | cmd <command...>)" ;;
-esac
-
-command -v python3 >/dev/null 2>&1 || fail "python3 is required for the mock server"
-
 WORK="$(mktemp -d)"
 SERVER_PID=""
 cleanup() {
@@ -54,6 +29,39 @@ cleanup() {
   rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+# The home directory is redirected so the developer's ~/.atc/config.json (its
+# models, keys and rules) stays out of the run and the bundled config template
+# is exercised, as on a fresh machine. Java takes the home from the passwd
+# entry, not from HOME, so the jar and native launchers get -Duser.home (a
+# launcher given with `cmd` runs as it is). -p runs never write a config.
+mkdir -p "$WORK/home"
+home_opt="-Duser.home=$WORK/home"
+
+mode="${1:-jar}"; shift || true
+case "$mode" in
+  jar)
+    [[ -f "$DIST/atc.jar" && -f "$DIST/atc-lib.jar" ]] || fail "no jars in $DIST; run ./mill dist first"
+    launcher=(java -Dfile.encoding=UTF-8 "$home_opt" "-Datc.lib.classpath=$DIST/atc-lib.jar" -jar "$DIST/atc.jar")
+    ;;
+  native)
+    [[ -x "$ROOT/out/native/atc" ]] || fail "no binary at out/native/atc; run native/build.sh first"
+    [[ -f "$DIST/atc-lib.jar" ]] || fail "no atc-lib.jar in $DIST; run ./mill dist first"
+    jdk="${ATC_JAVA_HOME:-${JAVA_HOME:-}}"
+    if [[ -z "$jdk" ]]; then
+      jdk="$(java -XshowSettings:properties -version 2>&1 | sed -nE 's/^[[:space:]]*java\.home[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' | head -n1)"
+    fi
+    [[ -n "$jdk" && -f "$jdk/lib/modules" ]] || fail "native mode needs a JDK (lib/modules): set ATC_JAVA_HOME"
+    launcher=("$ROOT/out/native/atc" -Dfile.encoding=UTF-8 "$home_opt" "-Djava.home=$jdk" "-Datc.lib.classpath=$DIST/atc-lib.jar")
+    ;;
+  cmd)
+    [[ $# -gt 0 ]] || fail "cmd mode needs a command"
+    launcher=("$@")
+    ;;
+  *) fail "unknown mode '$mode' (jar | native | cmd <command...>)" ;;
+esac
+
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for the mock server"
 
 port="${MOCK_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')}"
 python3 "$SCRIPT_DIR/mock-llm/server.py" --port "$port" --record "$WORK/requests" > "$WORK/server.log" 2>&1 &
@@ -90,9 +98,6 @@ check() { # <label> <needle> <transcript>
   fi
 }
 
-# HOME is redirected so the developer's ~/.atc/config.json (its models, keys and
-# rules) stays out of the run; -p runs never write a config.
-mkdir -p "$WORK/home"
 for adapter in responses chat anthropic; do
   echo "--- $adapter ---"
   transcript="$(cd "$WORK/project" && HOME="$WORK/home" ATC_DEBUG=1 "${launcher[@]}" -c "$WORK/config.json" -m "mock-$adapter" \

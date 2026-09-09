@@ -5077,6 +5077,15 @@
     {
       "module": "java.base",
       "glob": "sun/net/idn/uidna.spp"
+    },
+    {
+      "glob": "atc/config-template.json"
+    },
+    {
+      "glob": "atc/keys-template.properties"
+    },
+    {
+      "glob": "atc/project-template.json"
     }
   ]
 }

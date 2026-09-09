@@ -99,19 +99,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
+        # xmx: builder heap on a 16 GB runner (7 GB on macOS arm64); threads: builder
+        # threads, fewer need less heap in the compile phase (arm64 code is larger).
         - target: linux-x64
           runner: ubuntu-latest
           xmx: 13g
+          threads: 4
         - target: linux-arm64
           runner: ubuntu-24.04-arm
           xmx: 13g
+          threads: 2
         - target: macos-arm64
           runner: macos-latest
           xmx: 5g
+          threads: 2
           experimental: true
         - target: windows-x64
           runner: windows-latest
-          xmx: 12g
+          xmx: 13g
+          threads: 3
           experimental: true
     runs-on: ${{ matrix.runner }}
     continue-on-error: ${{ matrix.experimental || false }}
@@ -136,6 +142,7 @@ jobs:
       shell: bash
       env:
         ATC_NATIVE_XMX: ${{ matrix.xmx }}
+        ATC_NATIVE_THREADS: ${{ matrix.threads }}
       run: GRAALVM_HOME="$JAVA_HOME" native/build.sh
     - name: Run test against the mock LLM server (native)
       if: runner.os != 'Windows'
