@@ -17,6 +17,8 @@ interface, persistent REPL sessions, multiple model providers and layered permis
   only through supported output methods.
 - **Permission rules:** access is denied by default; configuration, temporary grants and
   session grants determine which operations are permitted. Deny rules take precedence.
+- **Native binary:** a GraalVM native image starts and runs the first snippet in well under
+  a second; the sandbox still compiles and type-checks the agent's code. See [Setup](#setup).
 
 The compiler and host are part of the trusted implementation. External commands run with
 the user's OS privileges. See [Security model](#security-model) for the assumptions and limits.
@@ -94,11 +96,37 @@ approve the request in a pop-up:
 
 ## Setup
 
-You need JDK 17 or newer.
+You need JDK 17 or newer. On macOS and Linux there are two ways to install ATC from the
+latest [GitHub release](https://github.com/noti0na1/atc/releases); both wrappers verify
+every download against the digests GitHub records, share `~/.atc/config.json` and the
+keys, and can be installed side by side.
 
-**macOS and Linux.** The `atc` wrapper script downloads the jars of the latest
-[GitHub release](https://github.com/noti0na1/atc/releases), checks them against the
-digests GitHub records, and runs them:
+### Native binary: `atcn`
+
+Each release ships a [GraalVM native image](native/README.md) of ATC for Linux and macOS
+on x64 and arm64. It starts, compiles and runs the first snippet in well under a second,
+where the JVM needs a few seconds, and uses about half the memory. The sandbox is the
+same: the agent's Scala is still compiled and type-checked; it then runs interpreted, so
+compute-heavy loops in agent code are slower than on the JVM, and the download is larger.
+A JDK 17+ is still required because the sandbox compiles against its class metadata.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atcn -o atcn
+chmod +x atcn
+./atcn setup     # installs ~/.local/bin/atcn, puts it on PATH, downloads the latest binary
+atcn -C ~/my-project
+```
+
+`atcn` runs ATC in the current directory; `atcn update`, `atcn self update`,
+`atcn self uninstall`, `atcn dev <checkout>` and `atcn help` work like their `atc`
+counterparts below. The binary lives in `~/.atc/native/`. `ATC_JAVA_HOME` picks the JDK when
+it is not the `java` on `PATH`. The native build is new and marked experimental: if
+something misbehaves, `atc` runs the same release on the JVM.
+
+### JVM jars: `atc`
+
+The `atc` wrapper script downloads the jars of the latest release and runs them with your
+JDK:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atc -o atc
@@ -111,7 +139,7 @@ From then on `atc` runs ATC in the current directory, `atc update` fetches a new
 lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
 (To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
 
-On an interactive launch, the wrapper checks GitHub for a newer release and asks:
+On an interactive launch, either wrapper checks GitHub for a newer release and asks:
 
 ```text
 ATC v0.2.0 is available (installed: v0.1.3). Upgrade now? [y/N]
@@ -121,8 +149,8 @@ Enter `y` to download and verify that release, then start it with your original 
 Enter `n` or press Enter to start the installed version. The check times out after five
 seconds; an unavailable release service does not block startup. Scripted `-p` runs,
 help/version and initialization commands, and local `atc dev` builds skip the check.
-Set `ATC_CHECK_UPDATES=0` to disable it. This updates the JARs; `atc self update` updates
-the wrapper itself.
+Set `ATC_CHECK_UPDATES=0` to disable it. This updates the release; `atc self update` (or
+`atcn self update`) updates the wrapper itself.
 
 <details>
 <summary><strong>Windows (best-effort support)</strong></summary>

@@ -34,6 +34,10 @@ object Sandbox:
           s"Neither $ClasspathEnvironment nor $ClasspathProperty is set; one must list the capability library classpath."
         )
 
+  /** `dotty.tools.repl.StopRepl` as the REPL asks for it, and the resource the build bundles it as. */
+  private val StopReplClassFile = "dotty/tools/repl/StopRepl.class"
+  private val StopReplBytes = "atc/StopRepl.class.bin"
+
   private val sharedPrefixes = List("scala.", "atc.lib.")
   /** Compiler-internal packages that live under `scala.` in the app loader. */
   private val hiddenPrefixes = List("scala.quoted.runtime.impl.", "scala.tools.")
@@ -60,6 +64,13 @@ object Sandbox:
       else super.loadClass(name, resolve).nn
     override def getResource(name: String): java.net.URL | Null =
       if name.endsWith(".class") then null else super.getResource(name)
+    /** The one class file the REPL loader must read: it defines its own copy
+      * of `StopRepl` (the stop flag checked by instrumented code) from the
+      * parent's bytes. Served from the build's renamed copy, which also
+      * exists in a native image where no `.class` resource does. */
+    override def getResourceAsStream(name: String): java.io.InputStream | Null =
+      if name == StopReplClassFile then app.getResourceAsStream(StopReplBytes)
+      else super.getResourceAsStream(name)
 
   def newLoader(): ClassLoader = SandboxLoader(classOf[Interface].getClassLoader.nn)
 
