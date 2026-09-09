@@ -16,15 +16,16 @@
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
-# Physical memory in GiB (Linux, macOS, Git Bash on Windows), 16 when unknown.
+# Physical memory in GiB, rounded (a "16 GB" runner reports 15.6 GiB), for
+# Linux, macOS and Git Bash on Windows; 16 when unknown.
 memory_gib() {
   local kib bytes
   if [[ -r /proc/meminfo ]]; then
-    kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); echo $(( kib / 1048576 ))
+    kib=$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo); echo $(( (kib + 524288) / 1048576 ))
   elif command -v sysctl >/dev/null 2>&1 && bytes=$(sysctl -n hw.memsize 2>/dev/null); then
-    echo $(( bytes / 1073741824 ))
+    echo $(( (bytes + 536870912) / 1073741824 ))
   elif command -v wmic >/dev/null 2>&1; then
-    bytes=$(wmic ComputerSystem get TotalPhysicalMemory 2>/dev/null | tr -dc '0-9'); echo $(( ${bytes:-0} / 1073741824 ))
+    bytes=$(wmic ComputerSystem get TotalPhysicalMemory 2>/dev/null | tr -dc '0-9'); echo $(( (${bytes:-0} + 536870912) / 1073741824 ))
   else
     echo 16
   fi
