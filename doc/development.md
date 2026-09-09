@@ -59,11 +59,10 @@ newer, set `GRAALVM_HOME`; run `./mill dist` first), and `native/start.sh` runs 
 `start.sh` does the JVM build: it loads `.env`, finds a JDK (`ATC_JAVA_HOME`, `JAVA_HOME`,
 `/usr/libexec/java_home`, then the `java` on `PATH`) for `-Djava.home`, sets the library
 classpath and version, and passes every flag through (`ATC_NATIVE_OPTS` adds runtime
-options). The REPL defines the agent's classes at
-run time, so the build enables GraalVM's early *runtime class loading*
-(`-H:+RuntimeClassLoading`): classes defined at run time are interpreted, never compiled,
-while the compiler, the REPL and the rest of the application are ahead-of-time compiled.
-The pieces that make it work:
+options). The REPL defines the agent's classes at run time, so the build enables GraalVM's
+early *runtime class loading* (`-H:+RuntimeClassLoading`): classes defined at run time are
+interpreted, never compiled, while the compiler, the REPL and the rest of the application
+are ahead-of-time compiled. The pieces that make it work:
 
 - `-H:Preserve=path=atc-lib.jar,module=java.base` keeps every member of the agent-facing
   library, the Scala standard library and `java.base` in the image. Native image otherwise
@@ -79,18 +78,32 @@ The pieces that make it work:
   them under the class-file name.
 - The app assembly is a plain jar (`prependShellScript = ""`): the launcher-script prefix
   Mill adds by default hides every resource of the jar from `native-image`.
-- `native/metadata/reachability-metadata.json` is the tracing agent's output for echo-model
-  runs (`-agentlib:native-image-agent=config-output-dir=...` on the GraalVM JVM), with the
-  REPL wrapper classes (`rs$line$N`) removed.
+- `native/metadata/reachability-metadata.json` is the tracing agent's output
+  (`-agentlib:native-image-agent=config-output-dir=...` on the GraalVM JVM) for echo-model
+  runs and real DeepSeek and Kimi turns, with the REPL wrapper classes (`rs$line$N`)
+  removed: Jackson's internals, kotlin-reflect, the TLS providers, JLine.
+- The provider SDKs (de)serialize requests and responses with Jackson over reflection, and
+  the trace only covers the response types a run happened to see. `native/sdk-reflection.py`
+  reads the class files of `com.openai.{models,core}` and `com.anthropic.{models,core}` from
+  the jar and registers, per class, the constructors (concrete classes only: registering an
+  abstract class's constructor crashes the builder) and the Jackson-annotated methods and
+  fields, which is exactly the shape the trace shows Jackson invoking (`<init>`, the
+  `_field()` getters, `putAdditionalProperty`). Registering every method of every SDK class
+  instead makes 870k methods reachable and the build runs out of memory; preserving the
+  whole app jar crashes the builder.
+- `-Ob` (quick build) and 20 GB of builder heap. An `-O2` image runs faster but builds much
+  longer, and the builder spends most of its time in GC below about 17 GB.
 
-Measured on an M-series Mac with the echo model and a one-line snippet: the binary starts,
-compiles and runs the snippet in about 0.4 s wall (2.5 s and 8 s of CPU on the JVM) at
-about 220 MB peak RSS (390 MB); a tight 20-million-iteration loop in agent code takes 2 s
-interpreted against 0.09 s JIT-compiled. Execution timeouts and interrupts work (the
-`StopRepl` flag is honoured by the interpreter). The image is about 650 MB and takes
-around 12 minutes and 16 GB of builder heap. Every run prints JDK 25's `sun.misc.Unsafe`
-deprecation warning for `scala.runtime.LazyVals` on stderr. Not part of `dist`, releases
-or CI.
+Verified on an M-series Mac: the echo-model smoke run, DeepSeek (Responses API, streaming,
+reasoning, tool calls) and Kimi (chat completions) editing a scratch project in `-p` runs,
+and an interactive session through a pty with a permission pop-up, a second turn,
+next-input prediction, `/cost` and `/quit`. The binary starts, compiles and runs a
+one-line snippet in about 0.4 s wall (2.5 s and 8 s of CPU on the JVM) at about 220 MB peak
+RSS (390 MB); a tight 20-million-iteration loop in agent code takes 2 s interpreted against
+0.09 s JIT-compiled. Execution timeouts and interrupts work (the `StopRepl` flag is honoured
+by the interpreter). The image is about 850 MB and a quick build takes 10 minutes. Every run
+prints JDK 25's `sun.misc.Unsafe` deprecation warning for `scala.runtime.LazyVals` on
+stderr. Not part of `dist`, releases or CI.
 
 ## Architecture
 
