@@ -16,7 +16,7 @@ trait Derivations:
   /** The configured file system as read-only, whatever `io` is (read-only mode's `fs`). */
   def readOnlyFileSystem(using io: IOCap): FileSystem^{io.rd}
 
-/** The sandbox's injection point. It is NOT part of the agent API and is never
+/** The sandbox's injection point. It is not part of the agent API and is never
   * bundled into the system prompt. The host installs its [[Interface]] implementation
   * here before the REPL preamble runs; the preamble reads it back with `current`
   * and takes the root capability `rootIO`. Everything here is `@rejectSafe`, so
@@ -41,11 +41,11 @@ object Runtime:
   def network(using io: IOCap^): Network^{io} = host.network
   def readOnlyFileSystem(using io: IOCap): FileSystem^{io.rd} = host.readOnlyFileSystem
 
-  /** The root-capability labels. The host never inspects them (every check is per
-    * call against the policy), so one shared instance of each serves every
-    * sandbox; their power is entirely in their types. `rootIO` groups the
-    * mode-selected file-system / command / network leaves; `rootUser` talks to
-    * the user. */
+  /** The root-capability labels. They carry no authority of their own: every check
+    * is made per call against the policy, so one shared instance of each serves
+    * every sandbox and what they grant is decided by their types. `rootIO` groups
+    * the mode-selected file-system, command and network leaves; `rootUser` talks
+    * to the user. */
   @caps.unsafe.untrackedCaptures
   val rootIO: IOCap^ = new IOCap
   @caps.unsafe.untrackedCaptures

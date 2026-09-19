@@ -66,9 +66,9 @@ class ClassifiedSuite extends munit.FunSuite:
   test("a fatal throwable inside map propagates, it is not masked as a classified failure"):
     // `Try` traps only `NonFatal`, so a fatal throwable escapes `map` and aborts the
     // evaluation (rather than becoming a masked failure). It cannot be turned into a
-    // per-bit oracle because agent code may not *catch* it — see CodeValidator. Here
-    // (host code, not agent code) we can catch it to observe that it did propagate.
-    // (Caught by hand rather than `intercept`, so no fatal error reaches the runner.)
+    // per-bit oracle because agent code may not *catch* it; see CodeValidator. This
+    // is host code, not agent code, so it can catch it to observe that it propagated.
+    // Caught by hand rather than with `intercept`, so no fatal error reaches the runner.
     var propagated = false
     try ClassifiedImpl.wrap("x").map[Int](_ => throw OutOfMemoryError("boom"))
     catch case _: OutOfMemoryError => propagated = true

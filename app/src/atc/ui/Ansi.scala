@@ -30,8 +30,8 @@ object Ansi:
   /** Strip terminal control from untrusted text (model prose, program output,
     * file content, paths): C0 controls except `\n` and `\t`, DEL, C1, and the
     * Unicode bidirectional-formatting controls used for visual spoofing. ESC is
-    * dropped outright, so even an escape sequence straddling two streamed chunks
-    * dies with it. Applied where such text enters the TUI, never to the TUI's
+    * dropped outright, so an escape sequence straddling two streamed chunks is
+    * broken as well. Applied where such text enters the TUI, never to the TUI's
     * own styled output. */
   def sanitize(s: String): String =
     if !s.exists(isControl) then s

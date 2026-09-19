@@ -5,21 +5,27 @@ import scala.util.matching.Regex
 /** A violation found by the code validator. */
 case class Violation(ruleId: String, description: String, lineNumber: Int, snippet: String)
 
-/** Fast, regex-based preflight for agent code before it reaches the compiler.
+/** Regex-based preflight for agent code before it reaches the compiler.
   *
-  * Its purpose is quick, actionable feedback for common invalid forms
-  * (`java.io`, reflection, class loaders, `unsafe*`, evaluator-hostile catches,
-  * ...). It is intentionally lexical: it does not parse or type-check Scala and
-  * is neither complete nor a safety boundary. Scala compiler safe mode is the
-  * authoritative safety check.
+  * It gives quick, actionable feedback on common invalid forms (`java.io`,
+  * reflection, class loaders, `unsafe*`, evaluator-hostile catches, ...). It is
+  * lexical: it does not parse or type-check Scala and is neither complete nor a
+  * safety boundary. Scala compiler safe mode is the authoritative safety check.
   *
-  * Keep this implementation simple and fast. Prefer cheap linear scans and
-  * high-value diagnostics; do not grow a second Scala parser or try to prove
-  * that accepted code is safe here. Adapted from TACIT (Apache-2.0).
+  * Keep the implementation to cheap linear scans and high-value diagnostics; do
+  * not grow a second Scala parser here, and do not try to prove that accepted
+  * code is safe. Adapted from TACIT (Apache-2.0).
   */
 object CodeValidator:
 
   private case class Forbidden(id: String, regex: Regex, description: String)
+
+  /** The `catch-fatal` rule, shared by the per-line scan and the catch-arm
+    * scanner (which reports an ascription the per-line regex cannot see). */
+  private val CatchFatalRe: Regex =
+    raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable)\b".r
+  private val CatchFatalDescription: String =
+    "Catching Throwable/Error/a fatal error is forbidden; catch a specific non-fatal type instead, e.g. case _: Exception (or a RuntimeException subtype)"
 
   private val forbidden: List[Forbidden] = List(
     // File IO bypass
@@ -100,17 +106,13 @@ object CodeValidator:
     // becomes a per-bit oracle and a loop could swallow a timeout/interrupt. A typed catch
     // of Throwable/Error/a fatal type is rejected here; a bare catch-all is caught by the
     // cross-line `catch-all` rule below. A typed catch of a non-fatal type (`case _: Exception`,
-    // a RuntimeException subtype, ...) stays allowed. (NonFatal(e) is not usable under safe mode.)
+    // a RuntimeException subtype, ...) stays allowed. NonFatal(e) is not usable under safe mode.
     // The fatal type may appear anywhere in the ascription, so a parenthesised
     // (`case _: (Throwable)`) or union (`case _: (RuntimeException | Throwable)`)
     // type does not slip past. The scan of the ascription stops before the arm
     // arrow `=>` and before an `if` guard, so a guard that merely mentions a
     // fatal type (`case _: Foo if Throwable.check() =>`) is not a false positive.
-    Forbidden(
-      "catch-fatal",
-      raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable)\b".r,
-      "Catching Throwable/Error/a fatal error is forbidden; catch a specific non-fatal type instead, e.g. case _: Exception (or a RuntimeException subtype)"
-    ),
+    Forbidden("catch-fatal", CatchFatalRe, CatchFatalDescription),
     // An erased type parameter bounded by a fatal type would defeat `catch-fatal`:
     // `def g[T <: Throwable] = try ... catch case _: T` erases to a catch of the
     // bound. `Any`/`AnyRef` are left out: `[T <: AnyRef]` is a common, legitimate
@@ -185,6 +187,9 @@ object CodeValidator:
 
     inline def emit(c: Char): Unit = sb.append(c)
     inline def blank(c: Char): Unit = sb.append(if c == '\n' then '\n' else ' ')
+    /** A character of a comment: blanked or kept, according to `blankComments`. */
+    inline def comment(c: Char): Unit = if blankComments then blank(c) else emit(c)
+    inline def comment2(a: Char, b: Char): Unit = { comment(a); comment(b) }
 
     var i = 0
     while i < len do
@@ -222,24 +227,17 @@ object CodeValidator:
           stack.push(Frame(true, triple, interp, false))
         else if c == '/' && i + 1 < len && code.charAt(i + 1) == '/' then
           while i < len && code.charAt(i) != '\n' do
-            if blankComments then blank(code.charAt(i)) else emit(code.charAt(i))
+            comment(code.charAt(i))
             i += 1
         else if c == '/' && i + 1 < len && code.charAt(i + 1) == '*' then
-          if blankComments then { blank('/'); blank('*') }
-          else { emit('/'); emit('*') }
+          comment2('/', '*')
           i += 2
           var depth = 1
           while i < len && depth > 0 do
-            if code.startsWith("/*", i) then
-              if blankComments then { blank('/'); blank('*') }
-              else { emit('/'); emit('*') }
-              i += 2; depth += 1
-            else if code.startsWith("*/", i) then
-              if blankComments then { blank('*'); blank('/') }
-              else { emit('*'); emit('/') }
-              i += 2; depth -= 1
+            if code.startsWith("/*", i) then { comment2('/', '*'); i += 2; depth += 1 }
+            else if code.startsWith("*/", i) then { comment2('*', '/'); i += 2; depth -= 1 }
             else
-              if blankComments then blank(code.charAt(i)) else emit(code.charAt(i))
+              comment(code.charAt(i))
               i += 1
         else if c == '{' then
           emit('{'); f.brace += 1; i += 1
@@ -332,32 +330,29 @@ object CodeValidator:
       else i += 1
     ImportAliases(hits.toList, fatal.toList)
 
-  /** Quick diagnostic for a bare catch-all arm (`case _ =>`, `case e =>`,
-    * `case e if ...`), which also catches fatal errors and the ThreadDeath stop
-    * signal. This remains a lexical heuristic, not an exhaustive exception-flow
-    * check or a substitute for compiler safety.
+  /** Finds the arms of every `catch` in `code`. It is a lexical heuristic, not an
+    * exhaustive exception-flow check or a substitute for compiler safety.
     *
-    * One linear pass over the stripped source (strings/comments already blanked).
-    * Only `case`s belonging to a `catch` are considered: `match` arms and
+    * One linear pass over the stripped source (strings and comments already blanked).
+    * Only `case`s belonging to a `catch` are considered, so `match` arms and
     * `.recover { case _ => }` are untouched. An arm is a bare catch-all when its
-    * head is `_` or a lower-case binder followed by `=>` or `if` — `case _: T`
-    * is typed (left to the `catch-fatal` rule) and extractors start upper-case.
-    * Braceless regions end at `finally`, a depth-0 `}`, or a line indented no
-    * deeper than the `catch` that does not start with `case` (a braceless nested
-    * `match` with a `case _` inside such an arm is an accepted false positive;
-    * braced nested matches are never flagged).
+    * head is `_` or a lower-case binder followed by `=>` or `if`, which also catches
+    * fatal errors and the ThreadDeath stop signal. `case _: T` is typed instead, and
+    * extractors start upper-case. Braceless regions end at `finally`, a depth-0 `}`,
+    * or a line indented no deeper than the `catch` that does not start with `case`.
+    * A braceless nested `match` with a `case _` inside such an arm is an accepted
+    * false positive; braced nested matches are never flagged.
     *
-    * Returns the character offsets of the offending `case` keywords (`catchAlls`), of
-    * typed arms whose ascription spans lines and names a fatal type (`fatalArms`: the
-    * per-line `catch-fatal` rule cannot see `case _:\n Throwable =>`), and of `catch`
-    * handlers that are not `case` arms at all (`handlers`: a PartialFunction value
-    * hides its arms from every rule here). */
-  private final case class CatchScan(catchAlls: List[Int], fatalArms: List[Int], handlers: List[Int])
+    * Returns the character offsets of the offending `case` keywords (`catchAlls`), every
+    * typed arm as its offset and the text of its ascription (`typedArms`), and the offsets
+    * of `catch` handlers that are not `case` arms at all (`handlers`: a PartialFunction
+    * value hides its arms from every rule here). */
+  private final case class CatchScan(catchAlls: List[Int], typedArms: List[(Int, String)], handlers: List[Int])
   private def scanCatches(code: String): CatchScan =
-    if !code.contains("catch") then return CatchScan(Nil, Nil, Nil) // the common case: no catch, no scan
+    if !code.contains("catch") then return CatchScan(Nil, Nil, Nil) // no catch, no scan
     val len = code.length
     val hits = scala.collection.mutable.ListBuffer[Int]()
-    val fatalArms = scala.collection.mutable.ListBuffer[Int]()
+    val typedArms = scala.collection.mutable.ListBuffer[(Int, String)]()
     val handlers = scala.collection.mutable.ListBuffer[Int]()
     def skipWs(from: Int): Int =
       var k = from
@@ -367,7 +362,10 @@ object CodeValidator:
       var k = from
       while k < len && isIdentChar(code.charAt(k)) do k += 1
       k
-    /** The ascription starting after the `:` at `colon`, up to the arm's `=>` or guard. */
+    /** The ascription starting after the `:` at `colon`, up to the arm's `=>` or guard.
+      * An unmatched `)`/`]` ends it too: the arm's typed part may sit inside an
+      * enclosing pattern (`case Wrapped(e: Exception) =>`, `case e @ (_: Exception) =>`),
+      * and without that stop the scan would run past the arm into unrelated code. */
     def ascription(colon: Int): String =
       var k = colon + 1
       var depth = 0
@@ -376,24 +374,24 @@ object CodeValidator:
         val c = code.charAt(k)
         if depth == 0 && ((c == '=' && k + 1 < len && code.charAt(k + 1) == '>') || keywordAt(code, k, "if")) then
           done = true
+        else if depth == 0 && (c == ')' || c == ']') then done = true
         else
           if c == '(' || c == '[' then depth += 1
           else if c == ')' || c == ']' then depth -= 1
           k += 1
       code.substring(colon + 1, k).nn
-    /** One arm at `caseOffset` (its pattern starting at `i0`): a bare catch-all, or a typed
-      * arm whose multi-line ascription names a fatal type. */
+    /** One arm at `caseOffset`, its pattern starting at `i0`: either a bare catch-all,
+      * or a typed arm, whose ascription is recorded for the rules that need to read it. */
     def checkArm(caseOffset: Int, i0: Int): Unit =
       if isBareCatchAll(i0) then hits += caseOffset
       else
         val colon = code.indexOf(':', i0)
         if colon >= 0 && colon < code.indexOf("=>", i0).max(colon + 1) then
-          val typed = ascription(colon)
-          if typed.contains('\n') && FatalTypeRe.findFirstIn(typed).isDefined then fatalArms += caseOffset
-    /** Does the arm whose pattern starts at `i0` begin with a bare catch-all —
+          typedArms += ((caseOffset, ascription(colon)))
+    /** Whether the arm whose pattern starts at `i0` begins with a bare catch-all:
       * `_`, a lower-case binder, an `@`-binder over one, or any of those in
-      * parentheses (`case (e) =>`, `case e @ _ =>`) — with no type ascription
-      * (a `:` is left to `catch-fatal`), extractor (upper-case name) or literal? */
+      * parentheses (`case (e) =>`, `case e @ _ =>`), with no type ascription
+      * (a `:` is left to `catch-fatal`), extractor (upper-case name) or literal. */
     def isBareCatchAll(i0: Int): Boolean =
       var k = skipWs(i0)
       var sawBinder = false
@@ -475,20 +473,22 @@ object CodeValidator:
             scanBraceless(j, ind)
         i = end
       else i += 1
-    CatchScan(hits.toList, fatalArms.toList, handlers.toList)
+    CatchScan(hits.toList, typedArms.toList, handlers.toList)
 
   private val stringStrippedPatterns: Set[String] = Set("directive-using", "directive-import", "language-import")
 
-  // Catching a type parameter erases to a catch of its bound — Object for the
-  // default/`Any`/`AnyRef` bound — so `case _: T` inside `def f[T]` swallows fatal
-  // throwables exactly like `case _: Throwable` (a runnable demonstration: an
-  // uncaught StackOverflowError becomes "caught"). A regex cannot tell an abstract
-  // type parameter from a concrete class by name, so correlate: collect the names
-  // declared as type parameters, then reject a `case` ascribed to one of them.
+  // Catching a name that stands for an unknown type at run time erases to a catch of
+  // its bound (Object for the default/`Any`/`AnyRef` bound), so `case _: T` inside
+  // `def f[T]`, and `case _: X` under an abstract `type X`, swallow fatal throwables
+  // exactly like `case _: Throwable`. Both are demonstrated to catch a real
+  // StackOverflowError in the sandbox. A regex cannot tell such a name from a concrete
+  // class, so correlate: collect the names declared as type parameters or as abstract
+  // type members, then reject a catch arm whose ascription names one of them.
   private val typeParamDecl = raw"\b(?:def|class|trait|enum|given|extension|type)\b[^\[\n=]*?\[([^\]\n]*)\]".r
-  private val caseAscription = raw"\bcase\b[^=:\n]*:\s*([A-Za-z_]\w*)".r
+  /** A type-member declaration; group 2 is `=` exactly when it is a concrete alias. */
+  private val typeMemberDecl = raw"\btype\s+([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*(=?)".r
   private val TypeParamCatchDescription: String =
-    "Catching a type parameter (`case _: T`) is forbidden: it erases to a catch of its bound and so catches fatal errors; catch a specific non-fatal type instead"
+    "Catching a type parameter or abstract type member (`case _: T`) is forbidden: it erases to a catch of its bound and so catches fatal errors; catch a specific non-fatal type instead"
 
   /** Split a type-parameter list on its top-level commas (a comma inside a nested
     * `[...]`/`(...)`, as in `[T <: Map[K, V]]`, does not separate parameters). */
@@ -507,15 +507,39 @@ object CodeValidator:
     segs += inner.substring(start)
     segs.toList
 
-  /** The names declared as type parameters anywhere in `code` (variance and bounds
-    * stripped: `+A`, `T <: X` and `F[_]` all yield their leading identifier). */
-  private def typeParamNames(code: String): Set[String] =
-    typeParamDecl
+  /** The names declared anywhere in `code` as a type parameter (variance and bounds
+    * stripped: `+A`, `T <: X` and `F[_]` all yield their leading identifier) or as an
+    * abstract type member (`type X`, `type X <: Foo`). A concrete alias (`type X = Foo`)
+    * is not one of them: `case _: X` then tests Foo, and `catch-fatal-alias` covers an
+    * alias of a fatal type. */
+  private def abstractTypeNames(code: String): Set[String] =
+    val parameters = typeParamDecl
       .findAllMatchIn(code)
       .flatMap(m => splitTopLevel(m.group(1).nn))
       .map(seg => seg.trim.stripPrefix("+").stripPrefix("-").trim.takeWhile(isIdentChar))
       .filter(_.nonEmpty)
-      .toSet
+    val members = typeMemberDecl.findAllMatchIn(code).filter(_.group(2) != "=").map(_.group(1).nn)
+    (parameters ++ members).toSet
+
+  /** The undotted type names at the top level of a type ascription, which is what a
+    * `case _: T` arm tests at run time. Names inside type arguments are skipped:
+    * `case _: List[T]` erases to a test of List, not of T. */
+  private def topLevelTypeNames(ascription: String): Set[String] =
+    val names = scala.collection.mutable.Set[String]()
+    var depth = 0
+    var i = 0
+    while i < ascription.length do
+      val c = ascription.charAt(i)
+      if c == '[' then { depth += 1; i += 1 }
+      else if c == ']' then { depth -= 1; i += 1 }
+      else if isIdentStart(c) then
+        val start = i
+        while i < ascription.length && isIdentChar(ascription.charAt(i)) do i += 1
+        val qualified = (start > 0 && ascription.charAt(start - 1) == '.') ||
+          (i < ascription.length && ascription.charAt(i) == '.')
+        if depth == 0 && !qualified then names += ascription.substring(start, i).nn
+      else i += 1
+    names.toSet
 
   private val dotWhitespace = raw"\s*\.\s*".r
   private def squeezeDots(line: String): String = dotWhitespace.replaceAllIn(line, ".")
@@ -560,24 +584,25 @@ object CodeValidator:
       val idx = stripped.substring(0, pos).count(_ == '\n')
       Violation(id, description, idx + 1, originalLines.lift(idx).getOrElse("").trim)
     val catches = scanCatches(stripped)
-    val catchAlls = catches.catchAlls.map(at("catch-all", CatchAllDescription, _)) ++
-      catches.fatalArms.map(at("catch-fatal", forbidden.find(_.id == "catch-fatal").get.description, _)) ++
+    // A multi-line ascription is invisible to the per-line `catch-fatal` regex
+    // (`case _:\n Throwable =>`), so the arm scanner reports that case.
+    val fatalArms = catches.typedArms.collect:
+      case (offset, typed) if typed.contains('\n') && FatalTypeRe.findFirstIn(typed).isDefined =>
+        at("catch-fatal", CatchFatalDescription, offset)
+    val catchIssues = catches.catchAlls.map(at("catch-all", CatchAllDescription, _)) ++ fatalArms ++
       catches.handlers.map(at("catch-handler", CatchHandlerDescription, _))
     val aliases = importAliasOffsets(stripped)
     val importAliases =
       aliases.fatal.map(at("import-fatal-alias", FatalImportAliasDescription, _)) ++
         (if strictImportAliases then aliases.all.map(at("import-alias", ImportAliasDescription, _)) else Nil)
-    val typeParams = typeParamNames(stripped)
-    val typeParamCatches =
-      if typeParams.isEmpty then Nil
+    val abstractTypes = abstractTypeNames(stripped)
+    val abstractTypeCatches =
+      if abstractTypes.isEmpty then Nil
       else
-        for
-          m <- caseAscription.findAllMatchIn(stripped).toList
-          if typeParams.contains(m.group(1).nn)
-        yield
-          val idx = stripped.substring(0, m.start).count(_ == '\n')
-          Violation("catch-type-param", TypeParamCatchDescription, idx + 1, originalLines.lift(idx).getOrElse("").trim)
-    perLine ++ catchAlls ++ importAliases ++ typeParamCatches
+        catches.typedArms.collect:
+          case (offset, typed) if topLevelTypeNames(typed).exists(abstractTypes.contains) =>
+            at("catch-type-param", TypeParamCatchDescription, offset)
+    perLine ++ catchIssues ++ importAliases ++ abstractTypeCatches
 
   def formatErrors(violations: List[Violation]): String =
     val header = s"Code validation failed (${violations.size} violation${if violations.size > 1 then "s" else ""}):"

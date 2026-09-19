@@ -594,6 +594,19 @@ class PermissionSuite extends munit.FunSuite:
     )
     assert(error.getMessage.nn.contains("case-insensitive"), error.getMessage)
 
+  test("an unusable secret-header name is reported plainly, like a plain one"):
+    val env = TestEnv(hosts = List(host))
+    import env.given
+    given net: Network = env.host.network
+    val secret = env.host.classify("s3cr3t")
+    val before = echoRequests.get()
+    // A header name is agent-supplied and carries nothing classified, so a
+    // rejected one is an actionable error rather than a failed response.
+    for name <- List("Host", "X Token") do
+      val error = intercept[IllegalArgumentException](env.host.httpGet(url("/echo"), Map.empty, Map(name -> secret)))
+      assert(error.getMessage.nn.contains(name), error.getMessage)
+    assertEquals(echoRequests.get(), before)
+
   test("httpPostClassified with a failed body makes no request and returns the failure unchanged"):
     val env = TestEnv(hosts = List(host))
     import env.given
@@ -651,7 +664,7 @@ class PermissionSuite extends munit.FunSuite:
     // a trailing dot names the same host but is not the same string
     val e1 = intercept[SecurityException](env.host.httpGet("http://EVIL.COM./x"))
     assert(e1.getMessage.nn.contains("denyHosts"), e1.getMessage)
-    // a single decimal number is an IPv4 literal the JDK resolves — 2852039166 = 169.254.169.254
+    // a single decimal number is an IPv4 literal the JDK resolves: 2852039166 = 169.254.169.254
     val e2 = intercept[SecurityException](env.host.httpGet("http://2852039166/latest/meta-data"))
     assert(e2.getMessage.nn.contains("denyHosts"), e2.getMessage)
 

@@ -438,7 +438,7 @@ class CodeValidatorSuite extends munit.FunSuite:
   test("allow a benign type alias"):
     assertAllowed("type S = String\ntype L = List[Int]")
   test("no-fp: a fatal type nested in type arguments is not an alias of it"):
-    // `case _: M` catches Map, not AnyRef — the RHS scan must not cross a '['.
+    // `case _: M` catches Map, not AnyRef, so the RHS scan must not cross a '['.
     assertAllowed("type M = Map[String, AnyRef]")
     assertAllowed("type L = List[Any]")
     assertAllowed("type R = Either[Throwable, Int]")
@@ -463,6 +463,32 @@ class CodeValidatorSuite extends munit.FunSuite:
       "class Box[E]:\n  def run(b: => Int): String = try b.toString catch case _: E => \"x\"",
       "catch-type-param"
     )
+  test("reject catching a parenthesised or union type parameter"):
+    // Demonstrated to swallow a real StackOverflowError in the sandbox: the arm's
+    // ascription is scanned as a whole, not only its leading identifier.
+    assertRejected("def g[T](b: => Int): String = try b.toString catch case _: (T) => \"x\"", "catch-type-param")
+    assertRejected(
+      "def g[T](b: => Int): String = try b.toString catch case _: (T | IllegalStateException) => \"x\"",
+      "catch-type-param"
+    )
+    assertRejected(
+      "def g[T](b: => Int): String = try b.toString catch { case _: (T) => \"x\" }",
+      "catch-type-param"
+    )
+  test("reject catching an abstract type member (it erases to its bound too)"):
+    // Also demonstrated to swallow a real StackOverflowError in the sandbox.
+    assertRejected(
+      "trait Holder:\n  type X\n  def run(b: => Int): String = try b.toString catch case _: X => \"x\"",
+      "catch-type-param"
+    )
+    assertRejected(
+      "trait Holder:\n  type X <: RuntimeException\n  def run(b: => Int) = try b.toString catch case _: X => \"x\"",
+      "catch-type-param"
+    )
+  test("no-fp: a concrete type alias may still be caught"):
+    assertAllowed("type Oops = IllegalStateException\ntry f() catch case _: Oops => 1")
+  test("no-fp: a type parameter inside type arguments is not what the arm tests"):
+    assertAllowed("def g[T](b: => Int): String = try b.toString catch case _: List[T] => \"x\"")
   test("no-fp: a generic def that does not catch its parameter is fine"):
     assertAllowed("def id[A](a: A): A = a\ndef first[A, B](p: (A, B)): A = p._1")
   test("no-fp: a generic def catching a concrete non-fatal type is fine"):
@@ -479,6 +505,15 @@ class CodeValidatorSuite extends munit.FunSuite:
     assertRejected("try f() catch case (_) => ()", "catch-all")
   test("allow an @-binder over a typed (non-fatal) pattern"):
     assertAllowed("try read(\"x\") catch case e @ (_: RuntimeException) => e.getMessage")
+  test("no-fp: an arm typed inside an enclosing pattern does not pull in later code"):
+    // The ascription scan used to run past the arm's closing `)` to the end of the
+    // snippet, so any later mention of a fatal type name was reported on this arm.
+    assertAllowed(
+      "case class Wrapped(e: Exception)\n" +
+        "try f() catch { case Wrapped(e: Exception) => 1 }\n" +
+        "val noted = List.empty[Throwable]"
+    )
+    assertAllowed("try f() catch { case e @ (_: Exception) => 1 }\nval noted = List.empty[Throwable]")
 
   test("reject backquoted getClass") { assertRejected("x.`getClass`", "reflect-getclass") }
   test("allow getClass inside a string") { assertAllowed("""val s = "x.getClass"""") }

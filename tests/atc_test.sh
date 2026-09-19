@@ -219,7 +219,7 @@ else
 fi
 
 # Without any sha256 tool the cache cannot be verified: 'cannot verify' (exit 2),
-# not 'verified' — the caller then keeps a matching install rather than deleting it.
+# not 'verified', so the caller keeps a matching install rather than deleting it.
 no_sha256_cache() {
   have_sha256_tool() { return 1; }
   cached_jars_match_digests "atc.jar	x	sha256:whatever"
@@ -355,12 +355,16 @@ done
 # ---------------------------------------------------------------------------
 echo "--- startup cache: AOT cache (Java 25+) / CDS archive (Java 19-24), keyed by jars + JDK ---"
 
-# A java mock that reports the given version, logs every invocation to $JAVA_CALLS, and
-# creates the cache file named by the creating flag (unless told not to).
+# A java mock that reports the given version, logs every invocation to $JAVA_CALLS (and
+# every `-version` probe to $JAVA_VERSION_CALLS), and creates the cache file named by the
+# creating flag (unless told not to).
 mock_java() { # $1 = version line, $2 = creates|fails
 cat > "$TEST_TMP/mockbin/java" <<EOF
 #!/usr/bin/env bash
-if [[ "\${1:-}" == "-version" ]]; then echo '$1' >&2; echo 'OpenJDK Runtime Environment (build test)' >&2; exit 0; fi
+if [[ "\${1:-}" == "-version" ]]; then
+  echo version >> "\$JAVA_VERSION_CALLS"
+  echo '$1' >&2; echo 'OpenJDK Runtime Environment (build test)' >&2; exit 0
+fi
 printf '%s\n' "\$@" >> "\$JAVA_CALLS"; echo '---' >> "\$JAVA_CALLS"
 for a in "\$@"; do
   case "\$a" in -XX:AOTCacheOutput=*|-XX:ArchiveClassesAtExit=*) [[ '$2' == creates ]] && echo cache > "\${a#*=}" ;; esac
@@ -370,7 +374,9 @@ EOF
 chmod +x "$TEST_TMP/mockbin/java"
 }
 export JAVA_CALLS="$TEST_TMP/java-calls.log"
+export JAVA_VERSION_CALLS="$TEST_TMP/java-version-calls.log"
 java_calls() { grep -c '^---$' "$JAVA_CALLS" 2>/dev/null || echo 0; }
+version_probes() { grep -c '^version$' "$JAVA_VERSION_CALLS" 2>/dev/null || echo 0; }
 STARTUP_DIR="$CACHE_DIR/startup"
 rm -rf "$STARTUP_DIR"; : > "$JAVA_CALLS"
 
@@ -390,8 +396,11 @@ assert_contains "real run keeps the app flags" $'-C\n/work' "$real"
 assert_eq "training left no throwaway config behind" "" "$(ls "${TMPDIR:-/tmp}" | grep 'atc-startup-cache' || true)"
 assert_contains "key records the JDK" 'openjdk version "25.0.4"' "$(cat "$STARTUP_DIR/key.txt")"
 
+: > "$JAVA_VERSION_CALLS"
 (PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
 assert_eq "second run reuses the cache" "3" "$(java_calls)"
+# Reading the Java version starts a JVM, which is most of what the cache saves: read it once.
+assert_eq "a cached run probes the Java version once" "1" "$(version_probes)"
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Dfoo=bar" main -Xmx4g)"
 assert_contains "cache flag precedes ATC_JAVA_OPTS and the command line" $'-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfoo=bar\n-Xmx4g' "$run_out"
 
@@ -653,7 +662,7 @@ trap_injection_safe() {
   )
   [[ -f "$sentinel/file" ]]
 }
-assert_succeeds "a quote in ATC_CACHE_DIR cannot weaponize the cleanup trap" trap_injection_safe
+assert_succeeds "a quote in ATC_CACHE_DIR cannot redirect the cleanup trap" trap_injection_safe
 
 # Download cleanup runs in its own subshell and must not replace a sourcing
 # application's EXIT trap.

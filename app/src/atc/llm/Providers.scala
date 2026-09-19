@@ -78,7 +78,7 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
 
 /** Settings and client construction shared by the provider adapters. */
 private[atc] object Providers:
-  /** Generous on purpose: a reasoning model with tools can take many minutes. */
+  /** Deliberately generous: a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
 
   def httpClient(connect: Duration, read: Duration, write: Duration, request: Duration): okhttp3.OkHttpClient =
@@ -121,10 +121,10 @@ private[atc] object Providers:
     else if configuredEffort then Some("low")
     else None
 
-  /** A client for the two OpenAI-shaped providers: the configured key if there
-    * is one, else the SDK's own environment resolution — except against a
-    * custom `url` (Ollama, vLLM, LM Studio, ...), where a placeholder stands
-    * in for the key such servers ignore. */
+  /** A client for the two OpenAI-shaped providers. The key is the configured
+    * one, else the SDK's own environment resolution. Against a custom `url`
+    * (Ollama, vLLM, LM Studio, ...) a placeholder stands in for the key, which
+    * such servers ignore. */
   def openAiClient(spec: ModelSpec, transport: com.openai.core.http.HttpClient): OpenAIClient =
     val b = com.openai.core.ClientOptions.builder().httpClient(transport).timeout(RequestTimeout)
     spec.apiKey match

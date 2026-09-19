@@ -6,7 +6,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 
-/** Running external processes with bounded, deadlock-free output capture */
+/** Running external processes with bounded, deadlock-free output capture. */
 object Processes:
   private val MaxStreamChars = 8 * 1024 * 1024
   private val TruncationMarker = "\n...[truncated: output exceeded 8 MiB cap]..."
@@ -26,10 +26,11 @@ object Processes:
     def output(text: String): Unit
 
   /** A bounded text buffer fed by a drain thread and read by the agent. With
-    * `keepHead` the first `cap` characters are kept and the rest dropped (a
-    * foreground command: its first megabytes carry the diagnostics); otherwise
-    * the oldest text is dropped (a long-running process: the recent output
-    * matters). Reads may consume, so an interactive session sees each chunk once. */
+    * `keepHead` the first `cap` characters are kept and the rest dropped,
+    * which suits a foreground command whose first megabytes carry the
+    * diagnostics; otherwise the oldest text is dropped, which suits a
+    * long-running process whose recent output matters. Reads may consume, so
+    * an interactive session sees each chunk once. */
   private[atc] sealed trait OutputBuffer:
     def append(text: String): Unit
     /** The unread text, left in place. */

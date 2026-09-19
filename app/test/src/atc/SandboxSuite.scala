@@ -116,7 +116,7 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
   test("the sandbox loader hides *.class resources (only REPL classes get interrupt-instrumented)"):
     // With interrupt instrumentation on, the REPL loader would otherwise read the
     // bytecode of shared classes through its parent and re-define an instrumented
-    // copy — including atc.lib.Interface, losing the installed host.
+    // copy, atc.lib.Interface included, losing the installed host.
     val loader = Sandbox.newLoader()
     assertEquals(loader.getResource("atc/lib/Interface.class"), null)
     assertEquals(loader.getResource("scala/collection/immutable/List.class"), null)
@@ -180,3 +180,25 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
   test("a type alias cannot smuggle a fatal catch past the validator"):
     assertFails(run("type T = Throwable\ntry println(1) catch case _: T => 2"), "catch-fatal-alias")
     assertFails(run("type E = StackOverflowError\ntry println(1) catch case _: E => 2"), "catch-fatal-alias")
+
+  test("a catch of an erased type cannot swallow a StackOverflowError"):
+    // A type parameter and an abstract type member both erase to their bound, so
+    // `case _: T` catches fatal throwables. Both forms ran and printed "SWALLOWED"
+    // before the validator scanned the whole ascription rather than its first token.
+    val attacks = List(
+      """def viaParen[T](b: => Int): String = try b.toString catch case _: (T) => "SWALLOWED"
+        |def deep(n: Int): Int = deep(n + 1) + 1
+        |println(viaParen[RuntimeException](deep(0)))""".stripMargin,
+      """def viaUnion[T](b: => Int): String = try b.toString catch case _: (T | IllegalStateException) => "SWALLOWED"
+        |def deep2(n: Int): Int = deep2(n + 1) + 1
+        |println(viaUnion[RuntimeException](deep2(0)))""".stripMargin,
+      """trait Erased:
+        |  type X
+        |  def run(b: => Int): String = try b.toString catch case _: X => "SWALLOWED"
+        |val holder: Erased = new Erased { type X = RuntimeException }
+        |def deep3(n: Int): Int = deep3(n + 1) + 1
+        |println(holder.run(deep3(0)))""".stripMargin,
+    )
+    for attack <- attacks do
+      val r = assertFails(run(attack), "catch-type-param")
+      assert(!r.output.contains("SWALLOWED"), r.output)

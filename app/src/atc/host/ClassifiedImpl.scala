@@ -21,12 +21,13 @@ object ClassifiedImpl:
   def unwrap[T](c: Classified[T]): Try[T] = c match
     case impl: ClassifiedImpl[T] @unchecked => impl.value
     case other => throw SecurityException(s"Unknown Classified implementation: ${other.getClass.getName}")
-  /** Unwrap for a sink. A failed computation is reported with a *sanitized*
-    * error: the original exception may carry the confidential value in its
-    * message (a pure `map` lambda can throw), so it must never reach the agent. */
+  /** Read the value out, for host code and tests that are allowed to see it.
+    * A failed computation raises a sanitized error: the original exception may
+    * carry the confidential value in its message, since a pure `map` lambda
+    * can throw, so it must never reach the agent. */
   def get[T](c: Classified[T]): T = unwrap(c).getOrElse(throw failed())
 
-  /** The error a sink raises for a failed classified computation. */
+  /** The sanitized error [[get]] raises for a failed classified computation. */
   def failed(): IllegalStateException =
     IllegalStateException(
       "The classified value is the result of a failed computation; its error is confidential (println it to let the user see it)."

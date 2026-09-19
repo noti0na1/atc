@@ -27,6 +27,8 @@ private[host] trait HostFiles:
     val raw = Paths.get(PlatformPath.native(expanded)).nn
     PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
 
+  /** `operation` carries its own preposition, so that it reads as a phrase in
+    * front of the path (`read '/x'`, `running a command in '/x'`). */
   private def denied(path: Path, operation: String, permission: Perm, hint: String): SecurityException =
     val shown = PlatformPath.portable(path)
     val guidance =
@@ -34,16 +36,16 @@ private[host] trait HostFiles:
         "The file rule is locked. Permission requests cannot widen access; the user must change the configuration."
       else hint
     SecurityException(
-      s"Access denied: $operation on '$shown' is not permitted (current permission: ${permission.describe}). $guidance"
+      s"Access denied: $operation '$shown' is not permitted (current permission: ${permission.describe}). $guidance"
     )
 
   private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
-    require(scope, path, operation, write = false)
+    requireAccess(scope, path, operation, write = false)
 
   private[atc] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
-    require(scope, path, operation, write = true)
+    requireAccess(scope, path, operation, write = true)
 
-  private def require(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
+  private def requireAccess(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
     val permission = policy.effective(scope, path)
     if !(if write then permission.canWrite else permission.canRead) then
       val access = if write then "Access.Write" else "Access.Read"
@@ -62,6 +64,24 @@ private[host] trait HostFiles:
         s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
       )
 
+  /** Require read access and that the content is not classified. `alternative`
+    * names what to use instead on a classified path. */
+  private[atc] def requireReadable(scope: ScopeId, path: Path, operation: String, alternative: String): Perm =
+    val permission = requireRead(scope, path, operation)
+    requireNotClassified(permission, path, operation, alternative)
+    permission
+
+  /** Require write access and that the target is not classified. */
+  private[atc] def requireWritable(
+    scope: ScopeId,
+    path: Path,
+    operation: String,
+    alternative: String = "writeClassified(path, classify(content))"
+  ): Perm =
+    val permission = requireWrite(scope, path, operation)
+    requireNotClassified(permission, path, operation, alternative)
+    permission
+
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
 
   private[host] def withFileChange[A](path: Path, operation: String)(body: => A): A =
@@ -74,8 +94,7 @@ private[host] trait HostFiles:
     result
 
   private[atc] def writeFile(scope: ScopeId, path: Path, content: String, append: Boolean): Unit =
-    val permission = requireWrite(scope, path, if append then "append" else "write")
-    requireNotClassified(permission, path, "write", "writeClassified(path, classify(content))")
+    requireWritable(scope, path, if append then "append" else "write")
     withFileChange(path, "updated") {
       ensureParent(path)
       if append then
@@ -84,8 +103,7 @@ private[host] trait HostFiles:
     }
 
   private[atc] def writeFileBytes(scope: ScopeId, path: Path, content: Array[Byte]): Unit =
-    val permission = requireWrite(scope, path, "writeBytes")
-    requireNotClassified(permission, path, "writeBytes", "writeClassified(path, classify(content))")
+    requireWritable(scope, path, "writeBytes")
     withFileChange(path, "updated") {
       ensureParent(path)
       Files.write(path, content)
@@ -104,13 +122,13 @@ private[host] trait HostFiles:
     content match
       case Success(value) =>
         // Once the classified computation has been inspected, neither an I/O
-        // failure nor its message may escape to the agent: that would reveal a
-        // success/failure bit (and an exception can itself quote the content).
+        // failure nor its message may escape to the agent. It would reveal a
+        // success/failure bit, and an exception can itself quote the content.
         try Files.writeString(path, value, StandardCharsets.UTF_8)
         catch case NonFatal(_) => classifiedSinkFailed(s"writing '$path'")
       case Failure(_) =>
         // Equalise the observable existence side effect with the successful
-        // branch. `exists` is intentionally available even for classified paths.
+        // branch. `exists` is available even for classified paths.
         try
           if !Files.exists(path) then
             Files.createFile(path)
@@ -191,9 +209,10 @@ private[host] trait HostFiles:
       )
     val lines = List.newBuilder[String]
     val limited =
-      impl(fs.access(path)).scanLines(Host.CatMaxLineChars, Host.ReadRangeMaxChars) { (line, chars, number) =>
-        if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
-        number < to
+      impl(fs.access(path)).scanLines("readRange", Host.CatMaxLineChars, Host.ReadRangeMaxChars) {
+        (line, chars, number) =>
+          if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
+          number < to
       }
     if limited then lines += "[read limit reached before completing the requested range]"
     lines.result().mkString("\n")
@@ -205,9 +224,7 @@ private[host] trait HostFiles:
     val entry = impl(fs.access(path))
     val kept = collection.mutable.ListBuffer[CappedLine]()
     var lineCount = 0
-    // Counting the lines beyond the shown window is bounded like `readRange`: a huge file
-    // must not cost the whole snippet timeout for 400 lines of output.
-    val cut = entry.scanLines(Host.CatMaxLineChars, Host.CatMaxReadChars) { (prefix, chars, number) =>
+    val cut = entry.scanLines("cat", Host.CatMaxLineChars, Host.CatMaxReadChars) { (prefix, chars, number) =>
       lineCount = number
       if lineCount <= Host.CatMaxLines then kept += CappedLine(prefix, chars)
       true
@@ -233,7 +250,7 @@ private[host] trait HostFiles:
     val entry = impl(fs.access(path))
     val kept = collection.mutable.ListBuffer[CappedLine]()
     var lineCount = 0
-    entry.scanLines(Host.CatMaxLineChars) { (prefix, chars, number) =>
+    entry.scanLines("cat", Host.CatMaxLineChars) { (prefix, chars, number) =>
       lineCount = number
       if lineCount >= from && lineCount <= to then kept += CappedLine(prefix, chars)
       number < to
@@ -393,23 +410,24 @@ private[host] trait HostFiles:
     else if path.startsWith(canonicalCwd) then PlatformPath.portable(canonicalCwd.relativize(path).nn)
     else PlatformPath.portable(path)
 
-  private def grepEntry(entry: FileEntry, regex: scala.util.matching.Regex): List[GrepMatch] =
+  private def grepEntry(entry: FileEntryImpl, operation: String, regex: scala.util.matching.Regex): List[GrepMatch] =
     val matches = collection.mutable.ListBuffer[GrepMatch]()
     val shown = display(entry.path)
-    entry.forEachLine { (line, number) =>
-      if regex.findFirstIn(line).isDefined then matches += GrepMatch(shown, number, line)
-    }
+    entry.forEachLine(
+      operation,
+      (line, number) => if regex.findFirstIn(line).isDefined then matches += GrepMatch(shown, number, line)
+    )
     matches.toList
 
   def grep(path: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
-    grepEntry(fs.access(path), pattern.r)
+    grepEntry(impl(fs.access(path)), "grep", pattern.r)
 
   def grepRecursive(dir: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
     grepRecursive(dir, pattern, "*")
 
   def grepRecursive(dir: String, pattern: String, glob: String)(using fs: FileSystem): List[GrepMatch] =
     val regex = pattern.r
-    filesNamed(dir, glob).filterNot(_.isClassified).flatMap(grepEntry(_, regex))
+    filesNamed(dir, glob).filterNot(_.isClassified).flatMap(grepEntry(_, "grepRecursive", regex))
 
   def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
     filesNamed(dir, glob).map(entry => display(entry.path))
@@ -427,30 +445,32 @@ private[host] trait HostFiles:
     val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.isClassified)
     val matches = collection.mutable.ListBuffer[GrepMatch]()
     var scanned = 0
+    // `limited` is set only where something was left out: a line cut at the
+    // character cap, a line past the per-file line budget, or a match past the
+    // match cap. A budget reached exactly at the end of the input cuts nothing.
     var limited = false
     while matches.size < options.maxMatches && scanned < options.maxFiles && entries.hasNext do
       val entry = entries.next()
       scanned += 1
-      // `limited` only when something was left out: a line beyond the per-file
-      // budget, or a match beyond the cap (a cap reached on a file's last line cut nothing).
-      val readLimit = impl(entry).scanLines(options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
-        if number > options.maxLinesPerFile then { limited = true; false }
-        else
-          if chars > line.length then limited = true
-          val hit = regex.findFirstIn(line).isDefined
-          if hit && matches.size >= options.maxMatches then { limited = true; false }
+      val readLimit =
+        entry.scanLines("search", options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
+          if number > options.maxLinesPerFile then { limited = true; false }
           else
-            if hit then matches += GrepMatch(display(entry.path), number, line)
-            true
-      }
+            if chars > line.length then limited = true
+            val hit = regex.findFirstIn(line).isDefined
+            if hit && matches.size >= options.maxMatches then { limited = true; false }
+            else
+              if hit then matches += GrepMatch(display(entry.path), number, line)
+              true
+        }
       if readLimit then limited = true
     SearchResult(matches.toList, scanned, limited || entries.hasNext)
 
   /** Select non-directory descendants by filename or relative-path glob. */
-  private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntry] =
+  private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntryImpl] =
     matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).toList
 
-  private def matchingFiles(files0: Iterator[FileEntry], dir: String, glob: String): Iterator[FileEntry] =
+  private def matchingFiles(files0: Iterator[FileEntryImpl], dir: String, glob: String): Iterator[FileEntryImpl] =
     val files = files0.filterNot(_.isDirectory)
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)

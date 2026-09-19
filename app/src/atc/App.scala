@@ -28,7 +28,6 @@ final class App(args: Cli.Args, val tui: Tui):
   val configuration: Configuration = App.setup(args, tui)
   /** The effective settings. The *policy* lists live on `configuration`. */
   val config: Config = configuration.settings
-  val configFiles: List[Path] = configuration.sources
 
   // ── models ────────────────────────────────────────────────────────
 
@@ -178,8 +177,8 @@ final class App(args: Cli.Args, val tui: Tui):
 
   def run(): Int =
     try
-      // A directory no config covers is unreachable; say so rather than let the
-      // agent discover it one denial at a time.
+      // A directory no config covers is unreachable; say so rather than leave the
+      // agent to find out through repeated denials.
       if !policy.effective(ScopeId.Base, PlatformPath.canonical(cwd)).canRead then
         tui.info(
           s"No configuration grants access to $cwd, so the agent has to ask for every file. " +
@@ -316,7 +315,7 @@ final class App(args: Cli.Args, val tui: Tui):
           Debug.log("input closed, exiting")
           running = false
         case Some(line) if line.trim.isEmpty => ()
-        // What people type out of habit; not listed in /help.
+        // Typed out of habit; not listed in /help.
         case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(java.util.Locale.ROOT)) => running = false
         case Some(line) if line.trim.startsWith("/") => running = command(line.trim)
         case Some(line) => runTurn(line)
@@ -435,8 +434,10 @@ final class App(args: Cli.Args, val tui: Tui):
     if code.trim.isEmpty then return
     tui.beginTurn()
     try
-      tui.toolStart(code, "/run")
+      // The session first: starting it reports progress of its own, and when it fails the
+      // code block would otherwise stay open without its closing verdict line.
       val s = ensureSession()
+      tui.toolStart(code, "/run")
       val (result, decisions) = ScalaToolRunner.evaluate(s, policy, tui, code)
       agent.noteUserRan(code, result, decisions)
     catch
@@ -714,7 +715,7 @@ object App:
       throw Exit(0)
     configuration
 
-  /** Bare lines that quit like `/quit`: shell and editor habits. */
+  /** Bare lines that quit like `/quit`: what shells and editors use. */
   val QuitWords: Set[String] = Set(":q", "exit", "quit")
 
   /** A path for display: under `~` when inside the home directory. */
@@ -725,8 +726,8 @@ object App:
     else PlatformPath.portable(p)
 
   /** The configured file rules, in layer order. Nothing is granted here or
-    * anywhere else in the program: a path is reachable only because a config
-    * says so: `~/.atc/config.json` for anything, a project's own
+    * anywhere else in the program; a path is reachable only because a config
+    * says so, `~/.atc/config.json` for anything and a project's own
     * `.atc/config.json` for paths inside that project. */
   def fileRules(configuration: Configuration, cwd: Path): List[FileRule] =
     configuration.rules.map { r =>

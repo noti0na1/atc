@@ -129,17 +129,15 @@ java_major_from_line() {
   return 1
 }
 
-java_major_version() {
-  local version_line
-  version_line="$(java -version 2>&1 | head -n1 || true)"
-  [[ -n "$version_line" ]] || return 1
-  java_major_from_line "$version_line"
-}
-
-# Sets JAVA_MAJOR and VERSIONED_JVM_OPTS (the defaults that only some Java versions accept).
+# Sets JAVA_VERSION (the whole `java -version` output, which is also what keys the startup
+# cache), JAVA_MAJOR and VERSIONED_JVM_OPTS (the defaults only some Java versions accept).
+# Reading the version starts a JVM, so it happens once per run and every later use reads
+# JAVA_VERSION instead.
 ensure_java() {
   command -v java >/dev/null 2>&1 || fail "Java 17+ is required. Install Java and try again."
-  JAVA_MAJOR="$(java_major_version)" || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
+  JAVA_VERSION="$(java -version 2>&1 || true)"
+  JAVA_MAJOR="$(java_major_from_line "$(printf '%s\n' "$JAVA_VERSION" | head -n1)")" \
+    || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
   (( JAVA_MAJOR >= 17 )) || fail "Java 17+ is required. Found Java ${JAVA_MAJOR}. Install a newer Java version and try again."
   VERSIONED_JVM_OPTS=()
   # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
@@ -296,6 +294,13 @@ sha256_of() {
   fi
 }
 
+# The lowercase hex of a "sha256:<hex>" digest from the release metadata; non-zero
+# when the digest is not in that form.
+digest_hex() {
+  [[ "$1" =~ ^sha256:([0-9a-fA-F]{64})$ ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f'
+}
+
 # Verify a downloaded jar against the "sha256:<hex>" digest from the release
 # metadata. Fails closed: a jar without a digest is never installed.
 verify_jar() {
@@ -303,11 +308,8 @@ verify_jar() {
 
   name="$(basename "$file")"
   [[ -n "$digest" ]] || fail "no digest in release metadata for ${name}; refusing to install an unverified jar."
-  if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
-    expected="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f')"
-  else
-    fail "unrecognised digest format '${digest}' for ${name}; expected 'sha256:' followed by 64 hex characters."
-  fi
+  expected="$(digest_hex "$digest")" \
+    || fail "unrecognised digest format '${digest}' for ${name}; expected 'sha256:' followed by 64 hex characters."
   actual="$(sha256_of "$file")" \
     || fail "cannot verify ${name}: no sha256 tool found. Install coreutils (sha256sum) or use macOS shasum."
   [[ "$actual" == "$expected" ]] || fail "Checksum mismatch for ${name}: expected ${expected}, got ${actual}"
@@ -321,8 +323,8 @@ cached_release_matches() {
 }
 
 # Whether the cached jars still match the digests of the release they came from.
-# Exit status: 0 = every jar verified against its digest; 1 = a digest MISMATCHED
-# (real corruption — the caller re-downloads); 2 = CANNOT verify (no sha256 tool,
+# Exit status: 0 = every jar verified against its digest; 1 = a digest mismatched
+# (real corruption, so the caller re-downloads); 2 = cannot verify (no sha256 tool,
 # or an asset lacks a usable digest). On 2 the caller keeps the existing install
 # rather than deleting a working cache it has no way to re-check.
 cached_jars_match_digests() {
@@ -332,11 +334,7 @@ cached_jars_match_digests() {
   while IFS=$'\t' read -r name _url digest; do
     [[ -n "$name" ]] || return 1
     [[ -n "$digest" ]] || return 2
-    if [[ "$digest" =~ ^sha256:([0-9a-fA-F]{64})$ ]]; then
-      expected="$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-F' 'a-f')"
-    else
-      return 2
-    fi
+    expected="$(digest_hex "$digest")" || return 2
     actual="$(sha256_of "${CACHE_DIR}/${name}" 2>/dev/null)" || return 2
     [[ "$actual" == "$expected" ]] || return 1
   done <<< "$assets_info"
@@ -372,7 +370,7 @@ download_latest_release() (
     elif [[ $verify_status -eq 2 ]]; then
       # Cannot re-verify (no sha256 tool, or a digest is missing). The cached jars
       # already match this release; keep them rather than deleting a working install
-      # only to fail the re-download's own verification for the very same reason.
+      # only to fail the re-download's own verification for the same reason.
       echo "Cannot re-verify the cached ATC jars (no sha256 tool, or a digest is missing);" >&2
       echo "keeping the existing install in ${CACHE_DIR}. Install coreutils (sha256sum) or" >&2
       echo "macOS shasum to enable verification." >&2
@@ -386,9 +384,9 @@ download_latest_release() (
 
   tmp_dir="$(mktemp -d "${CACHE_DIR}/download.XXXXXX")" || fail "cannot create a download directory."
   # The trap string is evaluated at EXIT: reference the variable (single
-  # quotes), never interpolate the path into it — a quote in ATC_CACHE_DIR
-  # would otherwise break out of the quoting into an arbitrary rm -rf. On the
-  # success path below this trap is cleared (see the note there).
+  # quotes), never interpolate the path into it. A quote in ATC_CACHE_DIR would
+  # otherwise break out of the quoting into an arbitrary rm -rf. On the success
+  # path below this trap is cleared (see the note there).
   DOWNLOAD_TMP_DIR="$tmp_dir"
   trap '[[ -z "$DOWNLOAD_TMP_DIR" ]] || rm -rf -- "$DOWNLOAD_TMP_DIR"' EXIT
 
@@ -880,9 +878,10 @@ startup_cache_flags() {
   fi
 }
 
-# What the cache was built for: the JDK (its whole -version output) and the release marker.
+# What the cache was built for: the JDK (its whole -version output, read once by
+# ensure_java) and the release marker.
 startup_cache_key() {
-  java -version 2>&1
+  printf '%s\n' "$JAVA_VERSION"
   cat "$RELEASE_MARKER" 2>/dev/null || true
 }
 

@@ -69,10 +69,14 @@ if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
 if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
 
 # JVM defaults as in the Unix `atc` wrapper (the same list is repeated in atc, start.sh,
-# start.ps1 and the dist script in build.mill); the command line's -Xmx/-Xms come later and win.
+# start.ps1 and the dist script in build.mill). Later flags win: the defaults, then
+# ATC_JAVA_OPTS, then the command line's -Xmx/-Xms.
 $javaArgs = @('-Xms256m', '-Xmx2g', '-Xss4m', '-XX:-UsePerfData')
 # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
 if ($major -ge 23) { $javaArgs += '--sun-misc-unsafe-memory-access=allow' }
+if ($env:ATC_JAVA_OPTS) {
+  $javaArgs += @($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })
+}
 $javaArgs = $javaArgs + $jvmOpts + @('-Dfile.encoding=UTF-8', '-Datc.version=@ATC_VERSION@', '-jar', 'atc.jar')
 $savedLaunchCwd = $env:ATC_INTERNAL_LAUNCH_CWD
 $savedLibClasspath = $env:ATC_INTERNAL_LIB_CLASSPATH

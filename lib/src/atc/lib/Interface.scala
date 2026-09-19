@@ -12,7 +12,7 @@ import caps.*
 //     read-only view of the machine-effect root; same for
 //     `FileSystem^` (can write) vs `FileSystem` (read only). A full capability
 //     can be passed where a read-only one is wanted, never the other way round.
-//     `x.rd` names the read-only view of `x`:  `val ro: FileSystem^{fs.rd} = fs` is a
+//     `x.rd` names the read-only view of `x`: `val ro: FileSystem^{fs.rd} = fs` is a
 //     file system that provably cannot write (hand it to a helper, or read files
 //     with it inside `Classified.map`, where a full `fs` may not be captured).
 //
@@ -487,8 +487,8 @@ trait Interface:
 
   /** Ask the user for permission to run commands matching `commands` (patterns
    *  over the full command line, `*` a wildcard: `"git status"`, `"npm *"`).
-   *  The block receives the wider `Exec^`; actually executing a command also
-   *  requires the ambient full `FileSystem^`. */
+   *  The block receives the wider `Exec^`; running a command also requires the
+   *  ambient full `FileSystem^`. */
   def requestExec[T](commands: Iterable[String])(op: Exec^ ?=> T)(using UserIO^, Exec^): T
   def requestExec[T](commands: Iterable[String], reason: String)(op: Exec^ ?=> T)(using UserIO^, Exec^): T
 

@@ -42,15 +42,14 @@ object Sandbox:
     sharedPrefixes.exists(name.startsWith) && !hiddenPrefixes.exists(name.startsWith)
 
   /** Delegates the shared packages to the application loader and everything
-    * else to the platform loader (i.e. the JDK only).
+    * else to the platform loader, which offers the JDK only.
     *
     * Class *resources* (`*.class`) are hidden: with interrupt instrumentation
     * enabled, the REPL loader would otherwise read the bytecode of every
-    * non-JDK class through its parent and re-define an instrumented copy of
-    * it — including `atc.lib.Interface`, whose static state holds the
-    * installed host. Without the resource the REPL falls back to normal
-    * delegation, so shared classes stay shared and only REPL-defined classes
-    * are instrumented. */
+    * non-JDK class through its parent and re-define an instrumented copy of it,
+    * `atc.lib.Interface` included, whose static state holds the installed host.
+    * Without the resource the REPL falls back to normal delegation, so shared
+    * classes stay shared and only REPL-defined classes are instrumented. */
   final class SandboxLoader(app: ClassLoader) extends ClassLoader("atc-sandbox", ClassLoader.getPlatformClassLoader):
     override protected def loadClass(name: String, resolve: Boolean): Class[?] =
       if isShared(name) then

@@ -15,8 +15,7 @@ trait HostOutput:
   /** A command the agent runs (`exec`) has been running for a while
     * ([[Processes.LiveAfterMs]]): from now on what it writes is shown to the
     * human as it happens, through [[commandOutput]]. Shown only: the tool
-    * result does not carry it (the command's `ProcessResult` does), so a
-    * double that ignores both is right. */
+    * result does not carry it, the command's `ProcessResult` does. */
   def commandRunning(commandLine: String): Unit = ()
   def commandOutput(text: String): Unit = ()
   /** Runs `body`, a command the agent executes, so the host can keep the time

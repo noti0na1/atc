@@ -66,10 +66,20 @@ class HostEditingSuite extends munit.FunSuite:
     assertEquals(complete.matches.size, 3)
     assert(!complete.limited)
     // A budget reached exactly at the end of the input cut nothing.
-    for exact <- List(SearchOptions(maxMatches = 3), SearchOptions(maxFiles = 2), SearchOptions(maxLinesPerFile = 2)) do
+    val exactChars = SearchOptions(maxCharsPerFile = env.contents("a.txt").length)
+    for exact <- List(
+        SearchOptions(maxMatches = 3),
+        SearchOptions(maxFiles = 2),
+        SearchOptions(maxLinesPerFile = 2),
+        exactChars,
+      )
+    do
       val result = env.host.search(".", "match", "*.txt", exact)
       assertEquals(result.matches.size, 3, exact.toString)
       assert(!result.limited, exact.toString)
+    // One character less is a real cut.
+    val cut = env.host.search(".", "match", "a.txt", SearchOptions(maxCharsPerFile = exactChars.maxCharsPerFile - 1))
+    assert(cut.limited)
 
   test("search and change previews respect classified paths"):
     val env = TestEnv(mkRules =

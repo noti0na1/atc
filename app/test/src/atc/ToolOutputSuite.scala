@@ -20,6 +20,9 @@ class ToolOutputSuite extends munit.FunSuite:
     val guided = ToolOutput.renderForModel(result, 10000)
     assert(guided.contains("Hint:"), guided)
     assert(guided.contains("PATH"), guided)
+    val listed =
+      ToolOutput.renderForModel(ExecutionResult(false, "java.nio.file.NotDirectoryException: /x/a.txt"), 10000)
+    assert(listed.contains("Hint:") && listed.contains("not a directory"), listed)
 
     val rendered = ToolOutput.renderForModel(
       result,
@@ -48,3 +51,37 @@ class ToolOutputSuite extends munit.FunSuite:
     assert(rendered.contains(ujson.write(instructions)), rendered)
     assert(rendered.contains("request only the permissions still needed"), rendered)
     assert(!rendered.contains("the user denied"), rendered)
+
+  test("a denial tells the model what it may and may not conclude"):
+    val out = ToolOutput.renderForModel(ExecutionResult(true, "ok"), 10000, List(Decision.Deny -> "write on '/x'"))
+    assert(out.contains("the user denied write on '/x'"), out)
+    assert(out.contains("do not repeat it unchanged"), out)
+    assert(out.contains("or infer a permanent ban on every item"), out)
+
+  test("each common capture-checking or safe-mode error gets its own hint"):
+    def hintFor(output: String): String = ToolOutput.renderForModel(ExecutionResult(false, output), 10000)
+
+    val explicitType = hintFor("value e needs an explicit type because the inferred type does not conform to ...")
+    assert(explicitType.contains("explicit type"), explicitType)
+    assert(explicitType.contains("FileEntry^{fs}"), explicitType)
+
+    val safeMode = hintFor("Cannot refer to object ArrayBuffer ... from safe code since it is neither ...")
+    assert(safeMode.contains("not available in safe mode"), safeMode)
+
+    val builder = hintFor("Cannot refer to object StringBuilder ... from safe code since it is neither ...")
+    assert(builder.contains("new StringBuilder()"), builder)
+    assert(builder.contains("val b: StringBuilder"), builder)
+
+    val variable = hintFor("Mutable variable counter is defined in a class that does not extend Stateful")
+    assert(variable.contains("top-level `var`"), variable)
+    assert(variable.contains("inside a `def`"), variable)
+
+    val ambiguous = hintFor("Ambiguous given instances: both fs and fs2 match type FileSystem ...")
+    assert(ambiguous.contains("requestFiles"), ambiguous)
+
+    List("... cannot subsume a read-only capture set ...", "... Cannot call update method ...").foreach(output =>
+      assert(hintFor(output).contains("/mode"), output)
+    )
+    List("No given instance of type atc.lib.Network ...", "No given instance of type atc.lib.Exec ...").foreach(
+      output => assert(hintFor(output).contains("/mode"), output)
+    )
