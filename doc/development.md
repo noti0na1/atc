@@ -44,6 +44,40 @@ Environment files contain literal `KEY=value` entries; shell expansion is not pe
 | `ATC_ENV_FILE` | Alternative environment file |
 | `ATC_SKIP_BUILD=1` | Skip the start script's rebuild check |
 | `ATC_JAVA_OPTS` | Additional JVM flags for Unix launchers and checkout start scripts |
+| `-Xmx<size>`, `-Xms<size>` (launcher arguments) | JVM heap flags that `atc`, `start.sh` and `atc.ps1` take out of the arguments and pass to `java` after the defaults and `ATC_JAVA_OPTS`, so they win; ATC never sees them |
+| `ATC_STARTUP_CACHE=0` | Run without the JVM startup cache (`atc`, `start.sh`) |
+
+### JVM settings
+
+Every launcher starts the JVM with `-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData`
+(`DEFAULT_JVM_OPTS` in `atc`; the same list in `start.sh`, the dist `atc` script, `atc.ps1`
+and `start.ps1`), and on Java 23+ `--sun-misc-unsafe-memory-access=allow`
+(`VERSIONED_JVM_OPTS`; the dist `atc` script leaves it out since it does not detect the Java
+version), because Scala's `LazyVals` still use `sun.misc.Unsafe` and JEP 471 makes the JVM
+print four warning lines on every run otherwise. Measured with the dist jar and the echo
+model (JDK 25, September 2026):
+a 100-turn session of reads, writes and commands keeps 130 to 230 MB live and runs down to
+`-Xmx192m`, so 2 GB is headroom, and it bounds a runaway sandbox computation (one line
+building a large vector reached 5 GB under the JVM's own quarter-of-RAM default; under 2 GB
+it fails in five seconds with an out-of-memory error the session survives). With the 1 MB
+Linux default thread stack a 3000-term expression overflowed the compiler's stack before its
+own recursion guard could report it; `-Xss4m` costs nothing since stacks are only reserved.
+
+The **startup cache** halves the cold start (2.6 s to 1.3 s on that machine, and 30% less
+CPU over a session, since the JDK 25 cache carries method profiles): on Java 25+ an AOT
+cache (`-XX:AOTCacheOutput=` to build, `-XX:AOTCache=` to use), on Java 19 to 24 a dynamic
+CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are bound to
+the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
+*not* regenerated, so the launchers never point the JVM at one that might be stale:
+`~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
+`-version` output and the release marker, its timestamp is compared with the jars
+(`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
+on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
+building flag. A build that leaves no file writes the key anyway, so it is not retried until
+the JDK or release changes. `atc self uninstall` removes the cache with the jars.
+`-XX:TieredStopAtLevel=1` (60% less CPU, 50% slower steady-state compiles) and
+`-XX:+UseSerialGC` (200 MB less resident memory, five times the GC time, pauses still under
+10 ms) were measured and left to `ATC_JAVA_OPTS`.
 | `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
 | `ATC_ASCII` | Select ASCII terminal glyphs when set |
 

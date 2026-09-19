@@ -280,6 +280,9 @@ assert_eq "wrapper defaults to ~/.local/bin/atc" "/h/.local/bin/atc" \
   printf '{}\n' > "$HOME/.atc/config.json"
   printf 'KEY=x\n' > "$HOME/.atc/keys.properties"
   printf '#!/bin/sh\n' > "$INSTALL_PATH"
+  mkdir -p "$STARTUP_CACHE_DIR"
+  printf 'cache\n' > "$STARTUP_CACHE_DIR/atc.aot"
+  printf 'key\n' > "$STARTUP_CACHE_KEY"
   cmd_uninstall >/dev/null
   [[ ! -e "$CACHE_DIR" && ! -e "$INSTALL_PATH" && -f "$HOME/.atc/config.json" && -f "$HOME/.atc/keys.properties" ]]
 ) && echo "  PASS: uninstall removes ~/.atc/jars and keeps config.json/keys.properties" && pass_count=$((pass_count + 1)) \
@@ -322,8 +325,107 @@ assert_contains "run uses the app jar" "$APP_JAR" "$run_out"
 assert_contains "run forwards flags" $'-C\n/work\n-p\nhi there' "$run_out"
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main run --version)"
 assert_contains "run subcommand forwards flags" "--version" "$run_out"
-run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Xmx2g -Dfoo=bar" main)"
-assert_contains "ATC_JAVA_OPTS is applied" $'-Xmx2g\n-Dfoo=bar' "$run_out"
+DEFAULT_FLAGS=$'-Xms256m\n-Xmx2g\n-Xss4m\n-XX:-UsePerfData'
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Xmx3g -Dfoo=bar" main)"
+assert_contains "ATC_JAVA_OPTS is applied after the JVM defaults" "$DEFAULT_FLAGS"$'\n-Xmx3g\n-Dfoo=bar' "$run_out"
+
+# -Xmx/-Xms among the arguments go to java, in order, and are not forwarded to ATC.
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main -Xmx4g -C /work -Xms512m)"
+assert_contains "-Xmx/-Xms go to java after the defaults, before the app flags" \
+  "$DEFAULT_FLAGS"$'\n-Xmx4g\n-Xms512m\n-Dfile.encoding=UTF-8' "$run_out"
+assert_contains "-Xmx/-Xms keep the other flags" $'-jar\n'"$APP_JAR"$'\n-C\n/work' "$run_out"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main run --version -Xmx512m)"
+assert_contains "run subcommand takes -Xmx after other flags" $'-Xmx512m\n-Dfile.encoding=UTF-8' "$run_out"
+assert_contains "run subcommand keeps the other flags" "--version" "$run_out"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Xmx3g" main -Xmx4g)"
+assert_contains "-Xmx comes after the defaults and ATC_JAVA_OPTS" "$DEFAULT_FLAGS"$'\n-Xmx3g\n-Xmx4g' "$run_out"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
+assert_eq "no heap flag leaves only the defaults" $'-Xms256m\n-Xmx2g\n-Xss4m' "$(printf '%s\n' "$run_out" | grep -- '-X[ms]' || true)"
+for bad in -Xmx -Xmxlots -Xms4gg -Xmx=4g; do
+  assert_fails "$bad is refused" env PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main $bad -C /work"
+  assert_contains "$bad message" "Invalid JVM heap size '$bad'" \
+    "$(env PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main $bad -C /work" 2>&1 >/dev/null || true)"
+done
+
+# ---------------------------------------------------------------------------
+echo "--- startup cache: AOT cache (Java 25+) / CDS archive (Java 19-24), keyed by jars + JDK ---"
+
+# A java mock that reports the given version, logs every invocation to $JAVA_CALLS, and
+# creates the cache file named by the creating flag (unless told not to).
+mock_java() { # $1 = version line, $2 = creates|fails
+cat > "$TEST_TMP/mockbin/java" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "-version" ]]; then echo '$1' >&2; echo 'OpenJDK Runtime Environment (build test)' >&2; exit 0; fi
+printf '%s\n' "\$@" >> "\$JAVA_CALLS"; echo '---' >> "\$JAVA_CALLS"
+for a in "\$@"; do
+  case "\$a" in -XX:AOTCacheOutput=*|-XX:ArchiveClassesAtExit=*) [[ '$2' == creates ]] && echo cache > "\${a#*=}" ;; esac
+done
+printf '%s\n' "\$@"
+EOF
+chmod +x "$TEST_TMP/mockbin/java"
+}
+export JAVA_CALLS="$TEST_TMP/java-calls.log"
+java_calls() { grep -c '^---$' "$JAVA_CALLS" 2>/dev/null || echo 0; }
+STARTUP_DIR="$CACHE_DIR/startup"
+rm -rf "$STARTUP_DIR"; : > "$JAVA_CALLS"
+
+mock_java 'openjdk version "25.0.4" 2026-07-21 LTS' creates
+run_err="$(PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main -C /work" 2>&1 >/dev/null)"
+assert_contains "first run announces the cache build" "preparing the JVM startup cache" "$run_err"
+assert_eq "first run = training run + real run" "2" "$(java_calls)"
+training="$(awk 'BEGIN{RS="---\n"} NR==1' "$JAVA_CALLS")"
+assert_contains "training run creates the AOT cache" "-XX:AOTCacheOutput=$STARTUP_DIR/atc.aot" "$training"
+assert_contains "training run is one echo-model prompt turn" $'-p\nrun: 1 + 1' "$training"
+assert_contains "training run uses the JVM defaults" "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow' "$training"
+assert_contains "training run uses a throwaway config and cwd" "/train.json" "$training"
+real="$(awk 'BEGIN{RS="---\n"} NR==2' "$JAVA_CALLS")"
+assert_contains "real run uses the AOT cache after the defaults" \
+  "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow\n-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfile.encoding' "$real"
+assert_contains "real run keeps the app flags" $'-C\n/work' "$real"
+assert_eq "training left no throwaway config behind" "" "$(ls "${TMPDIR:-/tmp}" | grep 'atc-startup-cache' || true)"
+assert_contains "key records the JDK" 'openjdk version "25.0.4"' "$(cat "$STARTUP_DIR/key.txt")"
+
+(PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
+assert_eq "second run reuses the cache" "3" "$(java_calls)"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Dfoo=bar" main -Xmx4g)"
+assert_contains "cache flag precedes ATC_JAVA_OPTS and the command line" $'-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfoo=bar\n-Xmx4g' "$run_out"
+
+touch -t 203501010000 "$APP_JAR"
+(PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
+assert_eq "a newer jar rebuilds the cache" "6" "$(java_calls)"
+(PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
+assert_eq "a future-dated jar does not rebuild it again" "7" "$(java_calls)"
+
+mock_java 'openjdk version "25.0.5" 2026-10-21 LTS' creates
+(PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
+assert_eq "a different JDK rebuilds the cache" "9" "$(java_calls)"
+
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_STARTUP_CACHE=0 main)"
+assert_eq "ATC_STARTUP_CACHE=0 runs without the cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache' || true)"
+assert_eq "ATC_STARTUP_CACHE=0 does not train" "10" "$(java_calls)"
+
+rm -rf "$STARTUP_DIR"
+mock_java 'openjdk version "21.0.4" 2024-07-16 LTS' creates
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
+assert_contains "Java 21 trains a CDS archive" "-XX:ArchiveClassesAtExit=$STARTUP_DIR/atc.jsa" "$(awk 'BEGIN{RS="---\n"} NR==11' "$JAVA_CALLS")"
+assert_contains "Java 21 runs with the CDS archive" "-XX:SharedArchiveFile=$STARTUP_DIR/atc.jsa" "$run_out"
+assert_eq "Java 21 gets no Unsafe opt-in (Java 23+ only)" "" "$(printf '%s\n' "$run_out" | grep -- 'sun-misc-unsafe' || true)"
+
+rm -rf "$STARTUP_DIR"
+mock_java 'openjdk version "17.0.2" 2022-01-18' creates
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
+assert_eq "Java 17 has no startup cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache\|SharedArchiveFile' || true)"
+assert_eq "Java 17 does not train" "13" "$(java_calls)"
+assert_eq "Java 17 gets no Unsafe opt-in" "" "$(printf '%s\n' "$run_out" | grep -- 'sun-misc-unsafe' || true)"
+
+rm -rf "$STARTUP_DIR"
+mock_java 'openjdk version "25.0.4" 2026-07-21 LTS' fails
+run_err="$(PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main" 2>&1 >/dev/null)"
+assert_contains "a failed build is reported" "could not build the startup cache" "$run_err"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
+assert_eq "a failed build runs without the cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache' || true)"
+assert_eq "a failed build is not retried until the key changes" "16" "$(java_calls)"
+rm -rf "$STARTUP_DIR"
 
 cat > "$TEST_TMP/mockbin/java" <<'EOF'
 #!/usr/bin/env bash
