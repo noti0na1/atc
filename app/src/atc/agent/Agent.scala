@@ -84,7 +84,8 @@ final class Agent(
   def recordUsage(purpose: String, u: TokenUsage): Unit =
     synchronized { usageBy.update(purpose, usageBy.getOrElse(purpose, TokenUsage()) + u) }
 
-  /** The native Scala tool; other operations are library calls. */
+  /** The schema of the tools offered to the model. The active runner replaces it
+    * at the start of every turn; it is read by [[fixedTokens]] between turns too. */
   private var tools = ScalaToolRunner.tools
   private val sink: StreamSink = StreamSink(ui.assistantDelta, ui.assistantNote, ui.thinkingDelta)
 
@@ -136,6 +137,7 @@ final class Agent(
     toolCalls = 0
     context.reset()
     queuedInput.clear()
+    compactRetryAt = 0
 
   /** Summarize the older exchanges with the current model (`/compact`). History
     * is replaced only after a complete summary smaller than what it replaces
@@ -159,8 +161,8 @@ final class Agent(
       )
     if older.isEmpty then return Agent.CompactOutcome.NothingToCompact
     val input = ContextCompaction.transcript(older, focus)
-    // The transcript goes to the same model as one message: refuse before paying for a
-    // request the provider would reject, with a way out (a bigger model for the summary).
+    // The transcript goes to the same model as one message. Refuse before paying for a
+    // request the provider would reject, and name the way out in the message.
     current.contextWindow.foreach { window =>
       val allowance = window.toLong - window.toLong / 8
       val needed =
@@ -192,15 +194,16 @@ final class Agent(
       Agent.CompactOutcome.Compacted
 
   /** Calibrated context usage below which an automatic attempt is not repeated after
-    * one that produced nothing smaller or failed; reset by a successful compaction. */
+    * one that produced nothing smaller or failed. Reset by a successful compaction
+    * and by [[clear]], so a fresh conversation is never held back by the old one. */
   private var compactRetryAt: Long = 0
 
   /** Before a request is prepared: when the next request would reach the threshold,
     * summarize the older exchanges so that ordinary trimming has less to cut. Runs
     * between rounds only, never between a tool request and its results, and never
-    * after the final answer (nothing would read the summary in a `-p` run). A
-    * failure is a warning, trimming still fits the request; Ctrl-C interrupts the
-    * turn like any other request, but queued input just skips the attempt. */
+    * after the final answer, where nothing would read the summary in a `-p` run. A
+    * failure is a warning and trimming still fits the request; Ctrl-C interrupts the
+    * turn like any other request, while queued input skips the attempt. */
   private def autoCompact(cancelled: () => Boolean): Unit =
     val stop = () => cancelled() || !queuedInput.isEmpty
     if config.autoCompactThreshold > 0 && !stop() then
@@ -396,7 +399,8 @@ object Agent:
   val Prediction = "next-input prediction"
   val Compaction = "context compaction"
 
-  /** What [[Agent.compact]] did; the two "unchanged" cases read differently to the user. */
+  /** What [[Agent.compact]] did. The two cases that leave history alone are kept
+    * apart because the user is told something different about each. */
   enum CompactOutcome:
     /** The older exchanges were replaced by a summary. */
     case Compacted

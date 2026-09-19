@@ -4,8 +4,8 @@ import upickle.default.*
 
 /** A token count in a config, written as a number or as a string with a
   * suffix: `200000`, `"200000"`, `"256k"`, `"1m"`, `"1.5m"` (`k` = 1000,
-  * `m` = 1000000, either case). Decimal on purpose: a window given as `"128k"`
-  * then never overshoots the model's real one, whichever convention the
+  * `m` = 1000000, either case). The multipliers are decimal, so a window given
+  * as `"128k"` never overshoots the model's real one, whichever convention the
   * vendor's figure follows. */
 opaque type Tokens = Int
 object Tokens:

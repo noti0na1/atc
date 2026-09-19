@@ -144,7 +144,7 @@ object Prompts:
        |   rejected. If a plain denial leaves the intended scope unclear, ask a focused question.
        |   The permissions listed below never change. When the message says the
        |   *configuration* refuses it (a `denyCommands` / `denyHosts` pattern), it is final: no
-       |   `request*` can widen it, so do not look for another route to the same effect — say what you
+       |   `request*` can widen it, so do not look for another route to the same effect: say what you
        |   would have run and stop.
        |   Classification and locked file rules also cannot be widened by a request. If they prevent
        |   the needed inspection, explain the blocker; do not keep probing guessed paths or alternate APIs.

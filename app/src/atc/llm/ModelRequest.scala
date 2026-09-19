@@ -31,6 +31,8 @@ private[atc] final class ModelRequest:
         if cancelled() then throw CancelledException()
         try
           val result = task.get(50, TimeUnit.MILLISECONDS)
+          // The worker has finished, so release the task and the response it holds.
+          synchronized { if pending eq task then pending = null }
           if cancelled() then throw CancelledException()
           return result
         catch case _: TimeoutException => ()

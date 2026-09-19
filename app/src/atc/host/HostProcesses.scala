@@ -70,20 +70,17 @@ private[host] trait HostProcesses:
 
   private def commandDirectory(path: String, fs: FileSystem): Path =
     val dir = canonical(path)
-    val permission = requireRead(scopeOf(fs), dir, "running a command in")
-    requireNotClassified(permission, dir, "running a command there", "a working directory outside it")
+    requireReadable(scopeOf(fs), dir, "running a command in", "a working directory outside it")
     dir
 
   private def inputRedirect(path: String, fs: FileSystem): Path =
     val input = canonical(path)
-    val permission = requireRead(scopeOf(fs), input, "feeding a command from")
-    requireNotClassified(permission, input, "feeding a command from", "an unclassified file")
+    requireReadable(scopeOf(fs), input, "feeding a command from", "an unclassified file")
     input
 
   private def outputRedirect(path: String, fs: FileSystem): Path =
     val target = canonical(path)
-    val permission = requireWrite(scopeOf(fs), target, "redirecting a command's output to")
-    requireNotClassified(permission, target, "redirecting a command's output to", "an unclassified file")
+    requireWritable(scopeOf(fs), target, "redirecting a command's output to", "an unclassified file")
     ensureParent(target)
     target
 

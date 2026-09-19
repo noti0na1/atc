@@ -44,8 +44,9 @@ object AgentMessages:
       s"${fence}scala\n$code\n$fence\nResult:\n$renderedResult"
 
   /** Prepend queued notes to the user's input without creating adjacent user
-    * messages in provider history. */
-  def userMessage(notes: List[String], input: String): String = (notes :+ input).mkString("\n\n")
+    * messages in provider history. Empty parts are left out: a turn started
+    * from queued input alone has no text of its own yet. */
+  def userMessage(notes: List[String], input: String): String = (notes :+ input).filter(_.nonEmpty).mkString("\n\n")
 
   def turnFailed(error: Throwable): String =
     val detail = Option(error.getMessage).getOrElse(error.toString)

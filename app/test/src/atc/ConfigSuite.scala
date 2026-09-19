@@ -665,3 +665,12 @@ class ConfigSuite extends munit.FunSuite:
     val explicit = layer(Origin.Explicit, 0.1)
     assertEquals(Config.combine(List(global, project)).settings.compactKeepRatio, 0.4)
     assertEquals(Config.combine(List(global, project, explicit)).settings.compactKeepRatio, 0.1)
+
+  test("an empty literal key is not a binding"):
+    assertEquals(Config.resolveEnvRef(""), None)
+    assertEquals(Config.resolveEnvRef("sk-1"), Some("sk-1"))
+    val p = ProviderConfig(api = Some("anthropic"), key = Some(""), keyEnv = Some("K"))
+    assertEquals(
+      Config.resolveApiKey(p, KeyBindings(List((java.nio.file.Path.of("k"), Map("K" -> "from-env"))))),
+      Some("from-env")
+    )

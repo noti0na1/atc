@@ -66,9 +66,9 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     Tool.builder().name(t.name).description(t.description).inputSchema(is.build()).build()
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): MessageCreateParams =
-    // Two cache breakpoints: the system prompt (large, the same for the whole
-    // session) and the last message of the history, so each round reads the
-    // previous round's prefix from the cache and writes only what was added.
+    // Two cache breakpoints: the system prompt, which is large and the same for the
+    // whole session, and the last user-role message of the history, so each round
+    // reads the previous round's prefix from the cache and writes only what was added.
     val cache = CacheControlEphemeral.builder().build()
     val systemBlock = TextBlockParam.builder().text(system.text).cacheControl(cache).build()
     val b = MessageCreateParams.builder()
@@ -86,9 +86,10 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       val block = TextBlockParam.builder().text(text)
       if mark then block.cacheControl(cache)
       b.addUserMessageOfBlockParams(List(ContentBlockParam.ofText(block.build())).asJava)
-    val last = history.length - 1
+    // Only a user-role block can carry the breakpoint, and a round resumed after a
+    // server-side pause re-sends a history that ends with an assistant message.
+    val last = AnthropicModel.cacheBreakpoint(history)
     history.zipWithIndex.foreach { (msg, i) =>
-      // The request always ends with a user-role message (a request or tool results): mark it.
       val mark = i == last
       msg match
         case Msg.User(text) => addUserText(text, mark)
@@ -203,3 +204,13 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     if thinking then configuredThinking(b) else b.thinking(ThinkingConfigDisabled.builder().build())
     val m = client.messages().create(b.build())
     Reply(m.content().asScala.flatMap(_.text().toScala).map(_.text()).mkString, usageOf(m))
+
+private[atc] object AnthropicModel:
+  /** Where the second cache breakpoint goes: the index of the last user-role
+    * message (a request, a continuation or tool results), or `-1` when the
+    * history holds none. The system block carries the first breakpoint. */
+  def cacheBreakpoint(history: List[Msg]): Int =
+    history.lastIndexWhere {
+      case _: Msg.Assistant => false
+      case _ => true
+    }

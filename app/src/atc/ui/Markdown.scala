@@ -6,8 +6,8 @@ package atc.ui
   * untagged blocks are shown verbatim), pipe tables, and inline `**bold**` /
   * `` `code` ``. Text may arrive in arbitrary chunks: `push` returns what can
   * be rendered now and holds back only what is still ambiguous (the first
-  * characters of a line, a trailing `*`, an unfinished fenced line, a table
-  * — its column widths need every row); `finish` flushes the rest.
+  * characters of a line, a trailing `*`, an unfinished fenced line, and a
+  * table, whose column widths need every row); `finish` flushes the rest.
   *
   * Styles are scoped to one line: an unclosed `**` never bleeds into the
   * next line. Everything is emitted as raw SGR sequences.
@@ -130,7 +130,7 @@ class MarkdownStream(
       case FenceRe(lang0) =>
         val lang = lang0.nn.toLowerCase(java.util.Locale.ROOT)
         restStart = line.length
-        // Models like to wrap a whole answer in ```markdown: render its content, drop the fence.
+        // A whole answer wrapped in ```markdown: render its content, drop the fence.
         if lang == "markdown" || lang == "md" then { droppedFence = true; dropLine = true; "" }
         else if droppedFence && lang.isEmpty then { droppedFence = false; dropLine = true; "" }
         else
@@ -314,9 +314,9 @@ object MarkdownStream:
   private val DelimiterRow = """^(?=[^\n]*\|)\s*\|?(?:\s*:?-+:?\s*\|)*\s*:?-+:?\s*\|?\s*$""".r
 
   /** Whether `s` (a line so far, without newline) may still turn into a line
-    * marker once more characters arrive — then we wait rather than render.
-    * Fence lines (their language matters) and `|` lines (table rows are laid
-    * out together) are always waited for in full. */
+    * marker once more characters arrive, in which case it is held back rather
+    * than rendered. Fence lines (their language matters) and `|` lines (table
+    * rows are laid out together) are always waited for in full. */
   private val MarkerPrefix = """^ {0,3}(?:#{0,6} ?|[-*+] ?|\d{0,3}\.? ?|> ?|`{0,3}|-{0,3}|\*{0,3}|_{0,3})$""".r
   private val TableRow = """^ {0,3}\|.*$""".r
   private val WholeLine = """^ {0,3}(?:```|\|).*$""".r

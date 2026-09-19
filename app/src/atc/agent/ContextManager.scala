@@ -67,8 +67,8 @@ final class ContextManager:
 
   def prepareWithContext(fixedTokens: Long, history: List[Msg], model: ModelContext, retained: String): Preparation =
     // Leave both estimation slack and, when configured, the full output
-    // allowance. A maxTokens larger than the window intentionally leaves no
-    // room and triggers the actionable warning below.
+    // allowance. A maxTokens larger than the window leaves no room at all and
+    // raises the warning below, which names both settings.
     val allowance = model.contextWindow.map { window =>
       val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
       Allowance(window, reserve, window.toLong - reserve)

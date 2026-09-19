@@ -17,9 +17,9 @@ object Json:
     case null => ujson.Null
     case s: String => ujson.Str(s)
     // ujson.Num is a Double, and ujson renders a whole one without a decimal point,
-    // so `{"n": 5}` round-trips as `{"n":5}` (pinned by LlmJsonSuite). The residual
-    // limit: integers beyond 2^53 lose precision — acceptable for tool inputs
-    // (run_scala's `code` is a string) and unavoidable without a raw-number node.
+    // so `{"n": 5}` round-trips as `{"n":5}`; LlmJsonSuite pins that. Integers beyond
+    // 2^53 lose precision. Tool inputs do not carry any (run_scala's `code` is a
+    // string), and avoiding it would need a raw-number node.
     case n: java.lang.Number => ujson.Num(n.doubleValue)
     case b: java.lang.Boolean => ujson.Bool(b)
     case l: java.util.List[?] => ujson.Arr(l.asScala.map(x => fromJava(x.asInstanceOf[AnyRef | Null])).toSeq*)

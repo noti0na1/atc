@@ -1,11 +1,10 @@
 package atc
 
-import atc.agent.ToolOutput
 import atc.config.{Config, ModelCatalog, ModelConfig, ModelSpec, ProviderConfig}
 import atc.llm.*
-import atc.sandbox.ExecutionResult
 
-/** The model layer: the echo model, provider dispatch, and tool-output rendering. */
+/** The model layer: stop-reason normalization, provider settings, the echo
+  * model, adapter dispatch and the model catalog. */
 class ModelSuite extends munit.FunSuite:
 
   private def collect(m: ChatModel, history: List[Msg]): (Completion, String) =
@@ -76,6 +75,25 @@ class ModelSuite extends munit.FunSuite:
       collect(EchoModel("echo"), List(Msg.ToolResults(List(ToolResult("id", "the output", isError = false)))))
     assert(c.text.contains("the output"))
     assert(c.toolCalls.isEmpty)
+
+  test("echo: a run: message calls run_scala, even with a prepended agent note"):
+    val m = EchoModel("echo")
+    // The agent prepends `/new` and `/run` notes; the trigger must still be detected.
+    val noted = "[sandbox notice] The Scala REPL was restarted (x).\n\nrun: 1 + 1"
+    val (c, _) = collect(m, List(Msg.User(noted)))
+    assertEquals(c.toolCalls.size, 1)
+    val code = Json.parseObject(c.toolCalls.head.arguments).value("code").str
+    assertEquals(code, "1 + 1")
+    // The trigger also works without a note, while a regular message is echoed.
+    assertEquals(collect(m, List(Msg.User("run: 2 + 2")))._1.toolCalls.size, 1)
+    val (plain, _) = collect(m, List(Msg.User("hello")))
+    assertEquals(plain.text, "echo: hello")
+    assert(plain.toolCalls.isEmpty)
+
+  test("echo: a configured contextWindow is honored (so context-fitting demos work key-less)"):
+    val m = EchoModel("echo", "echo", Some(5000))
+    assertEquals(m.contextWindow, Some(5000))
+    assertEquals(EchoModel("echo").contextWindow, None)
 
   test("EchoModel.simple and metadata"):
     val m = EchoModel("myalias")
@@ -173,118 +191,16 @@ class ModelSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
 
-  // ── ToolOutput ───────────────────────────────────────────────────
+  // ── Anthropic prompt caching ────────────────────────────────────
 
-  test("Json.parseObject is lenient with tool-call arguments"):
-    assertEquals(Json.parseObject("""{"code": "1 + 1"}""").value("code").str, "1 + 1")
-    assertEquals(Json.parseObject("").value.size, 0)
-    assertEquals(Json.parseObject("not json").value.size, 0)
-    assertEquals(Json.parseObject("[1, 2]").value.size, 0)
-
-  test("Json round-trips through Java values"):
-    val v = ujson.Obj("s" -> "x", "n" -> 3, "d" -> 1.5, "b" -> true, "l" -> ujson.Arr(1, "a"), "z" -> ujson.Null)
-    assertEquals(Json.fromJava(Json.toJava(v)), v)
-
-  test("renderForModel passes short output through"):
-    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, "hello"), 1000), "hello")
-    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, ""), 1000), "(no output)")
-
-  test("renderForModel adds the explicit-type hint"):
-    val r = ExecutionResult(false, "value e needs an explicit type because the inferred type does not conform to ...")
-    val out = ToolOutput.renderForModel(r, 10000)
-    assert(out.contains("explicit type"), out)
-    assert(out.contains("FileEntry^{fs}"), out)
-
-  test("renderForModel adds the safe-mode hint"):
-    val r = ExecutionResult(false, "Cannot refer to object ArrayBuffer ... from safe code since it is neither ...")
-    val out = ToolOutput.renderForModel(r, 10000)
-    assert(out.toLowerCase.contains("not available in safe mode"), out)
-
-  test("renderForModel gives precise safe-mode hints for StringBuilder and top-level var"):
-    val builder = ToolOutput.renderForModel(
-      ExecutionResult(false, "Cannot refer to object StringBuilder ... from safe code since it is neither ..."),
-      10000
-    )
-    assert(builder.contains("new StringBuilder()"), builder)
-    assert(builder.contains("val b: StringBuilder"), builder)
-    val variable = ToolOutput.renderForModel(
-      ExecutionResult(false, "Mutable variable counter is defined in a class that does not extend Stateful"),
-      10000
-    )
-    assert(variable.contains("top-level `var`"), variable)
-    assert(variable.contains("inside a `def`"), variable)
-
-  test("renderForModel adds the ambiguous-FileSystem hint"):
-    val r = ExecutionResult(false, "Ambiguous given instances: both fs and fs2 match type FileSystem ...")
-    val out = ToolOutput.renderForModel(r, 10000)
-    assert(out.contains("requestFiles"), out)
-
-  test("the system prompt really bundles the API reference"):
-    // `Prompts.interfaceSource` falls back to "(API reference unavailable)" if the
-    // packaged resource is missing, so verify that packaging succeeds.
-    val src = atc.agent.Prompts.interfaceSource
-    assert(src.contains("def httpPostClassified"), src.take(200))
-    assert(!src.contains("API reference unavailable"), "the Interface.scala resource was not bundled")
-
-  test("renderForModel adds the PATH/no-shell hint for a program that cannot run"):
-    val r = ExecutionResult(false, "Cannot run program \"gti\": error=2, No such file or directory")
-    val out = ToolOutput.renderForModel(r, 10000)
-    assert(out.contains("PATH"), out)
-    assert(out.contains("no shell"), out)
-
-  test("renderForModel adds the switch-mode hint for read-only capture errors"):
-    val out1 = ToolOutput.renderForModel(
-      ExecutionResult(false, "... cannot subsume a read-only capture set ..."),
-      10000,
-    )
-    assert(out1.contains("/mode"), out1)
-    val out2 = ToolOutput.renderForModel(ExecutionResult(false, "... Cannot call update method ..."), 10000)
-    assert(out2.contains("/mode"), out2)
-
-  test("renderForModel adds the mode hint for a capability the mode does not hand out"):
-    val out1 = ToolOutput.renderForModel(
-      ExecutionResult(false, "No given instance of type atc.lib.Network ..."),
-      10000,
-    )
-    assert(out1.contains("/mode"), out1)
-    val out2 = ToolOutput.renderForModel(ExecutionResult(false, "No given instance of type atc.lib.Exec ..."), 10000)
-    assert(out2.contains("/mode"), out2)
-
-  test("renderForModel reports a denial in the tool result"):
-    val out = ToolOutput.renderForModel(
-      ExecutionResult(true, "ok"),
-      10000,
-      List(atc.perms.Decision.Deny -> "write on '/x'")
-    )
-    assert(out.contains("the user denied write on '/x'"), out)
-    assert(out.contains("do not repeat it unchanged"), out)
-    assert(out.contains("or infer a permanent ban on every item"), out)
-
-  // ── EchoModel ───────────────────────────────────────────────────
-
-  test("echo: a run: message calls run_scala, even with a prepended agent note"):
-    val m = EchoModel("echo")
-    // The agent prepends `/new` and `/run` notes; the trigger must still be detected.
-    val noted = "[sandbox notice] The Scala REPL was restarted (x).\n\nrun: 1 + 1"
-    val (c, _) = collect(m, List(Msg.User(noted)))
-    assertEquals(c.toolCalls.size, 1)
-    val code = Json.parseObject(c.toolCalls.head.arguments).value("code").str
-    assertEquals(code, "1 + 1")
-    // The trigger also works without a note, while a regular message is echoed.
-    assertEquals(collect(m, List(Msg.User("run: 2 + 2")))._1.toolCalls.size, 1)
-    val (plain, _) = collect(m, List(Msg.User("hello")))
-    assertEquals(plain.text, "echo: hello")
-    assert(plain.toolCalls.isEmpty)
-
-  test("echo: a configured contextWindow is honored (so context-fitting demos work key-less)"):
-    val m = EchoModel("echo", "echo", Some(5000))
-    assertEquals(m.contextWindow, Some(5000))
-    assertEquals(EchoModel("echo").contextWindow, None)
-
-  test("renderForModel truncates overlong output keeping head and tail"):
-    val big = ("H" * 400) + ("T" * 400)
-    val out = ToolOutput.renderForModel(ExecutionResult(true, big), 120)
-    assert(out.length < big.length, out.length.toString)
-    assert(out.contains("characters omitted"), out)
-    assert(out.startsWith("H"))
-    assert(out.endsWith("T"))
+  test("the history cache breakpoint is the last user-role message"):
+    val user = Msg.User("q")
+    val assistant = Msg.Assistant("a", Nil, None)
+    val results = Msg.ToolResults(List(ToolResult("id", "out", isError = false)))
+    assertEquals(AnthropicModel.cacheBreakpoint(List(user, assistant, results)), 2)
+    assertEquals(AnthropicModel.cacheBreakpoint(List(user, assistant, Msg.Continuation("go"))), 2)
+    // A round resumed after a server-side pause re-sends a history ending in an
+    // assistant message; the breakpoint stays on the last user-role message.
+    assertEquals(AnthropicModel.cacheBreakpoint(List(user, assistant)), 0)
+    assertEquals(AnthropicModel.cacheBreakpoint(List(assistant)), -1)
+    assertEquals(AnthropicModel.cacheBreakpoint(Nil), -1)

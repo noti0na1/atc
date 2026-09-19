@@ -96,8 +96,8 @@ case class Config(
   /** Host patterns that are always refused, like `denyCommands` for `hosts`. */
   denyHosts: List[String] = Nil,
   /** Hide paths ignored by `.gitignore` (and `.git` itself) from directory
-    * listings and searches — default true. Reading such a path by name still
-    * works; this only keeps build output and dependencies out of the way. */
+    * listings and searches; default true. Reading such a path by name still
+    * works. This only keeps build output and dependencies out of the way. */
   respectGitignore: Boolean = true,
   /** Compile agent code with `import language.experimental.safe`. On unless a
     * *granting* layer turns it off explicitly: it is a latch, so a narrowing
@@ -379,8 +379,6 @@ object Config:
       catch case e: IllegalArgumentException => throw invalid(e.getMessage.nn)
     }
 
-  /** Reject limits that would otherwise fail much later in output slicing,
-    * timeout accounting, or provider request construction. */
   private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
   private val ProviderApis =
@@ -436,6 +434,8 @@ object Config:
     provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
     provider.models.foreach((alias, model) => validateModel(name, alias, model))
 
+  /** Reject settings that would otherwise fail much later, in output slicing,
+    * timeout accounting or provider request construction. */
   def validate(config: Config): Config =
     requirePositive("maxToolOutputChars", config.maxToolOutputChars)
     requireValid(config.maxToolCalls >= 0, s"maxToolCalls must be non-negative (was ${config.maxToolCalls})")
@@ -510,13 +510,15 @@ object Config:
   private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
 
   /** A `${VAR}` reference resolved through `bindings`; anything else is the
-    * literal value. `None` when nothing binds the variable. */
+    * literal value. `None` when nothing binds the variable or the literal is
+    * empty, the same as an empty value in `keys.properties`. */
   def resolveEnvRef(value: String, bindings: KeyBindings = KeyBindings.empty): Option[String] = value match
     case EnvRef(name) => bindings.get(name.nn)
+    case "" => None
     case literal => Some(literal)
 
   /** The provider's key: `key` (a literal or `${VAR}`), else the variable
-    * `keyEnv` names, else none — leaving the SDK to resolve its own default
+    * `keyEnv` names, else none, which leaves the SDK to resolve its own default
     * variable. `${VAR}` and `keyEnv` are looked up in `.atc/keys.properties`
     * before the environment. */
   def resolveApiKey(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Option[String] =

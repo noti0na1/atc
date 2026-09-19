@@ -40,10 +40,10 @@ object GlobMatcher:
   private def regexLineTerminator(char: Char): Boolean =
     char == '\n' || char == '\r' || char == '\u0085' || char == '\u2028' || char == '\u2029'
 
-  /** Command-line matching. A pattern matches the command line if it matches
-    * as a glob, or — when it contains no `*` — if it equals the command line
-    * or is a word-prefix of it: `"ls"` permits `ls -la`, `"git status"`
-    * permits `git status --short`, `"git diff*"` also permits `git difftool`. */
+  /** Command-line matching. A pattern containing `*` matches as a glob. One
+    * without `*` matches the command line it equals, and any command line it
+    * is a word-prefix of: `"ls"` permits `ls -la` and `"git status"` permits
+    * `git status --short`, while `"git diff*"` also permits `git difftool`. */
   def matchesCommand(commandLine: String, pattern: String): Boolean =
     val command = normalizeCommand(commandLine.trim)
     val p = normalizeCommand(pattern.trim)

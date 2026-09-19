@@ -10,8 +10,8 @@ import com.openai.models.chat.completions.*
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
-/** OpenAI Chat Completions API — also the adapter for any OpenAI-compatible
-  * server (Ollama, vLLM, LM Studio, OpenRouter, ...) via `baseUrl`. */
+/** OpenAI Chat Completions API. Also the adapter for any OpenAI-compatible
+  * server (Ollama, vLLM, LM Studio, OpenRouter, ...) reached through `baseUrl`. */
 final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   val providerKey: String = "openai"
 

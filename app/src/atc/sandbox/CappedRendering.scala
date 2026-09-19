@@ -24,9 +24,9 @@ final class CappedRendering(parent: Option[ClassLoader], maxChars: Int) extends 
     threw = true
     super.renderError(thr, d)
 
-  /** Values of the capture-checked API types echo with an explicit empty
-    * capture set (`val r: ProcessResult^{} = ...`): noise the agent may copy
-    * into its own annotations, so the echoed signatures drop it. */
+  /** Values of the capture-checked API types echo with an explicit empty capture
+    * set (`val r: ProcessResult^{} = ...`). The agent may copy that into its own
+    * annotations, so the echoed signatures drop it. */
   private def withoutEmptyCaptureSets(diag: Diagnostic)(using Context): Diagnostic =
     val text = diag.message
     if !text.contains("^{}") then diag
@@ -48,6 +48,6 @@ final class CappedRendering(parent: Option[ClassLoader], maxChars: Int) extends 
     if full.length <= maxChars then full
     else
       val text = full.plainText // same length as `full`
-      // Do not cut in the middle of a surrogate pair (an emoji, for instance).
+      // Do not cut in the middle of a surrogate pair, as an emoji has.
       val cut = if maxChars > 0 && Character.isHighSurrogate(text.charAt(maxChars - 1)) then maxChars - 1 else maxChars
       fansi.Str(text.take(cut) + s"… [${text.length - cut} more characters not shown; println the value to see all]")

@@ -84,7 +84,7 @@ final class RecordingUI extends AgentUI:
   val toolEnds = ListBuffer[Boolean]()
   var ends = 0
   var onEnd: () => Unit = () => ()
-  /** When set, `toolStart` throws — a stand-in for anything that can fail while a
+  /** When set, `toolStart` throws, a stand-in for anything that can fail while a
     * tool call is being run, after its `Msg.Assistant` is in history. */
   var toolStartThrows: Boolean = false
   def assistantDelta(text: String): Unit = deltas += text
@@ -362,7 +362,7 @@ class AgentLoopSuite extends munit.FunSuite:
   test("a failure while running a tool call answers the pending call (no dangling tool_use)"):
     // The assistant asked for a tool; running it throws before the result is
     // recorded. The transcript must not end on a tool_use with no tool_result, nor
-    // stack a second assistant message — either is a provider 400 that would wedge
+    // stack a second assistant message; either is a provider 400 that would wedge
     // every later turn. It must be answered with an error tool_result instead.
     val (_, s, ui, agent) = setup(ScriptedModel(
       "m",
@@ -690,6 +690,34 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(model.i, 6)
     assertEquals(agent.history.last, Msg.Assistant("fourth", Nil, None))
     assert(agent.history.contains(Msg.Assistant("summary", Nil, None)))
+
+  test("clear() lifts the retry mark, so a new conversation may compact at its own threshold"):
+    val big = "findings " * 2000
+    val (_, session, ui, agent) =
+      setup(ScriptedModel("m", Nil), Config(autoCompactThreshold = 0.5, compactKeepRatio = 0))
+    val afterFirst = usageOf(agent, Msg.User("task"), Msg.Assistant(big, Nil, None))
+    val model = ScriptedModel(
+      "m",
+      Seq(
+        ScriptedModel.Reply(big),
+        ScriptedModel.Reply("expanded " * 6000), // no smaller: sets the retry mark
+        ScriptedModel.Reply("second"),
+        ScriptedModel.Reply(big), // the fresh conversation starts here
+        ScriptedModel.Reply("summary"),
+        ScriptedModel.Reply("third"),
+      ),
+      contextWindow = Some((afterFirst * 2).toInt)
+    )
+    agent.model = model
+    agent.turn(session, "task", never)
+    agent.turn(session, "next", never)
+    assert(ui.warnings.exists(_.contains("no smaller summary")), ui.warnings.toString)
+
+    agent.clear()
+    agent.turn(session, "task", never)
+    agent.turn(session, "next", never)
+    assertEquals(model.i, 6, "the second conversation is over its own threshold and must be summarized")
+    assert(agent.history.contains(Msg.Assistant("summary", Nil, None)), agent.history.toString.take(200))
 
   test("automatic compaction uses the configured fraction of the window for the next request"):
     List(0.5 -> true, 0.5001 -> false, 0.0 -> false).foreach { (threshold, expected) =>

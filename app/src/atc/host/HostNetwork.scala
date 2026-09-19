@@ -71,10 +71,12 @@ private[host] trait HostNetwork:
         s"HTTP header names are case-insensitive and may be supplied only once: ${duplicates.flatten.distinct.sorted.mkString(", ")}"
       )
 
-    // Ask the JDK to validate the non-secret values now, outside the classified
-    // failure boundary. Secret values are deliberately not touched here.
+    // Ask the JDK to validate the method, the plain header values and every
+    // header name now, outside the classified failure boundary. A placeholder
+    // stands in for each secret value, which is not touched here.
     val validator = HttpRequest.newBuilder(uri).nn
     headers.foreach((name, value) => validator.header(name, value))
+    secretHeaderNames.foreach(name => validator.header(name, "placeholder"))
     validator.method(normalizedMethod, HttpRequest.BodyPublishers.noBody())
     Prepared(uri, normalizedMethod)
 

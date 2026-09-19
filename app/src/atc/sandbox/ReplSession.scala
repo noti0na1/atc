@@ -149,6 +149,9 @@ object ReplSession:
     * and whether agent code threw an exception the REPL rendered (`failed`). */
   private case class Evaluated(state: State, output: String, thrown: Option[Throwable], failed: Boolean)
 
+  private val InterruptedMessage = "Execution interrupted by the user (completed effects are not rolled back)"
+  private val NoResultMessage = "Execution failed (no result; possible fatal error)"
+
 /** One persistent REPL with its own sandbox class loader and host. */
 final class ReplSession(config: SandboxConfig, host: Interface & Derivations, preambleOverride: Option[String] = None):
   import ReplSession.*
@@ -243,13 +246,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         catch
           case _: ThreadDeath if stopRequested =>
             skipInvalidWrapper(previousIndex)
-            ExecutionResult(
-              false,
-              "",
-              Some("Execution interrupted by the user (completed effects are not rolled back)")
-            )
+            ExecutionResult(false, "", Some(InterruptedMessage))
           case t: ThreadDeath => throw t
-          case _: Throwable => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
+          case _: Throwable => ExecutionResult(false, "", Some(NoResultMessage))
         finally
           evalThread = null
           Thread.interrupted() // an interrupt meant for the evaluation must not hit this thread's later work
@@ -259,10 +258,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
   private def evaluate(res: ParseResult, started: CountDownLatch = CountDownLatch(0)): Evaluated =
     var newState = state
     val (output, thrown) = withOutputCapture(onEnter = started.countDown()) {
-      // An interrupt may have landed while we waited for the output lock (`run`
+      // An interrupt may have landed while we waited for the output lock. `run`
       // cleared `stopRequested` at the top, so it is true only if `interrupt()`
-      // fired during THIS run). If so, do not execute the cancelled code — and do
-      // not clear the stop flag it raised. `adopt` then honestly reports the abort.
+      // fired during this run. Then the cancelled code must not execute, and the
+      // stop flag it raised must not be cleared; `adopt` reports the abort.
       if !stopRequested then
         // A preamble object/given can be initialized lazily on the first agent
         // line, long after `init`. Re-select the owning host inside the global
@@ -285,7 +284,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       // the REPL renders as normal output). Skip that wrapper index so the next
       // line does not collide with the invalid class, and report the abort.
       skipInvalidWrapper(previousIndex)
-      ExecutionResult(false, "", Some("Execution interrupted by the user (completed effects are not rolled back)"))
+      ExecutionResult(false, "", Some(InterruptedMessage))
     else
       thrown match
         case Some(e) => ExecutionResult(false, output, Option(e.getMessage).orElse(Some(e.toString)))
@@ -338,7 +337,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         )
       else
         resultRef.get() match
-          case null => ExecutionResult(false, "", Some("Execution failed (no result; possible fatal error)"))
+          case null => ExecutionResult(false, "", Some(NoResultMessage))
           case evaluated => adopt(res, evaluated)
     finally evalThread = null
 
@@ -348,8 +347,8 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     val acquired =
       try outputLock.tryLock(OutputLockWaitMs, TimeUnit.MILLISECONDS)
       catch
-        // Interrupted while waiting (e.g. a user interrupt landed here): the lock
-        // may well be free — retry once, uninterruptibly, before reporting a blocked evaluation.
+        // Interrupted while waiting (a user interrupt can land here). The lock may
+        // be free, so retry once, uninterruptibly, before reporting a blocked evaluation.
         case _: InterruptedException => outputLock.tryLock()
     onEnter
     if !acquired then ("", Some(RuntimeException(StuckEvaluationMessage)))

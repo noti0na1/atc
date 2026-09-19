@@ -138,10 +138,10 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // while network methods demand `Network^`.
     assertFails(run("""val rex: Exec^{ex.rd} = ex; 1"""), "cannot flow into capture set")
     assertFails(run("""val rn: Network^{net.rd} = net; 1"""), "cannot flow into capture set")
-    assertOk(run("""val e: Exec = ex; 1""")) // a bare `Exec` type is `Exec^` (full), not a read-only view...
+    assertOk(run("""val e: Exec = ex; 1""")) // a bare `Exec` type is `Exec^` (full), not a read-only view
     assertFails(run(
       """val e2: Exec = ex; classify("s").map(s => exec("echo", List(s))(using e2, fs).stdout)"""
-    )) // ...so it is just as unusable in map
+    )) // so it is as unusable in map as `ex` itself
     assertFails(
       run("""classify("s").map(s => { val r: Exec^{ex.rd} = ex; exec("echo", List(s))(using r, fs).stdout })""")
     )

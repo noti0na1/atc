@@ -32,15 +32,15 @@ Here is a request, the Scala code the agent wrote, the program output, and the f
   │ grepRecursive("lib/src", "^\\s+update def", "*.scala")
   │   .foreach(m => println(s"${m.lineNumber}  ${m.line.trim}"))
   ├ output
-  │ 116  update def write(content: String): Unit
-  │ 117  update def writeBytes(content: Array[Byte]): Unit
-  │ 118  update def append(content: String): Unit
-  │ 119  update def delete(): Unit
-  │ 121  update def mkdir(): Unit
-  │ 130  update def writeClassified(content: Classified[String]): Unit
+  │ 114  update def write(content: String): Unit
+  │ 115  update def writeBytes(content: Array[Byte]): Unit
+  │ 116  update def append(content: String): Unit
+  │ 117  update def delete(): Unit
+  │ 119  update def mkdir(): Unit
+  │ 129  update def writeClassified(content: Classified[String]): Unit
   └ ok 121 ms
 
-● Six of them — write, writeBytes, append, delete, mkdir and writeClassified. They are
+● Six of them: write, writeBytes, append, delete, mkdir and writeClassified. They are
   declared `update`, so they can only be called through a full `FileSystem^`.
 ```
 
@@ -49,9 +49,9 @@ Here is a request, the Scala code the agent wrote, the program output, and the f
 The snippet was compiled before it ran. The REPL keeps its state between snippets, so a
 `val` defined in one turn is still there in the next.
 
-When asked to change a file in **read-only mode**, the same agent cannot even express the
-write. The sandbox provides a read-only file system, while `write` is an `update` method
-that requires a full view. The compiler rejects the call, and the agent explains why:
+In **read-only mode** the same agent cannot express the write. The sandbox provides a
+read-only file system, and `write` is an `update` method that requires a full view. The
+compiler rejects the call, and the agent explains why:
 
 ```scala
 read-only > add a "review the tests" item to TODO.md
@@ -69,9 +69,8 @@ read-only > add a "review the tests" item to TODO.md
   or Shift-Tab) and I will add the line.
 ```
 
-When the agent needs access that the configuration does not grant, it requests exactly that
-access within a block from which the extra permission cannot escape. You decide whether to
-approve the request in a pop-up:
+When the agent needs access the configuration does not grant, it requests exactly that
+access within a block the extra permission cannot escape. You decide in a pop-up:
 
 ```scala
 > install the dependencies and run the tests
@@ -106,11 +105,13 @@ chmod +x atc
 ./atc setup      # installs ~/.local/bin/atc, puts it on PATH, downloads the latest release
 ```
 
-From then on `atc` runs ATC in the current directory, `atc update` fetches a newer release,
-`atc self uninstall` removes everything, and `atc help` lists the wrapper's commands. When
-a newer release or wrapper is available, an interactive start offers to upgrade first;
-answer `y`, or press Enter to skip. (To run from a checkout instead, see
-[doc/development.md](doc/development.md#building-and-running).)
+From then on `atc` runs ATC in the current directory. `atc update` fetches a newer release,
+`atc self update` replaces the wrapper, `atc self uninstall` removes the wrapper, the jars
+and the PATH snippet while keeping `~/.atc/config.json` and `keys.properties`, and
+`atc help` lists every wrapper command. When a newer release or wrapper is available, an
+interactive start offers to upgrade first: answer `y`, or press Enter to skip. 
+To run from a checkout instead, see
+[doc/development.md](doc/development.md#building-and-running).
 
 <details>
 <summary><strong>Windows (best-effort support)</strong></summary>
@@ -131,27 +132,16 @@ assets of a newer release.
 
 </details>
 
-**1. Start it.** Change to the project you want to work on, then run `atc`:
+**1. Start it.** Change to the project you want to work on (`cd ~/my-project`) and run
+`atc`. If the first run finds no `~/.atc/config.json`, it offers to create a starter file
+with the providers and machine-wide permissions, plus `~/.atc/keys.properties` for your API
+keys, one `NAME=value` per line, then exits so you can fill them in. On Windows, `~/.atc` is
+`%USERPROFILE%\.atc`. You can also export the variables in your shell, or use a local model
+that needs no key.
 
-```bash
-cd ~/my-project
-atc
-```
-
-If the first run finds no `~/.atc/config.json`, it offers to create a starter file with the
-providers and machine-wide permissions, plus `~/.atc/keys.properties` for your API keys,
-then exits so you can fill them in:
-
-```properties
-ANTHROPIC_API_KEY=sk-ant-…
-OPENAI_API_KEY=
-```
-
-(On Windows, `~/.atc` is `%USERPROFILE%\.atc`.) You can also export the variables in your
-shell, or use a local model that needs no key.
-
-**2. Start it again.** If no configuration grants access to the current directory, ATC
-offers to create a starter `.atc/config.json` there and applies it immediately. That file
+**2. Start it again.** If no configuration grants access to the current directory and the
+directory has no `.atc/config.json` of its own, ATC offers to create a starter one there and
+applies it immediately. That file
 is what opens the project to the agent: its own tree, the read-only git commands and a set
 of documentation hosts. Review it to choose which **models** to use and which **files,
 commands and hosts** the agent may use without asking; see [Configuration](#configuration).
@@ -214,9 +204,8 @@ publishes `ex` also publishes a full `fs` under the same root.
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
 
-`UserIO` is deliberately *not* derived from `IOCap`: reporting to the human is an effect on
-the conversation, not on the machine, so it survives even when the agent may touch nothing
-at all.
+`UserIO` is not derived from `IOCap`: reporting to the human is an effect on the
+conversation, not on the machine, so it survives when the agent may touch nothing at all.
 
 ### Read-only and full views
 
@@ -261,14 +250,14 @@ untrusted outward channel needs a *full* one (`println`/`ask`/normal-model `chat
 `UserIO^`, `write` needs `FileSystem^`, `exec` needs both `Exec^` and `FileSystem^`, and
 `httpGet` needs `Network^`), so none of them can appear inside a `map`. The agent can compute
 on a secret but never see it; `toString` is
-`Classified(***)`. There are only a few deliberate output paths: `println` (you see the
+`Classified(***)`. The output paths are `println` (you see the
 value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
 `writeClassified` into a classified path, `classifiedChat` with the configured classified
 model, and `httpPostClassified` / `secretHeaders` to an allow-listed host. A response to a
 request carrying classified content stays `Classified`, so a peer cannot reflect a secret
 header or body back into a plain model-visible value.
 
-Here it is at work. `secrets/` is classified in the project config; the agent is asked a
+In this example `secrets/` is classified in the project config, and the agent is asked a
 question about a key it must never see:
 
 ```scala
@@ -310,22 +299,20 @@ file, a process, or the network:
   └ failed 88 ms
 ```
 
-(`rs$line$3` is the preamble line that holds the `user` given; the `exec` and `write`
-attempts name the lines that hold `ex` and `fs`.) The read-only/full distinction matters
-here: **the same line compiles in one mode but not another** because the view of `fs`
-changes. In local and full modes, `fs` is the full view, so even a harmless read
-inside the `map` captures a full capability and is refused:
+`rs$line$3` is the preamble line that holds the `user` given; the `exec` and `write`
+attempts name the lines that hold `ex` and `fs`. The same line can compile in one mode and
+not another, because the view of `fs` changes. In local and full mode `fs` is the full
+view, so even a harmless read inside the `map` captures a full capability and is refused:
 
 ```scala
 > key.map(k => k + read("notes.md"))               // local/full: fs is the full view
 Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 ```
 
-In read-only mode, `fs` is `FileSystem^{io.rd}`, so the identical line is accepted
-(`val res0: Classified[String] = Classified(***)`). Reading cannot leak the secret,
-whereas writing could; the capability view distinguishes the two. The agent can always
-route a secret to an explicitly authorized channel: the terminal, a classified file, the
-classified model, or an allow-listed host.
+In read-only mode `fs` is `FileSystem^{io.rd}`, so the identical line is accepted. Reading
+cannot leak the secret, whereas writing could, and the capability view distinguishes the
+two. The agent can always route a secret to an authorized channel: the terminal, a
+classified file, the classified model, or an allow-listed host.
 
 ### Runtime permissions
 
@@ -340,7 +327,7 @@ own packages) before compilation, and a class loader that shows agent code only 
 ## Modes: read-only, local, full
 
 A **mode** decides which capabilities the preamble puts in scope, and therefore what the
-agent can express at all, before the permission policy even comes up:
+agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|

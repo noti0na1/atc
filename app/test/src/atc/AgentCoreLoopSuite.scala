@@ -170,3 +170,18 @@ class AgentCoreLoopSuite extends munit.FunSuite:
     assertEquals(runner.calls.map(_.id).toList, List("first", "revised"))
     assertEquals(model.seenHistories(1).last, Msg.User("Skip deployment; run only unit tests."))
     assertEquals(agent.queuedInputCount, 0)
+
+  test("a turn carrying only queued input sends it without empty leading text"):
+    // The TUI starts such a turn with an empty request so that input typed during
+    // the previous one is answered; the model must see the text alone.
+    val (model, _, agent) = setup(Seq(ScriptedModel.Reply("done")))
+    agent.submit("run the tests instead")
+    agent.runTurn(RecordingRunner(), "", () => false)
+    assertEquals(model.seenHistories.head, List(Msg.User("run the tests instead")))
+
+    val (noted, _, withNote) = setup(Seq(ScriptedModel.Reply("done")))
+    withNote.noteSandboxRestarted("the mode changed")
+    withNote.submit("carry on")
+    withNote.runTurn(RecordingRunner(), "", () => false)
+    val text = noted.seenHistories.head.head.asInstanceOf[Msg.User].text
+    assertEquals(text, s"${AgentMessages.sandboxRestarted("the mode changed")}\n\ncarry on")

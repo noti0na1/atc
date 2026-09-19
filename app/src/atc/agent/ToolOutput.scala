@@ -29,6 +29,10 @@ object ToolOutput:
       "The program could not be started. Check PATH, the executable and interpreter, permissions and working directory. exec runs no shell: `exec(\"git status\")` is split into words for you, pipes and `<`/`>`/`>>`/`2>&1` work, but `&&`, `;`, globs and `$VAR` do not; run steps one by one and combine in Scala.",
     ),
     Hint(
+      _.contains("NotDirectoryException"),
+      "that path is a file, not a directory: use `cat`/`read` on it, or `ls`/`walk`/`find` on its parent."
+    ),
+    Hint(
       out => out.contains("Ambiguous given instances") && out.contains("FileSystem"),
       "do not define your own `given FileSystem`; use requestFiles(...) { ... } blocks."
     ),
@@ -52,9 +56,9 @@ object ToolOutput:
   /** The result as the model sees it: the rendered output with a hint for common
     * errors, cut in the middle beyond `maxChars`, then a note for every
     * decision the user made at a permission prompt during the run. The note
-    * comes last and uncut: the model cannot see the pop-ups, so this is how it
-    * learns whether a grant was for this call or for the session (and the
-    * system prompt never changes with one). */
+    * comes last and uncut. The model cannot see the pop-ups and the system
+    * prompt never changes with a grant, so this note is how it learns whether a
+    * grant was for this call or for the session. */
   def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)]): String =
     val base = r.render
     val hinted = hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")

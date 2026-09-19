@@ -31,7 +31,8 @@ private[agent] final class Conversation:
   def steer(input: String): Unit =
     remember(input)
     messages.lastOption match
-      case Some(Msg.User(text)) => messages = messages.init :+ Msg.User(s"$text\n\n$input")
+      case Some(Msg.User(text)) =>
+        messages = messages.init :+ Msg.User(List(text, input).filter(_.nonEmpty).mkString("\n\n"))
       case Some(_: Msg.ToolResults | _: Msg.Continuation) =>
         append(Msg.Assistant("[paused to apply the user's update]", Nil, None))
         append(Msg.User(input))

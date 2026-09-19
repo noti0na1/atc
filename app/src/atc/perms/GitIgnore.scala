@@ -44,8 +44,8 @@ object GitIgnore:
       else
         try
           Files.readAllLines(file).nn.asScala.toList.flatMap { line =>
-            // A malformed pattern (e.g. an unbalanced character class makes an
-            // invalid regex) disables just its line, as git does — not the file.
+            // A malformed pattern, such as an unbalanced character class,
+            // disables its own line and not the file, as git does.
             try Rule.parse(line)
             catch case _: Exception => None
           }
@@ -120,10 +120,10 @@ object GitIgnore:
           case '*' if i + 1 < glob.length && glob.charAt(i + 1) == '*' =>
             val atSegmentStart = i == 0 || glob.charAt(i - 1) == '/'
             if atSegmentStart && i + 2 < glob.length && glob.charAt(i + 2) == '/' then
-              out ++= "(?:.*/)?" // `**/` — zero or more directories
+              out ++= "(?:.*/)?" // `**/` matches zero or more directories
               i += 3
             else if atSegmentStart && i + 2 == glob.length then
-              out ++= ".*" // `/**` at the end — everything inside
+              out ++= ".*" // a trailing `/**` matches everything inside
               i += 2
             else
               out ++= "[^/]*" // `**` inside a name is two ordinary stars (git's rule)

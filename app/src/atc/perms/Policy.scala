@@ -41,7 +41,7 @@ case class FileRule(
       Option.when(locked)("locked"),
     ).flatten
     val note = grantsWithin.map(root => s"from the project config, granting only inside ${PlatformPath.portable(root)}")
-    s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(" — " + _)}"
+    s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(n => s" ($n)")}"
 
 /** What the user answers to a permission prompt. */
 enum Decision:
@@ -168,7 +168,7 @@ final class Policy(
 
   /** The configured rules matching a canonical path (itself or an ancestor).
     *
-    * A rule that matches a directory matches every path below it too — a
+    * A rule that matches a directory matches every path below it too: a
     * component glob matches a component still present in descendants, an
     * anchored glob always adds a `**`-suffixed descendant variant, and an exact path
     * covers its whole subtree. A child's matching set is therefore exactly its
@@ -285,10 +285,10 @@ final class Policy(
   /** Refuse a `request*` whose patterns collide with the deny list, before the
     * user is asked: a request is a widening, and the deny list is exactly what
     * may not be widened into. Two patterns collide when either one, read as a
-    * concrete command line / host name, matches the other — so `denyCommands:
-    * ["rm *"]` refuses both `requestExec(Set("rm -rf build"))` (the deny
-    * pattern covers it) and `requestExec(Set("rm*"))` (granting it would
-    * cover the deny pattern). */
+    * concrete command line or host name, matches the other. With
+    * `denyCommands: ["rm *"]` that refuses `requestExec(Set("rm -rf build"))`,
+    * which the deny pattern covers, and `requestExec(Set("rm*"))`, which would
+    * cover the deny pattern. */
   private def refuseDenied(
     what: String,
     requested: List[String],

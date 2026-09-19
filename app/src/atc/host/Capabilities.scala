@@ -27,10 +27,12 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   private def scope: ScopeId = fs.scope
   private[host] def canonicalPath: Path = p
 
-  /** Require read access for `what` *and* that the content is not classified;
-    * `alt` names the `Classified`-returning member to use instead. */
-  private def requireReadable(what: String, alt: String): Unit =
-    host.requireNotClassified(host.requireRead(scope, p, what), p, what, alt)
+  /** Require read access for `operation` and that the content is not
+    * classified; `alternative` names the `Classified`-returning member to use
+    * instead. */
+  private def requireReadable(operation: String, alternative: String): Unit =
+    host.requireReadable(scope, p, operation, alternative)
+    ()
 
   /** Run `op` (a read of classified content) as a `Classified` result: the
     * permission check and any failure stay inside the classified value. */
@@ -67,36 +69,33 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   def readLines(): List[String] = read().linesIterator.toList
 
   /** Stream the file line by line (never loaded whole); `op` receives each
-    * line with its 1-based number. Decoding is lenient like `read()` (invalid
-    * UTF-8 becomes U+FFFD, so binary or Latin-1 files do not abort a search);
-    * the file is closed when the iteration ends. */
-  def forEachLine(op: (String, Int) => Unit): Unit =
-    requireReadable("forEachLine", "readClassified()")
-    // Not `Files.lines`/`newBufferedReader`: their decoder throws on malformed input.
-    val reader = java.io.BufferedReader(java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8))
-    Using.resource(reader) { r =>
-      var i = 0
-      var line = r.readLine()
-      while line != null do
-        i += 1
-        op(line, i)
-        line = r.readLine()
-    }
+    * line with its 1-based number. Decoding is lenient like `read()`: invalid
+    * UTF-8 becomes U+FFFD, so binary or Latin-1 files do not abort a search.
+    * The file is closed when the iteration ends. */
+  def forEachLine(op: (String, Int) => Unit): Unit = forEachLine("forEachLine", op)
+
+  /** [[forEachLine]] naming the operation the agent called, for denials. */
+  private[host] def forEachLine(operation: String, op: (String, Int) => Unit): Unit =
+    scanLines(operation, Int.MaxValue) { (line, _, number) => op(line, number); true }
+    ()
 
   /** Stream line prefixes without ever materializing a whole line. `op` gets
-    * the retained prefix, the line's full UTF-16 character count and its
-    * one-based number. CR, LF and CRLF have the same line semantics as
-    * [[forEachLine]], including no phantom line after a final terminator. */
-  private[host] def forEachCappedLine(maxChars: Int)(op: (String, Long, Int) => Unit): Unit =
-    scanLines(maxChars) { (line, chars, number) => op(line, chars, number); true }
-
-  /** Stop and close the stream as soon as the callback returns false. */
+    * the retained prefix (at most `maxChars` characters), the line's full
+    * UTF-16 character count and its one-based number, and returns whether to
+    * carry on; the stream is closed as soon as it returns false. CR, LF and
+    * CRLF all end a line, and a final terminator adds no phantom line.
+    *
+    * Reads stop after `maxReadChars` characters. The result says whether that
+    * budget cut the file short, so a file ending exactly on it is not reported
+    * as truncated.
+    */
   private[host] def scanLines(
+    operation: String,
     maxChars: Int,
     maxReadChars: Long = Long.MaxValue
   )(op: (String, Long, Int) => Boolean): Boolean =
     if maxChars < 0 then throw IllegalArgumentException(s"maxChars must be non-negative (got $maxChars)")
-    requireReadable("forEachLine", "readClassified()")
+    requireReadable(operation, "readClassified()")
     val reader = java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8)
     Using.resource(reader) { r =>
       val input = new Array[Char](8192)
@@ -106,6 +105,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
       var afterCr = false
       var continue = true
       var consumed = 0L
+      var truncated = false
 
       def emit(): Unit =
         lineNumber += 1
@@ -114,9 +114,14 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
         lineChars = 0L
 
       var read = r.read(input)
-      while continue && consumed < maxReadChars && read >= 0 do
-        var index = 0
-        while continue && consumed < maxReadChars && index < read do
+      var index = 0
+      while continue && !truncated && read >= 0 do
+        if index >= read then
+          // Refilling past the budget is how a file ending on it is told from a cut one.
+          read = r.read(input)
+          index = 0
+        else if consumed >= maxReadChars then truncated = true
+        else
           val char = input(index)
           if afterCr && char == '\n' then afterCr = false
           else
@@ -130,10 +135,9 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
               lineChars += 1
           index += 1
           consumed += 1
-        if continue && consumed < maxReadChars then read = r.read(input)
 
       if continue && lineChars > 0 then emit()
-      consumed >= maxReadChars
+      truncated
     }
 
   /** Open this file for streaming reads; checked like `read`. The caller must
@@ -146,8 +150,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     * target are two names for the same inode, all permission checks still run
     * but opening the truncating output stream is skipped. */
   private[host] def writeFrom(source: FileEntryImpl, in: java.io.InputStream): Unit =
-    val permission = host.requireWrite(scope, p, "writeBytes")
-    host.requireNotClassified(permission, p, "writeBytes", "writeClassified(path, classify(content))")
+    host.requireWritable(scope, p, "writeBytes")
     val sameFile =
       if p == source.canonicalPath then true
       else if !Files.exists(p) then false

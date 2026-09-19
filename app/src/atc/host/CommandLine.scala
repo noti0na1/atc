@@ -2,7 +2,7 @@ package atc.host
 
 import atc.platform.Platform
 
-/** The deliberately small command language accepted by `exec`.
+/** The small command language accepted by `exec`.
   *
   * It supports words with quoting, pipelines, file redirection, and `2>&1`.
   * It does not perform shell expansion or accept shell control operators. The

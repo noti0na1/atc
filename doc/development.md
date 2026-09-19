@@ -43,9 +43,11 @@ Environment files contain literal `KEY=value` entries; shell expansion is not pe
 | `ATC_MODEL`, `ATC_CONFIG`, `ATC_CWD` | Start-script defaults for `-m`, `-c`, `-C` |
 | `ATC_ENV_FILE` | Alternative environment file |
 | `ATC_SKIP_BUILD=1` | Skip the start script's rebuild check |
-| `ATC_JAVA_OPTS` | Additional JVM flags for Unix launchers and checkout start scripts |
+| `ATC_JAVA_OPTS` | Additional JVM flags for every launcher, applied after the defaults and before the command line's `-Xmx`/`-Xms` |
 | `-Xmx<size>`, `-Xms<size>` (launcher arguments) | JVM heap flags that `atc`, `start.sh`, `start.ps1` and `atc.ps1` take out of the arguments (the value of an option such as `-p` is never taken for one) and pass to `java` after the defaults and `ATC_JAVA_OPTS`, so they win; ATC never sees them |
 | `ATC_STARTUP_CACHE=0` | Run without the JVM startup cache (`atc`, `start.sh`) |
+| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
+| `ATC_ASCII` | Select ASCII terminal glyphs when set |
 
 ### JVM settings
 
@@ -70,7 +72,7 @@ CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are b
 the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
 *not* regenerated, so the launchers never point the JVM at one that might be stale:
 `~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
-`-version` output and the release marker, its timestamp is compared with the jars
+`-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`) and the release marker, its timestamp is compared with the jars
 (`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
 on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
 building flag. A build that leaves no file writes the key anyway, so it is not retried until
@@ -78,8 +80,6 @@ the JDK or release changes. `atc self uninstall` removes the cache with the jars
 `-XX:TieredStopAtLevel=1` (60% less CPU, 50% slower steady-state compiles) and
 `-XX:+UseSerialGC` (200 MB less resident memory, five times the GC time, pauses still under
 10 ms) were measured and left to `ATC_JAVA_OPTS`.
-| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
-| `ATC_ASCII` | Select ASCII terminal glyphs when set |
 
 For development without packaging, use `./mill -i app.run`. For manual REPL checks,
 `./mill app.test.runMain atc.Scratch file.scala` evaluates snippets separated by `// ---`.
@@ -162,8 +162,8 @@ def printer(using user: UserIO^): String ->{user} Unit =
 
 The callback retains the supplied `user`. Its return type is `Unit`, but that does not
 make it pure: purity depends on captured capabilities. Converting an effectful method to a
-function must preserve this dependency; the default-argument regression discussed below
-is important for precisely this reason.
+function must preserve this dependency. The default-argument regression discussed below
+follows from it.
 
 ### Scope and capture polymorphism
 
@@ -230,7 +230,7 @@ ro.access("notes.txt").write("changed") // compile error: read-only receiver
 ```
 
 `Exec` and `Network` extend only `ExclusiveCapability`. They do not support `.rd`; a bare
-`Exec` is already a full capability. Do not generalize the bare-`FileSystem` convention to
+`Exec` is already a full capability. The bare-`FileSystem` convention does not extend to
 every capability type. `CapabilitySuite` tests this distinction.
 
 ### Safe mode and the trusted implementation
@@ -261,25 +261,16 @@ Its comments are API documentation for the model: keep contracts and examples th
 keep implementation rationale in this guide or beside host code. Add operations to the
 interface and host together, then verify their required capabilities.
 
-Capture sets describe the capabilities a value may retain. For ATC's stateful capability
-types, the bare type is the read-only view; `^` denotes full access. For example,
-`FileSystem` can read and `FileSystem^` can read or write. `FileEntry` mutation methods are
-`update def`s, which require full access. A full file system can be explicitly restricted:
-
-```scala
-val ro: FileSystem^{fs.rd} = fs
-```
-
 | Mode | Machine capabilities supplied by the preamble |
 |---|---|
 | `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}` |
 | `local` | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}` |
-| `full` | Local capabilities plus `net: Network^{io}` |
+| `full` | the local capabilities plus `net: Network^{io}` |
 
-Every mode also supplies `user: UserIO^` for output, questions, TODO updates and normal
-`chat` calls. `UserIO` is independent of the machine root so user interaction remains
-available in read-only mode. `Exec` and `Network` have no read-only view. Command operations
-require both `Exec^` and `FileSystem^`, including when redirection writes a file.
+Every mode also supplies `user: UserIO^`, which is independent of the machine root, so
+output, questions, TODO updates and normal `chat` calls remain available in read-only mode.
+`Exec` and `Network` have no read-only view. Command operations require both `Exec^` and
+`FileSystem^`, including when redirection writes a file.
 
 Capability constructors are private to ATC. `Runtime` and `Derivations` provide the
 sandbox's internal bootstrap API and are marked `@rejectSafe`. Agent code cannot derive
@@ -292,22 +283,17 @@ checking behavior.
 
 ### Classified data
 
-`Classified.map` and `flatMap` accept callbacks of type `T ->{any.rd} B`. They may capture
-read-only capabilities. Printing, writing, commands, network requests, permission requests
-and normal `chat` all require full capabilities and are rejected in those callbacks.
-
 `ClassifiedImpl` stores a `Try`: non-fatal computation failures remain confidential.
-Authorized destinations are the user terminal, classified files, the configured classified
-model and permitted HTTP hosts. HTTP calls with classified headers or bodies return
-classified responses, preventing a server from reflecting a secret into ordinary output.
-Validate public parameters and permissions before inspecting classified values, and keep
-subsequent failures inside the classified result or user-only output.
+HTTP calls with classified headers or bodies return classified responses, preventing a
+server from reflecting a secret into ordinary output. Validate public parameters and
+permissions before inspecting classified values, and keep subsequent failures inside the
+classified result or user-only output.
 
 The data-flow argument relies on both parts of the API. `map` does not expose a plain
-result, and its callback cannot capture a full output capability. Thus deriving a Boolean
-from a secret keeps the Boolean classified too. Allowing `println`, a mutable file handle,
-or an untrusted model callback inside `map` would expose information even if the callback
-returned a harmless value.
+result, and its callback cannot capture a full output capability. Deriving a Boolean from a
+secret therefore keeps the Boolean classified too. Allowing `println`, a mutable file
+handle, or an untrusted model callback inside `map` would expose information even if the
+callback returned a harmless value.
 
 An explicit read-only file system can be used to compute a classified result:
 
@@ -399,13 +385,9 @@ separate character limit. User-visible prints also enter the REPL capture; the T
 a bounded prefix to subtract already-displayed output from result panels. Preserve leading
 whitespace in capture because subtraction uses exact text.
 
-| Command | State reset |
-|---|---|
-| `/clear` | Conversation, queued notes and usage accounting |
-| `/reset` | REPL and spawned processes; conversation and session grants remain |
-| `/mode` | REPL and spawned processes, with the selected capabilities |
-| `/new` | REPL, conversation, task notes, TODOs, retained output, usage and session grants |
-
+`/clear` resets the conversation, queued notes and usage accounting. `/reset` and `/mode`
+reset the REPL and its spawned processes, `/mode` with the newly selected capabilities.
+`/new` resets all of that plus task notes, TODOs, retained output and session grants.
 REPL restarts queue a notice for the model's next turn. `/run` queues the user's code and
 its result because definitions are shared with the agent. Closed sessions reject further
 runs. Input predictions are invalidated after state changes and before shutdown.
@@ -530,11 +512,11 @@ examines retained prefixes only. Directory listings still use the existing visib
 sorting rules; traversal does not follow directory symlinks or enter classified trees.
 
 Successful unclassified file operations report `FileChange` through `HostOutput`. Snapshots
-read at most 64001 bytes; binary and larger files get a summary without a text preview.
-The preview uses common line prefixes/suffixes and one replacement block, capped at 40
-lines. It is a compact explanation, not a general diff or undo engine. Classified writes
-and deletions never enter this preview path. External-command changes are not automatically
-captured by file API callbacks.
+cover files of at most 64000 bytes; binary and larger files get a summary without a text
+preview. The preview uses common line prefixes and suffixes and one replacement block,
+capped at 40 lines. It is a compact explanation, not a general diff or undo engine.
+Classified writes and deletions never enter this preview path. External-command changes are
+not captured by file API callbacks.
 
 `CommandLine` parses quoted arguments, pipelines, `<`, `>`, `>>` and `2>&1`. It rejects shell
 control operators and does not expand variables or globs. Explicit argument sequences are
@@ -550,7 +532,7 @@ pipeline exit code. `readUntil` consumes through a regex match; on timeout it th
 keeps output unread. `waitFor` returns `None` on timeout. Process termination includes
 pipeline stages and descendants. Shutdown kills registered processes.
 
-HTTP operations validate the scheme, host and headers, do not follow redirects, and cap
+HTTP operations validate the scheme, host and headers (secret header names too; only their values stay inside the classified boundary), do not follow redirects, and cap
 response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400 or higher;
 `httpRequest` returns raw status and body. Classified request handling retains subsequent
 transport and response failures within `Classified`.
@@ -572,7 +554,8 @@ paths retain their first role. Project rules are anchored to the directory conta
 | Mode and numeric limits | Granting layers set values; project layers may only tighten them |
 | Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
 
-Only explicitly defined project settings narrow a value. A missing timeout means no limit.
+Only explicitly defined project settings narrow a value. `executionTimeoutMs` defaults to
+300000; a JSON `null` clears it and means no limit.
 `Configuration.rules` is the complete rule list; do not build policy from `settings.files`,
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
@@ -723,9 +706,10 @@ an actionable message when it cannot fit, since it goes to the same model as one
 
 `Agent.autoCompact` runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
-between tool rounds, so a long tool loop can be summarized while it runs, but never between
-a tool request and its results (the history would be invalid) and never after the final
-answer (a `-p` run would pay for a summary nobody reads). It compares calibrated
+between tool rounds, so a long tool loop can be summarized while it runs. It never runs
+between a tool request and its results, which would make the history invalid, and never
+after the final answer, where a `-p` run would pay for a summary it never uses. It compares
+calibrated
 next-request usage with `contextWindow * autoCompactThreshold`. This fraction defaults to
 `0.8`, accepts `[0, 1]`, and uses zero to disable automatic compaction. It is a non-policy
 setting merged with later-layer precedence and shown in `/config`. When the exchange in
@@ -813,10 +797,6 @@ Predictions are reduced to visible single-line text and reported separately in u
 capture text unchanged; sanitize only at display boundaries. `TextSink` incrementally
 handles UTF-8 and BOM-marked UTF-16 process output.
 
-Ctrl-C interrupts a turn. Ctrl-O toggles expanded output; compact mode folds long output
-and summarizes reasoning. Shift-Tab cycles sandbox modes. Tab completes slash commands or
-accepts a prediction; the right arrow also accepts predictions. Ctrl-D exits.
-
 `Continuation` handles open brackets, strings and comments for `/run`. Shift+Enter and
 backslash followed by Enter insert a newline. An empty line submits a code block; Ctrl-C
 cancels block input. During a turn, a separate reader collects corrections and unsent
@@ -875,8 +855,8 @@ Empty or cancelled feedback returns to the menu. `Tui.readAnswer` consumes JLine
 preserved input-cancellation interrupt so the next menu can read normally.
 Plain prompts accept exact `y`/`yes` or
 `s`/`session` approvals, exact `n`/`no` denials, and treat other non-empty input as
-`Decision.Revise`. In particular, a qualified answer starting with “yes” or “skip” must
-not become an approval by prefix matching. EOF and empty plain replies deny the request.
+`Decision.Revise`. A qualified answer starting with “yes” or “skip” must not become an
+approval by prefix matching. EOF and empty plain replies deny the request.
 
 Question menus always include a custom-answer option. For multiple selections, chosen
 answers retain their display order and custom text is appended. User input is returned to
@@ -933,12 +913,12 @@ complete exchanges verbatim, as many as fit within `compactKeepRatio` of the con
 rest, keeping tool calls with their exchange. When everything fits there is nothing to
 compact and no request is made; a summary that is not smaller is discarded; a transcript
 larger than the model's input allowance is refused with a suggestion to use a larger model
-or `/clear`. Automatic compaction runs just before a request when its estimated size
+or `/clear`. Automatic compaction runs immediately before a request when its estimated size
 reaches `autoCompactThreshold` times the model's `contextWindow` (default `0.8`; `0`
 disables), before the first request of a turn and between tool rounds, never after a final
 answer, and never without a configured window. A failed or not-smaller attempt is reported
-and not retried until the conversation has grown by a tenth of the window. Compaction is
-lossy; essential details belong in task notes or files.
+and not retried until the conversation has grown by a tenth of the window; a new conversation
+(`/new`, `/clear`) lifts that mark. Compaction is lossy; essential details belong in task notes or files.
 
 ## Testing and conventions
 
@@ -952,6 +932,7 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
 - `ModelRequestSuite`, `ProviderCancellationSuite`: cancellation and HTTP client ownership across requests.
 - `SessionStoreSuite`: portable conversation persistence, validation and file permissions.
 - `ConfigSuite`, `LayerSuite`, `ModelSuite`, `GitIgnoreSuite`: configuration and lookup.
+- `ToolOutputSuite`, `PromptsSuite`: tool-result bounding, hints and permission notes; the system prompt.
 - `AgentCoreLoopSuite`, `AgentLoopSuite`, `CompletionPolicySuite`, `ContextManagerSuite`:
   loop decisions, transcript repair, context fitting and the real REPL integration.
 - `TuiSuite`, `TextLayoutSuite`, `ToolHistorySuite`, `RenderSuite`, `InputPredictorSuite`, `DebugSuite`:
@@ -974,10 +955,10 @@ syntax; format them by hand. Preserve tests for capability contracts when editin
 
 ## Wrappers, releases and CI
 
-The Unix `atc` wrapper installs to `~/.local/bin` and caches JARs in `~/.atc/jars`.
-`ATC_INSTALL_DIR` and `ATC_CACHE_DIR` override those locations. Release downloads require
-SHA-256 digests for both JARs. Metadata uses jq when available and a field-order-dependent
-fallback otherwise. A cache marker records `release-id|tag`; verified updates replace it
+The Unix `atc` wrapper installs to `~/.local/bin` and keeps the JARs and the startup cache
+in `~/.atc/jars`; `ATC_INSTALL_DIR` and `ATC_CACHE_DIR` override those locations. Release
+downloads require SHA-256 digests for both JARs. Metadata uses jq when available and a
+field-order-dependent fallback otherwise. A cache marker records `release-id|tag`; verified updates replace it
 with the downloaded artifacts. Uninstall validates the cache root and removes ATC-owned
 artifacts while retaining configuration and unrelated files.
 Directory-name prefixes alone do not prove ownership: uninstall retains directories such

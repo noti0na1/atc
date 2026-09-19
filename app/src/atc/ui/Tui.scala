@@ -46,7 +46,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   private val historyPath = Tui.secureHistoryFile(historyFile)
   // No grapheme-cluster probing: it sends a DECRQM query to the terminal and
   // waits for a reply, which swallows early input on ptys that don't answer.
-  val terminal: Terminal = Tui.openTerminal(nonInteractive)
+  private val terminal: Terminal = Tui.openTerminal(nonInteractive)
   private val out = terminal.writer()
   Debug.log(
     s"terminal: ${terminal.getClass.getSimpleName} type=${terminal.getType} size=${terminal.getSize} encoding=${terminal.encoding()}"
@@ -106,7 +106,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** The line `readLine` returns when the user presses Shift-Tab on an empty
     * prompt: the app treats it as the `/mode` command (cycle the sandbox mode). */
-  val CycleModeLine: String = "/mode"
+  private val CycleModeLine: String = "/mode"
   if !plain then
     val cycle: Widget = () =>
       if reader.getBuffer.length == 0 then
@@ -183,7 +183,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     else Option(terminal.getNumericCapability(InfoCmp.Capability.max_colors)).map(_.intValue).getOrElse(0)
   private def styled(s: String, codes: Int*): String = if colors <= 0 then s else Ansi.styled(s, codes*)
   // Continuation lines: a bar under the prompt, padded (`%P`) to the prompt's
-  // width. ASCII on purpose: JLine turns box glyphs in a prompt into DEC
+  // width. ASCII, because JLine turns box glyphs in a prompt into DEC
   // line-drawing escapes.
   reader.setVariable(LineReader.SECONDARY_PROMPT_PATTERN, "%P " + styled("| ", Cyan, Bold))
   private val Indent = "  "
@@ -192,7 +192,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   // ── state ─────────────────────────────────────────────────────────
 
   /** Set while an agent turn is running; Ctrl-C sets it. */
-  val interrupted = AtomicBoolean(false)
+  private val interrupted = AtomicBoolean(false)
   @volatile private var busy = false
   @volatile private var closed = false
   /** The last two characters written: tells whether we are at a line start / after a blank line. */
@@ -342,7 +342,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       refreshStatus()
     keys.start()
   /** End the turn: close open blocks, say what the turn cost (`stats`) and
-    * leave one blank line before the next prompt — the agent is idle again. */
+    * leave one blank line before the next prompt. */
   def endTurn(stats: Option[Tui.TurnStats] = None): Unit =
     frame:
       stopSpinner()
@@ -461,24 +461,21 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Update only changed rows in a live preview. Clearing the rest of the screen would
     * also erase the footer, forcing unrelated output to be repainted on every token. */
   private final class LiveRegion:
-    private var drawn = 0
     private var tailBefore = tail
+    /** The rows this region owns, and what is on them. */
     private var previousLines = List.empty[String]
     def redraw(lines: List[String], force: Boolean = false): Unit =
       if !force && lines == previousLines then return
-      if drawn == 0 then { ensureNewline(); tailBefore = tail }
+      if previousLines.isEmpty then { ensureNewline(); tailBefore = tail }
       write(Tui.replaceRows(previousLines, lines, force))
       tail = lines.lastOption match
         case Some("") => "\n\n"
         case Some(last) => last.takeRight(1) + "\n"
         case None => tailBefore
-      drawn = lines.length
       previousLines = lines
     def clear(): Unit = redraw(Nil)
     /** Keep what is drawn as ordinary output. */
-    def freeze(): Unit =
-      drawn = 0
-      previousLines = Nil
+    def freeze(): Unit = previousLines = Nil
 
   // ── plain lines (banner, slash commands, notices) ─────────────────
 
@@ -651,11 +648,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     if !plain && statusLine.isEmpty then spin(Indent, "running")
 
   /** Live output of the agent's `println` (see `HostOutput.print`). Classified
-    * content — where the two texts differ — is marked so the user knows the
-    * model cannot see it. `printed` keeps the RAW text (it is matched verbatim
-    * against the REPL capture in `toolEnd`); only the display is sanitized. */
+    * content, where the two texts differ, is marked so the user knows the model
+    * cannot see it. `printed` keeps the raw text, which `toolEnd` matches
+    * verbatim against the REPL capture; only the display is sanitized. */
   def agentPrint(agentText: String, userText: String): Unit = frame:
-    // Text beyond the REPL capture limit cannot be subtracted from its result.
+    // Text beyond the REPL capture limit cannot be subtracted from its result. The
+    // limit is in bytes and this length in chars, so the budget is approximate.
     val room = ReplSession.MaxOutputBytes - printed.length
     if room > 0 then printed.append(agentText.take(room))
     openOutputSection()
@@ -773,10 +771,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   private def section(label: String, code: Int): String =
     Indent + styled(s"${g.tee} $label", code) + "\n"
 
-  /** Close the tool block: what the REPL produced *besides* the agent's own
-    * prints (those were shown live) — diagnostics, echoed values, exceptions —
-    * then the verdict. Long bodies are cut in the middle (unless expanded) so
-    * both the first diagnostics and the tail stay visible. */
+  /** Close the tool block: what the REPL produced besides the agent's own
+    * prints (those were shown live), meaning diagnostics, echoed values and
+    * exceptions, then the verdict. Long bodies are cut in the middle (unless
+    * expanded) so both the first diagnostics and the tail stay visible. */
   def toolEnd(r: ExecutionResult, millis: Long): Unit = frame:
     setOperation(if r.success then "tool completed" else "tool failed")
     val live = liveCaptured.toString + (if liveTruncated then "\n[retained live output limit reached]" else "")
@@ -789,7 +787,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     val lines = Tui.withoutPrinted(body, printed.toString).linesIterator.toList
     if lines.nonEmpty then
       // REPL output holds the agent's raw prints and compiler diagnostics: sanitize
-      // before display (the subtraction above happens in raw space, on purpose).
+      // before display. The subtraction above runs on the raw text, before this.
       val cleaned = lines.map(Ansi.sanitize(_)).flatMap(line =>
         if plain then List(line) else TextLayout.wrap(line, width - GutterWidth - 1)
       )
@@ -806,7 +804,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         write(section("error", Red))
         kept.foreach(l => write(gutter(Red) + l + "\n"))
     fileChanges.foreach(change =>
-      write(Indent + styled(s"${Ansi.sanitize(change.path)}: ${change.summary}", Cyan) + "\n")
+      write(Indent + styled(Ansi.sanitize(s"${change.path}: ${change.summary}"), Cyan) + "\n")
     )
     val verdict =
       if r.success then styled(s"${g.end} ok ${millis} ms", Green) else styled(s"${g.end} failed ${millis} ms", Red)
@@ -831,7 +829,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   // ── spinner ───────────────────────────────────────────────────────
 
-  /** An animated "the agent is working" line — `prefix ⠋ text… 12 s` — that
+  /** An animated "the agent is working" line (`prefix ⠋ text… 12 s`) that
     * lives on the current (empty) line until something else is written. */
   private final class Spinner(prefix: String, text: String) extends Thread("atc-spinner"):
     setDaemon(true)
@@ -929,8 +927,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           pauseLock.notifyAll()
 
     /** Swallow the rest of an escape sequence (arrow keys, function keys): its
-      * bytes are all ≥ 32 and would otherwise land in the type-ahead as
-      * `[A`-style garbage. */
+      * bytes are all ≥ 32 and would otherwise land in the type-ahead as stray
+      * `[A` text. */
     private def loop(): Unit =
       val in: NonBlockingReader = terminal.reader()
       var skipLf = false // a CR already added the newline of a CRLF
@@ -1236,7 +1234,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     // (and, on Tab/→, inserted into the input buffer), like every other model output.
     suggestion = if plain then None else text.map(t => Ansi.sanitize(t.trim)).filter(_.nonEmpty)
     if !plain then
-      // Redraws under the reader's lock, and only while it is actually reading.
+      // Redraws under the reader's lock, and only while it is reading.
       try reader.callWidget(LineReader.REDISPLAY)
       catch case _: IllegalStateException => ()
 
@@ -1451,8 +1449,8 @@ object Tui:
       var nl = 0
       while i >= 0 && nl < n do { if sb.charAt(i) == '\n' then nl += 1; i -= 1 }
       // `nl < n` means we ran off the front before finding n newlines (return all);
-      // otherwise `i` sits just before the n-th newline from the end — even at -1
-      // when that newline is the very first char, so `i + 2` is the correct start.
+      // otherwise `i` sits just before the n-th newline from the end, which is -1
+      // when that newline is the first character, so `i + 2` is the correct start.
       val text = if nl < n then sb.toString else sb.substring(i + 2)
       text.split("\n", -1).toList match
         case init :+ "" => init
@@ -1500,7 +1498,7 @@ object Tui:
     }
 
   /** The REPL output without the agent's own prints. The host wrote those to
-    * the very same stream, so they occur verbatim and contiguously: remove the
+    * the same stream, so they occur verbatim and contiguously: remove the
     * first occurrence of `printed`. If it cannot be found (truncated capture),
     * the body is shown as is. */
   def withoutPrinted(body: String, printed: String): String =

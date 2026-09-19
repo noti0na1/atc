@@ -511,6 +511,22 @@ class HostSuite extends munit.FunSuite:
     val walkedC = ClassifiedImpl.get(access(".").walkClassified()).map(rel)
     assert(walkedC.contains("secrets/sub/deep.txt"))
 
+  test("a denial names the operation the agent called, and reads as a phrase in front of the path"):
+    val calls: List[(String, () => Any)] = List(
+      "read" -> (() => read("secrets/key.txt")),
+      "cat" -> (() => cat("secrets/key.txt")),
+      "cat" -> (() => cat("secrets/key.txt", 1, 2)),
+      "readRange" -> (() => readRange("secrets/key.txt", 1, 2)),
+      "grep" -> (() => grep("secrets/key.txt", "s")),
+      "forEachLine" -> (() => access("secrets/key.txt").forEachLine((_, _) => ())),
+    )
+    for (operation, call) <- calls do
+      val message = intercept[SecurityException](call()).getMessage.nn
+      assert(message.contains(s"'$operation' would reveal its content"), message)
+    val outside = intercept[SecurityException](read("/etc/hosts")).getMessage.nn
+    assert(outside.startsWith("Access denied: read '"), outside)
+    assert(outside.contains("' is not permitted (current permission: none)"), outside)
+
   test("classified writes"):
     intercept[SecurityException](write("secrets/new.txt", "x"))
     writeClassified("secrets/new.txt", classify("x"))
