@@ -740,8 +740,10 @@ ends or `ModelRequest.recheck()` finds the request's cancellation predicate true
 threads that make it true (the SIGINT handler through `Agent.interrupt`, the key thread
 through `Agent.submit`) call `recheck()`, which wakes the caller, closes the stream and
 interrupts the worker, so nothing is polled during a call. A provider that does not stop prevents
-another worker from accumulating behind it and produces a clear retry message. Stream
-sinks reject late output after the request ends. Provider clients are closed at application
+another worker from accumulating behind it and produces a clear retry message. Request
+completion or failure releases the active slot before returning to the caller, even if
+the worker is still exiting. Cancellation retains the slot while the operation is running.
+Stream sinks reject late output after the request ends. Provider clients are closed at application
 shutdown. Interrupted calls may not supply a final token-usage report.
 
 Cancellation tracks the underlying OkHttp call through a request-scoped event listener.

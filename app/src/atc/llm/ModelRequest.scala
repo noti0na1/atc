@@ -52,7 +52,7 @@ private[atc] final class ModelRequest:
     try
       if cancelled() then throw CancelledException()
       val result = done.get()
-      // The worker has finished, so release the request and the response it holds.
+      // The operation has finished, even if its worker has not exited yet.
       synchronized { if pending eq active then pending = null }
       if cancelled() then throw CancelledException()
       result.asInstanceOf[A]
@@ -60,7 +60,9 @@ private[atc] final class ModelRequest:
       case e: ExecutionException =>
         e.getCause.nn match
           case c: CancelledException => stopped(c)
-          case c => throw c
+          case c =>
+            synchronized { if pending eq active then pending = null }
+            throw c
       case e: CancelledException => stopped(e)
       case _: InterruptedException =>
         stop(active)

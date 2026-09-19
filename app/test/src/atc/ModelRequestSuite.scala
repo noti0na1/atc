@@ -74,3 +74,72 @@ class ModelRequestSuite extends munit.FunSuite:
     for i <- 1 to 20 do assertEquals(request.run(() => false)(i), i)
     val failure = intercept[IllegalArgumentException](request.run(() => false)(throw IllegalArgumentException("bad")))
     assertEquals(failure.getMessage, "bad")
+    assertEquals(request.run(() => false)("recovered"), "recovered")
+
+  test("a failed operation releases its slot before the worker thread finishes exiting"):
+    val request = ModelRequest()
+    val exiting = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val worker = AtomicReference[Thread]()
+    val failure = LinkageError("provider failure")
+    try
+      val observed =
+        try
+          request.run(() => false) {
+            val thread = Thread.currentThread()
+            worker.set(thread)
+            // Keep the failed worker alive after it publishes the failure to its caller.
+            thread.setUncaughtExceptionHandler((_, _) =>
+              exiting.countDown()
+              release.await(5, TimeUnit.SECONDS)
+              ()
+            )
+            throw failure
+          }
+          fail("Expected the provider failure")
+        catch case error: LinkageError => error
+      assert(observed eq failure)
+      assert(exiting.await(5, TimeUnit.SECONDS))
+      assertEquals(request.run(() => false)("recovered"), "recovered")
+    finally
+      release.countDown()
+      Option(worker.get()).foreach(_.join(1000))
+
+  test("cancellation keeps the slot occupied until an uncooperative operation ends"):
+    val request = ModelRequest()
+    val entered = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val cancelled = AtomicBoolean(false)
+    val error = AtomicReference[Throwable]()
+    val worker = AtomicReference[Thread]()
+    val caller = Thread(() =>
+      try
+        request.run(() => cancelled.get()) {
+          worker.set(Thread.currentThread())
+          entered.countDown()
+          while release.getCount > 0 do
+            try release.await()
+            catch case _: InterruptedException => ()
+          "late response"
+        }
+      catch case failure: Throwable => error.set(failure)
+      ()
+    )
+    caller.setDaemon(true)
+    caller.start()
+    try
+      assert(entered.await(5, TimeUnit.SECONDS))
+      cancelled.set(true)
+      request.recheck()
+      caller.join(1500)
+      assert(!caller.isAlive)
+      assert(error.get().isInstanceOf[CancelledException])
+      val blocked = intercept[IllegalStateException](request.run(() => false)("too soon"))
+      assert(blocked.getMessage.nn.contains("still stopping"))
+      release.countDown()
+      worker.get().nn.join(1500)
+      assertEquals(request.run(() => false)("recovered"), "recovered")
+    finally
+      release.countDown()
+      caller.join(1000)
+      Option(worker.get()).foreach(_.join(1000))
