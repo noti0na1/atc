@@ -60,6 +60,11 @@ object ToolOutput:
     * prompt never changes with a grant, so this note is how it learns whether a
     * grant was for this call or for the session. */
   def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)]): String =
+    renderForModel(r, maxChars, decisions, "")
+
+  /** As above, plus a hint keyed on the snippet itself (`codeHint`) after the cut, since it
+    * concerns what the snippet wrote rather than what it printed. */
+  def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)], code: String): String =
     val base = r.render
     val hinted = hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
     val bounded =
@@ -68,7 +73,37 @@ object ToolOutput:
         val head = hinted.take(maxChars * 2 / 3)
         val tail = hinted.takeRight(maxChars / 3)
         s"$head\n... [${hinted.length - head.length - tail.length} characters omitted] ...\n$tail"
-    if decisions.isEmpty then bounded else s"$bounded\n${decisionNote(decisions)}"
+    val withCodeHint = codeHint(code).fold(bounded)(h => s"$bounded\nHint: $h")
+    if decisions.isEmpty then withCodeHint else s"$withCodeHint\n${decisionNote(decisions)}"
+
+  /** A hint about the snippet's text: `\"` inside a plain triple-quoted literal stays a
+    * backslash and a quote, so a Python docstring written as `\"\"\"` lands in the file
+    * with backslashes (the models did this in most live runs). */
+  def codeHint(code: String): Option[String] =
+    Option.when(hasEscapedQuoteInRawLiteral(code))(
+      "inside a plain triple-quoted literal `\\\"` is two characters, a backslash and a quote, so the text " +
+        "you wrote contains backslashes; to put `\"\"\"` in text, prefix the literal with `s` (`s\"\"\"...\"\"\"` " +
+        "processes escapes; write `$` as `$$` in it) or use an ordinary `\"...\"` string."
+    )
+
+  /** Whether `code` has a triple-quoted literal without an interpolator prefix whose body
+    * contains `\"`. A prefix (`s`, `f`, `raw`) is an identifier character right before the
+    * opening quotes; `raw` keeps the backslash too, but is a deliberate choice. */
+  private[atc] def hasEscapedQuoteInRawLiteral(code: String): Boolean =
+    val quotes = "\"\"\""
+    var i = 0
+    var found = false
+    while !found && i < code.length do
+      if code.startsWith(quotes, i) then
+        val prefixed = i > 0 && (Character.isLetterOrDigit(code.charAt(i - 1)) || code.charAt(i - 1) == '_')
+        val end = code.indexOf(quotes, i + 3)
+        val stop = if end < 0 then code.length else end
+        if !prefixed && !code.substring(i - (if prefixed then 1 else 0), i).startsWith("raw") &&
+          code.substring(i + 3, stop).contains("\\\"")
+        then found = true
+        i = if end < 0 then code.length else end + 3
+      else i += 1
+    found
 
   /** What the user decided at the prompts of one call, for the model:
     * `[permissions: the user allowed commands npm * once (this call only; a

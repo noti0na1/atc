@@ -15,6 +15,17 @@ class ToolOutputSuite extends munit.FunSuite:
     assert(bounded.contains("characters omitted"), bounded)
     assert(bounded.endsWith("T"), bounded)
 
+  test("a `\\\"` inside a plain triple-quoted literal earns a hint; interpolated and ordinary strings do not"):
+    val plain = "replaceExact(\"a.py\", \"x\", \"\"\"def f():\n    \\\"\\\"\\\"doc\\\"\\\"\\\"\n\"\"\")"
+    assert(ToolOutput.hasEscapedQuoteInRawLiteral(plain))
+    val out = ToolOutput.renderForModel(ExecutionResult(true, "a.py: updated"), 10000, Nil, plain)
+    assert(out.startsWith("a.py: updated\nHint: inside a plain triple-quoted literal"), out)
+    val interpolated = plain.replace("\"x\", \"\"\"", "\"x\", s\"\"\"")
+    assert(interpolated != plain && !ToolOutput.hasEscapedQuoteInRawLiteral(interpolated), interpolated)
+    assert(!ToolOutput.hasEscapedQuoteInRawLiteral("write(\"a.py\", \"\\\"\\\"\\\"doc\\\"\\\"\\\"\")"))
+    assert(!ToolOutput.hasEscapedQuoteInRawLiteral("val q = \"\"\"plain text\"\"\""))
+    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, "ok"), 10000, Nil, "val q = \"\"\"a\"\"\""), "ok")
+
   test("adds diagnostic guidance and leaves permission decisions uncut"):
     val result = ExecutionResult(false, "Cannot run program \"gti\": No such file or directory")
     val guided = ToolOutput.renderForModel(result, 10000)

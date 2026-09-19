@@ -112,7 +112,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   val agent: Agent = Agent(
     config,
-    AgentEnvironment.current(cwd),
+    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty),
     policy,
     tui,
     initialModel,

@@ -118,6 +118,17 @@ App → Agent → ChatModel.complete → CompletionPolicy
 `ContextManager` owns token estimates and history fitting. `ScalaToolRunner` decodes
 `run_scala`, invokes the REPL, records execution time and renders results through
 `ToolOutput`. `AgentMessages` contains notices exchanged with the model and UI.
+`ToolOutput` appends one hint per result: most are keyed on the output (a safe-mode
+rejection, a missing capability, a command that could not start), one on the snippet
+itself (`ToolOutput.codeHint`): a `\"` inside a plain triple-quoted literal, which stays a
+backslash and a quote, so a Python docstring written as `\"\"\"` lands in the file with
+backslashes; live runs of several models did this and spent rounds repairing it. The system
+prompt says the same in its editing rule, and its Environment block tells the model whether
+a user is present (`AgentEnvironment.userPresent`, false for a `-p` run, where `ask`
+returns `None` and permission prompts fail unless `--approve-all` was given), so the model
+decides for itself instead of asking nobody. The REPL echo of a `ProcessResult` shows the
+exit code and the size of each stream only (`toString` in `Interface.scala`), because a
+snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
 traits. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.

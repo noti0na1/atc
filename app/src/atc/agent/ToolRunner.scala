@@ -36,7 +36,7 @@ private[atc] final class ScalaToolRunner(
       ui.toolStart(code)
       val current = repl // may start the sandbox first: not part of the snippet's time
       val (result, decisions) = ScalaToolRunner.evaluate(current, policy, ui, code)
-      val rendered = ToolOutput.renderForModel(result, maxOutputChars, decisions)
+      val rendered = ToolOutput.renderForModel(result, maxOutputChars, decisions, code)
       val needsReplan = decisions.exists {
         case (Decision.Revise(_), _) => true
         case _ => false

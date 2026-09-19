@@ -214,8 +214,12 @@ case class TaskNotes(goal: String = "", constraints: List[String] = Nil,
 @assumeSafe
 object TaskNotes
 
+/** What a finished command produced. The REPL echo of a `val` holding one shows the
+ *  exit code and the size of each stream only, so `println` the stream(s) you need. */
 @assumeSafe
-case class ProcessResult(exitCode: Int, stdout: String, stderr: String)
+case class ProcessResult(exitCode: Int, stdout: String, stderr: String):
+  override def toString: String =
+    s"ProcessResult(exitCode = $exitCode, stdout = ${stdout.length} chars, stderr = ${stderr.length} chars)"
 @assumeSafe
 object ProcessResult
 
