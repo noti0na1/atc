@@ -45,6 +45,23 @@ class AgentCoreLoopSuite extends munit.FunSuite:
   private def toolResults(agent: Agent): List[Msg.ToolResults] =
     agent.history.collect { case results: Msg.ToolResults => results }
 
+  test("repeated incomplete streams stop after two continuation attempts without running tools"):
+    val unfinished = ScriptedModel.Comp(Completion(
+      "",
+      List(ToolCall("partial", toolSpec.name, "{}")),
+      None,
+      TokenUsage(1, 1),
+      "stream_incomplete",
+      CompletionStop.Incomplete,
+    ))
+    val (model, ui, agent) = setup(Seq.fill(5)(unfinished))
+    val runner = RecordingRunner()
+    assertEquals(agent.runTurn(runner, "go", () => false), TurnOutcome.Failed)
+    assertEquals(model.i, 3)
+    assertEquals(runner.calls.toList, Nil)
+    assert(ui.warnings.exists(_.contains("after 2 continuation attempts")))
+    assert(agent.history.collect { case message: Msg.Assistant => message }.forall(_.toolCalls.isEmpty))
+
   test("compaction reserves the model's full output allowance before sending a request"):
     val (_, _, agent) = setup(Nil, Config(compactKeepRatio = 0))
     val model = ScriptedModel("capped", Nil, contextWindow = Some(10000), maxOutputTokens = Some(8000))

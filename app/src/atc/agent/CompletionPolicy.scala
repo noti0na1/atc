@@ -16,7 +16,8 @@ private[atc] object CompletionPolicy:
   final case class Decision(message: Msg.Assistant, next: Next, warnings: List[String])
 
   def apply(raw: Completion): Decision =
-    val resumable = raw.stop == CompletionStop.Resume || raw.stop == CompletionStop.Truncated
+    val resumable = raw.stop == CompletionStop.Resume || raw.stop == CompletionStop.Truncated ||
+      raw.stop == CompletionStop.Incomplete
     val blocked = raw.stop == CompletionStop.Blocked
     // Calls accompanying a partial or blocked response may themselves be
     // partial or contradict the provider's safety decision.
@@ -24,24 +25,28 @@ private[atc] object CompletionPolicy:
     val emptyTerminal = raw.text.trim.isEmpty && raw.toolCalls.isEmpty && !resumable
 
     val text =
-      if unsafeCalls && raw.text.trim.isEmpty then
+      if raw.stop == CompletionStop.Incomplete && raw.text.trim.isEmpty then AgentMessages.incompleteStream
+      else if unsafeCalls && raw.text.trim.isEmpty then
         AgentMessages.unsafeResponse(raw.stopReason)
       else if emptyTerminal then AgentMessages.emptyResponse(raw.stopReason)
       else raw.text
     val calls = if unsafeCalls then Nil else raw.toolCalls
-    val native = if unsafeCalls || emptyTerminal then None else raw.native
+    val native = if unsafeCalls || emptyTerminal || raw.stop == CompletionStop.Incomplete then None else raw.native
 
     val next = raw.stop match
       case CompletionStop.Blocked => Next.Blocked
       case _ if calls.nonEmpty => Next.RunTools(calls)
       case CompletionStop.Resume => Next.Resume(needsContinuation = false)
-      case CompletionStop.Truncated => Next.Resume(needsContinuation = true)
+      case CompletionStop.Truncated | CompletionStop.Incomplete => Next.Resume(needsContinuation = true)
       case CompletionStop.Complete => Next.Finish
 
     val warnings =
       Option.when(unsafeCalls)(
         AgentMessages.unsafeToolCallsWarning(raw.toolCalls.size, raw.stopReason)
       ).toList ++
+        Option.when(raw.stop == CompletionStop.Incomplete)(
+          AgentMessages.incompleteStreamWarning
+        ) ++
         Option.when(blocked)(AgentMessages.blockedResponseWarning(raw.stopReason)) ++
         Option.when(raw.stop == CompletionStop.Complete && raw.toolCalls.isEmpty && raw.text.trim.isEmpty)(
           AgentMessages.emptyResponseWarning

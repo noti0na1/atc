@@ -99,25 +99,23 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     ModelRequest.awaitStream(() => stream.close()) {
       stream.subscribe { chunk =>
         if cancelled() then throw CancelledException()
-        feed.accumulate(chunk)
-        chunk.choices().asScala.headOption.foreach { ch =>
-          val delta = ch.delta()
-          delta.content().toScala.foreach(sink.text)
-          // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
-          // OpenRouter `reasoning`; a gateway echoing both must not double the stream.
-          List("reasoning_content", "reasoning").iterator
-            .flatMap(key => Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala))
-            .nextOption().foreach(sink.thinking)
-        }
+        if feed.accumulate(chunk) then
+          chunk.choices().asScala.headOption.foreach { ch =>
+            val delta = ch.delta()
+            // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
+            // OpenRouter `reasoning`. A mixed chunk ends reasoning before starting the answer.
+            List("reasoning_content", "reasoning").iterator
+              .flatMap(key => Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala))
+              .filter(_.nonEmpty)
+              .nextOption().foreach(sink.thinking)
+            delta.content().toScala.filter(_.nonEmpty).foreach(sink.text)
+          }
       }.onCompleteFuture()
     }
-    extract(feed.completion())
+    feed.partialCompletion.getOrElse(extract(feed.completion()))
 
   private def usageOf(c: ChatCompletion): TokenUsage =
-    c.usage().toScala.map { u =>
-      val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
-      TokenUsage(u.promptTokens(), u.completionTokens(), cached)
-    }.getOrElse(TokenUsage())
+    OpenAIChatModel.usageOf(c.usage().toScala)
 
   def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
     def request(effort: Option[ReasoningEffort]): ChatCompletion =
@@ -134,6 +132,11 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     Reply(c.choices().asScala.headOption.flatMap(_.message().content().toScala).getOrElse(""), usageOf(c))
 
 object OpenAIChatModel:
+  private def usageOf(usage: Option[CompletionUsage]): TokenUsage = usage.map { u =>
+    val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
+    TokenUsage(u.promptTokens(), u.completionTokens(), cached)
+  }.getOrElse(TokenUsage())
+
   /** Feeds a stream's chunks to the SDK accumulator, which accepts the finish chunk and then
     * at most one choice-less chunk, and only if it carries the usage the completion lacks.
     * Providers differ in where the usage goes: OpenAI sends it in a choice-less chunk after
@@ -149,13 +152,23 @@ object OpenAIChatModel:
     private var finished = false
     private var usage: Option[CompletionUsage] = None
     private var last: Option[ChatCompletionChunk] = None
+    private val text = StringBuilder()
 
-    def accumulate(chunk: ChatCompletionChunk): Unit =
+    /** Whether this chunk contributes a delta; ignored chunks must not reach the display either. */
+    def accumulate(chunk: ChatCompletionChunk): Boolean =
       chunk.usage().toScala.foreach(u => usage = Some(u))
       if !chunk.choices().isEmpty && !finished then
         last = Some(chunk)
+        chunk.choices().asScala.headOption.flatMap(_.delta().content().toScala).foreach(text.append(_))
         acc.accumulate(chunk.toBuilder().usage(java.util.Optional.empty[CompletionUsage]()).build())
         finished = chunk.choices().asScala.exists(_.finishReason().isPresent)
+        true
+      else false
+
+    /** A clean EOF or [DONE] without finish_reason does not confirm that any tool call is complete. */
+    def partialCompletion: Option[Completion] = Option.when(!finished) {
+      Completion(text.toString, Nil, None, usageOf(usage), "stream_incomplete", CompletionStop.Incomplete)
+    }
 
     /** The accumulated completion, with the usage if any was reported; throws when the
       * stream ended before its finish chunk. */

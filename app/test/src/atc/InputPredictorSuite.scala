@@ -14,12 +14,14 @@ class InputPredictorSuite extends munit.FunSuite:
   final class OneShot(answer: String, gate: CountDownLatch = CountDownLatch(0)) extends ChatModel:
     val alias = "one"; val modelId = "one"; val providerKey = "one"; val webSearch = false
     val prompts: ListBuffer[String] = ListBuffer()
+    val systems: ListBuffer[Option[String]] = ListBuffer()
     val entered = CountDownLatch(1)
     def complete(s: SystemPrompt, h: List[Msg], t: List[ToolSpec], sink: StreamSink, c: () => Boolean): Completion =
       Completion("", Nil, None, TokenUsage(), "end_turn", CompletionStop.Complete)
     val thinkingAsked: ListBuffer[Boolean] = ListBuffer()
     def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
       prompts += prompt
+      systems += system
       thinkingAsked += thinking
       entered.countDown()
       gate.await(5, TimeUnit.SECONDS)
@@ -66,6 +68,35 @@ class InputPredictorSuite extends munit.FunSuite:
     assertEquals(InputPredictor.clean("x" * 500).map(_.length), Some(InputPredictor.MaxChars))
     assertEquals(InputPredictor.clean("fix\u0007 \u202eabc\t now"), Some("fix abc now"))
     assertEquals(InputPredictor.clean("run\tthe\ttests"), Some("run the tests"))
+
+  test("no-prediction markers are hidden after whitespace, quotes and role prefixes are removed"):
+    for marker <- List(InputPredictor.NoPrediction, "[no_prediction]") do
+      for reply <- List(marker, s"\n $marker \n", s"\"$marker\"", s"User: `$marker`", s"$marker\nNo follow-up needed.")
+      do
+        assertEquals(InputPredictor.clean(reply), None, reply)
+    assertEquals(InputPredictor.clean("Explain [NO_PREDICTION]"), Some("Explain [NO_PREDICTION]"))
+
+  test("a no-prediction response clears the suggestion and still records usage"):
+    val model = OneShot(InputPredictor.NoPrediction)
+    val shown = ListBuffer[Option[String]]()
+    val published = CountDownLatch(2) // clear at start, then publish the completed prediction
+    val tokens = AtomicInteger()
+    val predictor = InputPredictor(
+      () => model,
+      () => List(user("fix it"), agent("Done.")),
+      guess =>
+        shown.synchronized(shown += guess)
+        published.countDown()
+      ,
+      usage => { tokens.addAndGet((usage.input + usage.output).toInt); () },
+    )
+    try
+      predictor.start()
+      assert(published.await(5, TimeUnit.SECONDS))
+      assertEquals(shown.synchronized(shown.toList), List(None, None))
+      assertEquals(tokens.get(), 10)
+      assert(model.systems.head.exists(_.contains(InputPredictor.NoPrediction)))
+    finally predictor.invalidate()
 
   test("predict asks the agent model with the transcript, reports the cost, and skips an empty conversation"):
     val m = OneShot("Now add a test for it\n")

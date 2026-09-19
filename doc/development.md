@@ -706,6 +706,14 @@ and extra choice chunks after completion. Auxiliary chat calls also apply config
 `maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
 checks requests and usage accounting against a local HTTP server.
 
+Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
+The adapter returns an `Incomplete` completion containing received answer text and usage,
+with no tool calls or native replay payload. The agent warns and requests a continuation;
+after two such attempts in a turn it stops with a failed outcome. Normal provider output
+limits retain their separate continuation budget. Reasoning is never used as answer text.
+When a chunk contains both reasoning and answer text, reasoning is displayed first so the
+answer stays together. Empty deltas and deltas after the finish chunk do not reach the UI.
+
 ## Conversation context and agent loop
 
 The system prompt contains environment data, workflow instructions, capability rules, the
@@ -939,7 +947,9 @@ explicitly configured to auto-approve requests.
 ### Sessions, inspection and compaction
 
 After each interactive turn the model predicts the next request and the prompt shows it as
-ghost text (Tab or → accepts it; `"predictInput": false` disables it). A summary line
+ghost text (Tab or → accepts it; `"predictInput": false` disables it). When there is no useful
+suggestion, the model is asked to return `[NO_PREDICTION]`. This marker and empty responses
+are suppressed before reaching the prompt. A summary line
 shows the turn's cost and how full the context window is. Turn summaries distinguish
 finished, interrupted, blocked, failed and limit-reached responses; in scripted `-p` runs,
 finished responses exit with `0`, interruptions with `130`, and other stopped outcomes with

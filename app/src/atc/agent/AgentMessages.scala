@@ -11,6 +11,11 @@ object AgentMessages:
   val interruptedWarning: String = "interrupted"
   val emptyResponseWarning: String = "The model returned no response."
   val resumingStatus: String = "resuming"
+  val incompleteStreamWarning: String =
+    "The provider stream ended before its finish marker. Any partial tool calls were discarded."
+  val incompleteStream: String = "[provider stream ended before any answer text; tool calls were not executed]"
+  def incompleteStreamExhausted(modelAlias: String, attempts: Int): String =
+    s"$modelAlias kept ending its stream early after $attempts continuation attempts. Try again or switch models."
   val toolBudgetLoopWarning: String =
     "model kept requesting tools after exhausting the tool budget; stopping this turn"
   val cancelledBeforeExecution: String = "Cancelled by the user before execution."

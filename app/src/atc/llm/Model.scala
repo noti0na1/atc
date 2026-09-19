@@ -48,11 +48,14 @@ case class TokenUsage(input: Long = 0, output: Long = 0, cacheRead: Long = 0):
   * agent to run. [[Resume]] means the provider paused after server-side work;
   * [[Truncated]] means an output limit cut the response and a user-role bridge
   * is needed before resuming. Calls on resumable or blocked responses are not
-  * safe to execute. */
+  * safe to execute. [[Incomplete]] means the stream ended without a finish marker;
+  * its partial text may be continued, but it cannot authorize tool execution. */
 enum CompletionStop:
   case Complete
   case Resume
   case Truncated
+  /** The stream ended without confirming completion; received text can be continued, but tool calls cannot run. */
+  case Incomplete
   case Blocked
 
 object CompletionStop:
