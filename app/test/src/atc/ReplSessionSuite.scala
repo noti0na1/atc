@@ -256,9 +256,11 @@ class ReplSessionSuite extends munit.FunSuite:
 
   test("execution timeout is reported and the session stays usable"):
     assertOk(quick.run("val beforeTimeout = 40"))
-    val r = quick.run("while true do ()")
+    val r = quick.run("""println("before the limit"); while true do ()""")
     assert(!r.success)
     assert(r.error.exists(_.contains("timed out")), r.error.toString)
+    // What it printed before the limit reaches the model, without the stop signal's trace.
+    assertEquals(r.output, "before the limit")
     assert(assertOk(quick.run("1 + 1")).output.contains("2"))
     assertOk(quick.run("val afterTimeout = beforeTimeout + 2"))
     assert(assertOk(quick.run("afterTimeout")).output.contains("42"))
