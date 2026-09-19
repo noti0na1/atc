@@ -568,6 +568,34 @@ trait Interface:
                          headers: Map[String, String],
                          secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
+  // ── Concurrency ─────────────────────────────────────────────────
+
+  /** Run the tasks at the same time and return their results in the tasks'
+   *  order once all of them have finished. Use it for independent slow steps:
+   *  several commands, requests or file scans at once.
+   *
+   *  The tasks run on separate threads, so they MUST be independent: never let
+   *  two tasks write, append to or delete the same file or directory, run
+   *  commands that touch the same files, or read what another task is writing.
+   *  Never share mutable data between tasks or with the enclosing code (no
+   *  outer `var`, `Array`, `StringBuilder` or other mutable object written from
+   *  a task): each task returns its result, and you combine the returned list
+   *  afterwards. Anything else is a race with unpredictable outcomes.
+   *
+   *  A task can do what its captured capabilities allow (the same rules as
+   *  anywhere else; inside `Classified.map` only read-only captures compile,
+   *  as usual). At most eight tasks run at once. When a task throws,
+   *  `parallel` waits for the rest and rethrows the first failure in task
+   *  order; catch inside the task to keep the other results. Prompts raised by
+   *  several tasks are put to the user one at a time. `C` (what the tasks
+   *  capture) is inferred; never write it.
+   *
+   *  {{{
+   *  val outputs = parallel(List("git status", "git diff --stat").map(c => () => execOutput(c)))
+   *  val mixed = parallel(List(() => httpGet(url), () => execOutput("ls")))
+   *  }}} */
+  def parallel[A, C^](tasks: Seq[() ->{C} A]): List[A]
+
   // ── Output ──────────────────────────────────────────────────────
 
   /** Print to the conversation. This is how you report results. A `Classified`

@@ -4,6 +4,10 @@ import atc.lib.*
 import atc.perms.{GitIgnore, GlobMatcher, Policy, ScopeId}
 
 import java.nio.file.Path
+import java.util.concurrent.{ExecutionException, Executors, ThreadFactory}
+import java.util.concurrent.atomic.AtomicInteger
+import scala.util.{Failure, Success, Try}
+import scala.util.control.NonFatal
 
 /** Implements the agent API and manages shared capabilities and permission scopes. */
 final class Host(
@@ -38,7 +42,36 @@ final class Host(
 
   def network(using IOCap): Network = NetworkImpl(ScopeId.Base)
 
+  /** Run the tasks on up to [[Host.MaxParallel]] daemon threads of a pool that lives for
+    * this call only (a nested `parallel` gets its own, so it cannot starve the outer one).
+    * Every task runs to its end before the call returns, even when one of them failed: a
+    * task's effects (a command, a request) must not outlive the snippet. A fatal throwable
+    * from any task wins over ordinary failures, since the REPL's stop signal (`ThreadDeath`,
+    * raised in instrumented agent code on every thread once the session is interrupted)
+    * must reach the evaluation thread. Interrupting the caller while it waits interrupts
+    * the workers (for blocking host calls) and is reported as an interruption. */
+  def parallel[A, C <: caps.CapSet](tasks: Seq[() => A]): List[A] =
+    if tasks.isEmpty then return Nil
+    val pool = Executors.newFixedThreadPool(math.min(tasks.size, Host.MaxParallel), Host.parallelThreads)
+    try
+      val futures = tasks.toList.map(task => pool.submit[A](() => task()))
+      val outcomes = futures.map(future => Try(future.get()))
+      val failures = outcomes.collect {
+        case Failure(wrapped: ExecutionException) => wrapped.getCause.nn
+        case Failure(other) => other
+      }
+      failures.find(!NonFatal(_)).orElse(failures.headOption).foreach(throw _)
+      outcomes.collect { case Success(value) => value }
+    finally pool.shutdownNow()
+
 object Host:
+  /** How many tasks `parallel` runs at once. */
+  val MaxParallel: Int = 8
+  private val parallelThreadCount = AtomicInteger()
+  private val parallelThreads: ThreadFactory = runnable =>
+    val thread = Thread(runnable, s"atc-parallel-${parallelThreadCount.incrementAndGet()}")
+    thread.setDaemon(true)
+    thread
   /** `cat(path)` shows at most this many lines, then says how to see the rest. */
   val CatMaxLines: Int = 400
   /** `cat` cuts a line beyond this many characters (minified files) with a marker. */

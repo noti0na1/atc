@@ -61,7 +61,7 @@ final class TestEnv(
   val processEvents: ListBuffer[String] = ListBuffer()
 
   val output: HostOutput = new HostOutput:
-    def print(agentText: String, userText: String): Unit =
+    def print(agentText: String, userText: String): Unit = agentOut.synchronized:
       agentOut.append(agentText)
       session.foreach(_.printStream.print(agentText))
       userOut.append(if agentText == userText then userText else s"<$userText>")

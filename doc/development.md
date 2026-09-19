@@ -532,6 +532,26 @@ pipeline exit code. `readUntil` consumes through a regex match; on timeout it th
 keeps output unread. `waitFor` returns `None` on timeout. Process termination includes
 pipeline stages and descendants. Shutdown kills registered processes.
 
+`parallel(tasks)` runs the tasks (a `Seq[() => A]`) on a pool of at most eight daemon
+threads created for that call (a nested call gets its own pool, so it cannot starve the
+outer one). The results come back in task order once every task has ended; a failed task
+does not cut the others short, since their effects must not outlive the snippet, and the
+first failure in task order is rethrown, with a fatal throwable winning over ordinary exceptions so that the
+REPL's stop signal reaches the evaluation thread. The stop flag is checked by every
+instrumented REPL class on every thread, so an interrupt or timeout stops busy tasks too;
+for tasks blocked in a host call, `parallel` interrupts its workers when the calling thread
+is interrupted and reports the interruption. Nothing else in the host changes for it, but the
+signature matters: the tasks are declared `Seq[() ->{C} A]` with a capture-set parameter
+`C^`, because a function inside a `Seq[() => A]` is *boxed*, and a boxed closure's captures
+are charged only when it is unboxed, which happens inside the trusted host. With the plain
+signature, `classify(s).map(s => parallel(List(() => exec("echo", List(s)))))` compiled and
+ran the command on the secret (`CapabilitySuite` keeps that snippet as a regression test);
+the capture-set parameter makes the checker charge the caller with `C`, so `Classified.map`
+keeps its rules and pure tasks still compile inside it. The TUI's output methods are already synchronized, `Policy` and the
+process registry lock their mutable state, and `Tui.popupBlock` takes a lock so that
+questions and permission prompts from several tasks reach the terminal one at a time (a
+waiter interrupted meanwhile never shows its pop-up).
+
 HTTP operations validate the scheme, host and headers (secret header names too; only their values stay inside the classified boundary), do not follow redirects, and cap
 response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400 or higher;
 `httpRequest` returns raw status and body. Classified request handling retains subsequent
