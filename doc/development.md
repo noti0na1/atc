@@ -491,6 +491,20 @@ case-insensitive and normalize numeric IP literals. Deny rules are checked at us
 when a requested pattern was previously approved. Each permission decision is included in
 the tool result so the model knows whether approval was temporary, session-wide or denied.
 
+### Request blocks from the agent's side
+
+`requestFiles` works in every mode: the file system it lends the block is exactly as
+capable as the one the caller already holds, so read-only callbacks remain read-only, and
+command execution, which needs `FileSystem^`, still compiles only in local and full mode.
+`requestExec` widens only `Exec^`; a command that also needs a file permission that is not
+configured needs a nested `requestFiles` block. The result of a request tells the agent
+what the user decided, so "once" needs another request next time while "for the session"
+does not. In the pop-up, **Tell the agent what to change** sends the typed text back
+instead of a grant: the original request receives nothing, the remaining tool calls of that
+batch are skipped, and the text survives result truncation. Without a menu-capable terminal
+the answer is `y`, `s` or `n`, or free text; only an exact approval grants ("yes, except
+the deployment command" is feedback, not approval).
+
 ## Host operations
 
 Text helpers use UTF-8. `TextFiles` accepts LF, CRLF and CR and preserves the first newline
@@ -571,12 +585,58 @@ for its case-class default, which is why `ConfigLayer.defines` participates in t
 
 Key bindings are separate from settings. Lookup uses project files, global files, then the
 live process environment; blank values are skipped. New key files use owner-only POSIX
-permissions where supported. Windows uses inherited ACLs.
+permissions (`0600`, with a warning at load when group or others can read the file).
+Windows uses the directory's inherited NTFS ACL, which ATC does not rewrite or audit; keep
+the file under the private profile and check it with `icacls` on a shared machine.
 
 `Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings. The
 `ObjectText` scanner operates only after JSON validation. Duplicate keys update the final
 occurrence, matching ujson's lookup. Writes use a temporary file and atomic replacement
 where supported, preserving POSIX permissions and resolving a configured symlink target.
+
+### File rules and command patterns
+
+Each file rule has a `path` pattern and may specify `access` (`none|read|write`),
+`classified`, and `locked`. Patterns follow gitignore-style conventions. A pattern without
+`/` matches a path **component** anywhere (`.env`, `*.pem`, `node_modules`). A relative
+pattern containing `/` is resolved against the working directory, or the project directory
+in a project configuration, and may contain `*`, `**`, `?`, or `[…]`. Absolute paths and
+paths beginning with `~/` remain absolute; `.` denotes the working directory itself. A
+rule applies to the matched path **and its entire subtree**. Effective access is the
+**minimum** granted by all matching rules, and no match means no access. A path is
+classified or locked if any matching rule says so, and a deeper rule can only make access
+more restrictive.
+
+**Classified** content is only observable as `Classified[String]`, and a classified
+directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
+`walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
+is refused, and so is `writeClassified` to a non-classified path. **Locked** means no prompt
+can widen the rule. `"respectGitignore": true` (the default) additionally hides what git
+ignores from listings; that is visibility, not permission, so an ignored file is still
+readable by name.
+
+`commands` contains patterns matched against the complete command line. `*` is a wildcard,
+and a pattern without `*` matches by word prefix (`"git status"` allows `git status --short`
+but not `git statusx`). A command also needs read access to the directory it runs in. A
+pre-approved command runs with the user's privileges and is *not* subject to the file rules.
+`hosts` are glob patterns on host names; only `http`/`https` URLs are accepted and redirects
+are not followed. `denyCommands` and `denyHosts` use the same syntax: a deny rule overrides
+every allow rule, including a session grant, an open `request*` scope, and `--approve-all`.
+The template's shell denials are bare names: `"bash"` blocks both `bash` and `bash -c ...`,
+but not an explicit `/bin/bash`, a wrapper, or a renamed interpreter; no finite deny list
+can classify every program that might execute code.
+
+**Windows.** Use `/` separators in configuration on every platform: in JSON,
+`"C:/Users/alice/project"` (a native backslash starts a JSON escape, so the equivalent form
+needs doubled backslashes). The file API accepts native Windows input too, but renders
+Windows separators as `/`. Command availability is platform-specific: `./mill`, `ls`, `cat`
+and `bash` are not normal Windows commands; use an installed executable or the project's
+`mill.bat`. `exec` does not send its command line through a shell; an authorized
+`.cmd`/`.bat` launcher inherently uses the Windows command processor with strict argument
+checks, and built-ins such as `dir` or PowerShell cmdlets need an explicitly permitted
+shell, which grants that shell broad authority. Quote every argument containing spaces; a
+backslash remains a path separator, not a space escape. External programs choose their own
+newline and encoding conventions (commonly CRLF, sometimes BOM-marked UTF-16 on Windows).
 
 ## Models and providers
 
@@ -828,6 +888,58 @@ terminal cell widths. History is owner-only on POSIX systems and rejects final s
 Non-interactive runs use a dumb UTF-8 terminal and do not prompt for permission unless
 explicitly configured to auto-approve requests.
 
+### Sessions, inspection and compaction
+
+After each interactive turn the model predicts the next request and the prompt shows it as
+ghost text (Tab or → accepts it; `"predictInput": false` disables it). A summary line
+shows the turn's cost and how full the context window is. Turn summaries distinguish
+finished, interrupted, blocked, failed and limit-reached responses; in scripted `-p` runs,
+finished responses exit with `0`, interruptions with `130`, and other stopped outcomes with
+`1`, and a finished response does not certify that every tool succeeded. Bracketed pastes
+retain their newlines until Enter. The REPL starts on the first Scala call, so ordinary
+conversation needs no compiler startup.
+
+| Command | Purpose |
+|---|---|
+| `/output` | List recent tool results |
+| `/output last` or `/output 3` | Inspect retained output and file-change previews (bounded text diffs) |
+| `/output 3 201` | Continue from a line in a long result |
+| `/task` | Show the task goal, constraints, completed work and remaining steps |
+| `/perms revoke` | Select a session grant to revoke (`/perms revoke 2`, `/perms revoke all`) |
+| `/save [file]` | Save to a new file (never overwrites); default location `.atc/sessions/` |
+| `/resume [file]` | Resume the last session for this directory, or restore a saved file |
+| `/ps`, `/kill [id|all]` | The processes the agent started with `spawn` |
+| `/reset` | Fresh REPL, killing those processes |
+
+Interactive terminal sessions save automatically on `/quit`, `exit` or Ctrl-D, under
+`~/.atc/sessions/` per working directory (owner-only on POSIX); the next launch in the
+same directory offers **Resume last session**. Exiting an empty session preserves the
+previous save, scripted `-p` runs do not update it, and resuming does not replay tool calls
+or restore permission grants. Output retention excludes classified terminal text.
+
+For agent code, `replaceExact(path, expected, replacement)` checks that literal text occurs
+exactly once before writing, `readRange(path, from, to)` and
+`search(dir, pattern, glob, SearchOptions(...))` provide bounded reads and searches
+(`SearchResult.limited` says whether a search was exhaustive), and `TaskNotes` keep task
+state that survives context trimming.
+
+`/compact [focus]` asks the current model for a summary of the older part of the
+conversation and replaces that part with it (`/compact preserve debugging findings` guides
+it). Task notes, pending notices, permissions and the live REPL remain; summaries are part
+of saved sessions and the usage is listed under **context compaction** in `/cost`; Ctrl-C
+cancels without replacing history. Manual and automatic compaction keep the most recent
+complete exchanges verbatim, as many as fit within `compactKeepRatio` of the context window
+(default `0.2`; `0` summarizes everything; valid values `0` through `1`), and summarize the
+rest, keeping tool calls with their exchange. When everything fits there is nothing to
+compact and no request is made; a summary that is not smaller is discarded; a transcript
+larger than the model's input allowance is refused with a suggestion to use a larger model
+or `/clear`. Automatic compaction runs just before a request when its estimated size
+reaches `autoCompactThreshold` times the model's `contextWindow` (default `0.8`; `0`
+disables), before the first request of a turn and between tool rounds, never after a final
+answer, and never without a configured window. A failed or not-smaller attempt is reported
+and not retried until the conversation has grown by a tenth of the window. Compaction is
+lossy; essential details belong in task notes or files.
+
 ## Testing and conventions
 
 Tests use munit under `app/test/src/atc`. Extend the suite responsible for the behavior:
@@ -879,6 +991,15 @@ GitHub metadata uses a two-second connection timeout and a five-second total tim
 lookup failures are ignored. Stable `vMAJOR.MINOR.PATCH` tags are compared numerically,
 and a release without both JAR assets is not offered. Unknown and development markers
 are left for explicit `atc update` handling.
+
+The same startup check then offers the wrapper itself (`offer_self_update`): at most once a
+day (a `self-check` stamp beside the jars, touched before the check so a failed download or a
+declined offer also waits a day), only when the running script is the installed one at
+`INSTALL_PATH` (a checkout's copy is never overwritten), it stages GitHub's `atc` beside the
+script with `stage_latest_self` (the download and `bash -n` check `atc self update` uses,
+with the release check's timeouts), compares it with `cmp`, and on `y` moves it into place
+with `install_staged_self`; bash keeps reading the running script from its old inode, so
+the new wrapper takes effect at the next start.
 
 The prompt defaults to No. Approval passes the already-fetched metadata to
 `download_latest_release`, so the updater installs the release the user approved without

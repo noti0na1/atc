@@ -107,50 +107,27 @@ chmod +x atc
 ```
 
 From then on `atc` runs ATC in the current directory, `atc update` fetches a newer release,
-`atc self update` refreshes the wrapper, `atc self uninstall` removes both, and `atc help`
-lists the wrapper's commands. The jars live in `~/.atc/jars/`, beside the global config.
-(To run from a checkout instead, see [doc/development.md](doc/development.md#building-and-running).)
-
-On an interactive launch, the wrapper checks GitHub for a newer release and asks:
-
-```text
-ATC v0.2.0 is available (installed: v0.1.3). Upgrade now? [y/N]
-```
-
-Enter `y` to download and verify that release, then start it with your original arguments.
-Enter `n` or press Enter to start the installed version. The check times out after five
-seconds; an unavailable release service does not block startup. Scripted `-p` runs,
-help/version and initialization commands, and local `atc dev` builds skip the check.
-Set `ATC_CHECK_UPDATES=0` to disable it. This updates the JARs; `atc self update` updates
-the wrapper itself.
+`atc self uninstall` removes everything, and `atc help` lists the wrapper's commands. When
+a newer release or wrapper is available, an interactive start offers to upgrade first;
+answer `y`, or press Enter to skip. (To run from a checkout instead, see
+[doc/development.md](doc/development.md#building-and-running).)
 
 <details>
 <summary><strong>Windows (best-effort support)</strong></summary>
 
-Windows support is best effort and does not yet have the Unix wrapper's installer or
-automatic updater. From the [latest release](https://github.com/noti0na1/atc/releases/latest),
-download these four assets from the same release into one directory:
-
-- `atc.ps1`
-- `atc.cmd`
-- `atc.jar`
-- `atc-lib.jar`
-
-With JDK 17+ on `PATH`, run ATC from your project directory:
+Windows support is best effort and has no installer or automatic updater yet. From the
+[latest release](https://github.com/noti0na1/atc/releases/latest), download `atc.ps1`,
+`atc.cmd`, `atc.jar` and `atc-lib.jar` into one directory. With JDK 17+ on `PATH`, run ATC
+from your project directory:
 
 ```powershell
 Set-Location 'C:\path\to\your-project'
-& 'C:\path\to\atc\atc.ps1' --version
 & 'C:\path\to\atc\atc.ps1'
 ```
 
-You can optionally add the ATC directory to your user `PATH`; then invoke it as `atc.ps1`.
-Prefer the PowerShell launcher because it preserves Unicode and complex arguments.
-`atc.cmd` is a compatibility entrypoint for Command Prompt and simple interactive use.
-
-To update, replace all four files with assets from the same newer release. If your
-PowerShell execution policy blocks local scripts, use `atc.cmd` or follow your
-organization's approved policy rather than weakening a managed policy for ATC.
+Prefer the PowerShell launcher, which preserves Unicode and complex arguments; `atc.cmd` is
+a compatibility entrypoint for Command Prompt. To update, replace all four files with the
+assets of a newer release.
 
 </details>
 
@@ -161,57 +138,33 @@ cd ~/my-project
 atc
 ```
 
-If the first run finds no `~/.atc/config.json`, it offers to create a starter file containing
-providers and machine-wide permissions. It also creates `~/.atc/keys.properties`, then
-exits so you can add the keys you use:
+If the first run finds no `~/.atc/config.json`, it offers to create a starter file with the
+providers and machine-wide permissions, plus `~/.atc/keys.properties` for your API keys,
+then exits so you can fill them in:
 
 ```properties
 ANTHROPIC_API_KEY=sk-ant-…
 OPENAI_API_KEY=
 ```
 
-Here `~/.atc` means `$HOME/.atc`; on Windows it is normally
-`%USERPROFILE%\.atc` (`$HOME\.atc` in PowerShell). On POSIX file systems ATC creates a new
-`keys.properties` with mode `0600` and warns if group or other users can read it. On Windows
-the file inherits the directory's NTFS ACL; ATC does not currently rewrite or audit that ACL,
-so keep it under your private profile and check it with `icacls` on a shared machine.
+(On Windows, `~/.atc` is `%USERPROFILE%\.atc`.) You can also export the variables in your
+shell, or use a local model that needs no key.
 
-Alternatively, export the variables in your shell or use a local model that needs no key.
-If you decline, nothing is written; ATC uses the built-in starter config for that run
-(`atc --init-global` writes it later, on demand).
-
-**2. Start it again.** With the keys in place, run `atc` again. If no configuration grants
-access to the current directory, ATC offers to create a starter `.atc/config.json` there
-and applies it immediately, so the project is open when the prompt appears:
-
-```bash
-atc
-```
-
-That file gives the agent access to the project. Without it—or a matching rule in
-`~/.atc/config.json`—nothing is readable, and the agent must request access to every file.
-Review the file to choose which **models** to use and which **files, commands, and hosts**
-the agent may access without asking. The defaults work as written, but you should review
-the permissions; see [Configuration](#configuration). For scripts, `atc --init` writes the
-same file without prompting.
+**2. Start it again.** If no configuration grants access to the current directory, ATC
+offers to create a starter `.atc/config.json` there and applies it immediately. That file
+is what opens the project to the agent: its own tree, the read-only git commands and a set
+of documentation hosts. Review it to choose which **models** to use and which **files,
+commands and hosts** the agent may use without asking; see [Configuration](#configuration).
 
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
-Scala in the sandbox, and asks before touching anything the config does not grant.
-`/help` lists the slash commands (`/model`, `/mode`, `/cost`, `/new`, …), Ctrl-C
-interrupts a turn, Ctrl-D quits, and `-p "<request>"` runs a single turn from the shell
-instead:
+Scala in the sandbox, and asks before touching anything the config does not grant. `/help`
+lists the slash commands, Ctrl-C interrupts a turn, Ctrl-D quits. The most useful flags are
+`-m <alias>` to pick a model, `--mode readonly|local|full` to pick a sandbox mode, and
+`-p "<request>"` to run one turn from the shell and exit:
 
 ```bash
 atc -p 'summarise the README'
 ```
-
-Useful flags: `-m <alias>` pick a model, `--mode readonly|local|full` pick a sandbox mode,
-`-p "<request>"` run one turn and exit, `-c <file>` add a config file, `-C <dir>` set the
-working directory, `--approve-all` auto-approve permission requests (scripted use only);
-the Unix wrapper uses `atc run --help` to list them (`atc --help` describes that wrapper),
-while the direct Windows launcher uses `atc --help`.
-Because `-p` has no human to answer a pop-up, an unconfigured permission request fails
-without reading stdin; use `--approve-all` only in a trusted setup.
 
 ## Capabilities and ambient authority
 
@@ -387,26 +340,18 @@ own packages) before compilation, and a class loader that shows agent code only 
 ## Modes: read-only, local, full
 
 A **mode** decides which capabilities the preamble puts in scope, and therefore what the
-agent can express at all, before the permission policy even comes up.
+agent can express at all, before the permission policy even comes up:
 
-| Mode | In scope | The agent can |
-|---|---|---|
-| **read-only** | `io: IOCap` (read-only), `fs: FileSystem^{io.rd}`, `user: UserIO^` | read files, report, ask |
-| **local** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `user: UserIO^` | also write files and run commands |
-| **full** | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}`, `net: Network^{io}`, `user: UserIO^` | also reach the network |
+| Mode | The agent can |
+|---|---|
+| **read-only** | read files, report, ask |
+| **local** | also write files and run commands |
+| **full** | also reach the network |
 
-In read-only mode, a write is an `update` call through a read-only view (the error shown
-[above](#example)); in local mode the preamble deliberately omits the `Network`
-capability, so a network call has no given to resolve. The derivation API is internal: full
-`io` records the common capture root but is not an agent-callable factory for `net`. Either
-way a mode can withdraw an effect while leaving the conversation intact. The agent can
-therefore always explain what it *would* have done; the system prompt directs it to do so
-instead of trying to bypass the mode. The policy enforces the same three levels again at run
-time, so the type check is not the only safeguard.
-
-Switch modes with `/mode` (cycles read-only → local → full), **Shift-Tab** on an empty
-prompt, `/mode <name>`, the `--mode` flag, or `"mode"` in the config. Switching starts a
-fresh REPL (the agent's `val`s and `def`s are gone) but keeps the conversation. The
+A mode withdraws an effect while leaving the conversation intact, so the agent can always
+explain what it *would* have done. The policy enforces the same three levels again at run
+time. Switch with `/mode` (cycles the three), **Shift-Tab** on an empty prompt, `--mode`,
+or `"mode"` in the config; switching starts a fresh REPL but keeps the conversation. The
 default is full.
 
 ## Asking for more
@@ -418,97 +363,47 @@ exception names the block that can ask for it, and the agent wraps only that ope
 requestFiles(".cache/atc", Access.Write, reason = "cache build outputs") {
   write(".cache/atc/out.txt", "done")     // a wider FileSystem^ is the given inside the block
 }
-requestFiles("~/notes", Access.Read, "look up the design notes") {
-  read("~/notes/design.md")
-}
 requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-Permission prompts offer these choices:
-
-- **Allow once:** grant the request for the current block.
-- **Allow for this session:** retain the grant for later calls.
-- **Deny this request:** reject the submitted request.
-- **Tell the agent what to change:** send instructions so the agent can revise its request.
-
-For example, if a request includes five commands, choose **Tell the agent what to change**
-and enter “Request only the first four commands; skip the deployment command.” The original
-request receives no grant. The agent receives your instructions, skips remaining tool calls
-from that batch, and can request the narrower permissions. Typed feedback is preserved even
-when other tool output is truncated. Rejecting a batch does not create a permanent deny
-rule for each item. Cancelling the instruction entry returns to the permission choices.
-
-Without a menu-capable terminal, enter `y`, `s` or `n`, or type instructions directly.
-Only exact approval answers grant permission: “yes, except the deployment command” is
-feedback that the agent must address, not approval for the entire request.
-
-The result tells the agent what you decided, so “this time” requires another request next
-time, while “for the session” does not. `locked` rules cannot be widened at all, and a
-`denyCommands`/`denyHosts` match is refused without a pop-up. The granted capability cannot
-leave the block (capture checking), and the host closes the permission scope when the block
-exits. `requestFiles` works in every mode: the file system it lends the block is exactly as
-capable as the one you already hold. Read-only callbacks therefore remain read-only;
-command execution, which requires `FileSystem^`, still compiles only in local/full mode.
-Likewise, `requestExec` widens only `Exec^`: use a nested `requestFiles` block as well when
-the command needs a filesystem permission that is not already configured.
+The pop-up offers **Allow once**, **Allow for this session**, **Deny this request**, and
+**Tell the agent what to change**. The last one sends your instructions back instead of a
+grant: "request only the first four commands; skip the deployment" makes the agent revise
+its request. The granted capability cannot leave the block, and the host closes the scope
+when the block exits. `locked` rules cannot be widened at all, and a `denyCommands` or
+`denyHosts` match is refused without a pop-up.
 
 ## Configuration
 
-Config files are JSON, and there are three layers:
-
-In the paths below, `~` is the user home; on Windows that is normally
-`%USERPROFILE%` (`$HOME` in PowerShell).
+Config files are JSON, in three layers:
 
 | | layer | file | may |
 |---|---|---|---|
 | 1 | global | `~/.atc/config.json` | grant anything |
-| 2 | project | the nearest `.atc/config.json` at or above the working directory | open **its own project** (files inside its folder, commands, hosts); narrow anything |
+| 2 | project | the nearest `.atc/config.json` at or above the working directory | open **its own project**; narrow anything |
 | 3 | explicit | `-c <file>` | grant anything |
 
-**`~/.atc/config.json` is the global policy layer.** No policy is
-compiled into the program: anything not granted by a configuration is denied. The
-[starting config](app/resources/atc/config-template.json) written on the first run protects
-without granting access: it lists the providers, classifies common credential paths, puts
-`.atc` itself out of reach, refuses `rm -rf *`, `sudo`, and common bare Unix/Windows shell
-names, and grants no files, commands, or host. Edit it to grant things machine-wide.
-
-**A directory is workable because a config says so.** The
-[project config](app/resources/atc/project-template.json) that `atc --init` writes (or the
-first run in a directory offers) opens the project: its own tree (with `./.git` read-only
-and `./secrets` classified), the read-only git commands, and a set of documentation hosts.
-ATC finds the project layer by walking up from the working directory, much as Git finds
-`.git`, and resolves its relative patterns against the directory containing `.atc`.
-
-A project's configuration resides inside the repository, so it may open *that repository*
-but nothing beyond it, and it cannot exceed limits set by the machine's owner. Its file
-rules grant access only within the project directory and can only narrow access elsewhere.
-The `commands` and `hosts` lists are combined across all layers. Deny lists restrict these
-grants regardless of their source. `denyCommands` and `denyHosts` accumulate,
-and no layer can remove an entry. Scalar limits (`mode`, `safeMode`, `maxToolCalls`,
-`executionTimeoutMs`, …) can only become stricter. Non-permission settings (`model`,
-`providers`, `instructions`, …) merge in layer order, with later values taking precedence.
-Repository configuration is therefore authoritative for models, endpoints, commands, hosts,
-and instructions inside that checkout; review it before running ATC on code you do not trust.
-Permissions that *you* grant in a pop-up are not narrowed by a layer because the human is
-the final authority. The exact rules are in
+No policy is compiled into the program: anything not granted by a configuration is denied.
+The [starting global config](app/resources/atc/config-template.json) protects without
+granting: it lists the providers, classifies common credential paths, puts `.atc` out of
+reach, refuses `rm -rf *`, `sudo` and bare shells, and grants no files, commands or hosts.
+The [project config](app/resources/atc/project-template.json) opens a project, and because
+it lives inside the repository it can open *that repository* but nothing beyond it, and
+cannot exceed the limits the global config sets. Review a project's `.atc/config.json`
+before running ATC on code you do not trust: it chooses the models, commands and hosts.
+The exact merge rules are in
 [doc/development.md](doc/development.md#configuration-semantics).
 
 ```json
 {
   "model": "claude",
-  "classifiedModel": "local",
   "providers": {
     "anthropic": {
       "api": "anthropic",
       "models": {
-        "claude": { "name": "claude-opus-5",   "webSearch": true, "reasoning": "high", "contextWindow": "200k" },
-        "sonnet": { "name": "claude-sonnet-5", "webSearch": true, "contextWindow": "200k" }
+        "claude": { "name": "claude-opus-5", "webSearch": true, "reasoning": "high", "contextWindow": "200k" }
       }
-    },
-    "openai": {
-      "api": "openai-responses",
-      "models": { "gpt": { "name": "gpt-5", "webSearch": true, "contextWindow": "400k" } }
     },
     "ollama": {
       "api": "openai",
@@ -519,110 +414,41 @@ the final authority. The exact rules are in
   },
   "files": [
     { "path": ".",        "access": "write" },
-    { "path": "./build",  "access": "read" },
     { "path": "secrets",  "classified": true },
     { "path": "~/notes",  "access": "read", "locked": true }
   ],
   "commands": ["git status", "git diff*", "git log*"],
-  "denyCommands": [
-    "git push*", "rm -rf *", "sudo",
-    "sh", "bash", "dash", "ash", "ksh", "ksh93", "mksh", "zsh", "csh", "tcsh", "fish",
-    "cmd", "powershell", "pwsh", "wsl", "git-bash"
-  ],
+  "denyCommands": ["git push*", "rm -rf *", "sudo", "sh", "bash", "zsh", "powershell"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
-  "denyHosts": ["*.internal"],
-  "safeMode": true,
-  "respectGitignore": true,
   "mode": "full",
-  "executionTimeoutMs": 300000,
-  "maxToolCalls": 200,
-  "predictInput": true,
-  "autoCompactThreshold": 0.8,
-  "compactKeepRatio": 0.2,
   "instructions": "Use 2-space indentation."
 }
 ```
 
-### Providers and models
+**Providers and models.** A provider defines one endpoint (`api`, an optional `url`, a key)
+and its `models`; a model is an alias with a provider-specific `name` and its own settings
+(`contextWindow`, `reasoning`, `webSearch`, `maxTokens`, …). The `api` values are
+`anthropic`, `openai-responses` (also DeepSeek and other services through `url`), `openai`
+(Chat Completions: Ollama, vLLM, OpenRouter, …) and `echo` (keyless, for smoke tests). Name
+a model by its alias, or `provider/alias` when two providers share one; `/models` lists
+them. Set `contextWindow` to the model's real window so the conversation is compacted and
+trimmed to fit. **Keys** never go in a config: a provider names a variable
+(`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (project,
+then `~/.atc`, then the environment). A second role, `classifiedModel`, may answer
+`classifiedChat` inside classified computations; set it only for a model that runs in an
+isolated environment with no outward connection.
 
-A **provider** defines one endpoint (`api`, an optional `url`, and a key) and its `models`.
-A **model** is an alias with a provider-specific `name` (which defaults to the alias) and
-its own settings (`contextWindow`, `reasoning`, `webSearch`, `thinking`, `maxTokens`, …).
-An optional `displayName` replaces the backend model id in the startup banner and
-`/models`; it is presentation-only, so model selection still uses the alias or
-`provider/alias` and provider requests still use `name`.
-The supported `api` values are `anthropic` (Messages API), `openai-responses` (Responses
-API, including DeepSeek and other services through `url`), `openai` (Chat Completions for
-OpenAI-compatible servers such as Ollama, vLLM, or OpenRouter), and `echo` (a keyless
-provider for smoke tests). Name a model
-by its alias (`"model": "claude"`, `/model sonnet`), or by `provider/alias` when two
-providers share one; `/models` lists them. Set `contextWindow` to the model's real window:
-when the conversation no longer fits, the oldest exchanges are dropped and you are warned.
-
-**Keys** are never stored directly in a configuration. A provider names a variable
-(`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (first the
-project file, then `~/.atc/keys.properties`, and finally the environment). The starter
-policy hides `.atc` from the agent, and `/config` shows only
-which variables are bound, never values.
-
-**Two roles**: `model` is the untrusted agent; talking to it through `chat(String)` is an
-effect requiring `UserIO^`. `classifiedModel` is assumed to run in an isolated classified
-environment with no outward connection or side effects. Its capability-free
-`classifiedChat(String)` may therefore run inside `Classified.map`, while
-`classifiedChat(Classified[String])` keeps the response classified. Leave the role unset
-if that deployment assumption does not hold. `/model` and `/classifiedmodel` switch the
-roles for the session. Per-adapter settings are listed in
-[doc/development.md](doc/development.md#models-and-providers).
-
-### File permissions, commands and hosts
-
-Each file rule has a `path` pattern and may specify `access` (`none|read|write`),
-`classified`, and `locked`. Patterns follow gitignore-style conventions. A pattern without
-`/` matches a path **component** anywhere (`.env`, `*.pem`, `node_modules`). A relative
-pattern containing `/` is resolved against the working directory—or the project directory
-in a project configuration—and may contain `*`, `**`, `?`, or `[…]`. Absolute paths and
-paths beginning with `~/` remain absolute; `.` denotes the working directory itself. A
-rule applies to the matched path **and its entire subtree**. Effective access is the
-**minimum** granted by all matching rules, and no match means no access. A path is
-classified or locked if any matching rule says so, and a deeper rule can only make access
-more restrictive.
-
-Use `/` separators in configuration on every platform. In Windows JSON, write
-`"C:/Users/alice/project"`; a native backslash starts a JSON escape, so the equivalent form
-would need doubled backslashes (`"C:\\Users\\alice\\project"`). The file API accepts native
-Windows input too, but renders Windows separators as `/`. Pass returned strings directly
-back to the API; as with any filename, quote/escape them before generating Scala source.
-
-**Classified** content is only observable as `Classified[String]`, and a classified
-directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
-`walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
-is refused, and so is `writeClassified` to a non-classified path. **Locked** means no prompt
-can widen the rule. `"respectGitignore": true` (the default) additionally hides what git
-ignores from listings; that is visibility, not permission, so an ignored file is still
-readable by name.
-
-`commands` contains patterns matched against the complete command line. `*` is a wildcard,
-and a pattern without `*` matches by word prefix (`"git status"` allows `git status --short`
-but not `git statusx`). A command also needs read access to the directory it runs in. A pre-approved
-command runs with your privileges and is *not* subject to the file rules, so pre-approve the
-subcommands you mean rather than `git *`. `hosts` are glob patterns on host names; only
-`http`/`https` URLs are accepted and redirects are not followed. `denyCommands` and
-`denyHosts` use the same syntax: **a deny rule overrides every allow rule**, including a
-session grant, an open `request*` scope, and `--approve-all`.
-
-The starting shell denials are bare names: `"bash"` blocks both `bash` and `bash -c ...`,
-but not an explicit `/bin/bash`, a wrapper, or a renamed interpreter. Keep command grants
-narrow; no finite deny list can classify every program that might execute code.
-
-Command availability is platform-specific: `./mill`, `ls`, `cat`, and `bash` are not normal
-Windows commands; use an installed executable or the project's `mill.bat`. `exec` does not
-send its command-line grammar through a general shell; an authorized `.cmd`/`.bat` launcher
-inherently uses the Windows command processor with strict argument checks. Built-ins such as
-`dir` and PowerShell cmdlets still need an explicitly permitted shell—which grants that shell broad authority. Prefer ATC's
-file helpers instead. Quote every argument containing spaces. On Windows a backslash remains
-a path separator, not a space escape. External programs also choose their own newline and
-encoding conventions (commonly CRLF, and sometimes BOM-marked UTF-16 on Windows), so scripts
-should not assume Unix `\n` output from a native command.
+**Files, commands and hosts.** A file rule has a gitignore-style `path` pattern (a bare
+name matches that component anywhere; a pattern with `/` is relative to the working
+directory, or the project directory in a project config), an `access` of `none`, `read`
+or `write`, and optionally `classified` and `locked`. A rule covers the matched path's
+whole subtree, effective access is the minimum over matching rules, and no match means no
+access. `commands` are patterns over the whole command line (`"git status"` also allows
+`git status --short`; `*` is a wildcard); `hosts` are glob patterns on host names.
+`denyCommands` and `denyHosts` use the same syntax and override every allow, session grant
+and open scope. A pre-approved command runs with your privileges and outside the file
+rules, so pre-approve the subcommands you mean rather than `git *`. Pattern details and
+Windows notes are in [doc/development.md](doc/development.md#file-rules-and-command-patterns).
 
 ## Security model
 
@@ -654,9 +480,8 @@ and the configured permissions.
   The capability system governs the Scala the model writes, not what a program you
   permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
   runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
-  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill app.test` or
-  `mill.bat app.test`); never grant
-  an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
+  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill app.test`); never
+  grant an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
 - **Allowed hosts can receive data.** The agent may send any non-classified data available
   to it to an allowed host. The type system prevents this only for `classified` content.
   Allow only hosts you trust to receive project data.
@@ -688,101 +513,25 @@ and the configured permissions.
 
 ## The terminal
 
-Questions with listed choices also offer **Write a different answer**. Multiple-choice
-questions offer **Add an answer or instructions**, which combines your text with the
-selected answers. You can use these options to correct an assumption or describe a choice
-the agent did not list. In a plain terminal, type your answer directly.
+`/help` lists the slash commands: `/model` and `/mode` switch for the session, `/cost`
+shows tokens and how full the context is, `/run <code>` runs Scala in the sandbox yourself,
+`/output` inspects recent tool results, `/perms` lists and revokes session grants,
+`/compact [focus]` summarizes the older conversation, `/clear` forgets it, `/new` starts
+over (REPL, conversation and grants), `/quit` leaves. Ctrl-C interrupts the turn, Ctrl-O
+shows folded output and reasoning in full, Shift-Tab cycles the mode, Tab completes
+commands and accepts the ghost-text suggestion for your next request, and Shift+Enter (or
+`\` then Enter) adds a line.
 
-`/help` lists the slash commands: `/model`, `/classifiedmodel`, `/models`, `/mode`, `/perms`,
-`/config`, `/todos`, `/cost` (tokens, and how full the context is), `/interface` (the API the
-model sees), `/run <code>` (run Scala in the sandbox yourself, with the agent's API and
-permissions; the agent is told what you ran), `/ps` and `/kill [id|all]` (the processes the agent
-started with `spawn`), `/reset` (fresh REPL, kills them too), `/clear` (forget the
-conversation), `/compact [focus]` (summarize the conversation, keeping the REPL), `/new`
-(both, plus the session's grants), `/quit`. Ctrl-C interrupts the turn, Ctrl-O shows folded
-output and reasoning in full, Shift-Tab cycles the mode, Ctrl-D quits, Tab completes commands. Shift+Enter (or `\` then Enter) adds a line to the input; a
-`/run` also continues while a bracket is open; Enter on an empty line submits.
+While the agent is working, type a correction and press Enter: it reaches the agent before
+its next tool call. Questions from the agent always offer **Write a different answer** so
+you can correct an assumption it did not list. Interactive sessions are saved when you
+leave, and the next start in the same directory offers to resume. Long conversations are
+compacted automatically before they outgrow the model's context window.
 
-After each turn, the model predicts your next request and displays it as ghost text (Tab or
-→ accepts it; `"predictInput": false` disables it). A summary line shows the turn's cost
-and how much of the context window is in use. Output is kept short: long program output
-folds into a live tail, long results are cut in the middle, reasoning collapses to one line. Without a
-terminal (`-p` in a pipe) everything is printed plainly; `ATC_ASCII=1` draws with ASCII
-glyphs. The content shapes, keys and multi-line rules are in
+Without a terminal (`-p` in a pipe) everything is printed plainly and nothing asks: an
+unconfigured permission request fails rather than waits for input, so use `--approve-all`
+only in a trusted setup. The content shapes, keys, sessions and compaction settings are in
 [doc/development.md](doc/development.md#the-terminal).
-
-While the agent is working, type a correction and press Enter. The status line shows your
-draft and queued messages. A submitted correction cancels an active model response or waits
-for the current Scala call to finish, then reaches the agent before more tool calls run.
-Bracketed pastes retain their newlines until you press Enter. Ctrl-C interrupts the turn.
-
-The status line shows the current operation, elapsed time, model, mode and working
-directory. Turn summaries distinguish finished, interrupted, blocked, failed and limit-reached
-responses. In scripted runs, finished responses exit with `0`, interruptions with `130`,
-and other stopped outcomes with `1`. A finished response does not certify that every tool
-succeeded. The REPL starts on the first Scala call, so ordinary conversation needs no compiler startup.
-
-Additional inspection and session commands:
-
-| Command | Purpose |
-|---|---|
-| `/output` | List recent tool results |
-| `/output last` or `/output 3` | Inspect retained output and file-change previews |
-| `/output 3 201` | Continue from a line in a long result |
-| `/task` | Show the task goal, constraints, completed work and remaining steps |
-| `/perms revoke` | Select a session grant to revoke |
-| `/perms revoke 2` or `/perms revoke all` | Revoke grants from the current list; configured rules remain |
-| `/save [file]` | Save to a new file; default location is `.atc/sessions/` |
-| `/resume [file]` | Resume the last session for this directory, or restore a saved file |
-
-Interactive terminal sessions save automatically when you leave with `/quit`, `exit` or
-Ctrl-D. The next launch in the same directory offers **Resume last session** or
-**Start a new session**. You can also use `/resume` after starting fresh. Exiting an empty
-session preserves the previous save. Automatic saves live under `~/.atc/sessions/`,
-separately for each working directory; scripted `-p` runs do not update them.
-
-File API edits produce compact change summaries; `/output` includes bounded text diffs.
-Existing background processes are managed separately with `/kill`, and their exits are
-reported above the input prompt. Output retention excludes classified terminal text.
-Saved sessions are owner-only on POSIX systems. `/save` never overwrites an existing file;
-automatic saves replace the last checkpoint after writing a complete new one.
-Resuming does not replay tool calls or restore previous permission grants.
-
-For agent code, `replaceExact(path, expected, replacement)` checks that literal text occurs
-exactly once before writing. `readRange(path, from, to)` and
-`search(dir, pattern, glob, SearchOptions(...))` provide bounded reads and searches; inspect
-`SearchResult.limited` before treating a search as exhaustive. The agent maintains
-`TaskNotes` alongside its TODO list so important task state survives context trimming.
-
-`/compact` asks the current model for a concise summary of the older part of the
-conversation and replaces that part with it. Add a focus, such as
-`/compact preserve debugging findings`, to guide it. Task notes, pending notices, permissions
-and the live REPL remain available. Summaries are included in saved sessions; model usage
-is listed under **context compaction** in `/cost`. Ctrl-C cancels without replacing history.
-Both manual and automatic compaction keep the most recent complete user exchanges verbatim,
-as many as fit within `compactKeepRatio` of the model's context window (default `0.2`, or
-20%, using the same calibrated token estimates as `/cost`), and summarize everything before
-them; tool calls, their results and continuations always stay with their exchange. If even
-the latest exchange exceeds the budget, it is summarized too. Set the ratio to `0` to
-summarize everything; valid values are `0` through `1`. Without a known context window,
-manual compaction summarizes everything. When the whole conversation fits the retention
-budget there is nothing to compact and no request is made, and a summary that would not be
-smaller than what it replaces is discarded; `/compact` says which happened. The summary
-itself must fit the model: a transcript larger than the model's input allowance is refused
-with a message suggesting a larger model or `/clear`.
-
-Automatic compaction runs just before a request when the estimated size of that request
-(system prompt, tools and history) reaches `autoCompactThreshold` times the selected
-model's `contextWindow`: before the first request of a turn, and between tool rounds, so a
-long tool loop is summarized while it runs; the summary is followed by a request to carry
-on. The default is `0.8` (80%); set `"autoCompactThreshold": 0.6` for 60%, or `0` to
-disable it. Values must be between `0` and `1`. No automatic compaction runs without a
-configured context window, and none runs after a final answer. Global, project and explicit
-configs can set it; the later layer wins. A failed attempt, or one whose summary is not
-smaller, is reported and not repeated until the conversation has grown by a tenth of the
-window; ordinary context trimming still protects the request meanwhile. Ctrl-C during the
-summary interrupts the turn with the conversation unchanged. Compaction is lossy; keep
-essential details in task notes or files.
 
 ## License
 
