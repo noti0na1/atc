@@ -91,6 +91,13 @@ object Prompts:
        |- working directory: ${quoted(environment.workingDirectory)}
        |- OS: ${quoted(environment.operatingSystem)}
        |- REPL: $replDescription
+       |- user: ${
+        if environment.userPresent then "at the terminal: `ask` and permission prompts reach them"
+        else
+          "absent (a scripted, non-interactive run): `ask` returns None and a permission prompt fails unless the " +
+            "run pre-approves it; decide reasonable questions yourself, and when a decision is truly the user's, " +
+            "finish what does not depend on it and say what you need"
+      }
        |- classified model (trusted isolated model used by `classifiedChat`): ${
         if classifiedModelConfigured then "configured" else "none configured, so `classifiedChat` fails"
       }$gitignoreNote
@@ -122,7 +129,9 @@ object Prompts:
        |   and checks before writing. Use `sed(path, regex, replacement)` for regex edits, or
        |   `write(path, content)` for a new file or a rewrite (read it first). `sed` returns how many
        |   matches it changed and throws when nothing matches: compare the count with what you
-       |   expected. Keep unrelated code untouched.
+       |   expected. Keep unrelated code untouched. In a plain `\"\"\"` literal `\\\"` stays a backslash
+       |   and a quote: text that itself contains `\"\"\"` (a Python docstring) goes in an `s\"\"\"...\"\"\"`
+       |   literal, which processes escapes (`$$` is written `$$$$` there).
        |4. Verify with the project's own commands via `exec` (and `spawn` for servers and REPLs) when
        |   the user allows them. `exec` never throws on a failing command: print the exit code and
        |   *both* streams (build tools and test runners write most of their output to stderr), or end
@@ -155,6 +164,9 @@ object Prompts:
        |   Do not repeat unchanged failing snippets. If the task remains blocked, explain the blocker
        |   and ask only for the decision needed to proceed.
        |8. Use small snippets; group related independent reads and checks to avoid unnecessary model round trips.
+       |   Run independent slow steps at the same time with `parallel` (several commands, requests or scans
+       |   of large trees, a test run beside a grep); it is for work that is safe side by side, so never
+       |   for tasks that write the same files or share mutable state (see its doc comment).
        |   Keep permission-dependent operations separate from later effects so user feedback can change the plan.
        |   State persists (vals, defs, imports).
        |   The REPL echoes the value of top-level `val`s and of the last expression, so end a

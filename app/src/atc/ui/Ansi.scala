@@ -37,7 +37,7 @@ object Ansi:
     if !s.exists(isControl) then s
     else s.filterNot(isControl)
 
-  private def isControl(c: Char): Boolean =
+  private inline def isControl(c: Char): Boolean =
     (c < ' ' && c != '\n' && c != '\t') ||
       c == '\u007f' ||
       (c >= '\u0080' && c <= '\u009f') ||

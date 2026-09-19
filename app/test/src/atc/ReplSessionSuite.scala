@@ -60,6 +60,7 @@ class ReplSessionSuite extends munit.FunSuite:
   test("echoed API types carry no empty capture set"):
     val r = assertOk(run("val pr = ProcessResult(0, \"\", \"\"); def item = Todo(\"a\")"))
     assert(r.output.contains("val pr: ProcessResult = ProcessResult("), r.output)
+    assert(r.output.contains("stdout = 0 chars"), r.output)
     assert(r.output.contains("def item: Todo"), r.output)
     assert(!r.output.contains("^{}"), r.output)
   test("function definition and call"):

@@ -412,8 +412,8 @@ The exact merge rules are in
 }
 ```
 
-**Providers and models.** A provider defines one endpoint (`api`, an optional `url`, a key)
-and its `models`; a model is an alias with a provider-specific `name` and its own settings
+**Providers and models.** A provider defines one endpoint (`api`, an optional `url`, a key,
+optional `headers`) and its `models`; a model is an alias with a provider-specific `name` and its own settings
 (`contextWindow`, `reasoning`, `webSearch`, `maxTokens`, …). The `api` values are
 `anthropic`, `openai-responses` (also DeepSeek and other services through `url`), `openai`
 (Chat Completions: Ollama, vLLM, OpenRouter, …) and `echo` (keyless, for smoke tests). Name
@@ -421,7 +421,11 @@ a model by its alias, or `provider/alias` when two providers share one; `/models
 them. Set `contextWindow` to the model's real window so the conversation is compacted and
 trimmed to fit. **Keys** never go in a config: a provider names a variable
 (`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (project,
-then `~/.atc`, then the environment). A second role, `classifiedModel`, may answer
+then `~/.atc`, then the environment). `headers` are extra HTTP headers sent with every
+request to the provider; a value may be a `${VAR}` resolved the same way, or `${ATC_SESSION}`,
+a random id of the current conversation (renewed by `/new` and `/clear`) for gateways that
+route by session, such as OpenCode (`"headers": { "x-opencode-session": "${ATC_SESSION}" }`).
+Every request identifies ATC as `atc/<version>` unless `headers` sets `User-Agent`. A second role, `classifiedModel`, may answer
 `classifiedChat` inside classified computations; set it only for a model that runs in an
 isolated environment with no outward connection.
 

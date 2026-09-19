@@ -884,7 +884,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     @volatile private var running = false
     /** The pop-up handshake: both guarded by pauseLock. A pop-up may not read
       * while the key thread is inside `read`, and the key thread may not start
-      * a read once a pop-up asked for the pause. */
+      * a read once a pop-up asked for the pause. Every change of `reading`,
+      * `pauseDepth` and `running` notifies, so the waits below have no timeout. */
     private val pauseLock = Object()
     private var pauseDepth = 0
     private var reading = false
@@ -916,7 +917,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       pauseLock.synchronized { pauseDepth += 1 }
       try
         pauseLock.synchronized:
-          while reading do pauseLock.wait(50)
+          while reading do pauseLock.wait()
         body
       finally
         pauseLock.synchronized:
@@ -940,7 +941,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           typeAhead.clear()
       while running do
         val mayRead = pauseLock.synchronized:
-          while pauseDepth > 0 && running do pauseLock.wait(50)
+          while pauseDepth > 0 && running do pauseLock.wait()
           reading = running
           reading
         if mayRead then
@@ -949,7 +950,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
               try in.read(100L)
               catch case _: Exception => -1
             c match
-              case NonBlockingReader.READ_EXPIRED | -1 => () // no key read: leave skipLf pending
+              case NonBlockingReader.READ_EXPIRED => () // no key read: leave skipLf pending
+              case -1 => running = false
               case '\r' =>
                 if pasting then typeAhead.append('\n') else submit()
                 skipLf = true
@@ -1148,18 +1150,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             checkboxIndices("Choose answers", cleanOptions :+ Tui.AddAnswerLabel) match
               case None => None
               case Some(ids) =>
-                val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
+                val chosen = ids.sorted.filter(_ < options.size).flatMap(options.lift)
                 if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
                 else if chosen.isEmpty then None
                 else Some(chosen.mkString("; "))
           else
             menuIndex("Choose an answer", cleanOptions :+ Tui.OtherLabel) match
               case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
-              case Some(i) => cleanOptions.lift(i)
+              case Some(i) => options.lift(i)
               case None => None
         // A single-choice menu echoes the selection itself; confirm the other outcomes.
         answer match
-          case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
+          case Some(a) if options.isEmpty || plain || multiple || !options.contains(a) =>
             write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
           case Some(_) => ()
           case None => write(Indent + styled(s"${g.arrow} No answer", Dim) + "\n")

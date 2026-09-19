@@ -4,6 +4,25 @@ import atc.host.{CommandLine, Processes}
 import scala.jdk.CollectionConverters.*
 
 class ProcessesSuite extends munit.FunSuite:
+  test("waiting for output rechecks buffered text before sleeping and wakes on exit"):
+    val buffer = Processes.TailBuffer(64)
+    val pattern = java.util.regex.Pattern.compile("ready")
+    assertEquals(buffer.consumeThrough(pattern), None)
+    // Output can arrive after readUntil's first check but before it starts waiting.
+    buffer.append("ready\ntail")
+    val done = java.util.concurrent.CompletableFuture[Option[String]]()
+    val waiter = Thread(() => { done.complete(buffer.awaitMatch(pattern, 10000)); () })
+    waiter.setDaemon(true)
+    waiter.start()
+    try
+      assertEquals(done.get(2, java.util.concurrent.TimeUnit.SECONDS), Some("ready"))
+      assertEquals(buffer.take(), "\ntail")
+    finally
+      waiter.interrupt()
+      waiter.join(1000)
+    buffer.end()
+    assertEquals(buffer.awaitMatch(pattern, 10000), None)
+
   test("captured stderr reports truncation at its output limit"):
     val command = ProcessFixture.command("stderr", (8 * 1024 * 1024 + 1).toString)
     val result = Processes.run(ProcessBuilder(CommandLine.parseCommandLine(command).asJava), command, 10000L)

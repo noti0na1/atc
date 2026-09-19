@@ -47,8 +47,18 @@ object Processes:
       if m.find() then Some(consume(m.end())) else None
     /** Whether the cap ever dropped text (reported once, in `marker`). */
     def marker: String
-    /** Wait (at most `ms`) for more text to arrive. */
-    def awaitChange(ms: Long): Unit
+    /** Set once the process has exited and its output has all landed (`end()`). */
+    private var ended = false
+    /** Check for a match and begin waiting under the same lock as append/end,
+      * so output arriving just before the wait cannot lose its notification. */
+    def awaitMatch(pattern: java.util.regex.Pattern, ms: Long): Option[String] = synchronized:
+      consumeThrough(pattern).orElse {
+        if !ended then wait(math.max(1L, ms))
+        consumeThrough(pattern)
+      }
+    def end(): Unit = synchronized:
+      ended = true
+      notifyAll()
 
   private object OutputBuffer:
     def apply(cap: Int, keepHead: Boolean): OutputBuffer =
@@ -74,7 +84,6 @@ object Processes:
       sb.delete(0, end)
       s
     def marker: String = synchronized(if !truncated then "" else TruncationMarker)
-    def awaitChange(ms: Long): Unit = synchronized(wait(math.max(1L, ms)))
 
   /** Keeps the last `cap` characters (tail mode) in bounded-size chunks, so
     * dropping the front is a constant-time list removal rather than a
@@ -150,7 +159,6 @@ object Processes:
     def marker: String = synchronized(
       if !truncated then "" else "\n...[older output dropped: exceeded 8 MiB cap]...\n"
     )
-    def awaitChange(ms: Long): Unit = synchronized(wait(math.max(1L, ms)))
 
     /** Exposed only for a focused invariant test: retained storage must be
       * bounded by chunks, not by the number of append calls. */
@@ -245,8 +253,7 @@ object Processes:
             throw RuntimeException(
               s"timed out after ${timeoutMs}ms waiting for '$regex' from '$line'; output so far (still unread):\n${stdoutBuf.peek.takeRight(TimeoutTailChars)}"
             )
-          stdoutBuf.awaitChange(math.min(remaining, 200L)) // InterruptedException propagates (Ctrl-C)
-          found = tryMatch()
+          found = stdoutBuf.awaitMatch(pattern, remaining) // InterruptedException propagates (Ctrl-C)
       found.get
 
     /** Wait (at most `timeoutMs`) for every stage to exit; whether they did. */
@@ -348,19 +355,19 @@ object Processes:
         feeder.start()
       def drainer(stream: java.io.InputStream, into: OutputBuffer): Thread =
         Thread(() =>
-          val text = TextSink(into.append)
-          val shown = gate.map(g => TextSink(g.feed))
+          val text = TextSink { decoded =>
+            into.append(decoded)
+            gate.foreach(_.feed(decoded))
+          }
           val buf = new Array[Byte](8192)
           try
             var n = stream.read(buf)
             while n >= 0 do
               text.write(buf, 0, n)
-              shown.foreach(_.write(buf, 0, n))
               n = stream.read(buf)
           catch case _: java.io.IOException => ()
           finally
             text.finish()
-            shown.foreach(_.finish())
             try stream.close()
             catch case _: java.io.IOException => ()
         )
@@ -375,6 +382,7 @@ object Processes:
           catch case _: InterruptedException => ()
         )
         m.drains.foreach(_.join(5000))
+        m.stdoutBuf.end() // wakes a `readUntil` that is waiting for output that will never come
         ManagedProcess.live.remove(m)
         onExit(m.exitCode.getOrElse(-1))
       )

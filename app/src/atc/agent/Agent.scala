@@ -65,7 +65,13 @@ final class Agent(
   private val queuedInput = java.util.concurrent.ConcurrentLinkedQueue[String]()
 
   def submit(input: String): Unit =
-    if input.trim.nonEmpty then queuedInput.add(input.trim)
+    if input.trim.nonEmpty then
+      queuedInput.add(input.trim)
+      request.recheck()
+
+  /** The user interrupted: a model request in progress re-evaluates its cancellation
+    * (`ModelRequest.recheck`) instead of finding out when the provider next answers. */
+  def interrupt(): Unit = request.recheck()
 
   def queuedInputCount: Int = queuedInput.size()
 
@@ -133,6 +139,7 @@ final class Agent(
 
   def clear(): Unit =
     conversation.clear()
+    Providers.newConversation()
     synchronized { usageBy.clear() }
     toolCalls = 0
     context.reset()
@@ -164,7 +171,7 @@ final class Agent(
     // The transcript goes to the same model as one message. Refuse before paying for a
     // request the provider would reject, and name the way out in the message.
     current.contextWindow.foreach { window =>
-      val allowance = window.toLong - window.toLong / 8
+      val allowance = window.toLong - ContextManager.outputReserve(window, current.maxOutputTokens)
       val needed =
         ((ContextManager.estimateTokens(ContextCompaction.prompt.text) + size(input)) * context.calibration).round
       if needed > allowance then
@@ -246,6 +253,7 @@ final class Agent(
     private var used = 0 // tool calls run this turn
     private var budget = config.maxToolCalls // grows by `maxToolCalls` each time the user says "continue"
     private var resumes = 0
+    private var incompleteResumes = 0
     private var budgetRejections = 0
 
     def run(): TurnOutcome =
@@ -305,7 +313,11 @@ final class Agent(
                 else Done(TurnOutcome.Finished)
               case CompletionPolicy.Next.Resume(needsContinuation) =>
                 if cancelled() then interrupted()
+                else if raw.stop == CompletionStop.Incomplete && incompleteResumes >= Agent.MaxIncompleteResumes then
+                  ui.warn(AgentMessages.incompleteStreamExhausted(model.alias, Agent.MaxIncompleteResumes))
+                  Done(TurnOutcome.Failed)
                 else if resumes < Agent.MaxResumes then
+                  if raw.stop == CompletionStop.Incomplete then incompleteResumes += 1
                   if needsContinuation then conversation.append(Msg.Continuation(AgentMessages.truncationContinuation))
                   resume()
                 else
@@ -411,5 +423,7 @@ object Agent:
 
   /** Server-side tool pauses (web search) per turn; a research turn can take many. */
   val MaxResumes = 20
+  /** A broken provider stream gets fewer retries than a normal output-limit continuation. */
+  val MaxIncompleteResumes = 2
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */
   val MaxBudgetRejections = 2

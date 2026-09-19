@@ -47,6 +47,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): ResponseCreateParams =
     val b = ResponseCreateParams.builder().model(modelId).instructions(system.text).store(false)
+    Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
     // Stateless (store(false)) replay must carry the reasoning between calls: ask
     // for the encrypted reasoning content, or the replayed reasoning items are
     // invalid (backends answer HTTP 400 invalid_encrypted_content).
@@ -161,6 +162,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
   def simple(system: Option[String], prompt: String, thinking: Boolean): Reply =
     def request(reasoning: Option[Reasoning]): Response =
       val b = ResponseCreateParams.builder().model(modelId).input(prompt).store(false)
+      Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
       system.foreach(b.instructions)
       cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
       cfg.temperature.foreach(b.temperature)

@@ -62,6 +62,12 @@ case class ProviderConfig(
   key: Option[String] = None,
   /** The name of a variable holding the key, resolved the same way. */
   keyEnv: Option[String] = None,
+  /** Extra HTTP headers sent with every request to this provider. A value is a
+    * literal, a `${VAR}` resolved like [[key]] (a header whose variable is unset
+    * is not sent), or `${ATC_SESSION}`, a random id of the current
+    * conversation (renewed by `/new` and `/clear`), which gateways such as
+    * OpenCode use for routing and prompt caching. */
+  headers: Map[String, String] = Map.empty,
   /** The provider's models, by alias. */
   models: Map[String, ModelConfig] = Map.empty,
 ) derives ReadWriter
@@ -523,6 +529,17 @@ object Config:
     * before the environment. */
   def resolveApiKey(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Option[String] =
     p.key.flatMap(resolveEnvRef(_, bindings)).orElse(p.keyEnv.flatMap(bindings.get))
+
+  /** The placeholder in a provider header for the conversation id, filled in
+    * per request by `Providers.headers`. */
+  val SessionRef = "${ATC_SESSION}"
+
+  /** The provider's extra headers with `${VAR}` values resolved; a header
+    * whose variable is unset is dropped, [[SessionRef]] is kept for the request. */
+  def resolveHeaders(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Map[String, String] =
+    p.headers.flatMap { (name, value) =>
+      (if value == SessionRef then Some(value) else resolveEnvRef(value, bindings)).map(name -> _)
+    }
 
   // ── editing a config file in place ────────────────────────────────
 

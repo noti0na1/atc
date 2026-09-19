@@ -15,5 +15,5 @@ object Debug:
     parts.result().mkString("\nCaused by: ")
 
   val enabled: Boolean = ProcessEnvironment.contains("ATC_DEBUG")
-  def log(message: => String): Unit = if enabled then System.err.println(s"[atc] $message")
+  inline def log(inline message: String): Unit = if enabled then System.err.println(s"[atc] $message")
   def trace(e: Throwable): Unit = if enabled then e.printStackTrace()

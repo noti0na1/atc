@@ -16,6 +16,8 @@ case class ModelSpec(
   apiKey: Option[String],
   /** The model's own settings (web search, reasoning, limits). */
   settings: ModelConfig,
+  /** The provider's extra request headers (`ProviderConfig.headers`, resolved). */
+  headers: Map[String, String] = Map.empty,
 ):
   /** The unambiguous name of this model, `provider/alias`. */
   def ref: String = s"$provider/$alias"
@@ -80,8 +82,9 @@ object ModelCatalog:
     ModelCatalog(
       config.providers.toList.sortBy(_._1).flatMap { (name, p) =>
         val key = Config.resolveApiKey(p, keys)
+        val headers = Config.resolveHeaders(p, keys)
         p.models.toList.sortBy(_._1).map { (alias, m) =>
-          ModelSpec(name, alias, p.api.getOrElse(""), m.name.getOrElse(alias), p.url, key, m)
+          ModelSpec(name, alias, p.api.getOrElse(""), m.name.getOrElse(alias), p.url, key, m, headers)
         }
       }
     )

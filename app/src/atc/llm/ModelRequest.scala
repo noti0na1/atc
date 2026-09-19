@@ -1,54 +1,85 @@
 package atc.llm
 
-import java.util.concurrent.{ExecutionException, FutureTask, TimeUnit, TimeoutException}
+import java.util.concurrent.{CompletableFuture, ExecutionException}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import scala.util.Using
 import scala.util.control.NonFatal
 
-/** One active model request per agent. Cancellation interrupts the worker and closes its stream. */
+/** One active model request per agent. The caller blocks until the worker finishes or
+  * `recheck()` finds the request cancelled; cancellation wakes the caller, interrupts the
+  * worker and closes its stream. */
 private[atc] final class ModelRequest:
-  private var pending: FutureTask[?] | Null = null
+  /** A request whose worker was started; guarded by `this`. */
+  private final class Pending(
+    val cancelled: () => Boolean,
+    val thread: Thread,
+    val scope: ModelRequest.Scope,
+    val done: CompletableFuture[Any],
+  )
+  private var pending: Pending | Null = null
 
+  /** `cancelled` is evaluated before the worker starts, once it is registered (so a
+    * `recheck()` that raced the start is not lost), on every `recheck()` and after the
+    * worker returns; it is not polled while the worker runs. */
   def run[A](cancelled: () => Boolean)(operation: => A): A =
     if cancelled() then throw CancelledException()
     val scope = ModelRequest.Scope()
-    val task = FutureTask[A](() =>
+    val done = CompletableFuture[Any]()
+    val work: Runnable = () =>
       ModelRequest.current.set(scope)
-      try operation
+      try done.complete(operation)
+      catch
+        // The interrupt of a cancelled request is not `NonFatal`, but it ends the worker quietly.
+        case e: InterruptedException => done.completeExceptionally(e)
+        case NonFatal(e) => done.completeExceptionally(e)
+        case e => // a fatal error still reaches the caller, then ends the worker as it would have
+          done.completeExceptionally(e)
+          throw e
       finally ModelRequest.current.remove()
-    )
-    val thread = synchronized {
-      if pending != null && !pending.nn.isDone then
+    val thread = Thread(work, "atc-model-request")
+    thread.setDaemon(true)
+    val active = Pending(cancelled, thread, scope, done)
+    synchronized {
+      if pending != null && pending.nn.thread.isAlive then
         throw IllegalStateException("The previous model request is still stopping; try again shortly.")
-      val next = Thread(task, "atc-model-request")
-      next.setDaemon(true)
-      pending = task
-      next.start()
-      next
+      pending = active
+      thread.start()
     }
+    def stopped(e: CancelledException): Nothing =
+      stop(active)
+      thread.join(250)
+      throw e
     try
-      while true do
-        if cancelled() then throw CancelledException()
-        try
-          val result = task.get(50, TimeUnit.MILLISECONDS)
-          // The worker has finished, so release the task and the response it holds.
-          synchronized { if pending eq task then pending = null }
-          if cancelled() then throw CancelledException()
-          return result
-        catch case _: TimeoutException => ()
-      throw IllegalStateException("Model request ended without a result")
+      if cancelled() then throw CancelledException()
+      val result = done.get()
+      // The operation has finished, even if its worker has not exited yet.
+      synchronized { if pending eq active then pending = null }
+      if cancelled() then throw CancelledException()
+      result.asInstanceOf[A]
     catch
-      case e: ExecutionException => throw e.getCause.nn
-      case e: CancelledException =>
-        thread.interrupt()
-        scope.cancel()
-        thread.join(250)
-        throw e
-      case e: InterruptedException =>
-        thread.interrupt()
-        scope.cancel()
+      case e: ExecutionException =>
+        e.getCause.nn match
+          case c: CancelledException => stopped(c)
+          case c =>
+            synchronized { if pending eq active then pending = null }
+            throw c
+      case e: CancelledException => stopped(e)
+      case _: InterruptedException =>
+        stop(active)
         Thread.currentThread().interrupt()
         throw CancelledException()
+
+  /** Something the pending request's `cancelled` predicate observes has changed: evaluate
+    * it now, and if it holds wake the caller (which throws `CancelledException`) and stop
+    * the worker. Called from the threads that record an interrupt or queue input. */
+  def recheck(): Unit =
+    val active = synchronized(pending)
+    if active != null && active.cancelled() then stop(active)
+
+  private def stop(active: Pending): Unit =
+    active.done.completeExceptionally(CancelledException())
+    active.thread.interrupt()
+    active.scope.cancel()
 
 private[atc] object ModelRequest:
   private val current = ThreadLocal[Scope]()

@@ -56,7 +56,9 @@ Every launcher starts the JVM with `-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData`
 and `start.ps1`), and on Java 23+ `--sun-misc-unsafe-memory-access=allow`
 (`VERSIONED_JVM_OPTS`; the dist `atc` script leaves it out since it does not detect the Java
 version), because Scala's `LazyVals` still use `sun.misc.Unsafe` and JEP 471 makes the JVM
-print four warning lines on every run otherwise. Measured with the dist jar and the echo
+print four warning lines on every run otherwise. On Java 24+ the same list adds
+`--enable-native-access=ALL-UNNAMED`, because JLine loads its native terminal library and
+JEP 472 prints four warning lines for that. Measured with the dist jar and the echo
 model (JDK 25, September 2026):
 a 100-turn session of reads, writes and commands keeps 130 to 230 MB live and runs down to
 `-Xmx192m`, so 2 GB is headroom, and it bounds a runaway sandbox computation (one line
@@ -72,7 +74,9 @@ CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are b
 the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
 *not* regenerated, so the launchers never point the JVM at one that might be stale:
 `~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
-`-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`) and the release marker, its timestamp is compared with the jars
+`-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`), the release
+marker and the version-gated JVM options (the JVM refuses a cache built under other module
+options, such as `--enable-native-access`), its timestamp is compared with the jars
 (`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
 on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
 building flag. A build that leaves no file writes the key anyway, so it is not retried until
@@ -114,6 +118,17 @@ App → Agent → ChatModel.complete → CompletionPolicy
 `ContextManager` owns token estimates and history fitting. `ScalaToolRunner` decodes
 `run_scala`, invokes the REPL, records execution time and renders results through
 `ToolOutput`. `AgentMessages` contains notices exchanged with the model and UI.
+`ToolOutput` appends one hint per result: most are keyed on the output (a safe-mode
+rejection, a missing capability, a command that could not start), one on the snippet
+itself (`ToolOutput.codeHint`): a `\"` inside a plain triple-quoted literal, which stays a
+backslash and a quote, so a Python docstring written as `\"\"\"` lands in the file with
+backslashes; live runs of several models did this and spent rounds repairing it. The system
+prompt says the same in its editing rule, and its Environment block tells the model whether
+a user is present (`AgentEnvironment.userPresent`, false for a `-p` run, where `ask`
+returns `None` and permission prompts fail unless `--approve-all` was given), so the model
+decides for itself instead of asking nobody. The REPL echo of a `ProcessResult` shows the
+exit code and the size of each stream only (`toString` in `Interface.scala`), because a
+snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
 traits. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
@@ -350,8 +365,15 @@ ATC's file and HTTP permissions do not constrain the internals of those commands
 
 ## The sandbox
 
-`App.ensureSession` initializes the REPL on the first Scala tool call or `/run`.
-Text-only turns do not start a compiler. Reset and mode changes discard the previous
+`App.warmSession` starts the REPL on a daemon thread as soon as the program is ready for
+input (after the resume offer; before the turn of a `-p` run), because compiling the
+preamble takes about two seconds that would otherwise land inside the first tool call.
+`App.ensureSession` adopts that session on the first Scala tool call or `/run`, waiting for
+it (with a "starting sandbox" status) only when it is not ready yet, and starts one on the
+spot if none is warming. `App.replaceSession` (reset, mode change, `/new`) drops the live
+session and a warming one alike (`discardWarming`: a daemon thread closes it once its
+initialization ends, so the switch never waits for a compiler it no longer needs) and
+starts warming the next one. Text-only turns never wait for a compiler. Reset and mode changes discard the previous
 session; initialization remains deferred. `Agent.turn` and `ScalaToolRunner` accept the
 session lazily, and cancellation is checked after initialization before executing code.
 
@@ -506,7 +528,9 @@ source write permission before copying but is not atomic.
 `replaceExact` requires one non-empty literal occurrence and validates it before any write.
 It does not interpret regex or replacement escapes. `readRange` stops at the requested
 line boundary, with caps of 1000 returned lines, 2000 characters per line and two million
-scanned characters. Line-window `cat` also stops once it reaches `to`.
+scanned characters. Both `cat` forms show at most 400 lines and suggest a continuation
+when more remain. The range form also stops at `to` or two million scanned characters;
+it reports a read limit separately from end of file.
 
 `search` uses lazy descendant traversal and `FileEntryImpl.scanLines`, which closes its
 stream when the callback stops or a character budget is reached. `SearchOptions` bounds
@@ -665,6 +689,31 @@ parameter; unrelated bad requests are not retried by this fallback.
 Provider SDK request construction remains in each adapter. Shared configuration and client
 setup belong in `Providers`; model selection belongs in `ModelCatalog`.
 
+A provider's `headers` are extra HTTP headers for every request to it. `Config.resolveHeaders`
+resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
+keeps the placeholder `${ATC_SESSION}` (`Config.SessionRef`), which `Providers.headers(spec)`
+replaces per request with the conversation id, a UUID that `Agent.clear()` renews. The same
+call adds `User-Agent: atc/<version>` unless the config sets one, regardless of header-name
+case. Every adapter applies the set to both `complete` and `simple` with the params builder's
+`putAdditionalHeader`. Provider-specific headers such as OpenCode's `x-opencode-session`
+are configured explicitly.
+
+Chat Completions requests set `stream_options.include_usage` so providers can report token
+counts for `/cost` and context calibration. Providers send usage on the finish chunk,
+in a separate chunk, or both. `OpenAIChatModel.ChunkFeed` saves the latest usage and feeds
+it to the SDK accumulator once, after the choices. It ignores empty chunks without usage
+and extra choice chunks after completion. Auxiliary chat calls also apply configured
+`maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
+checks requests and usage accounting against a local HTTP server.
+
+Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
+The adapter returns an `Incomplete` completion containing received answer text and usage,
+with no tool calls or native replay payload. The agent warns and requests a continuation;
+after two such attempts in a turn it stops with a failed outcome. Normal provider output
+limits retain their separate continuation budget. Reasoning is never used as answer text.
+When a chunk contains both reasoning and answer text, reasoning is displayed first so the
+answer stays together. Empty deltas and deltas after the finish chunk do not reach the UI.
+
 ## Conversation context and agent loop
 
 The system prompt contains environment data, workflow instructions, capability rules, the
@@ -686,10 +735,15 @@ exceptions within the loop and are reported as `Failed` by the application.
 `ModelRequest` runs at most one unfinished provider call per agent. The provider adapters
 use SDK asynchronous streams, register their close callbacks before waiting for completion,
 and accumulate events through the existing SDK accumulators. This permits cancellation
-before HTTP headers arrive as well as during streaming. The caller polls cancellation every
-50 ms, closes the stream and interrupts its worker. A provider that does not stop prevents
-another worker from accumulating behind it and produces a clear retry message. Stream
-sinks reject late output after the request ends. Provider clients are closed at application
+before HTTP headers arrive as well as during streaming. The caller blocks until the worker
+ends or `ModelRequest.recheck()` finds the request's cancellation predicate true; the
+threads that make it true (the SIGINT handler through `Agent.interrupt`, the key thread
+through `Agent.submit`) call `recheck()`, which wakes the caller, closes the stream and
+interrupts the worker, so nothing is polled during a call. A provider that does not stop prevents
+another worker from accumulating behind it and produces a clear retry message. Request
+completion or failure releases the active slot before returning to the caller, even if
+the worker is still exiting. Cancellation retains the slot while the operation is running.
+Stream sinks reject late output after the request ends. Provider clients are closed at application
 shutdown. Interrupted calls may not supply a final token-usage report.
 
 Cancellation tracks the underlying OkHttp call through a request-scoped event listener.
@@ -725,8 +779,8 @@ complete, nonempty summaries smaller than the older prefix they replace; the res
 `Agent.CompactOutcome` (compacted, nothing to compact, summary not smaller) so `/compact`
 can say which. Pending notes, user request tracking, task state and REPL definitions are
 unchanged; usage is recorded separately. Before the summary request is sent, the transcript
-is estimated against the model's input allowance (window minus an eighth) and refused with
-an actionable message when it cannot fit, since it goes to the same model as one message.
+is estimated against the model's input allowance, using the same output reservation as
+ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
 
 `Agent.autoCompact` runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
@@ -895,13 +949,16 @@ explicitly configured to auto-approve requests.
 ### Sessions, inspection and compaction
 
 After each interactive turn the model predicts the next request and the prompt shows it as
-ghost text (Tab or → accepts it; `"predictInput": false` disables it). A summary line
+ghost text (Tab or → accepts it; `"predictInput": false` disables it). When there is no useful
+suggestion, the model is asked to return `[NO_PREDICTION]`. This marker and empty responses
+are suppressed before reaching the prompt. A summary line
 shows the turn's cost and how full the context window is. Turn summaries distinguish
 finished, interrupted, blocked, failed and limit-reached responses; in scripted `-p` runs,
 finished responses exit with `0`, interruptions with `130`, and other stopped outcomes with
 `1`, and a finished response does not certify that every tool succeeded. Bracketed pastes
-retain their newlines until Enter. The REPL starts on the first Scala call, so ordinary
-conversation needs no compiler startup.
+retain their newlines until Enter. The REPL starts in the background as soon as ATC is
+ready for input, so the first Scala call usually finds it warm and ordinary conversation
+never waits for a compiler.
 
 | Command | Purpose |
 |---|---|
@@ -971,6 +1028,13 @@ portable process tests; reserve native commands for platform integration suites.
 and checkout environment loading.
 
 All Scala modules use explicit null checks where configured; Java APIs may require `.nn`.
+Use `inline` selectively for small predicates, primitive conversions and wrappers where
+expansion removes a closure. Ordinary parameters preserve evaluation order and evaluate
+once; an `inline` parameter substitutes its expression at each use. `Debug.log` uses one
+inline message expression behind the runtime debug flag, so disabled logging creates no
+message closure. Keep larger methods and capability boundaries as ordinary methods.
+See the [Scala 3 inline guide](https://docs.scala-lang.org/scala3/guides/macros/inline.html)
+for parameter semantics and the distinction between `inline` and `transparent inline`.
 Use `Platform` and `PlatformPath` for OS decisions and `ScalaSource` for generated Scala
 literals. Keep model/provider escaping, shell quoting and terminal sanitization separate.
 Scalafmt uses a 120-column configuration that preserves existing layout. `Interface.scala`

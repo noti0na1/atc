@@ -81,6 +81,26 @@ private[atc] object Providers:
   /** Deliberately generous: a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
 
+  /** How ATC identifies itself; a configured `User-Agent` header replaces it. */
+  lazy val UserAgent: String = s"atc/${atc.Main.Version}"
+
+  /** A random id of the current conversation, what `${ATC_SESSION}` in a
+    * provider header stands for. */
+  @volatile private var conversationId: String = newId()
+  private def newId(): String = java.util.UUID.randomUUID().toString
+
+  /** Start a new conversation id (`/new`, `/clear`). */
+  def newConversation(): Unit = conversationId = newId()
+
+  /** The headers of one request to `spec`'s provider: the user agent, then the
+    * configured ones with the conversation id filled in. */
+  def headers(spec: ModelSpec): Map[String, String] =
+    val defaults = if spec.headers.keysIterator.exists(_.equalsIgnoreCase("User-Agent")) then Map.empty[String, String]
+    else Map("User-Agent" -> UserAgent)
+    defaults ++ spec.headers.map { (name, value) =>
+      name -> (if value == atc.config.Config.SessionRef then conversationId else value)
+    }
+
   def httpClient(connect: Duration, read: Duration, write: Duration, request: Duration): okhttp3.OkHttpClient =
     okhttp3.OkHttpClient.Builder().retryOnConnectionFailure(false)
       .connectTimeout(connect).readTimeout(read).writeTimeout(write).callTimeout(request).build()

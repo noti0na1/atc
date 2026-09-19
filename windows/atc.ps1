@@ -74,6 +74,8 @@ if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major 
 $javaArgs = @('-Xms256m', '-Xmx2g', '-Xss4m', '-XX:-UsePerfData')
 # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
 if ($major -ge 23) { $javaArgs += '--sun-misc-unsafe-memory-access=allow' }
+# JLine loads a native library; Java 24+ warns about that on every run (JEP 472).
+if ($major -ge 24) { $javaArgs += '--enable-native-access=ALL-UNNAMED' }
 if ($env:ATC_JAVA_OPTS) {
   $javaArgs += @($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })
 }

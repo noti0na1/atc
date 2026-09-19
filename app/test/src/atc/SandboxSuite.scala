@@ -29,6 +29,30 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("""println("hello")"""))
     assertEquals(env.agentOut.toString, "hello\n")
 
+  test(
+    "a session initialized on another thread (the warm-up) evaluates here, and one discarded elsewhere leaves it alone"
+  ):
+    def background(): ReplSession =
+      val task = java.util.concurrent.FutureTask[ReplSession](() =>
+        ReplSession(SandboxConfig(safeMode = true, Mode.Full, Some(60000L)), env.host).init()
+      )
+      val thread = Thread(task, "warm-up")
+      thread.setDaemon(true)
+      thread.start()
+      task.get(4, java.util.concurrent.TimeUnit.MINUTES)
+    val warmed = background()
+    val discarded = background()
+    try
+      val closer = Thread(() => discarded.close(), "discard")
+      closer.start()
+      closer.join(10000)
+      env.activate()
+      assertOk(warmed.run("val warm = 1 + 1"))
+      assertOk(warmed.run("warm * 2"))
+      assert(!discarded.run("1").success)
+      assertOk(run("1 + 1"))
+    finally warmed.close()
+
   test("file effects go through the real host"):
     assertOk(run("""write("a.txt", "content")"""))
     assertEquals(env.contents("a.txt"), "content")

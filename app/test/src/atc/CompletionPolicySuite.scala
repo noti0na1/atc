@@ -57,6 +57,27 @@ class CompletionPolicySuite extends munit.FunSuite:
     assertEquals(decision.warnings.size, 2)
     assert(decision.warnings.exists(_.contains("blocked this request")), decision.warnings.toString)
 
+  test("an incomplete stream resumes without replaying tool calls or an empty assistant message"):
+    val decision = CompletionPolicy(completion(
+      text = "",
+      calls = List(call()),
+      native = Some(NativeTurn("provider", "model", "partial payload")),
+      reason = "stream_incomplete",
+      stop = CompletionStop.Incomplete,
+    ))
+    assert(decision.message.text.contains("stream ended"))
+    assertEquals(decision.message.toolCalls, Nil)
+    assertEquals(decision.message.native, None)
+    assertEquals(decision.next, CompletionPolicy.Next.Resume(needsContinuation = true))
+    assert(decision.warnings.exists(_.contains("finish marker")))
+    val partial = CompletionPolicy(completion(
+      text = "partial answer",
+      native = Some(NativeTurn("provider", "model", "partial payload")),
+      reason = "stream_incomplete",
+      stop = CompletionStop.Incomplete,
+    ))
+    assertEquals(partial.message, Msg.Assistant("partial answer", Nil, None))
+
   test("an empty terminal response gets a visible neutral marker"):
     val decision = CompletionPolicy(completion(
       text = "  ",

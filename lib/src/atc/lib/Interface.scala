@@ -214,8 +214,12 @@ case class TaskNotes(goal: String = "", constraints: List[String] = Nil,
 @assumeSafe
 object TaskNotes
 
+/** What a finished command produced. The REPL echo of a `val` holding one shows the
+ *  exit code and the size of each stream only, so `println` the stream(s) you need. */
 @assumeSafe
-case class ProcessResult(exitCode: Int, stdout: String, stderr: String)
+case class ProcessResult(exitCode: Int, stdout: String, stderr: String):
+  override def toString: String =
+    s"ProcessResult(exitCode = $exitCode, stdout = ${stdout.length} chars, stderr = ${stderr.length} chars)"
 @assumeSafe
 object ProcessResult
 
@@ -378,8 +382,10 @@ trait Interface:
    *  `sed -n 'from,to'`. This is the way to look at a file (`read`/`readLines`
    *  give the raw text to code with). The numbers are not in the file: never copy
    *  them into a `sed` pattern. `to` may run past the end (`[end of file: N lines]`
-   *  marks it), so a large `to` shows the tail. Lines longer than 2000 characters are
-   *  cut with a `[+N chars]` marker. */
+   *  marks it). Both forms show at most 400 lines and suggest a continuation when
+   *  more remain. The range form scans at most two million characters and reports
+   *  when that limit prevents completing the range. Lines longer than 2000 characters
+   *  are cut with a `[+N chars]` marker. */
   def cat(path: String)(using FileSystem, UserIO^): Unit
   def cat(path: String, from: Int, to: Int)(using FileSystem, UserIO^): Unit
 
@@ -579,8 +585,9 @@ trait Interface:
    *  commands that touch the same files, or read what another task is writing.
    *  Never share mutable data between tasks or with the enclosing code (no
    *  outer `var`, `Array`, `StringBuilder` or other mutable object written from
-   *  a task): each task returns its result, and you combine the returned list
-   *  afterwards. Anything else is a race with unpredictable outcomes.
+   *  a task): each task returns its result, and you combine and print the
+   *  returned list afterwards (output printed from inside tasks interleaves).
+   *  Anything else is a race with unpredictable outcomes.
    *
    *  A task can do what its captured capabilities allow (the same rules as
    *  anywhere else; inside `Classified.map` only read-only captures compile,

@@ -169,9 +169,12 @@ class MarkdownStream(
     close + "\n"
 
   private def fenceLine(line: String): String =
-    fenceText.append(line).append("\n")
-    // The block so far ends with "\n", so its highlighted lines map 1:1 onto the fenced lines; take the newest.
-    val shown = if fenceScala then highlight(fenceText.toString).lastOption.getOrElse(line) else line
+    val shown =
+      if fenceScala then
+        // Keep earlier lines for multiline strings and comments in Scala highlighting.
+        fenceText.append(line).append("\n")
+        highlight(fenceText.toString).lastOption.getOrElse(line)
+      else line
     glyphs.codeGutter + shown + "\n"
 
   // ── tables ────────────────────────────────────────────────────────

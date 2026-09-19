@@ -48,7 +48,6 @@ final class App(args: Cli.Args, val tui: Tui):
   // ── sandbox session ───────────────────────────────────────────────
 
   @volatile var session: Option[ReplSession] = None
-  tui.onInterrupt = () => session.foreach(_.interrupt())
 
   /** Exclude user input and operations with their own timeout from the snippet clock. */
   private def withClockPaused[T](body: => T): T =
@@ -113,7 +112,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   val agent: Agent = Agent(
     config,
-    AgentEnvironment.current(cwd),
+    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty),
     policy,
     tui,
     initialModel,
@@ -123,6 +122,9 @@ final class App(args: Cli.Args, val tui: Tui):
   )
   tui.onSubmit = agent.submit
   tui.queuedInputs = () => agent.queuedInputCount
+  tui.onInterrupt = () =>
+    agent.interrupt()
+    session.foreach(_.interrupt())
 
   private def updateStatusContext(): Unit =
     val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)
@@ -131,9 +133,48 @@ final class App(args: Cli.Args, val tui: Tui):
 
   // ── running ───────────────────────────────────────────────────────
 
+  /** A session starting on a background thread (`warmSession`), adopted by `ensureSession`
+    * or dropped by `discardWarming`. Touched by the main thread only. */
+  private var warming: Option[java.util.concurrent.FutureTask[ReplSession]] = None
+
+  private def startSession(): ReplSession =
+    ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
+
+  /** Start the sandbox on a daemon thread, so that compiling its preamble (about two
+    * seconds) overlaps the user's typing and the model's answer instead of the first
+    * tool call. Nothing happens when a session exists or is already starting. */
+  private def warmSession(): Unit = if session.isEmpty && warming.isEmpty then
+    val task = java.util.concurrent.FutureTask[ReplSession](() => startSession())
+    val thread = Thread(task, "atc-sandbox-warmup")
+    thread.setDaemon(true)
+    thread.start()
+    warming = Some(task)
+
+  /** Drop a session still starting in the background: a daemon thread closes it once it
+    * is ready, so a mode switch does not wait for a compiler it no longer needs. */
+  private def discardWarming(): Unit =
+    warming.foreach { task =>
+      warming = None
+      val closer: Runnable = () =>
+        try task.get().close()
+        catch case _: Exception => ()
+      val thread = Thread(closer, "atc-sandbox-discard")
+      thread.setDaemon(true)
+      thread.start()
+    }
+
+  /** The live session: the one warming in the background once it is ready (the status
+    * line says so only if the wait is real), else one started here and now. */
   private def ensureSession(): ReplSession = session.getOrElse {
-    tui.status(s"starting sandbox (${policy.mode.label} mode)")
-    val created = ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
+    val created = warming match
+      case Some(task) =>
+        warming = None
+        if !task.isDone then tui.status(s"starting sandbox (${policy.mode.label} mode)")
+        try task.get()
+        catch case e: java.util.concurrent.ExecutionException => throw e.getCause.nn
+      case None =>
+        tui.status(s"starting sandbox (${policy.mode.label} mode)")
+        startSession()
     if tui.isInterrupted then
       created.close()
       throw atc.llm.CancelledException()
@@ -141,12 +182,15 @@ final class App(args: Cli.Args, val tui: Tui):
     created
   }
 
-  /** Discard the REPL and its processes. The next tool call initializes a new session. */
+  /** Discard the REPL (live or still warming) and its processes, and start warming the
+    * next one, so a mode switch or `/new` costs the first tool call nothing either. */
   private def replaceSession(failure: String): Boolean =
     try
       host.killProcesses()
+      discardWarming()
       session.foreach(_.close())
       session = None
+      warmSession()
       true
     catch
       case e: Exception =>
@@ -187,17 +231,20 @@ final class App(args: Cli.Args, val tui: Tui):
       args.prompt match
         case Some(p) =>
           tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
+          warmSession()
           // Report a failed turn through the process exit code so scripts can detect it.
           runTurn(p).exitCode
         case None =>
           banner()
           if tui.menusAvailable then offerResume()
+          warmSession() // after the resume offer: restoring would only discard it
           interactive()
           if tui.menusAvailable then saveOnExit()
           0
     finally
       predictor.invalidate()
       host.killProcesses()
+      discardWarming()
       session.foreach(_.close())
       modelCache.values.foreach { model =>
         try model.close()
