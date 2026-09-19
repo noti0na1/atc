@@ -3,11 +3,22 @@ $ErrorActionPreference = 'Stop'
 $AtcArgs = [string[]]$args
 $launchCwd = (Get-Location).Path
 
-# `-Xmx<size>` / `-Xms<size>` are the JVM's flags, not ATC's: take them out for java.
+# `-Xmx<size>` / `-Xms<size>` are the JVM's flags, not ATC's: take them out for java. The
+# value of an ATC option that takes one (-p 'text', -C dir, ...) is forwarded untouched even
+# when it starts with -Xm: the list of those options mirrors `FlagsWithValues` in
+# app/src/atc/Cli.scala (`atc`, start.sh and start.ps1 carry the same list).
+$optionsWithValues = @('-c', '--config', '-C', '--cwd', '-m', '--model', '-p', '--prompt', '--mode')
 $jvmOpts = @()
 $forwarded = New-Object System.Collections.Generic.List[string]
+$expectValue = $false
 foreach ($arg in $AtcArgs) {
-  if ($arg -cmatch '^-Xm[sx]') {
+  if ($expectValue) {
+    $expectValue = $false
+    $forwarded.Add($arg)
+  } elseif ($optionsWithValues -ccontains $arg) {
+    $expectValue = $true
+    $forwarded.Add($arg)
+  } elseif ($arg -cmatch '^-Xm[sx]') {
     if ($arg -cnotmatch '^-Xm[sx][0-9]+[kKmMgG]?$') {
       throw "Invalid JVM heap size '$arg': use a number with an optional k, m or g suffix, e.g. -Xmx4g or -Xms512m"
     }
@@ -57,7 +68,8 @@ $major = [int]$Matches.major
 if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
 if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
 
-# JVM defaults as in the Unix `atc` wrapper; the command line's -Xmx/-Xms come later and win.
+# JVM defaults as in the Unix `atc` wrapper (the same list is repeated in atc, start.sh,
+# start.ps1 and the dist script in build.mill); the command line's -Xmx/-Xms come later and win.
 $javaArgs = @('-Xms256m', '-Xmx2g', '-Xss4m', '-XX:-UsePerfData')
 # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
 if ($major -ge 23) { $javaArgs += '--sun-misc-unsafe-memory-access=allow' }

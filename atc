@@ -18,7 +18,8 @@ CACHE_DIR="${ATC_CACHE_DIR:-${DEFAULT_CACHE_DIR}}"
 INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
 INSTALL_PATH="${INSTALL_DIR}/atc"
 # JVM defaults for 'atc run' (measured; doc/development.md "JVM settings"). ATC_JAVA_OPTS
-# and -Xmx/-Xms on the command line come later and win.
+# and -Xmx/-Xms on the command line come later and win. The same list is repeated in
+# start.sh, start.ps1, windows/atc.ps1 and the dist script in build.mill: change all five.
 DEFAULT_JVM_OPTS="-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData"
 # Startup cache (AOT cache on Java 25+, CDS archive on 19-24): halves the cold start, but a
 # stale one makes the JVM print errors, so key.txt records the JDK and release and is dated
@@ -842,13 +843,18 @@ cmd_dev() {
 
 # Take the JVM heap flags `-Xmx<size>` / `-Xms<size>` out of the run arguments: they go to
 # java, and ATC itself does not know them. Leaves the rest, in order, in RUN_ARGS and the
-# flags in JVM_OPTS. Bash 3.2: an empty array must be expanded as ${A[@]+"${A[@]}"}
-# under `set -u`.
+# flags in JVM_OPTS. The value of an ATC option that takes one (-p 'text', -C dir, ...) is
+# forwarded untouched even when it starts with -Xm: the list of those options mirrors
+# `FlagsWithValues` in app/src/atc/Cli.scala (start.sh and windows/atc.ps1 carry the same
+# list). Bash 3.2: an empty array must be expanded as ${A[@]+"${A[@]}"} under `set -u`.
 extract_jvm_options() {
   JVM_OPTS=()
   RUN_ARGS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      -c|--config|-C|--cwd|-m|--model|-p|--prompt|--mode)
+        RUN_ARGS+=("$1"); shift
+        [[ $# -eq 0 ]] || { RUN_ARGS+=("$1"); shift; } ;;
       -Xmx*|-Xms*)
         [[ "${1#-Xm?}" =~ ^[0-9]+[kKmMgG]?$ ]] ||
           fail "Invalid JVM heap size '$1': use a number with an optional k, m or g suffix, e.g. -Xmx4g or -Xms512m"
