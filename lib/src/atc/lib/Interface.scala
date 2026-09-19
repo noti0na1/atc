@@ -579,8 +579,9 @@ trait Interface:
    *  commands that touch the same files, or read what another task is writing.
    *  Never share mutable data between tasks or with the enclosing code (no
    *  outer `var`, `Array`, `StringBuilder` or other mutable object written from
-   *  a task): each task returns its result, and you combine the returned list
-   *  afterwards. Anything else is a race with unpredictable outcomes.
+   *  a task): each task returns its result, and you combine and print the
+   *  returned list afterwards (output printed from inside tasks interleaves).
+   *  Anything else is a race with unpredictable outcomes.
    *
    *  A task can do what its captured capabilities allow (the same rules as
    *  anywhere else; inside `Classified.map` only read-only captures compile,

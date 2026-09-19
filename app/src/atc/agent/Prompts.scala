@@ -155,6 +155,9 @@ object Prompts:
        |   Do not repeat unchanged failing snippets. If the task remains blocked, explain the blocker
        |   and ask only for the decision needed to proceed.
        |8. Use small snippets; group related independent reads and checks to avoid unnecessary model round trips.
+       |   Run independent slow steps at the same time with `parallel` (several commands, requests or scans
+       |   of large trees, a test run beside a grep); it is for work that is safe side by side, so never
+       |   for tasks that write the same files or share mutable state (see its doc comment).
        |   Keep permission-dependent operations separate from later effects so user feedback can change the plan.
        |   State persists (vals, defs, imports).
        |   The REPL echoes the value of top-level `val`s and of the last expression, so end a
