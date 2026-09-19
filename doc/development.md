@@ -354,8 +354,15 @@ ATC's file and HTTP permissions do not constrain the internals of those commands
 
 ## The sandbox
 
-`App.ensureSession` initializes the REPL on the first Scala tool call or `/run`.
-Text-only turns do not start a compiler. Reset and mode changes discard the previous
+`App.warmSession` starts the REPL on a daemon thread as soon as the program is ready for
+input (after the resume offer; before the turn of a `-p` run), because compiling the
+preamble takes about two seconds that would otherwise land inside the first tool call.
+`App.ensureSession` adopts that session on the first Scala tool call or `/run`, waiting for
+it (with a "starting sandbox" status) only when it is not ready yet, and starts one on the
+spot if none is warming. `App.replaceSession` (reset, mode change, `/new`) drops the live
+session and a warming one alike (`discardWarming`: a daemon thread closes it once its
+initialization ends, so the switch never waits for a compiler it no longer needs) and
+starts warming the next one. Text-only turns never wait for a compiler. Reset and mode changes discard the previous
 session; initialization remains deferred. `Agent.turn` and `ScalaToolRunner` accept the
 session lazily, and cancellation is checked after initialization before executing code.
 
@@ -921,8 +928,9 @@ shows the turn's cost and how full the context window is. Turn summaries disting
 finished, interrupted, blocked, failed and limit-reached responses; in scripted `-p` runs,
 finished responses exit with `0`, interruptions with `130`, and other stopped outcomes with
 `1`, and a finished response does not certify that every tool succeeded. Bracketed pastes
-retain their newlines until Enter. The REPL starts on the first Scala call, so ordinary
-conversation needs no compiler startup.
+retain their newlines until Enter. The REPL starts in the background as soon as ATC is
+ready for input, so the first Scala call usually finds it warm and ordinary conversation
+never waits for a compiler.
 
 | Command | Purpose |
 |---|---|
