@@ -75,6 +75,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       .model(modelId)
       .maxTokens(maxOutputTokens.get.toLong)
       .systemOfTextBlockParams(List(systemBlock).asJava)
+    Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
     configuredThinking(b)
     // `temperature` is not applied: current Anthropic models reject sampling parameters.
     tools.foreach(t => b.addTool(toolUnion(t)))
@@ -200,6 +201,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     val b = MessageCreateParams.builder().model(
       modelId
     ).maxTokens(cfg.maxTokens.map(_.toLong).getOrElse(16000L)).addUserMessage(prompt)
+    Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
     system.foreach(b.system)
     if thinking then configuredThinking(b) else b.thinking(ThinkingConfigDisabled.builder().build())
     val m = client.messages().create(b.build())

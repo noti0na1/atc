@@ -674,3 +674,20 @@ class ConfigSuite extends munit.FunSuite:
       Config.resolveApiKey(p, KeyBindings(List((java.nio.file.Path.of("k"), Map("K" -> "from-env"))))),
       Some("from-env")
     )
+
+  test("provider headers resolve ${VAR} values, drop unset ones and keep the session placeholder"):
+    val p = ProviderConfig(
+      api = Some("openai"),
+      headers = Map(
+        "x-literal" -> "plain",
+        "x-secret" -> "${HDR}",
+        "x-unset" -> "${NO_SUCH_HEADER_VAR_XYZ}",
+        "x-session" -> Config.SessionRef,
+      ),
+    )
+    val bindings = KeyBindings(List((java.nio.file.Path.of("k"), Map("HDR" -> "from-file"))))
+    assertEquals(
+      Config.resolveHeaders(p, bindings),
+      Map("x-literal" -> "plain", "x-secret" -> "from-file", "x-session" -> "${ATC_SESSION}"),
+    )
+    assertEquals(Config.resolveHeaders(ProviderConfig(api = Some("openai"))), Map.empty)

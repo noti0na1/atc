@@ -665,6 +665,14 @@ parameter; unrelated bad requests are not retried by this fallback.
 Provider SDK request construction remains in each adapter. Shared configuration and client
 setup belong in `Providers`; model selection belongs in `ModelCatalog`.
 
+A provider's `headers` are extra HTTP headers for every request to it. `Config.resolveHeaders`
+resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
+keeps the placeholder `${ATC_SESSION}` (`Config.SessionRef`), which `Providers.headers(spec)`
+replaces per request with the conversation id, a UUID that `Agent.clear()` renews. The same
+call adds `User-Agent: atc/<version>` unless the config sets one. Every adapter applies the
+set to both `complete` and `simple` with the params builder's `putAdditionalHeader`. Nothing
+provider-specific is sent by default; OpenCode's `x-opencode-session` is configured.
+
 ## Conversation context and agent loop
 
 The system prompt contains environment data, workflow instructions, capability rules, the

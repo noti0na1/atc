@@ -204,3 +204,18 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(AnthropicModel.cacheBreakpoint(List(user, assistant)), 0)
     assertEquals(AnthropicModel.cacheBreakpoint(List(assistant)), -1)
     assertEquals(AnthropicModel.cacheBreakpoint(Nil), -1)
+
+  test("request headers: the user agent unless configured, and the conversation id for ${ATC_SESSION}"):
+    def spec(headers: Map[String, String]) =
+      ModelSpec("p", "m", "openai", "m", None, None, ModelConfig(), headers)
+    assertEquals(Providers.headers(spec(Map.empty)), Map("User-Agent" -> Providers.UserAgent))
+    assert(Providers.UserAgent.startsWith("atc/"))
+    assertEquals(Providers.headers(spec(Map("User-Agent" -> "mine/1")))("User-Agent"), "mine/1")
+    val withSession = spec(Map("x-session" -> Config.SessionRef, "x-plain" -> "v"))
+    val first = Providers.headers(withSession)
+    assertEquals(first("x-plain"), "v")
+    assert(first("x-session").matches("[0-9a-f-]{36}"), first("x-session"))
+    // stable within a conversation, renewed by a new one
+    assertEquals(Providers.headers(withSession)("x-session"), first("x-session"))
+    Providers.newConversation()
+    assertNotEquals(Providers.headers(withSession)("x-session"), first("x-session"))

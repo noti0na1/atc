@@ -133,6 +133,7 @@ final class Agent(
 
   def clear(): Unit =
     conversation.clear()
+    Providers.newConversation()
     synchronized { usageBy.clear() }
     toolCalls = 0
     context.reset()
