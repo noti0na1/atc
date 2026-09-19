@@ -684,11 +684,17 @@ call adds `User-Agent: atc/<version>` unless the config sets one. Every adapter 
 set to both `complete` and `simple` with the params builder's `putAdditionalHeader`. Nothing
 provider-specific is sent by default; OpenCode's `x-opencode-session` is configured.
 
-Chat Completions streams differ in where `usage` arrives: OpenAI sends it in a choice-less
-chunk after the finish chunk, and the SDK's accumulator builds the completion as soon as a
-usage chunk arrives. DeepSeek puts the usage on the finish chunk itself, which made the
-accumulator fail on the choices it had not recorded yet. `OpenAIChatModel.accumulate` feeds
-such a chunk as the two chunks it stands for.
+Chat Completions streams differ in where `usage` arrives, and the SDK's accumulator is
+strict: after the finish chunk it accepts one choice-less chunk, and only one carrying the
+usage the completion lacks. OpenAI sends the usage in a choice-less chunk after the finish
+chunk; DeepSeek puts it on the finish chunk itself (which made the accumulator build the
+completion before its choices were recorded); OpenCode's gateway does both for GLM, so the
+second usage chunk was refused with "Already accumulated the final chunk(s)"; after `[DONE]`
+it also sends a `cost` line, which the SDK never parses. `OpenAIChatModel.ChunkFeed` therefore
+feeds chunks with their usage stripped, remembers the last usage seen, and feeds it once as
+the choice-less chunk the accumulator expects when the completion is taken; choice-less
+chunks without usage and chunks arriving after the finish chunk are dropped (test in
+`ModelSuite`).
 
 ## Conversation context and agent loop
 

@@ -220,9 +220,8 @@ class ModelSuite extends munit.FunSuite:
     Providers.newConversation()
     assertNotEquals(Providers.headers(withSession)("x-session"), first("x-session"))
 
-  test("a chat chunk carrying usage on the finish chunk (DeepSeek) accumulates like OpenAI's separate usage chunk"):
-    import com.openai.helpers.ChatCompletionAccumulator
-    import com.openai.models.chat.completions.ChatCompletionChunk
+  test("chat chunks are accumulated whichever way the usage arrives: after, on, or twice around the finish chunk"):
+    import com.openai.models.chat.completions.{ChatCompletion, ChatCompletionChunk}
     import com.openai.models.completions.CompletionUsage
     def chunk(content: String, finished: Boolean, usage: Option[CompletionUsage]) =
       val delta = ChatCompletionChunk.Choice.Delta.builder().content(content).build()
@@ -232,18 +231,35 @@ class ModelSuite extends munit.FunSuite:
         .build()
       ChatCompletionChunk.builder().id("c").created(1L).model("m").addChoice(choice)
         .usage(usage.map(java.util.Optional.of).getOrElse(java.util.Optional.empty())).build()
-    val usage = CompletionUsage.builder().promptTokens(38L).completionTokens(29L).totalTokens(67L).build()
-    val usageOnly =
-      ChatCompletionChunk.builder().id("c").created(1L).model("m").choices(java.util.List.of()).usage(usage).build()
-
-    def text(acc: ChatCompletionAccumulator) = acc.chatCompletion().choices().get(0).message().content().get
+    def usageOf(total: Long) =
+      CompletionUsage.builder().promptTokens(38L).completionTokens(total - 38L).totalTokens(total).build()
+    def usageOnly(total: Long) =
+      ChatCompletionChunk.builder().id("c").created(1L).model("m").choices(java.util.List.of()).usage(usageOf(
+        total
+      )).build()
+    val bare = ChatCompletionChunk.builder().id("c").created(1L).model("m").choices(java.util.List.of()).build()
+    def feed(chunks: ChatCompletionChunk*): ChatCompletion =
+      val f = OpenAIChatModel.ChunkFeed()
+      chunks.foreach(f.accumulate)
+      f.completion()
+    def text(c: ChatCompletion) = c.choices().get(0).message().content().get
+    def total(c: ChatCompletion) = c.usage().get.totalTokens()
     // OpenAI's shape: finish chunk, then a choice-less usage chunk
-    val openai = ChatCompletionAccumulator.create()
-    List(chunk("po", false, None), chunk("ng", true, None), usageOnly).foreach(OpenAIChatModel.accumulate(openai, _))
+    val openai = feed(chunk("po", false, None), chunk("ng", true, None), usageOnly(67))
     assertEquals(text(openai), "pong")
-    assertEquals(openai.chatCompletion().usage().get.totalTokens(), 67L)
+    assertEquals(total(openai), 67L)
     // DeepSeek's shape: the usage rides on the finish chunk
-    val deepseek = ChatCompletionAccumulator.create()
-    List(chunk("po", false, None), chunk("ng", true, Some(usage))).foreach(OpenAIChatModel.accumulate(deepseek, _))
+    val deepseek = feed(chunk("po", false, None), chunk("ng", true, Some(usageOf(67))))
     assertEquals(text(deepseek), "pong")
-    assertEquals(deepseek.chatCompletion().usage().get.totalTokens(), 67L)
+    assertEquals(total(deepseek), 67L)
+    // GLM through OpenCode's gateway: both, and the later one wins; a choice-less chunk
+    // without usage (a cost line) is ignored
+    val glm = feed(chunk("po", false, None), chunk("ng", true, Some(usageOf(67))), usageOnly(68), bare)
+    assertEquals(text(glm), "pong")
+    assertEquals(total(glm), 68L)
+    // running usage on every chunk, and none at all
+    assertEquals(total(feed(chunk("po", false, Some(usageOf(40))), chunk("ng", true, Some(usageOf(67))))), 67L)
+    assert(feed(chunk("po", false, None), chunk("ng", true, None)).usage().isEmpty)
+    // a stream cut before its finish chunk fails clearly instead of building a completion without choices
+    val cut = intercept[IllegalStateException](feed(chunk("po", false, None), usageOnly(67)))
+    assert(cut.getMessage.nn.contains("not yet received"), cut.getMessage)
