@@ -102,6 +102,26 @@ private[atc] object ModelRequest:
             def close(): Unit = call.cancel()))
     }.build()
 
+  /** Bind cancellation to the Anthropic SDK's calls, including retries and calls still waiting for
+    * response headers: cancelling a pending call's future makes the SDK cancel its OkHttp call, and
+    * closing a response body mid-read does the same (SDK >= 2.64). The wrapper shares the model's
+    * transport and never closes it; the model owns its lifetime (see `Providers.borrowed`). */
+  def scopedTransport(base: com.anthropic.core.http.HttpClient): com.anthropic.core.http.HttpClient =
+    val scope = Option(current.get())
+    new com.anthropic.core.http.HttpClient:
+      def execute(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        scope.foreach(_.checkActive())
+        base.execute(request, options)
+      def executeAsync(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        scope.foreach(_.checkActive())
+        val call = base.executeAsync(request, options)
+        scope.foreach(_.attachTransport(new AutoCloseable:
+          def close(): Unit =
+            call.cancel(true)
+            ()))
+        call
+      def close(): Unit = ()
+
   /** Register a provider stream while it is open, including streams created after cancellation. */
   def withResource[R <: AutoCloseable, A](open: => R)(operation: R => A): A =
     Using.resource(open) { resource =>

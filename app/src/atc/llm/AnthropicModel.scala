@@ -19,11 +19,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   /** What the request asks for: the context fitter reserves exactly this. */
   override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(DefaultMaxTokens))
 
-  private final case class Connection(
-    client: AnthropicClient,
-    http: okhttp3.OkHttpClient,
-    backend: com.anthropic.backends.AnthropicBackend
-  )
+  private final case class Connection(client: AnthropicClient, transport: com.anthropic.core.http.HttpClient)
   private var openedClient: Option[Connection] = None
   private def connection: Connection = synchronized {
     openedClient.getOrElse {
@@ -34,12 +30,13 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
       spec.baseUrl.foreach(backendBuilder.baseUrl)
       val backend = backendBuilder.build()
       val timeout = com.anthropic.core.Timeout.builder().request(Providers.RequestTimeout).build()
-      val http = Providers.httpClient(timeout.connect(), timeout.read(), timeout.write(), timeout.request())
-      val transport = com.anthropic.client.okhttp.OkHttpClient(http, backend)
+      // The SDK builds and owns the OkHttp client (since 2.63 its transport takes no outside one);
+      // cancellation goes through `ModelRequest.scopedTransport` instead of an OkHttp event listener.
+      val transport = com.anthropic.client.okhttp.OkHttpClient.builder().timeout(timeout).backend(backend).build()
       val options = com.anthropic.core.ClientOptions.builder().httpClient(transport)
         .baseUrl(backend.baseUrl()).timeout(Providers.RequestTimeout)
       backend.applyCredentials(transport, options)
-      val created = Connection(AnthropicClientImpl(options.build()), http, backend)
+      val created = Connection(AnthropicClientImpl(options.build()), transport)
       openedClient = Some(created)
       created
     }
@@ -47,10 +44,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   private def client: AnthropicClient = connection.client
   private def streamingClient: AnthropicClient =
     val opened = connection
-    opened.client.withOptions(_.httpClient(Providers.borrowed(com.anthropic.client.okhttp.OkHttpClient(
-      ModelRequest.scopedHttpClient(opened.http),
-      opened.backend
-    ))))
+    opened.client.withOptions(_.httpClient(ModelRequest.scopedTransport(opened.transport)))
 
   override def close(): Unit = synchronized {
     openedClient.foreach(_.client.close())
