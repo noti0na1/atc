@@ -884,7 +884,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     @volatile private var running = false
     /** The pop-up handshake: both guarded by pauseLock. A pop-up may not read
       * while the key thread is inside `read`, and the key thread may not start
-      * a read once a pop-up asked for the pause. */
+      * a read once a pop-up asked for the pause. Every change of `reading`,
+      * `pauseDepth` and `running` notifies, so the waits below have no timeout. */
     private val pauseLock = Object()
     private var pauseDepth = 0
     private var reading = false
@@ -916,7 +917,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       pauseLock.synchronized { pauseDepth += 1 }
       try
         pauseLock.synchronized:
-          while reading do pauseLock.wait(50)
+          while reading do pauseLock.wait()
         body
       finally
         pauseLock.synchronized:
@@ -940,7 +941,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           typeAhead.clear()
       while running do
         val mayRead = pauseLock.synchronized:
-          while pauseDepth > 0 && running do pauseLock.wait(50)
+          while pauseDepth > 0 && running do pauseLock.wait()
           reading = running
           reading
         if mayRead then

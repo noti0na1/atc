@@ -65,7 +65,13 @@ final class Agent(
   private val queuedInput = java.util.concurrent.ConcurrentLinkedQueue[String]()
 
   def submit(input: String): Unit =
-    if input.trim.nonEmpty then queuedInput.add(input.trim)
+    if input.trim.nonEmpty then
+      queuedInput.add(input.trim)
+      request.recheck()
+
+  /** The user interrupted: a model request in progress re-evaluates its cancellation
+    * (`ModelRequest.recheck`) instead of finding out when the provider next answers. */
+  def interrupt(): Unit = request.recheck()
 
   def queuedInputCount: Int = queuedInput.size()
 

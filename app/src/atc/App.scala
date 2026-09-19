@@ -48,7 +48,6 @@ final class App(args: Cli.Args, val tui: Tui):
   // ── sandbox session ───────────────────────────────────────────────
 
   @volatile var session: Option[ReplSession] = None
-  tui.onInterrupt = () => session.foreach(_.interrupt())
 
   /** Exclude user input and operations with their own timeout from the snippet clock. */
   private def withClockPaused[T](body: => T): T =
@@ -123,6 +122,9 @@ final class App(args: Cli.Args, val tui: Tui):
   )
   tui.onSubmit = agent.submit
   tui.queuedInputs = () => agent.queuedInputCount
+  tui.onInterrupt = () =>
+    agent.interrupt()
+    session.foreach(_.interrupt())
 
   private def updateStatusContext(): Unit =
     val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)

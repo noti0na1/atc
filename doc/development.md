@@ -704,8 +704,11 @@ exceptions within the loop and are reported as `Failed` by the application.
 `ModelRequest` runs at most one unfinished provider call per agent. The provider adapters
 use SDK asynchronous streams, register their close callbacks before waiting for completion,
 and accumulate events through the existing SDK accumulators. This permits cancellation
-before HTTP headers arrive as well as during streaming. The caller polls cancellation every
-50 ms, closes the stream and interrupts its worker. A provider that does not stop prevents
+before HTTP headers arrive as well as during streaming. The caller blocks until the worker
+ends or `ModelRequest.recheck()` finds the request's cancellation predicate true; the
+threads that make it true (the SIGINT handler through `Agent.interrupt`, the key thread
+through `Agent.submit`) call `recheck()`, which wakes the caller, closes the stream and
+interrupts the worker, so nothing is polled during a call. A provider that does not stop prevents
 another worker from accumulating behind it and produces a clear retry message. Stream
 sinks reject late output after the request ends. Provider clients are closed at application
 shutdown. Interrupted calls may not supply a final token-usage report.

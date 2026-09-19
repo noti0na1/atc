@@ -168,6 +168,7 @@ class ProviderCancellationSuite extends munit.FunSuite:
           assert(streamed.await(5, TimeUnit.SECONDS))
           Thread.sleep(50)
         cancelled.set(true)
+        request.recheck()
         caller.join(1500)
         assert(!caller.isAlive, "cancellation waited for the server")
         assert(failure.get().isInstanceOf[CancelledException])
