@@ -1051,20 +1051,28 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Whether pop-up menus can be drawn (a real terminal). */
   def menusAvailable: Boolean = !plain
 
+  /** Pop-ups from different threads (`parallel` tasks asking or requesting permission)
+    * take turns; a waiter that is interrupted meanwhile never shows its pop-up. */
+  private val popupLock = java.util.concurrent.locks.ReentrantLock()
+
   /** A pop-up is a block of its own: a pending TODO panel is drawn first, then
     * `body` (which reads the terminal), then the blank line that ends the block. */
-  private def popupBlock[T](body: => T): T = keys.withPaused:
-    frame:
-      popupDepth += 1
-      liveOutput.end()
-      flushTodos()
-      beginBlock()
-    try body
-    finally frame:
-        blankLine()
-        popupDepth -= 1
-        if popupDepth == 0 then
-          while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
+  private def popupBlock[T](body: => T): T =
+    popupLock.lockInterruptibly()
+    try
+      keys.withPaused:
+        frame:
+          popupDepth += 1
+          liveOutput.end()
+          flushTodos()
+          beginBlock()
+        try body
+        finally frame:
+            blankLine()
+            popupDepth -= 1
+            if popupDepth == 0 then
+              while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
+    finally popupLock.unlock()
 
   /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
     * `None` when there is no terminal for menus, no options, or the user

@@ -246,6 +246,22 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("""classify("x").map(s => { var n = 0; n += s.length; n })"""))
     assertOk(run("""classify("x").map(s => { val a = Array(1, 2); a(0) + s.length })"""))
 
+  test("parallel charges the caller with what its tasks capture, so Classified.map keeps its rules"):
+    assert(assertOk(run("""parallel(List(1, 2, 3).map(i => () => i * 2))""")).output.contains("List(2, 4, 6)"))
+    env.file("par.txt", "read at once")
+    assert(
+      assertOk(run("""parallel(List(() => read("par.txt"), () => read("par.txt")))""")).output.contains("read at once")
+    )
+    assertOk(
+      run("""classify("s").map(s => parallel(List(() => s.length, () => s.length)).sum)""")
+    ) // pure tasks are fine
+    // The tasks are declared `Seq[() ->{C} A]`: a closure in a plain `Seq[() => A]` is boxed,
+    // its captures are charged only inside the host, and the first snippet ran the command.
+    val charged = "cannot flow into capture set"
+    assertFails(run("""classify("s").map(s => parallel(List(() => exec("echo", List(s)).stdout)))"""), charged)
+    assertFails(run("""classify("s").map(s => parallel(List(() => { println(s); s })))"""), charged)
+    assertFails(run("""classify("s").map(s => parallel(List(() => { write("a.txt", s); s })))"""), charged)
+
   test("map rejects every outward channel"):
     // The security property: nothing that leaves the process (or reaches the
     // user, or the normal model) can run on confidential data.

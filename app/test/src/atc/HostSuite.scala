@@ -466,6 +466,51 @@ class HostSuite extends munit.FunSuite:
     assert(returned.endsWith(name), returned)
     assertEquals(read(returned), "content")
 
+  test("parallel runs the tasks at once, keeps their order, and reports the first failure in task order"):
+    val started = java.util.concurrent.CountDownLatch(3)
+    val results = parallel(List(1, 2, 3).map { i => () =>
+      started.countDown()
+      assert(started.await(5, java.util.concurrent.TimeUnit.SECONDS), "the tasks did not run at once")
+      i * 10
+    })
+    assertEquals(results, List(10, 20, 30))
+    assertEquals(parallel(List.empty[() => Int]), Nil)
+    val failure = intercept[IllegalStateException](parallel(List(1, 2, 3).map { i => () =>
+      if i == 1 then i else throw IllegalStateException(s"task $i")
+    }))
+    assertEquals(failure.getMessage, "task 2")
+
+  test("parallel lets a fatal throwable win and passes an interruption on to its tasks"):
+    // munit's intercept only catches non-fatal errors, and the stop signal is fatal by design.
+    val fatal =
+      try
+        parallel(List(() => throw IllegalStateException("ordinary"), () => throw ThreadDeath()))
+        None
+      catch case stop: ThreadDeath => Some(stop)
+    assert(fatal.isDefined, "the fatal throwable did not win over the ordinary failure")
+    val sleeping = java.util.concurrent.CountDownLatch(1)
+    val taskInterrupted = java.util.concurrent.CountDownLatch(1)
+    @volatile var outcome: Option[Exception] = None
+    val caller = Thread(() =>
+      try
+        parallel(List(() =>
+          sleeping.countDown()
+          try Thread.sleep(10000)
+          catch case _: InterruptedException => taskInterrupted.countDown()
+          0
+        ))
+        ()
+      catch case e: Exception => outcome = Some(e)
+    )
+    caller.setDaemon(true)
+    caller.start()
+    assert(sleeping.await(5, java.util.concurrent.TimeUnit.SECONDS))
+    caller.interrupt()
+    caller.join(5000)
+    assert(!caller.isAlive, "the caller did not return after the interrupt")
+    assert(outcome.exists(_.isInstanceOf[InterruptedException]), outcome.toString)
+    assert(taskInterrupted.await(5, java.util.concurrent.TimeUnit.SECONDS), "the task was not interrupted")
+
   test("writeBytes is refused on a classified path, like write"):
     intercept[SecurityException](writeBytes("secrets/x.dat", Array[Byte](1, 2)))
 

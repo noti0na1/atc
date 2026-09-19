@@ -292,6 +292,25 @@ class ReplSessionSuite extends munit.FunSuite:
     assertOk(s.run("val afterInterrupt = beforeInterrupt + 2"))
     assert(assertOk(s.run("afterInterrupt")).output.contains("42"))
 
+  test("interrupt() and the timeout stop tasks running in parallel"):
+    val busy = "parallel(List(1, 2).map(i => () => { var n = 0L; while true do n += i; n }))"
+    val env = TestEnv(prefix = "atc-repl-parallel")
+    val s = env.newSession(timeoutMs = Some(60000L))
+    @volatile var result: Option[ExecutionResult] = None
+    val t = Thread(() => result = Some(s.run(busy)))
+    t.setDaemon(true)
+    t.start()
+    Thread.sleep(700)
+    s.interrupt()
+    t.join(10000)
+    assert(!t.isAlive, "evaluation did not stop after interrupt")
+    assert(result.exists(!_.success), result.toString)
+    assert(assertOk(s.run("2 + 2")).output.contains("4"))
+    envQuick.activate()
+    val timedOut = quick.run(busy)
+    assert(timedOut.error.exists(_.contains("timed out")), timedOut.toString)
+    assert(assertOk(quick.run("3 + 3")).output.contains("6"))
+
   test("close() interrupts a running evaluation and refuses later runs"):
     val env = TestEnv(prefix = "atc-repl-close")
     val s = env.newSession(timeoutMs = Some(60000L))
