@@ -341,6 +341,11 @@ run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Xmx3g" main -Xmx4g)"
 assert_contains "-Xmx comes after the defaults and ATC_JAVA_OPTS" "$DEFAULT_FLAGS"$'\n-Xmx3g\n-Xmx4g' "$run_out"
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
 assert_eq "no heap flag leaves only the defaults" $'-Xms256m\n-Xmx2g\n-Xss4m' "$(printf '%s\n' "$run_out" | grep -- '-X[ms]' || true)"
+# The value of an ATC option is never taken for a heap flag, however it starts.
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main -p '-Xmx is not a flag here' -C -Xms512m --mode -Xmx)"
+assert_contains "option values starting with -Xm are forwarded to ATC" \
+  $'-p\n-Xmx is not a flag here\n-C\n-Xms512m\n--mode\n-Xmx' "$run_out"
+assert_contains "option values starting with -Xm do not reach java" "$DEFAULT_FLAGS"$'\n-Dfile.encoding=UTF-8' "$run_out"
 for bad in -Xmx -Xmxlots -Xms4gg -Xmx=4g; do
   assert_fails "$bad is refused" env PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main $bad -C /work"
   assert_contains "$bad message" "Invalid JVM heap size '$bad'" \

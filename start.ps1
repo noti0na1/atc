@@ -3,6 +3,32 @@ $ErrorActionPreference = 'Stop'
 $AtcArgs = [string[]]$args
 $launchCwd = (Get-Location).Path
 $root = $PSScriptRoot
+
+# `-Xmx<size>` / `-Xms<size>` are the JVM's flags, not ATC's: take them out for java. The
+# value of an ATC option that takes one (-p 'text', -C dir, ...) is forwarded untouched even
+# when it starts with -Xm: the list of those options mirrors `FlagsWithValues` in
+# app/src/atc/Cli.scala (`atc`, start.sh and windows/atc.ps1 carry the same list).
+$optionsWithValues = @('-c', '--config', '-C', '--cwd', '-m', '--model', '-p', '--prompt', '--mode')
+$jvmOpts = @()
+$forwarded = [Collections.Generic.List[string]]::new()
+$expectValue = $false
+foreach ($arg in $AtcArgs) {
+  if ($expectValue) {
+    $expectValue = $false
+    $forwarded.Add($arg)
+  } elseif ($optionsWithValues -ccontains $arg) {
+    $expectValue = $true
+    $forwarded.Add($arg)
+  } elseif ($arg -cmatch '^-Xm[sx]') {
+    if ($arg -cnotmatch '^-Xm[sx][0-9]+[kKmMgG]?$') {
+      throw "Invalid JVM heap size '$arg': use a number with an optional k, m or g suffix, e.g. -Xmx4g or -Xms512m"
+    }
+    $jvmOpts += $arg
+  } else {
+    $forwarded.Add($arg)
+  }
+}
+$AtcArgs = [string[]]$forwarded.ToArray()
 $envFile = if ($env:ATC_ENV_FILE) { $env:ATC_ENV_FILE } else { Join-Path $root '.env' }
 
 # Load simple KEY=value entries without replacing variables inherited from the shell.
@@ -54,11 +80,14 @@ if ($env:ATC_MODEL) { $argsList.Add('-m'); $argsList.Add($env:ATC_MODEL) }
 if ($AtcArgs) { $argsList.AddRange([string[]]$AtcArgs) }
 
 $javaArgs = [Collections.Generic.List[string]]::new()
-# JVM defaults as in the `atc` wrapper; ATC_JAVA_OPTS comes later and wins.
+# JVM defaults as in the `atc` wrapper (the same list is repeated in atc, start.sh,
+# windows/atc.ps1 and the dist script in build.mill); ATC_JAVA_OPTS and then the command
+# line's -Xmx/-Xms come later and win.
 foreach ($option in @('-Xms256m', '-Xmx2g', '-Xss4m', '-XX:-UsePerfData')) { $javaArgs.Add($option) }
 if ($env:ATC_JAVA_OPTS) {
   foreach ($option in ($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })) { $javaArgs.Add($option) }
 }
+foreach ($option in $jvmOpts) { $javaArgs.Add($option) }
 $javaArgs.Add('-Dfile.encoding=UTF-8')
 $appVersion = if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
   (Get-Content -LiteralPath $versionFile -Encoding UTF8 -Raw).Trim()

@@ -54,11 +54,23 @@ if [ "$needs_build" = 1 ]; then
   (cd "$ROOT" && ./mill dist >/dev/null)
 fi
 
-# `-Xmx<size>` / `-Xms<size>` are the JVM's flags, not ATC's: take them out for java.
+# `-Xmx<size>` / `-Xms<size>` are the JVM's flags, not ATC's: take them out for java. The
+# value of an ATC option that takes one (-p 'text', -C dir, ...) is forwarded untouched even
+# when it starts with -Xm: the list of those options mirrors `FlagsWithValues` in
+# app/src/atc/Cli.scala (`atc` and the PowerShell launchers carry the same list).
 JVM_OPTS=
+expect_value=
 for arg in "$@"; do
   shift
+  if [ -n "$expect_value" ]; then
+    expect_value=
+    set -- "$@" "$arg"
+    continue
+  fi
   case "$arg" in
+    -c|--config|-C|--cwd|-m|--model|-p|--prompt|--mode)
+      expect_value=1
+      set -- "$@" "$arg" ;;
     -Xmx*|-Xms*)
       size=${arg#-Xm?}
       case "${size%[kKmMgG]}" in
@@ -75,7 +87,8 @@ done
 [ -n "${ATC_CONFIG:-}" ] && set -- -c "$ATC_CONFIG" "$@"
 [ -n "${ATC_CWD:-}" ]    && set -- -C "$ATC_CWD" "$@"
 
-# JVM defaults as in the `atc` wrapper (doc/development.md "JVM settings").
+# JVM defaults as in the `atc` wrapper (doc/development.md "JVM settings"); the same list
+# is repeated in atc, start.ps1, windows/atc.ps1 and the dist script in build.mill.
 DEFAULT_JVM_OPTS="-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData"
 
 # Startup cache as in the `atc` wrapper: an AOT cache (Java 25+) or a CDS archive (Java
