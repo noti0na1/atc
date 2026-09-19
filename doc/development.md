@@ -673,6 +673,12 @@ call adds `User-Agent: atc/<version>` unless the config sets one. Every adapter 
 set to both `complete` and `simple` with the params builder's `putAdditionalHeader`. Nothing
 provider-specific is sent by default; OpenCode's `x-opencode-session` is configured.
 
+Chat Completions streams differ in where `usage` arrives: OpenAI sends it in a choice-less
+chunk after the finish chunk, and the SDK's accumulator builds the completion as soon as a
+usage chunk arrives. DeepSeek puts the usage on the finish chunk itself, which made the
+accumulator fail on the choices it had not recorded yet. `OpenAIChatModel.accumulate` feeds
+such a chunk as the two chunks it stands for.
+
 ## Conversation context and agent loop
 
 The system prompt contains environment data, workflow instructions, capability rules, the

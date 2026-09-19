@@ -97,7 +97,7 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     ModelRequest.awaitStream(() => stream.close()) {
       stream.subscribe { chunk =>
         if cancelled() then throw CancelledException()
-        acc.accumulate(chunk)
+        OpenAIChatModel.accumulate(acc, chunk)
         chunk.choices().asScala.headOption.foreach { ch =>
           val delta = ch.delta()
           delta.content().toScala.foreach(sink.text)
@@ -128,3 +128,17 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
       client.chat().completions().create(b.build())
     val c = withEffortFallback(thinking, effort(thinking))(request)
     Reply(c.choices().asScala.headOption.flatMap(_.message().content().toScala).getOrElse(""), usageOf(c))
+
+object OpenAIChatModel:
+  /** Feed `chunk` to the accumulator. OpenAI reports `usage` in a choice-less
+    * chunk after the finish chunk, and the accumulator builds the completion
+    * from a usage chunk on sight; DeepSeek (directly or through a gateway)
+    * puts the usage on the finish chunk itself, which then fails on the
+    * choices not yet recorded. Such a chunk is fed as the two it stands for. */
+  private[atc] def accumulate(acc: ChatCompletionAccumulator, chunk: ChatCompletionChunk): Unit =
+    if chunk.usage().isPresent && !chunk.choices().isEmpty then
+      acc.accumulate(
+        chunk.toBuilder().usage(java.util.Optional.empty[com.openai.models.completions.CompletionUsage]()).build()
+      )
+      acc.accumulate(chunk.toBuilder().choices(java.util.List.of[ChatCompletionChunk.Choice]()).build())
+    else acc.accumulate(chunk)

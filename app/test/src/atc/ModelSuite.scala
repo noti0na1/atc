@@ -219,3 +219,31 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(Providers.headers(withSession)("x-session"), first("x-session"))
     Providers.newConversation()
     assertNotEquals(Providers.headers(withSession)("x-session"), first("x-session"))
+
+  test("a chat chunk carrying usage on the finish chunk (DeepSeek) accumulates like OpenAI's separate usage chunk"):
+    import com.openai.helpers.ChatCompletionAccumulator
+    import com.openai.models.chat.completions.ChatCompletionChunk
+    import com.openai.models.completions.CompletionUsage
+    def chunk(content: String, finished: Boolean, usage: Option[CompletionUsage]) =
+      val delta = ChatCompletionChunk.Choice.Delta.builder().content(content).build()
+      val choice = ChatCompletionChunk.Choice.builder().index(0L).delta(delta)
+        .finishReason(if finished then java.util.Optional.of(ChatCompletionChunk.Choice.FinishReason.STOP)
+        else java.util.Optional.empty())
+        .build()
+      ChatCompletionChunk.builder().id("c").created(1L).model("m").addChoice(choice)
+        .usage(usage.map(java.util.Optional.of).getOrElse(java.util.Optional.empty())).build()
+    val usage = CompletionUsage.builder().promptTokens(38L).completionTokens(29L).totalTokens(67L).build()
+    val usageOnly =
+      ChatCompletionChunk.builder().id("c").created(1L).model("m").choices(java.util.List.of()).usage(usage).build()
+
+    def text(acc: ChatCompletionAccumulator) = acc.chatCompletion().choices().get(0).message().content().get
+    // OpenAI's shape: finish chunk, then a choice-less usage chunk
+    val openai = ChatCompletionAccumulator.create()
+    List(chunk("po", false, None), chunk("ng", true, None), usageOnly).foreach(OpenAIChatModel.accumulate(openai, _))
+    assertEquals(text(openai), "pong")
+    assertEquals(openai.chatCompletion().usage().get.totalTokens(), 67L)
+    // DeepSeek's shape: the usage rides on the finish chunk
+    val deepseek = ChatCompletionAccumulator.create()
+    List(chunk("po", false, None), chunk("ng", true, Some(usage))).foreach(OpenAIChatModel.accumulate(deepseek, _))
+    assertEquals(text(deepseek), "pong")
+    assertEquals(deepseek.chatCompletion().usage().get.totalTokens(), 67L)
