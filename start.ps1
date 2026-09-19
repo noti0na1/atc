@@ -123,6 +123,8 @@ if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
 if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
 # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
 if ($major -ge 23) { $javaArgs.Insert(0, '--sun-misc-unsafe-memory-access=allow') }
+# JLine loads a native library; Java 24+ warns about that on every run (JEP 472).
+if ($major -ge 24) { $javaArgs.Insert(1, '--enable-native-access=ALL-UNNAMED') }
 
 $savedLaunchCwd = $env:ATC_INTERNAL_LAUNCH_CWD
 $savedLibClasspath = $env:ATC_INTERNAL_LIB_CLASSPATH

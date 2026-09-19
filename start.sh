@@ -100,11 +100,17 @@ case "$java_major" in ''|*[!0-9]*) java_major=0 ;; esac
 # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
 VERSIONED_JVM_OPTS=
 [ "$java_major" -lt 23 ] || VERSIONED_JVM_OPTS="--sun-misc-unsafe-memory-access=allow"
+# JLine loads a native library; Java 24+ warns about that on every run (JEP 472).
+[ "$java_major" -lt 24 ] || VERSIONED_JVM_OPTS="$VERSIONED_JVM_OPTS --enable-native-access=ALL-UNNAMED"
 
 STARTUP_OPTS=
 if [ "${ATC_STARTUP_CACHE:-1}" != 0 ]; then
   cache_dir="$DIST/startup"
   cache_key="$cache_dir/key.txt"
+  # The JDK and the version-gated JVM options the cache was built with (the JVM refuses a
+  # cache built with different module options).
+  key_text="$java_version
+$VERSIONED_JVM_OPTS"
   if [ "$java_major" -ge 25 ]; then
     cache="$cache_dir/atc.aot"; create="-XX:AOTCacheOutput=$cache"; use="-XX:AOTCache=$cache"
   elif [ "$java_major" -ge 19 ]; then
@@ -113,7 +119,7 @@ if [ "${ATC_STARTUP_CACHE:-1}" != 0 ]; then
     cache=
   fi
   if [ -n "$cache" ]; then
-    if [ ! -f "$cache_key" ] || [ "$(cat "$cache_key")" != "$java_version" ] || [ -n "$(find "$JAR" "$LIBJAR" -newer "$cache_key")" ]; then
+    if [ ! -f "$cache_key" ] || [ "$(cat "$cache_key")" != "$key_text" ] || [ -n "$(find "$JAR" "$LIBJAR" -newer "$cache_key")" ]; then
       echo "[start.sh] preparing the JVM startup cache (a few seconds)..." >&2
       mkdir -p "$cache_dir"
       rm -f "$cache"
@@ -123,7 +129,7 @@ if [ "${ATC_STARTUP_CACHE:-1}" != 0 ]; then
       java $DEFAULT_JVM_OPTS $VERSIONED_JVM_OPTS "$create" -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIBJAR" -jar "$JAR" \
         -c "$tmp/train.json" -C "$tmp" -p 'run: 1 + 1' >/dev/null 2>&1 || true
       rm -rf "$tmp"
-      printf '%s\n' "$java_version" > "$cache_key"
+      printf '%s\n' "$key_text" > "$cache_key"
       for jar in "$JAR" "$LIBJAR"; do
         [ -z "$(find "$jar" -newer "$cache_key")" ] || touch -r "$jar" "$cache_key"
       done

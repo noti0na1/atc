@@ -22,8 +22,9 @@ INSTALL_PATH="${INSTALL_DIR}/atc"
 # start.sh, start.ps1, windows/atc.ps1 and the dist script in build.mill: change all five.
 DEFAULT_JVM_OPTS="-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData"
 # Startup cache (AOT cache on Java 25+, CDS archive on 19-24): halves the cold start, but a
-# stale one makes the JVM print errors, so key.txt records the JDK and release and is dated
-# against the jars; a mismatch rebuilds it with one silent echo-model run.
+# stale one makes the JVM print errors, so key.txt records the JDK, the release and the JVM
+# options it was built with, and is dated against the jars; a mismatch rebuilds it with one
+# silent echo-model run.
 STARTUP_CACHE_DIR="${CACHE_DIR}/startup"
 STARTUP_CACHE_KEY="${STARTUP_CACHE_DIR}/key.txt"
 APP_JAR_NAME="atc.jar"
@@ -142,6 +143,8 @@ ensure_java() {
   VERSIONED_JVM_OPTS=()
   # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
   (( JAVA_MAJOR < 23 )) || VERSIONED_JVM_OPTS+=("--sun-misc-unsafe-memory-access=allow")
+  # JLine loads a native library; Java 24+ warns about that on every run (JEP 472).
+  (( JAVA_MAJOR < 24 )) || VERSIONED_JVM_OPTS+=("--enable-native-access=ALL-UNNAMED")
 }
 
 # ---------------------------------------------------------------------------
@@ -879,10 +882,12 @@ startup_cache_flags() {
 }
 
 # What the cache was built for: the JDK (its whole -version output, read once by
-# ensure_java) and the release marker.
+# ensure_java), the release marker and the version-gated JVM options (the JVM refuses a
+# cache built with different module options, such as --enable-native-access).
 startup_cache_key() {
   printf '%s\n' "$JAVA_VERSION"
   cat "$RELEASE_MARKER" 2>/dev/null || true
+  printf '%s\n' "${VERSIONED_JVM_OPTS[*]+"${VERSIONED_JVM_OPTS[*]}"}"
 }
 
 # True when the key file matches and neither jar is newer than it.

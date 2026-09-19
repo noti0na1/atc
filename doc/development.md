@@ -56,7 +56,9 @@ Every launcher starts the JVM with `-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData`
 and `start.ps1`), and on Java 23+ `--sun-misc-unsafe-memory-access=allow`
 (`VERSIONED_JVM_OPTS`; the dist `atc` script leaves it out since it does not detect the Java
 version), because Scala's `LazyVals` still use `sun.misc.Unsafe` and JEP 471 makes the JVM
-print four warning lines on every run otherwise. Measured with the dist jar and the echo
+print four warning lines on every run otherwise. On Java 24+ the same list adds
+`--enable-native-access=ALL-UNNAMED`, because JLine loads its native terminal library and
+JEP 472 prints four warning lines for that. Measured with the dist jar and the echo
 model (JDK 25, September 2026):
 a 100-turn session of reads, writes and commands keeps 130 to 230 MB live and runs down to
 `-Xmx192m`, so 2 GB is headroom, and it bounds a runaway sandbox computation (one line
@@ -72,7 +74,9 @@ CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are b
 the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
 *not* regenerated, so the launchers never point the JVM at one that might be stale:
 `~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
-`-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`) and the release marker, its timestamp is compared with the jars
+`-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`), the release
+marker and the version-gated JVM options (the JVM refuses a cache built under other module
+options, such as `--enable-native-access`), its timestamp is compared with the jars
 (`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
 on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
 building flag. A build that leaves no file writes the key anyway, so it is not retried until

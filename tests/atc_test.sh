@@ -387,14 +387,15 @@ assert_eq "first run = training run + real run" "2" "$(java_calls)"
 training="$(awk 'BEGIN{RS="---\n"} NR==1' "$JAVA_CALLS")"
 assert_contains "training run creates the AOT cache" "-XX:AOTCacheOutput=$STARTUP_DIR/atc.aot" "$training"
 assert_contains "training run is one echo-model prompt turn" $'-p\nrun: 1 + 1' "$training"
-assert_contains "training run uses the JVM defaults" "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow' "$training"
+assert_contains "training run uses the JVM defaults" "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow\n--enable-native-access=ALL-UNNAMED' "$training"
 assert_contains "training run uses a throwaway config and cwd" "/train.json" "$training"
 real="$(awk 'BEGIN{RS="---\n"} NR==2' "$JAVA_CALLS")"
 assert_contains "real run uses the AOT cache after the defaults" \
-  "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow\n-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfile.encoding' "$real"
+  "$DEFAULT_FLAGS"$'\n--sun-misc-unsafe-memory-access=allow\n--enable-native-access=ALL-UNNAMED\n-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfile.encoding' "$real"
 assert_contains "real run keeps the app flags" $'-C\n/work' "$real"
 assert_eq "training left no throwaway config behind" "" "$(ls "${TMPDIR:-/tmp}" | grep 'atc-startup-cache' || true)"
 assert_contains "key records the JDK" 'openjdk version "25.0.4"' "$(cat "$STARTUP_DIR/key.txt")"
+assert_contains "key records the JVM options" '--sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED' "$(cat "$STARTUP_DIR/key.txt")"
 
 : > "$JAVA_VERSION_CALLS"
 (PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
@@ -424,6 +425,7 @@ run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
 assert_contains "Java 21 trains a CDS archive" "-XX:ArchiveClassesAtExit=$STARTUP_DIR/atc.jsa" "$(awk 'BEGIN{RS="---\n"} NR==11' "$JAVA_CALLS")"
 assert_contains "Java 21 runs with the CDS archive" "-XX:SharedArchiveFile=$STARTUP_DIR/atc.jsa" "$run_out"
 assert_eq "Java 21 gets no Unsafe opt-in (Java 23+ only)" "" "$(printf '%s\n' "$run_out" | grep -- 'sun-misc-unsafe' || true)"
+assert_eq "Java 21 gets no native-access opt-in (Java 24+ only)" "" "$(printf '%s\n' "$run_out" | grep -- 'enable-native-access' || true)"
 
 rm -rf "$STARTUP_DIR"
 mock_java 'openjdk version "17.0.2" 2022-01-18' creates
