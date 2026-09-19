@@ -118,7 +118,7 @@ App → Agent → ChatModel.complete → CompletionPolicy
 `ContextManager` owns token estimates and history fitting. `ScalaToolRunner` decodes
 `run_scala`, invokes the REPL, records execution time and renders results through
 `ToolOutput`. `AgentMessages` contains notices exchanged with the model and UI.
-`ToolOutput` appends one hint per result: most are keyed on the output (a safe-mode
+`ToolOutput` appends one hint per result: most are keyed on the output of a failed run (a safe-mode
 rejection, a missing capability, a command that could not start), one on the snippet
 itself (`ToolOutput.codeHint`): a `\"` inside a plain triple-quoted literal, which stays a
 backslash and a quote, so a Python docstring written as `\"\"\"` lands in the file with

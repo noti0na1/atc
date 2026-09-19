@@ -187,7 +187,11 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   // line-drawing escapes.
   reader.setVariable(LineReader.SECONDARY_PROMPT_PATTERN, "%P " + styled("| ", Cyan, Bold))
   private val Indent = "  "
-  private def width: Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
+  /** Terminal columns, measured once per resize (the WINCH handler below): `getSize` is a
+    * system call, and the live views ask for the width for every line of every token. */
+  @volatile private var columns = measureColumns()
+  private def measureColumns(): Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
+  private def width: Int = columns
 
   // ── state ─────────────────────────────────────────────────────────
 
@@ -327,6 +331,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     Terminal.Signal.WINCH,
     _ =>
       frame {
+        columns = measureColumns()
         refreshStatus()
         thinking.resize()
         liveOutput.resize()
@@ -431,12 +436,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Visible width of `gutter`: the indent plus the bar and its space. */
   private val GutterWidth = Indent.length + 2
 
+  /** The ellipsis's actual width: "…" is one cell but ASCII "..." is three, so budgeting a
+    * single column would let a truncated ASCII line overflow and wrap. */
+  private val EllipsisWidth = math.max(1, Tui.displayWidth(g.ellipsis))
+
   /** Cut a plain line so it fits on one terminal row (region lines must not wrap). */
   private def fit(line: String, used: Int): String =
     val room = width - used - 1
-    // Reserve the ellipsis's actual width: "…" is one cell but ASCII "..." is three,
-    // so budgeting a single column would let a truncated ASCII line overflow and wrap.
-    val ell = math.max(1, Tui.displayWidth(g.ellipsis))
+    val ell = EllipsisWidth
     if room <= 0 then ""
     else if Tui.displayWidth(line) <= room then line
     else if room <= ell then g.ellipsis.take(room)
@@ -454,7 +461,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           val cp = line.codePointAt(i)
           val cw = Tui.cellWidth(cp, w)
           if w + cw > budget then i = line.length
-          else { sb.append(String(Character.toChars(cp))); w += cw; i += Character.charCount(cp) }
+          else { sb.underlying.appendCodePoint(cp); w += cw; i += Character.charCount(cp) }
       // A cut may have dropped the line's own reset: never let its style leak into the next row.
       sb.toString + (if styledText then Reset else "") + g.ellipsis
 
@@ -606,7 +613,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     if colors > 0 then
       MarkdownStream(
         MarkdownStream.Glyphs(g.bullet2, g.quote, g.rule, styled(g.bar, Blue) + " ", g.bar, g.junction),
-        Highlight.scala,
+        Highlight.scalaTail,
         () => width - Indent.length - 1,
       )
     else MarkdownStream.plain

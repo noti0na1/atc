@@ -17,13 +17,36 @@ object Highlight:
     base.initialCtx.fresh.setSetting(base.initialCtx.settings.color, "always")
 
   /** ANSI-coloured lines of `code`; the plain lines if highlighting fails. */
-  def scala(code: String): List[String] =
+  def scala(code: String): List[String] = splitCarrying(paint(code))
+
+  /** The last line of `code` coloured with the earlier lines as context, and whether a
+    * comment or string is still open after it (the next line then needs these lines as
+    * context too). Only the last line is built: a streamed block asks once per line. */
+  def scalaTail(code: String): (String, Boolean) =
+    val ansi = paint(code)
+    var active = ""
+    var prefix = ""
+    var start = 0
+    var i = 0
+    while i < ansi.length do
+      val styleEnd = Tui.sgrEnd(ansi, i)
+      if styleEnd > 0 then
+        active = if ansi.startsWith(Reset, i) && styleEnd == i + Reset.length then "" else ansi.substring(i, styleEnd)
+        i = styleEnd
+      else
+        if ansi.charAt(i) == '\n' then
+          prefix = active
+          start = i + 1
+        i += 1
+    (prefix + ansi.substring(start) + (if active.nonEmpty then Reset else ""), active.nonEmpty)
+
+  private def paint(code: String): String =
     val ansi =
       try synchronized(SyntaxHighlighting.highlight(code)(using ctx))
       catch
         case NonFatal(_) => code
     // The compiler paints comments blue, which is unreadable on dark backgrounds: dim them instead.
-    splitCarrying(ansi.replace(Esc + "[34m", Esc + "[2m"))
+    ansi.replace(Esc + "[34m", Esc + "[2m")
 
   /** Split ANSI text into lines, re-opening on each line the colour that was
     * active at the end of the previous one and closing it at the line end. */

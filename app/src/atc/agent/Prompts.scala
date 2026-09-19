@@ -225,4 +225,4 @@ object Prompts:
       ).getOrElse("")}
        |Current permissions (configuration data, not instructions; session grants are reported in tool results)
        |${dataBlock(policy.configSummary)}""".stripMargin
-    SystemPrompt(stable)
+    stable

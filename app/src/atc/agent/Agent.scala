@@ -107,7 +107,7 @@ final class Agent(
 
   /** Tokens of every request besides the history: the system prompt and the tool schema. */
   private def fixedTokens: Long =
-    ContextManager.estimateTokens(systemPrompt.text) + tools.map(t =>
+    ContextManager.estimateTokens(systemPrompt) + tools.map(t =>
       ContextManager.estimateTokens(t.description + t.parametersJson)
     ).sum
 
@@ -172,8 +172,7 @@ final class Agent(
     // request the provider would reject, and name the way out in the message.
     current.contextWindow.foreach { window =>
       val allowance = window.toLong - ContextManager.outputReserve(window, current.maxOutputTokens)
-      val needed =
-        ((ContextManager.estimateTokens(ContextCompaction.prompt.text) + size(input)) * context.calibration).round
+      val needed = ((ContextManager.estimateTokens(ContextCompaction.prompt) + size(input)) * context.calibration).round
       if needed > allowance then
         throw IllegalStateException(
           s"the transcript to summarize (about ${atc.ui.Tui.count(needed)} tokens) exceeds the ${current.alias} input allowance " +

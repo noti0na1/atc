@@ -19,7 +19,7 @@ private[atc] object CommandLine:
       * `./tool safe` could also authorize an executable literally named
       * `./tool safe`.
       */
-    def line: String = argv match
+    lazy val line: String = argv match
       case Nil => ""
       case executable :: args =>
         val shown = if Platform.isWindows then executable.replace('\\', '/') else executable

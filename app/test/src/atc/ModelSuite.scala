@@ -9,7 +9,7 @@ class ModelSuite extends munit.FunSuite:
 
   private def collect(m: ChatModel, history: List[Msg]): (Completion, String) =
     val sb = StringBuilder()
-    val c = m.complete(SystemPrompt("sys"), history, Nil, StreamSink(sb.append(_)), () => false)
+    val c = m.complete("sys", history, Nil, StreamSink(sb.append(_)), () => false)
     (c, sb.toString)
 
   test("model stop reasons are normalized into typed loop states"):

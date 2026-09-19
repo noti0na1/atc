@@ -17,7 +17,7 @@ class PromptsSuite extends munit.FunSuite:
       safeMode = true,
       respectGitignore = true,
       extra = None,
-    ).text
+    )
 
     assert(prompt.contains(s"working directory: ${ujson.write(platform.workingDirectory)}"), prompt)
     assert(prompt.contains(s"OS: ${ujson.write(platform.operatingSystem)}"), prompt)
@@ -35,7 +35,7 @@ class PromptsSuite extends munit.FunSuite:
       safeMode = true,
       respectGitignore = true,
       extra = None,
-    ).text
+    )
     assert(prompt.contains("- user: absent") && prompt.contains("`ask` returns None"), prompt)
 
   test("the system prompt really bundles the API reference"):

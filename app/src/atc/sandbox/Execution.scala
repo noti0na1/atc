@@ -20,7 +20,8 @@ object ExecutionResult:
   /** Drop stack frames that point into the host or the runtime; frames in
     * agent code (`rs$line$N`) are kept because they locate the failing line. */
   def trimStackFrames(text: String): String =
-    text.linesIterator.filterNot(l => hostFrame.matches(l) || elided.matches(l)).mkString("\n")
+    if !text.contains("at ") && !text.contains("... ") then text // ordinary output: no frame to drop
+    else text.linesIterator.filterNot(l => hostFrame.matches(l) || elided.matches(l)).mkString("\n")
 
 /** Wall-clock accounting for the execution timeout: time spent waiting for the
   * user (permission prompts, questions) or for a command the agent runs does not

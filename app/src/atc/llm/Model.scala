@@ -86,12 +86,7 @@ case class Completion(
   stop: CompletionStop,
 )
 
-/** The system prompt of a request, deliberately one text. Configuration and
-  * mode changes rebuild it, as does an explicit classified-model switch;
-  * between those events every request starts with the same prefix, which is
-  * what the providers' prompt caches need. Permission decisions are reported in
-  * the append-only history instead of mutating this prefix. */
-final case class SystemPrompt(text: String)
+type SystemPrompt = String
 
 /** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
 case class Reply(text: String, usage: TokenUsage)

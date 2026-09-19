@@ -58,7 +58,7 @@ class ProviderCancellationSuite extends munit.FunSuite:
       try
         for _ <- 1 to 4 do
           val result = request.run(() => false) {
-            model.complete(SystemPrompt("test"), List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
+            model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
           }
           assertEquals(result.text, "done")
           System.gc()
@@ -148,7 +148,7 @@ class ProviderCancellationSuite extends munit.FunSuite:
       val cancelled = AtomicBoolean(false)
       val failure = AtomicReference[Throwable]()
       def run(): Completion = model.complete(
-        SystemPrompt("test"),
+        "test",
         List(Msg.User("hello")),
         Nil,
         StreamSink(_ => streamed.countDown(), _ => streamed.countDown()),
