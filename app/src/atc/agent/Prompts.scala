@@ -74,7 +74,6 @@ object Prompts:
     val safeModeRules =
       if safeMode then
         """- Safe mode is ON: only the API below plus safe Scala/JDK utilities are available.
-          |- Effects inside `Option.foreach` are rejected (use `match`); immutable `List`/`Map` iteration works.
           |- A `var` must be local to a `def`, block or lambda, never top-level. Accumulate into immutable collections.
           |- `scala.collection.mutable` and `StringBuilder()` are unavailable; `new StringBuilder()` and local arrays work.
           |  A top-level `StringBuilder` or array needs an explicit type.""".stripMargin

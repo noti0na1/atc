@@ -19,11 +19,11 @@ jobs:
       matrix:
         include:
         - os: ubuntu-latest
-          mill_version: 1.1.8
+          mill_version: 1.1.9
         - os: macos-latest
-          mill_version: 1.1.8
+          mill_version: 1.1.9
         - os: windows-latest
-          mill_version: 1.1.8
+          mill_version: 1.1.9
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:

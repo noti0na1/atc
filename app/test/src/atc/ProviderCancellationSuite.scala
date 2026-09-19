@@ -11,18 +11,24 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReferenc
 class ProviderCancellationSuite extends munit.FunSuite:
   test("closing borrowed SDK transports leaves the shared executor and connection pool open"):
     val http = okhttp3.OkHttpClient()
-    val backend = com.anthropic.backends.AnthropicBackend.builder().apiKey("test").build()
     val openai = com.openai.client.okhttp.OkHttpClient(http)
-    val anthropic = com.anthropic.client.okhttp.OkHttpClient(http, backend)
     try
       Providers.borrowed(openai).close()
-      Providers.borrowed(anthropic).close()
       assert(!http.dispatcher.executorService.isShutdown)
       openai.close()
       assert(http.dispatcher.executorService.isShutdown, "the owning model must still release resources")
-    finally
-      openai.close()
-      anthropic.close()
+    finally openai.close()
+
+  test("closing a scoped Anthropic transport leaves the model's transport open"):
+    val closed = AtomicBoolean(false)
+    val base = new com.anthropic.core.http.HttpClient:
+      def execute(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        throw UnsupportedOperationException()
+      def executeAsync(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
+        throw UnsupportedOperationException()
+      def close(): Unit = closed.set(true)
+    ModelRequest.scopedTransport(base).close()
+    assert(!closed.get(), "the owning model must still release resources")
 
   for api <- List("openai", "openai-responses", "anthropic") do
     test(s"$api: garbage collection between streamed requests does not close the model's executor"):

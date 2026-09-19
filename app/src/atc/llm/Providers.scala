@@ -95,14 +95,6 @@ private[atc] object Providers:
         transport.executeAsync(request, options)
       def close(): Unit = ()
 
-  def borrowed(transport: com.anthropic.core.http.HttpClient): com.anthropic.core.http.HttpClient =
-    new com.anthropic.core.http.HttpClient:
-      def execute(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
-        transport.execute(request, options)
-      def executeAsync(request: com.anthropic.core.http.HttpRequest, options: com.anthropic.core.RequestOptions) =
-        transport.executeAsync(request, options)
-      def close(): Unit = ()
-
   /** Whether a 400 specifically rejects the guessed reasoning-effort setting.
     * Do not retry arbitrary bad requests: that duplicates traffic and can
     * permanently misclassify a model as not supporting effort. */
