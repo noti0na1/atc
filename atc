@@ -48,7 +48,8 @@ Usage:
                            PATH, check for Java 17+ and download the latest release.
   atc update               Download the latest release jars when they are missing or
                            out of date.
-  atc self update          Replace this wrapper with the latest one from GitHub.
+  atc self update          Replace this wrapper with the latest one from GitHub (an
+                           interactive start also offers this, at most once a day).
   atc self uninstall       Remove the wrapper, the downloaded jars and the PATH snippet
                            (~/.atc/config.json and keys.properties are kept).
   atc dev <checkout>       Developers: install the jars a checkout's './mill dist' built
@@ -70,7 +71,7 @@ Environment:
   ATC_JAVA_OPTS        extra JVM flags for 'atc run'
   ATC_STARTUP_CACHE=0  run without the JVM startup cache (AOT cache on Java 25+,
                        class-data-sharing archive on Java 19-24)
-  ATC_CHECK_UPDATES=0  skip the release check on interactive startup
+  ATC_CHECK_UPDATES=0  skip the release and wrapper checks on interactive startup
   GITHUB_TOKEN         raises the GitHub API rate limit for release checks and downloads
 
 Examples:
@@ -466,8 +467,14 @@ should_check_update() {
   return 0
 }
 
+# A failed release download is the one thing that stops the start (cmd_run).
 offer_startup_update() {
   should_check_update "$@" || return 0
+  offer_release_update || return $?
+  offer_self_update
+}
+
+offer_release_update() {
   local installed current_tag json latest latest_tag answer
   installed="$(cat "$RELEASE_MARKER" 2>/dev/null)" || return 0
   # An absent, unknown or development marker cannot identify an installed release.
@@ -593,8 +600,10 @@ install_self() (
   echo "Installed atc to ${INSTALL_PATH}"
 )
 
-download_latest_self() {
+download_latest_self() { # $1 = output path, then extra curl arguments
   local output_path="$1" curl_args=(-fsSL --proto =https --proto-redir =https)
+  shift
+  curl_args+=("$@")
 
   require_command curl
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
@@ -680,41 +689,102 @@ cmd_update() {
   download_latest_release
 }
 
+# Downloads the latest wrapper to a temp file beside the script at $1 and checks it with
+# bash -n; the path lands in STAGED_SELF (and SELF_UPDATE_TMP, for signal traps). Extra
+# arguments go to curl. On failure the temp file is gone, the reason is on stderr.
+stage_latest_self() {
+  local source_path="$1" source_dir
+  shift
+  source_dir="$(dirname "$source_path")"
+  STAGED_SELF="$(mktemp "${source_dir}/atc.self-update.XXXXXX")" || {
+    STAGED_SELF=""
+    echo "Unable to create a temporary file in ${source_dir}." >&2
+    return 1
+  }
+  SELF_UPDATE_TMP="$STAGED_SELF"
+  if ! download_latest_self "$STAGED_SELF" "$@"; then
+    rm -f -- "$STAGED_SELF"
+    STAGED_SELF=""
+    echo "Failed to download the latest atc wrapper." >&2
+    return 1
+  fi
+  if ! "$BASH" -n "$STAGED_SELF"; then
+    rm -f -- "$STAGED_SELF"
+    STAGED_SELF=""
+    echo "Downloaded atc wrapper is not a valid Bash script." >&2
+    return 1
+  fi
+}
+
+# Moves the staged wrapper over the script at $1. 755, not mktemp's 600 +x: the installed
+# wrapper is for every user (install_self). Bash keeps reading the running script from its
+# old inode, so replacing it mid-run is safe; the new one is used from the next start.
+install_staged_self() {
+  local source_path="$1" tmp_path="$2"
+  chmod 755 "$tmp_path"
+  if ! mv "$tmp_path" "$source_path"; then
+    rm -f -- "$tmp_path"
+    echo "Unable to replace ${source_path}. Check file permissions and try again." >&2
+    return 1
+  fi
+}
+
 cmd_self_update() (
-  local source_path source_dir tmp_path
+  local source_path
 
   source_path="$(self_path)"
   [[ -f "$source_path" ]] || fail "Current atc script was not found at ${source_path}."
-  source_dir="$(dirname "$source_path")"
-  tmp_path="$(mktemp "${source_dir}/atc.self-update.XXXXXX")" || fail "Unable to create a temporary file in ${source_dir}."
   # Clean up the temp file on a signal too; global so the trap sees it at fire time.
-  SELF_UPDATE_TMP="$tmp_path"
+  SELF_UPDATE_TMP=""
   trap 'rm -f -- "$SELF_UPDATE_TMP"; trap - INT TERM; exit 130' INT TERM
 
   echo "Checking ${SCRIPT_SOURCE_URL}"
-  if ! download_latest_self "$tmp_path"; then
-    rm -f "$tmp_path"
-    fail "Failed to download the latest atc wrapper."
-  fi
-  if ! "$BASH" -n "$tmp_path"; then
-    rm -f "$tmp_path"
-    fail "Downloaded atc wrapper is not a valid Bash script."
-  fi
-  if cmp -s "$source_path" "$tmp_path"; then
-    rm -f "$tmp_path"
+  stage_latest_self "$source_path" || exit 1
+  if cmp -s "$source_path" "$STAGED_SELF"; then
+    rm -f -- "$STAGED_SELF"
     trap - INT TERM
     echo "atc is already up to date at ${source_path}."
     return 0
   fi
-  # 755, not mktemp's 600 +x: the installed wrapper is for every user (install_self).
-  chmod 755 "$tmp_path"
-  if ! mv "$tmp_path" "$source_path"; then
-    rm -f "$tmp_path"
-    fail "Unable to replace ${source_path}. Check file permissions and try again."
-  fi
+  install_staged_self "$source_path" "$STAGED_SELF" || exit 1
   trap - INT TERM
   echo "Updated atc at ${source_path}"
 )
+
+# Interactive starts also offer to replace the wrapper when GitHub's differs, at most once
+# a day (the stamp is touched before the check, so a failed download or a declined offer
+# waits a day too), and only for the installed copy at INSTALL_PATH: a checkout's or any
+# other copy is never overwritten from here.
+offer_self_update() {
+  local source_path stamp answer
+  source_path="$(self_path)"
+  [[ -f "$source_path" && "$source_path" -ef "$INSTALL_PATH" ]] || return 0
+  stamp="${CACHE_DIR}/self-check"
+  [[ -z "$(find "$stamp" -mtime -1 2>/dev/null)" ]] || return 0
+  { mkdir -p "$CACHE_DIR" && touch "$stamp"; } 2>/dev/null || return 0
+  stage_latest_self "$source_path" --connect-timeout 2 --max-time 5 2>/dev/null || return 0
+  if cmp -s "$source_path" "$STAGED_SELF"; then
+    rm -f -- "$STAGED_SELF"
+    return 0
+  fi
+  printf 'A newer atc wrapper is available. Update it now? [y/N] ' >&2
+  if ! read -r answer; then
+    printf '\n' >&2
+    rm -f -- "$STAGED_SELF"
+    return 0
+  fi
+  case "$answer" in
+    [yY]|[yY][eE][sS])
+      if install_staged_self "$source_path" "$STAGED_SELF"; then
+        echo "Updated atc at ${source_path}; the new wrapper is used from the next start." >&2
+      fi
+      ;;
+    *)
+      rm -f -- "$STAGED_SELF"
+      echo "Continuing with the installed wrapper ('atc self update' installs the new one)." >&2
+      ;;
+  esac
+}
 
 # Refuse broad or redirected cache roots before uninstall changes anything.
 # Content is only an identity check; it can never authorize recursive deletion.

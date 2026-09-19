@@ -873,6 +873,60 @@ for scenario in development unknown disabled redirected missing-marker; do
   assert_fails "$scenario: no release lookup" test -e "$TEST_TMP/startup-$scenario/checks"
 done
 
+# The wrapper's own startup offer: an installed copy (ATC_INSTALL_DIR) of the wrapper is
+# the script under test, GitHub's copy is assets/atc, the jars are current.
+self_case() { # $1 = scenario, $2 = input
+  local scenario="$1" input="$2" dir
+  dir="$TEST_TMP/self-$scenario"
+  mkdir -p "$dir/bin" "$dir/cache" "$dir/assets"
+  cp "$WRAPPER" "$dir/bin/atc"
+  printf 'old app\n' > "$dir/cache/atc.jar"
+  printf 'old lib\n' > "$dir/cache/atc-lib.jar"
+  printf '12345678|v0.2.0\n' > "$dir/cache/release.txt"
+  printf '%s\n' "$FIXTURE_JSON" > "$dir/release.json"
+  case "$scenario" in
+    same) cp "$WRAPPER" "$dir/assets/atc" ;;
+    broken) printf 'not bash (((\n' > "$dir/assets/atc" ;;
+    *) { cat "$WRAPPER"; printf '\n# newer wrapper\n'; } > "$dir/assets/atc" ;;
+  esac
+  [[ "$scenario" != "throttled" ]] || touch "$dir/cache/self-check"
+  local wrapper="$dir/bin/atc" install_dir="$dir/bin"
+  [[ "$scenario" != "not-installed" ]] || install_dir="$dir/elsewhere"
+  printf '%s\n' "$input" > "$dir/input"
+  STARTUP_CASE_DIR="$dir" STARTUP_RC=0
+  env PATH="$startup_bin:$PATH" ATC_CACHE_DIR="$dir/cache" ATC_INSTALL_DIR="$install_dir" ATC_CHECK_UPDATES=1 \
+    STARTUP_SCENARIO="$scenario" STARTUP_CASE_DIR="$dir" WRAPPER_UNDER_TEST="$wrapper" \
+    bash "$startup_driver" < "$dir/input" > "$dir/stdout" 2> "$dir/stderr" || STARTUP_RC=$?
+}
+self_prompt="A newer atc wrapper is available. Update it now? [y/N]"
+
+self_case accept $'y\nrequest'
+assert_eq "self accept: startup succeeds" "0" "$STARTUP_RC"
+assert_contains "self accept: offer shown" "$self_prompt" "$(cat "$STARTUP_CASE_DIR/stderr")"
+assert_contains "self accept: wrapper replaced" "# newer wrapper" "$(cat "$STARTUP_CASE_DIR/bin/atc")"
+assert_contains "self accept: replacement reported" "used from the next start" "$(cat "$STARTUP_CASE_DIR/stderr")"
+assert_contains "self accept: app still starts with the rest of stdin" $'app:old app' "$(cat "$STARTUP_CASE_DIR/stdout")"
+assert_contains "self accept: stdin after the answer reaches the app" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+assert_succeeds "self accept: check stamp written" test -f "$STARTUP_CASE_DIR/cache/self-check"
+assert_eq "self accept: no temp file left" "" "$(ls "$STARTUP_CASE_DIR/bin"/atc.self-update.* 2>/dev/null || true)"
+
+self_case decline $'n\nrequest'
+assert_contains "self decline: offer shown" "$self_prompt" "$(cat "$STARTUP_CASE_DIR/stderr")"
+assert_succeeds "self decline: wrapper kept" cmp -s "$WRAPPER" "$STARTUP_CASE_DIR/bin/atc"
+assert_contains "self decline: how to update later" "atc self update" "$(cat "$STARTUP_CASE_DIR/stderr")"
+assert_contains "self decline: app starts" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+assert_eq "self decline: no temp file left" "" "$(ls "$STARTUP_CASE_DIR/bin"/atc.self-update.* 2>/dev/null || true)"
+
+for scenario in same broken throttled not-installed; do
+  self_case "$scenario" request
+  assert_eq "self $scenario: startup succeeds" "0" "$STARTUP_RC"
+  assert_eq "self $scenario: no offer" "" "$(grep -F "$self_prompt" "$STARTUP_CASE_DIR/stderr" || true)"
+  assert_succeeds "self $scenario: wrapper kept" cmp -s "$WRAPPER" "$STARTUP_CASE_DIR/bin/atc"
+  assert_contains "self $scenario: stdin is untouched" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+done
+assert_fails "self not-installed: no check stamp" test -e "$TEST_TMP/self-not-installed/cache/self-check"
+assert_succeeds "self broken: stamp written, so no retry within a day" test -f "$TEST_TMP/self-broken/cache/self-check"
+
 for scenario in decline default-no qualified-yes eof; do
   startup_case "$scenario"
   assert_eq "$scenario: startup succeeds" "0" "$STARTUP_RC"
