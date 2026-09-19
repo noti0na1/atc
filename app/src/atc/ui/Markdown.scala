@@ -13,11 +13,12 @@ package atc.ui
   * next line. Everything is emitted as raw SGR sequences.
   *
   * @param glyphs    what to draw bullets, quote bars, rules, code gutters and tables with
-  * @param highlight colours a whole fenced Scala block; only its last line is used per push
+  * @param highlight colours the last line of a fenced Scala block given its context lines,
+  *                  and says whether a comment or string is still open after it
   */
 class MarkdownStream(
   glyphs: MarkdownStream.Glyphs,
-  highlight: String => List[String],
+  highlight: String => (String, Boolean),
   columns: () => Int = () => Int.MaxValue,
 ):
   import MarkdownStream.*
@@ -32,7 +33,8 @@ class MarkdownStream(
   /** Inside a dropped ```markdown wrapper: its bare closing fence must not open a code block. */
   private var droppedFence = false
   private var fenceScala = false
-  private val fenceText = StringBuilder()
+  /** The context the next fenced line is highlighted with (see [[fenceLine]]). */
+  private val fenceLines = collection.mutable.ArrayBuffer[String]()
   private var restStart = 0
   /** The current line produces no output at all (a dropped fence marker). */
   private var dropLine = false
@@ -136,7 +138,7 @@ class MarkdownStream(
         else
           inFence = true
           fenceScala = lang == "scala" || lang == "sc" // anything else: no colouring, verbatim
-          fenceText.clear()
+          fenceLines.clear()
           ""
       case RuleRe() =>
         restStart = line.length
@@ -168,12 +170,16 @@ class MarkdownStream(
     bold = false; code = false; lineStyle = Nil
     close + "\n"
 
+  /** A fenced line is coloured with the lines since a comment or string opened as
+    * context, or else the last [[FenceContext]] lines (a definition may span a few), so
+    * a long block costs the same per line as a short one. */
   private def fenceLine(line: String): String =
     val shown =
       if fenceScala then
-        // Keep earlier lines for multiline strings and comments in Scala highlighting.
-        fenceText.append(line).append("\n")
-        highlight(fenceText.toString).lastOption.getOrElse(line)
+        fenceLines += line
+        val (coloured, open) = highlight(fenceLines.mkString("\n"))
+        if !open then fenceLines.dropInPlace((fenceLines.size - FenceContext).max(0))
+        coloured
       else line
     glyphs.codeGutter + shown + "\n"
 
@@ -294,8 +300,14 @@ object MarkdownStream:
     junction: String = "+"
   )
 
+  /** Lines of context kept for the highlighter after every comment and string is closed. */
+  private val FenceContext = 8
+
+  /** A highlighter that colours nothing: the last line as it is. */
+  val verbatim: String => (String, Boolean) = code => (code.substring(code.lastIndexOf('\n') + 1), false)
+
   /** No rendering at all (no colours available): text passes through untouched. */
-  def plain: MarkdownStream = new MarkdownStream(Glyphs("-", ">", "-", ""), _.linesIterator.toList):
+  def plain: MarkdownStream = new MarkdownStream(Glyphs("-", ">", "-", ""), verbatim):
     override def push(chunk: String): String = chunk
     override def finish(): String = ""
 

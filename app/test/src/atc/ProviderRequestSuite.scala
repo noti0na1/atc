@@ -56,7 +56,7 @@ class ProviderRequestSuite extends munit.FunSuite:
       "text/event-stream" -> frames.map(frame => s"data: $frame\n\n").mkString
     } { (model, request) =>
       val completion =
-        model.complete(SystemPrompt("test"), List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
+        model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
       assertEquals(completion.text, "done")
       assertEquals(completion.usage, TokenUsage(42, 2))
       assertEquals(request()("max_completion_tokens").num, 1234.0)
@@ -94,7 +94,7 @@ class ProviderRequestSuite extends munit.FunSuite:
     ) { (model, _) =>
       val shown = collection.mutable.ListBuffer[(String, String)]()
       val sink = StreamSink(text => shown += "answer" -> text, onThinking = text => shown += "thinking" -> text)
-      val result = model.complete(SystemPrompt("test"), List(Msg.User("hello")), Nil, sink, () => false)
+      val result = model.complete("test", List(Msg.User("hello")), Nil, sink, () => false)
       assertEquals(result.text, "Yes, it works.")
       assertEquals(
         shown.toList,
@@ -118,7 +118,7 @@ class ProviderRequestSuite extends munit.FunSuite:
     ) { (model, _) =>
       val thoughts = StringBuilder()
       model.complete(
-        SystemPrompt("test"),
+        "test",
         List(Msg.User("hello")),
         Nil,
         StreamSink(_ => (), onThinking = thoughts.append(_)),
@@ -166,7 +166,7 @@ class ProviderRequestSuite extends munit.FunSuite:
       "function" -> ujson.Obj("name" -> "run_scala", "arguments" -> "{\"code\":\"println(1)\"}")
     ))
     withModel(_ => events(chunk(ujson.Obj("role" -> "assistant", "tool_calls" -> calls)), "[DONE]")) { (model, _) =>
-      val result = model.complete(SystemPrompt("test"), List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
+      val result = model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
       assertEquals(result.stop, CompletionStop.Incomplete)
       assertEquals(result.toolCalls, Nil)
       assertEquals(result.native, None)
@@ -176,7 +176,7 @@ class ProviderRequestSuite extends munit.FunSuite:
     val usage =
       """{"id":"one","object":"chat.completion.chunk","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":2,"total_tokens":44}}"""
     withModel(_ => events(chunk(ujson.Obj("reasoning_content" -> "unfinished thought")), usage)) { (model, _) =>
-      val result = model.complete(SystemPrompt("test"), List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
+      val result = model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
       assertEquals(result.stop, CompletionStop.Incomplete)
       assertEquals(result.text, "")
       assertEquals(result.usage, TokenUsage(42, 2))
@@ -192,7 +192,7 @@ class ProviderRequestSuite extends munit.FunSuite:
     ) { (model, _) =>
       val shown = collection.mutable.ListBuffer[String]()
       val result = model.complete(
-        SystemPrompt("test"),
+        "test",
         List(Msg.User("hello")),
         Nil,
         StreamSink(shown += _, onThinking = shown += _),

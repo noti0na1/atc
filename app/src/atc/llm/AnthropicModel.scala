@@ -70,7 +70,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     // whole session, and the last user-role message of the history, so each round
     // reads the previous round's prefix from the cache and writes only what was added.
     val cache = CacheControlEphemeral.builder().build()
-    val systemBlock = TextBlockParam.builder().text(system.text).cacheControl(cache).build()
+    val systemBlock = TextBlockParam.builder().text(system).cacheControl(cache).build()
     val b = MessageCreateParams.builder()
       .model(modelId)
       .maxTokens(maxOutputTokens.get.toLong)

@@ -69,6 +69,13 @@ class ToolOutputSuite extends munit.FunSuite:
     assert(out.contains("do not repeat it unchanged"), out)
     assert(out.contains("or infer a permanent ban on every item"), out)
 
+  test("a successful run gets no hint even when its output quotes a diagnostic"):
+    val quoted = "README: ... it cannot subsume a read-only capture set of the stateful type ..."
+    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, quoted), 10000), quoted)
+    val started = "docs say: Cannot run program is reported when the executable is missing"
+    assertEquals(ToolOutput.renderForModel(ExecutionResult(true, started), 10000), started)
+    assert(ToolOutput.renderForModel(ExecutionResult(false, quoted), 10000).contains("Hint:"))
+
   test("each common capture-checking or safe-mode error gets its own hint"):
     def hintFor(output: String): String = ToolOutput.renderForModel(ExecutionResult(false, output), 10000)
 

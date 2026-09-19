@@ -46,7 +46,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     }
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): ResponseCreateParams =
-    val b = ResponseCreateParams.builder().model(modelId).instructions(system.text).store(false)
+    val b = ResponseCreateParams.builder().model(modelId).instructions(system).store(false)
     Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
     // Stateless (store(false)) replay must carry the reasoning between calls: ask
     // for the encrypted reasoning content, or the replayed reasoning items are

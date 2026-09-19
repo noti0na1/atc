@@ -10,7 +10,7 @@ class RenderSuite extends munit.FunSuite:
   val D = s"$E[2m"
   val C = s"$E[36m"
   private val glyphs = MarkdownStream.Glyphs("•", "▎", "─", "G ", "│", "┼")
-  private def md() = MarkdownStream(glyphs, code => code.linesIterator.toList.map("H:" + _))
+  private def md() = MarkdownStream(glyphs, code => ("H:" + code.substring(code.lastIndexOf('\n') + 1), false))
   private def render(chunks: String*): String =
     val m = md()
     chunks.map(m.push).mkString + m.finish()
@@ -63,6 +63,21 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(m.push("`\nval a = 1\n"), "G val a = 1\n")
     assertEquals(m.push("```\ndone\n"), "done\n")
 
+  test("a fenced line is highlighted with the lines since an open comment, else a few lines of context"):
+    // The fake highlighter reports how many lines it was given and keeps a `/*` comment open.
+    val seen = collection.mutable.ListBuffer[Int]()
+    val m = MarkdownStream(
+      glyphs,
+      code => { seen += code.count(_ == '\n') + 1; ("", code.contains("/*") && !code.contains("*/")) }
+    )
+    m.push("```scala\n")
+    (1 to 10).foreach(_ => m.push("val a = 1\n"))
+    m.push("/* open\n")
+    (1 to 3).foreach(_ => m.push("still\n"))
+    m.push("*/\n")
+    m.push("val z = 1\n```\n")
+    assertEquals(seen.toList, List(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 10, 11, 12, 13, 9))
+
   test("a ```markdown wrapper is transparent and a fence line is waited for in full"):
     assertEquals(render("```markdown\n# T\n- a\n```\n"), s"${B}T${R}\n• a\n")
     val m = md()
@@ -104,7 +119,7 @@ class RenderSuite extends munit.FunSuite:
     val table = "| File | Finding | Action |\n|---|---|---|\n" +
       "| source.py | A long description of the observed failure | Add a regression test before changing behavior |\n"
     for columns <- List(24, 64, 100) do
-      val renderer = MarkdownStream(glyphs, _.linesIterator.toList, () => columns)
+      val renderer = MarkdownStream(glyphs, MarkdownStream.verbatim, () => columns)
       val output = renderer.push(table) + renderer.finish()
       val lines = plain(output).linesIterator.toList
       assert(lines.forall(line => atc.ui.TextLayout.width(line) <= columns), output)

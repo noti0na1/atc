@@ -66,7 +66,11 @@ object ToolOutput:
     * concerns what the snippet wrote rather than what it printed. */
   def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)], code: String): String =
     val base = r.render
-    val hinted = hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
+    // Hints key on diagnostics, which only a failed run carries. A successful run's
+    // output is data the model asked for, and a file that quotes a compiler message
+    // (this project's own docs do) must not earn the hint for that message.
+    val hinted =
+      if r.success then base else hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
     val bounded =
       if hinted.length <= maxChars then hinted
       else
