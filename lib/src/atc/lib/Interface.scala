@@ -382,8 +382,10 @@ trait Interface:
    *  `sed -n 'from,to'`. This is the way to look at a file (`read`/`readLines`
    *  give the raw text to code with). The numbers are not in the file: never copy
    *  them into a `sed` pattern. `to` may run past the end (`[end of file: N lines]`
-   *  marks it), so a large `to` shows the tail. Lines longer than 2000 characters are
-   *  cut with a `[+N chars]` marker. */
+   *  marks it). Both forms show at most 400 lines and suggest a continuation when
+   *  more remain. The range form scans at most two million characters and reports
+   *  when that limit prevents completing the range. Lines longer than 2000 characters
+   *  are cut with a `[+N chars]` marker. */
   def cat(path: String)(using FileSystem, UserIO^): Unit
   def cat(path: String, from: Int, to: Int)(using FileSystem, UserIO^): Unit
 

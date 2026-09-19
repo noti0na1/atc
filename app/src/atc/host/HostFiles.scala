@@ -242,24 +242,28 @@ private[host] trait HostFiles:
                 .stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
     output.print(text, text)
 
-  /** Print an inclusive, one-based range with line numbers. Streamed: only the
-    * requested window is kept in memory, however far `to` runs past the end. */
+  /** Print an inclusive, one-based range, bounded like the default file preview. */
   def cat(path: String, from: Int, to: Int)(using fs: FileSystem, user: UserIO): Unit =
     if from < 1 || to < from then
       throw IllegalArgumentException(s"cat: the range must satisfy 1 <= from <= to (got $from, $to)")
     val entry = impl(fs.access(path))
     val kept = collection.mutable.ListBuffer[CappedLine]()
+    val last = to.toLong.min(from.toLong + Host.CatMaxLines - 1).toInt
     var lineCount = 0
-    entry.scanLines("cat", Host.CatMaxLineChars) { (prefix, chars, number) =>
+    val limited = entry.scanLines("cat", Host.CatMaxLineChars, Host.ReadRangeMaxChars) { (prefix, chars, number) =>
       lineCount = number
-      if lineCount >= from && lineCount <= to then kept += CappedLine(prefix, chars)
-      number < to
+      if number >= from && number <= last then kept += CappedLine(prefix, chars)
+      number < to && number <= last
     }
     val text =
-      if from > lineCount then s"[nothing to show: $path has $lineCount lines]\n"
+      if limited then numbered(kept.toList, from) + "[read limit reached before completing the requested range]\n"
+      else if from > lineCount then s"[nothing to show: $path has $lineCount lines]\n"
       else
         val body = numbered(kept.toList, from)
-        if to > lineCount then body + s"[end of file: $lineCount lines]\n" else body
+        if lineCount > last then
+          body + s"... [more lines: cat(${ScalaSource.stringLiteral(path)}, ${last + 1}, $to) continues]\n"
+        else if to > lineCount then body + s"[end of file: $lineCount lines]\n"
+        else body
     output.print(text, text)
 
   private case class CappedLine(prefix: String, chars: Long)

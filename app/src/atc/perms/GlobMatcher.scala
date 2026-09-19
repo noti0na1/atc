@@ -37,7 +37,7 @@ object GlobMatcher:
     while patternIndex < pattern.length && pattern.charAt(patternIndex) == '*' do patternIndex += 1
     patternIndex == pattern.length
 
-  private def regexLineTerminator(char: Char): Boolean =
+  private inline def regexLineTerminator(char: Char): Boolean =
     char == '\n' || char == '\r' || char == '\u0085' || char == '\u2028' || char == '\u2029'
 
   /** Command-line matching. A pattern containing `*` matches as a glob. One

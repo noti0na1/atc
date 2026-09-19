@@ -528,7 +528,9 @@ source write permission before copying but is not atomic.
 `replaceExact` requires one non-empty literal occurrence and validates it before any write.
 It does not interpret regex or replacement escapes. `readRange` stops at the requested
 line boundary, with caps of 1000 returned lines, 2000 characters per line and two million
-scanned characters. Line-window `cat` also stops once it reaches `to`.
+scanned characters. Both `cat` forms show at most 400 lines and suggest a continuation
+when more remain. The range form also stops at `to` or two million scanned characters;
+it reports a read limit separately from end of file.
 
 `search` uses lazy descendant traversal and `FileEntryImpl.scanLines`, which closes its
 stream when the callback stops or a character budget is reached. `SearchOptions` bounds
@@ -691,21 +693,18 @@ A provider's `headers` are extra HTTP headers for every request to it. `Config.r
 resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
 keeps the placeholder `${ATC_SESSION}` (`Config.SessionRef`), which `Providers.headers(spec)`
 replaces per request with the conversation id, a UUID that `Agent.clear()` renews. The same
-call adds `User-Agent: atc/<version>` unless the config sets one. Every adapter applies the
-set to both `complete` and `simple` with the params builder's `putAdditionalHeader`. Nothing
-provider-specific is sent by default; OpenCode's `x-opencode-session` is configured.
+call adds `User-Agent: atc/<version>` unless the config sets one, regardless of header-name
+case. Every adapter applies the set to both `complete` and `simple` with the params builder's
+`putAdditionalHeader`. Provider-specific headers such as OpenCode's `x-opencode-session`
+are configured explicitly.
 
-Chat Completions streams differ in where `usage` arrives, and the SDK's accumulator is
-strict: after the finish chunk it accepts one choice-less chunk, and only one carrying the
-usage the completion lacks. OpenAI sends the usage in a choice-less chunk after the finish
-chunk; DeepSeek puts it on the finish chunk itself (which made the accumulator build the
-completion before its choices were recorded); OpenCode's gateway does both for GLM, so the
-second usage chunk was refused with "Already accumulated the final chunk(s)"; after `[DONE]`
-it also sends a `cost` line, which the SDK never parses. `OpenAIChatModel.ChunkFeed` therefore
-feeds chunks with their usage stripped, remembers the last usage seen, and feeds it once as
-the choice-less chunk the accumulator expects when the completion is taken; choice-less
-chunks without usage and chunks arriving after the finish chunk are dropped (test in
-`ModelSuite`).
+Chat Completions requests set `stream_options.include_usage` so providers can report token
+counts for `/cost` and context calibration. Providers send usage on the finish chunk,
+in a separate chunk, or both. `OpenAIChatModel.ChunkFeed` saves the latest usage and feeds
+it to the SDK accumulator once, after the choices. It ignores empty chunks without usage
+and extra choice chunks after completion. Auxiliary chat calls also apply configured
+`maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
+checks requests and usage accounting against a local HTTP server.
 
 ## Conversation context and agent loop
 
@@ -770,8 +769,8 @@ complete, nonempty summaries smaller than the older prefix they replace; the res
 `Agent.CompactOutcome` (compacted, nothing to compact, summary not smaller) so `/compact`
 can say which. Pending notes, user request tracking, task state and REPL definitions are
 unchanged; usage is recorded separately. Before the summary request is sent, the transcript
-is estimated against the model's input allowance (window minus an eighth) and refused with
-an actionable message when it cannot fit, since it goes to the same model as one message.
+is estimated against the model's input allowance, using the same output reservation as
+ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
 
 `Agent.autoCompact` runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
@@ -1017,6 +1016,13 @@ portable process tests; reserve native commands for platform integration suites.
 and checkout environment loading.
 
 All Scala modules use explicit null checks where configured; Java APIs may require `.nn`.
+Use `inline` selectively for small predicates, primitive conversions and wrappers where
+expansion removes a closure. Ordinary parameters preserve evaluation order and evaluate
+once; an `inline` parameter substitutes its expression at each use. `Debug.log` uses one
+inline message expression behind the runtime debug flag, so disabled logging creates no
+message closure. Keep larger methods and capability boundaries as ordinary methods.
+See the [Scala 3 inline guide](https://docs.scala-lang.org/scala3/guides/macros/inline.html)
+for parameter semantics and the distinction between `inline` and `transparent inline`.
 Use `Platform` and `PlatformPath` for OS decisions and `ScalaSource` for generated Scala
 literals. Keep model/provider escaping, shell quoting and terminal sanitization separate.
 Scalafmt uses a 120-column configuration that preserves existing layout. `Interface.scala`

@@ -9,8 +9,8 @@ import upickle.default.*
   * vendor's figure follows. */
 opaque type Tokens = Int
 object Tokens:
-  def apply(n: Int): Tokens = n
-  extension (t: Tokens) def toInt: Int = t
+  inline def apply(n: Int): Tokens = n
+  extension (t: Tokens) inline def toInt: Int = t
 
   private val Form = raw"(?i)\s*(\d+(?:\.\d+)?)\s*([km]?)\s*".r
 

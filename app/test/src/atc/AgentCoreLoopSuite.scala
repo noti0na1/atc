@@ -45,6 +45,17 @@ class AgentCoreLoopSuite extends munit.FunSuite:
   private def toolResults(agent: Agent): List[Msg.ToolResults] =
     agent.history.collect { case results: Msg.ToolResults => results }
 
+  test("compaction reserves the model's full output allowance before sending a request"):
+    val (_, _, agent) = setup(Nil, Config(compactKeepRatio = 0))
+    val model = ScriptedModel("capped", Nil, contextWindow = Some(10000), maxOutputTokens = Some(8000))
+    agent.model = model
+    val history = List(Msg.User("task"), Msg.Assistant("x" * 16000, Nil, None))
+    agent.restore(agent.snapshot.copy(history = history))
+    val error = intercept[IllegalStateException](agent.compact("", () => false))
+    assert(error.getMessage.nn.contains("input allowance"))
+    assertEquals(model.i, 0)
+    assertEquals(agent.history, history)
+
   test("multi-call results retain request order and call ids"):
     val ids = List("first", "second", "third")
     val (model, _, agent) = setup(Seq(toolStep(ids*), ScriptedModel.Reply("done")))

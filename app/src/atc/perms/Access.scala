@@ -6,9 +6,9 @@ enum Access(val level: Int, val label: String):
   case Read extends Access(1, "read")
   case Write extends Access(2, "write")
 
-  def >=(that: Access): Boolean = level >= that.level
-  def min(that: Access): Access = if level <= that.level then this else that
-  def max(that: Access): Access = if level >= that.level then this else that
+  inline def >=(that: Access): Boolean = level >= that.level
+  inline def min(that: Access): Access = if level <= that.level then this else that
+  inline def max(that: Access): Access = if level >= that.level then this else that
 
 object Access:
   def parse(s: String): Access = s.trim.toLowerCase(java.util.Locale.ROOT) match
@@ -22,8 +22,8 @@ object Access:
   * `Classified` values; `locked` means the configuration forbids widening
   * the access through a user prompt. */
 case class Perm(access: Access, classified: Boolean, locked: Boolean = false):
-  def canRead: Boolean = access >= Access.Read
-  def canWrite: Boolean = access >= Access.Write
+  inline def canRead: Boolean = access >= Access.Read
+  inline def canWrite: Boolean = access >= Access.Write
   def describe: String =
     val flags = List(Option.when(classified)("classified"), Option.when(locked)("locked")).flatten
     if flags.isEmpty then access.label else s"${access.label} (${flags.mkString(", ")})"

@@ -211,6 +211,7 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(Providers.headers(spec(Map.empty)), Map("User-Agent" -> Providers.UserAgent))
     assert(Providers.UserAgent.startsWith("atc/"))
     assertEquals(Providers.headers(spec(Map("User-Agent" -> "mine/1")))("User-Agent"), "mine/1")
+    assertEquals(Providers.headers(spec(Map("user-agent" -> "mine/1"))), Map("user-agent" -> "mine/1"))
     val withSession = spec(Map("x-session" -> Config.SessionRef, "x-plain" -> "v"))
     val first = Providers.headers(withSession)
     assertEquals(first("x-plain"), "v")

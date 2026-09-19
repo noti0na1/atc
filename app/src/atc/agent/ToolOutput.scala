@@ -76,9 +76,7 @@ object ToolOutput:
     val withCodeHint = codeHint(code).fold(bounded)(h => s"$bounded\nHint: $h")
     if decisions.isEmpty then withCodeHint else s"$withCodeHint\n${decisionNote(decisions)}"
 
-  /** A hint about the snippet's text: `\"` inside a plain triple-quoted literal stays a
-    * backslash and a quote, so a Python docstring written as `\"\"\"` lands in the file
-    * with backslashes (the models did this in most live runs). */
+  /** Warn when an escaped quote would be written literally from a plain triple-quoted string. */
   def codeHint(code: String): Option[String] =
     Option.when(hasEscapedQuoteInRawLiteral(code))(
       "inside a plain triple-quoted literal `\\\"` is two characters, a backslash and a quote, so the text " +
@@ -98,9 +96,7 @@ object ToolOutput:
         val prefixed = i > 0 && (Character.isLetterOrDigit(code.charAt(i - 1)) || code.charAt(i - 1) == '_')
         val end = code.indexOf(quotes, i + 3)
         val stop = if end < 0 then code.length else end
-        if !prefixed && !code.substring(i - (if prefixed then 1 else 0), i).startsWith("raw") &&
-          code.substring(i + 3, stop).contains("\\\"")
-        then found = true
+        if !prefixed && code.substring(i + 3, stop).contains("\\\"") then found = true
         i = if end < 0 then code.length else end + 3
       else i += 1
     found

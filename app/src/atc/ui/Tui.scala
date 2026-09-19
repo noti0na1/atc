@@ -950,7 +950,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
               try in.read(100L)
               catch case _: Exception => -1
             c match
-              case NonBlockingReader.READ_EXPIRED | -1 => () // no key read: leave skipLf pending
+              case NonBlockingReader.READ_EXPIRED => () // no key read: leave skipLf pending
+              case -1 => running = false
               case '\r' =>
                 if pasting then typeAhead.append('\n') else submit()
                 skipLf = true
@@ -1149,18 +1150,18 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             checkboxIndices("Choose answers", cleanOptions :+ Tui.AddAnswerLabel) match
               case None => None
               case Some(ids) =>
-                val chosen = ids.sorted.filter(_ < cleanOptions.size).flatMap(cleanOptions.lift)
+                val chosen = ids.sorted.filter(_ < options.size).flatMap(options.lift)
                 if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
                 else if chosen.isEmpty then None
                 else Some(chosen.mkString("; "))
           else
             menuIndex("Choose an answer", cleanOptions :+ Tui.OtherLabel) match
               case Some(i) if i == cleanOptions.size => freeText(answerPrompt)
-              case Some(i) => cleanOptions.lift(i)
+              case Some(i) => options.lift(i)
               case None => None
         // A single-choice menu echoes the selection itself; confirm the other outcomes.
         answer match
-          case Some(a) if cleanOptions.isEmpty || plain || multiple || !cleanOptions.contains(a) =>
+          case Some(a) if options.isEmpty || plain || multiple || !options.contains(a) =>
             write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
           case Some(_) => ()
           case None => write(Indent + styled(s"${g.arrow} No answer", Dim) + "\n")

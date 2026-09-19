@@ -171,7 +171,7 @@ final class Agent(
     // The transcript goes to the same model as one message. Refuse before paying for a
     // request the provider would reject, and name the way out in the message.
     current.contextWindow.foreach { window =>
-      val allowance = window.toLong - window.toLong / 8
+      val allowance = window.toLong - ContextManager.outputReserve(window, current.maxOutputTokens)
       val needed =
         ((ContextManager.estimateTokens(ContextCompaction.prompt.text) + size(input)) * context.calibration).round
       if needed > allowance then

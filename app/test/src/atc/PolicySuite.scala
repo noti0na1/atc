@@ -8,6 +8,20 @@ class PolicySuite extends munit.FunSuite:
 
   val root: Path = Files.createTempDirectory("atc-policy").toRealPath()
 
+  test("access comparisons evaluate receiver and argument once in order"):
+    val evaluated = collection.mutable.ListBuffer[Access]()
+    def record(access: Access): Access =
+      evaluated += access
+      access
+    assertEquals(record(Access.Write).min(record(Access.Read)), Access.Read)
+    assertEquals(evaluated.toList, List(Access.Write, Access.Read))
+    evaluated.clear()
+    assertEquals(record(Access.Read).max(record(Access.Write)), Access.Write)
+    assertEquals(evaluated.toList, List(Access.Read, Access.Write))
+    evaluated.clear()
+    assert(record(Access.Write) >= record(Access.Read))
+    assertEquals(evaluated.toList, List(Access.Write, Access.Read))
+
   test("revoking a session grant removes only that grant and preserves configured access"):
     val policy = Policy(Nil, List("git status"), Nil, _ => Decision.AllowSession)
     policy.closeScope(policy.requestExec(ScopeId.Base, List("npm test"), "test"))

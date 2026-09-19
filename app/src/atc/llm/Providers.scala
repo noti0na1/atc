@@ -95,7 +95,9 @@ private[atc] object Providers:
   /** The headers of one request to `spec`'s provider: the user agent, then the
     * configured ones with the conversation id filled in. */
   def headers(spec: ModelSpec): Map[String, String] =
-    Map("User-Agent" -> UserAgent) ++ spec.headers.map { (name, value) =>
+    val defaults = if spec.headers.keysIterator.exists(_.equalsIgnoreCase("User-Agent")) then Map.empty[String, String]
+    else Map("User-Agent" -> UserAgent)
+    defaults ++ spec.headers.map { (name, value) =>
       name -> (if value == atc.config.Config.SessionRef then conversationId else value)
     }
 

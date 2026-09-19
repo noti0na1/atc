@@ -49,10 +49,13 @@ object Processes:
     def marker: String
     /** Set once the process has exited and its output has all landed (`end()`). */
     private var ended = false
-    /** Wait (at most `ms`) for more text to arrive or the process to end; returns at
-      * once after `end()`, so an exit noticed before the wait is not missed. */
-    def awaitChange(ms: Long): Unit = synchronized:
-      if !ended then wait(math.max(1L, ms))
+    /** Check for a match and begin waiting under the same lock as append/end,
+      * so output arriving just before the wait cannot lose its notification. */
+    def awaitMatch(pattern: java.util.regex.Pattern, ms: Long): Option[String] = synchronized:
+      consumeThrough(pattern).orElse {
+        if !ended then wait(math.max(1L, ms))
+        consumeThrough(pattern)
+      }
     def end(): Unit = synchronized:
       ended = true
       notifyAll()
@@ -250,8 +253,7 @@ object Processes:
             throw RuntimeException(
               s"timed out after ${timeoutMs}ms waiting for '$regex' from '$line'; output so far (still unread):\n${stdoutBuf.peek.takeRight(TimeoutTailChars)}"
             )
-          stdoutBuf.awaitChange(remaining) // InterruptedException propagates (Ctrl-C)
-          found = tryMatch()
+          found = stdoutBuf.awaitMatch(pattern, remaining) // InterruptedException propagates (Ctrl-C)
       found.get
 
     /** Wait (at most `timeoutMs`) for every stage to exit; whether they did. */
@@ -353,19 +355,19 @@ object Processes:
         feeder.start()
       def drainer(stream: java.io.InputStream, into: OutputBuffer): Thread =
         Thread(() =>
-          val text = TextSink(into.append)
-          val shown = gate.map(g => TextSink(g.feed))
+          val text = TextSink { decoded =>
+            into.append(decoded)
+            gate.foreach(_.feed(decoded))
+          }
           val buf = new Array[Byte](8192)
           try
             var n = stream.read(buf)
             while n >= 0 do
               text.write(buf, 0, n)
-              shown.foreach(_.write(buf, 0, n))
               n = stream.read(buf)
           catch case _: java.io.IOException => ()
           finally
             text.finish()
-            shown.foreach(_.finish())
             try stream.close()
             catch case _: java.io.IOException => ()
         )

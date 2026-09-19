@@ -114,12 +114,12 @@ object InputPredictor:
     * records. Quoting keeps embedded newlines and fake role labels inside the
     * record instead of letting transcript content reshape the prediction prompt. */
   def render(history: List[Msg]): String =
-    val texts = history.collect {
-      case Msg.User(t) => "User: " + ujson.write(cut(t))
-      case Msg.Assistant(t, _, _) if t.trim.nonEmpty => "Agent: " + ujson.write(cut(t))
+    val texts = history.reverseIterator.collect {
+      case Msg.User(t) => ("User", t)
+      case Msg.Assistant(t, _, _) if t.trim.nonEmpty => ("Agent", t)
     }
     // Roughly the last N exchanges: an exchange is a user line plus the answers to it.
-    val keep = texts.takeRight(Exchanges * 2)
+    val keep = texts.take(Exchanges * 2).toList.reverse.map((role, text) => s"$role: ${ujson.write(cut(text))}")
     if keep.isEmpty then "" else keep.mkString("\n\n") + "\n\nNext user message:"
 
   private def cut(text: String): String =

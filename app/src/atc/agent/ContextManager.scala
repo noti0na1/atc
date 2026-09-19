@@ -70,7 +70,7 @@ final class ContextManager:
     // allowance. A maxTokens larger than the window leaves no room at all and
     // raises the warning below, which names both settings.
     val allowance = model.contextWindow.map { window =>
-      val reserve = (window.toLong / 8).max(model.maxOutputTokens.map(_.toLong).getOrElse(0L))
+      val reserve = outputReserve(window, model.maxOutputTokens)
       Allowance(window, reserve, window.toLong - reserve)
     }
     val (fitted, dropped) = allowance match
@@ -120,6 +120,12 @@ final class ContextManager:
     )
 
 object ContextManager:
+  /** Leave room for the configured answer and at least one eighth of the window. */
+  def outputReserve(
+    window: Int,
+    maxOutputTokens: Option[Int]
+  ): Long = (window.toLong / 8).max(maxOutputTokens.fold(0L)(_.toLong))
+
   /** Below this many prompt tokens a completion is not used to calibrate the estimator. */
   val CalibrationMinTokens = 200L
 
@@ -151,7 +157,7 @@ object ContextManager:
 
   /** A rough token count: about four characters per token, corrected at run
     * time by [[ContextManager]]'s calibration against provider counts. */
-  def estimateTokens(text: String): Long = (text.length + 3) / 4
+  inline def estimateTokens(text: String): Long = (text.length.toLong + 3) / 4
 
   /** Estimate a neutral message, including per-message framing. */
   def estimateTokens(msg: Msg): Long = estimateTokens(msg, replayed = _ => true)

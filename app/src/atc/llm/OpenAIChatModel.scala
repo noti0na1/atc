@@ -33,6 +33,7 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
 
   private def params(system: SystemPrompt, history: List[Msg], tools: List[ToolSpec]): ChatCompletionCreateParams =
     val b = ChatCompletionCreateParams.builder().model(modelId).addSystemMessage(system.text)
+    b.streamOptions(ChatCompletionStreamOptions.builder().includeUsage(true).build())
     Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
     cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
     cfg.temperature.foreach(b.temperature)
@@ -124,6 +125,8 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
       Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
       system.foreach(b.addSystemMessage)
       b.addUserMessage(prompt)
+      cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
+      cfg.temperature.foreach(b.temperature)
       effort.foreach(b.reasoningEffort)
       thinkingSwitch(thinking).foreach(b.putAdditionalBodyProperty("thinking", _))
       client.chat().completions().create(b.build())

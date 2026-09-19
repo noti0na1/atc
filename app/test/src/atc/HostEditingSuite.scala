@@ -44,6 +44,28 @@ class HostEditingSuite extends munit.FunSuite:
     env.file("large.txt", "x" * 2100000)
     assert(env.host.readRange("large.txt", 1, 1).contains("read limit reached"))
 
+  test("cat ranges bound output and distinguish read limits from end of file"):
+    val env = TestEnv()
+    import env.given
+    given FileSystem = FileSystemImpl(ScopeId.Base, env.host)
+    env.file("lines.txt", (1 to 405).map(n => s"line $n").mkString("\n"))
+    env.host.cat("lines.txt", 1, Int.MaxValue)
+    val preview = env.agentOut.toString
+    assert(preview.contains("400\tline 400"))
+    assert(!preview.contains("401\tline 401"))
+    assert(preview.contains(s"cat(\"lines.txt\", 401, ${Int.MaxValue}) continues"))
+    env.clearOutput()
+    env.host.cat("lines.txt", 401, Int.MaxValue)
+    assert(env.agentOut.toString.contains("405\tline 405"))
+    assert(env.agentOut.toString.contains("end of file: 405 lines"))
+    env.file("long.txt", "x" * 2100000 + "\nlast\n")
+    for from <- List(1, 2) do
+      env.clearOutput()
+      env.host.cat("long.txt", from, 3)
+      assert(env.agentOut.toString.contains("read limit reached"))
+      assert(!env.agentOut.toString.contains("end of file"))
+      assert(!env.agentOut.toString.contains("nothing to show"))
+
   test("search enforces match, file, line and character budgets"):
     val env = TestEnv()
     given FileSystem = FileSystemImpl(ScopeId.Base, env.host)
