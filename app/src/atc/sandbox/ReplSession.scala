@@ -329,10 +329,14 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         val evaluated = resultRef.get()
         if evaluated != null then state = evaluated.state
         skipInvalidWrapper(previousIndex)
+        // What the snippet printed before the limit is still useful to the model: the
+        // worker's own output when it stopped, else a snapshot of the capture it is
+        // still writing to.
+        val output = withoutStopTrace(if evaluated != null then evaluated.output else capturedSoFar)
         val note = if worker.isAlive then "; the evaluation could not be stopped and is still running" else ""
         ExecutionResult(
           false,
-          "",
+          output,
           Some(s"Execution timed out after ${limitMs}ms (completed effects are not rolled back)$note")
         )
       else
@@ -366,12 +370,24 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
             System.setOut(oldOut)
             System.setErr(oldErr)
             printStream.flush()
-        // Only trailing whitespace is dropped: the UI removes the agent's own
-        // prints (already shown live) from this text and needs an exact match.
-        val captured = outputCapture.capturedString.stripTrailing()
-        val output = if outputCapture.truncated then captured + TruncationMarker else captured
-        (output, thrown)
+        (capturedSoFar, thrown)
       finally outputLock.unlock()
+
+  /** Drop the trace the REPL prints when the stop flag aborts the snippet (`ThreadDeath`
+    * from the stop check, or the `ExceptionInInitializerError` it surfaces as in a
+    * top-level definition): it is the last thing printed and says nothing to the model. */
+  private def withoutStopTrace(output: String): String =
+    val lines = output.linesIterator.toVector
+    val start = lines.lastIndexWhere(l =>
+      l.startsWith("java.lang.ThreadDeath") || l.startsWith("java.lang.ExceptionInInitializerError")
+    )
+    if start < 0 then output else lines.take(start).mkString("\n").stripTrailing()
+
+  /** The output captured so far. Only trailing whitespace is dropped: the UI removes the
+    * agent's own prints (already shown live) from this text and needs an exact match. */
+  private def capturedSoFar: String =
+    val captured = outputCapture.capturedString.stripTrailing()
+    if outputCapture.truncated then captured + TruncationMarker else captured
 
   private def formatDiagnostics(diags: List[Diagnostic]): String =
     diags.map: d =>

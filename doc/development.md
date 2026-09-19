@@ -364,7 +364,11 @@ With an execution timeout configured, evaluation runs on a daemon worker. `Execu
 excludes nested waits for user input, external commands and model calls that have their own
 timeouts. Interrupts set the compiler's REPL stop flag and interrupt blocking operations.
 `skipInvalidWrapper` advances past a potentially incomplete wrapper class. Completed file,
-process or network effects are not rolled back after interruption or timeout.
+process or network effects are not rolled back after interruption or timeout. A timed-out
+result still carries what the snippet printed before the limit (the worker's output if it
+stopped within the two-second grace, else a snapshot of the capture buffer it is still
+writing to), minus the stop signal's trace, so the model sees the progress made; an
+interrupted result stays empty, since the turn ends anyway.
 
 Evaluation temporarily replaces `System.out` and `System.err`, so a process-wide lock
 serializes capture. The same lock protects selection of the session's host in `Runtime`,
