@@ -54,6 +54,8 @@ if ($env:ATC_MODEL) { $argsList.Add('-m'); $argsList.Add($env:ATC_MODEL) }
 if ($AtcArgs) { $argsList.AddRange([string[]]$AtcArgs) }
 
 $javaArgs = [Collections.Generic.List[string]]::new()
+# JVM defaults as in the `atc` wrapper; ATC_JAVA_OPTS comes later and wins.
+foreach ($option in @('-Xms256m', '-Xmx2g', '-Xss4m', '-XX:-UsePerfData')) { $javaArgs.Add($option) }
 if ($env:ATC_JAVA_OPTS) {
   foreach ($option in ($env:ATC_JAVA_OPTS -split '\s+' | Where-Object { $_ })) { $javaArgs.Add($option) }
 }
@@ -90,6 +92,8 @@ if (-not ($versionText -match '(?im)^\S+\s+version\s+"(?<major>\d+)(?:\.(?<minor
 $major = [int]$Matches.major
 if ($major -eq 1 -and $Matches.minor) { $major = [int]$Matches.minor }
 if ($major -lt 17) { throw "Java 17 or newer is required; '$java' reports major version $major." }
+# Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
+if ($major -ge 23) { $javaArgs.Insert(0, '--sun-misc-unsafe-memory-access=allow') }
 
 $savedLaunchCwd = $env:ATC_INTERNAL_LAUNCH_CWD
 $savedLibClasspath = $env:ATC_INTERNAL_LIB_CLASSPATH

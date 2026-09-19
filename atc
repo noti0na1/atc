@@ -17,6 +17,14 @@ DEFAULT_CACHE_DIR="${HOME}/.atc/jars"
 CACHE_DIR="${ATC_CACHE_DIR:-${DEFAULT_CACHE_DIR}}"
 INSTALL_DIR="${ATC_INSTALL_DIR:-${HOME}/.local/bin}"
 INSTALL_PATH="${INSTALL_DIR}/atc"
+# JVM defaults for 'atc run' (measured; doc/development.md "JVM settings"). ATC_JAVA_OPTS
+# and -Xmx/-Xms on the command line come later and win.
+DEFAULT_JVM_OPTS="-Xms256m -Xmx2g -Xss4m -XX:-UsePerfData"
+# Startup cache (AOT cache on Java 25+, CDS archive on 19-24): halves the cold start, but a
+# stale one makes the JVM print errors, so key.txt records the JDK and release and is dated
+# against the jars; a mismatch rebuilds it with one silent echo-model run.
+STARTUP_CACHE_DIR="${CACHE_DIR}/startup"
+STARTUP_CACHE_KEY="${STARTUP_CACHE_DIR}/key.txt"
 APP_JAR_NAME="atc.jar"
 LIB_JAR_NAME="atc-lib.jar"
 APP_JAR="${CACHE_DIR}/${APP_JAR_NAME}"
@@ -35,7 +43,7 @@ atc: install, update and run ATC
 
 Usage:
   atc [atc-args...]        Run ATC with the downloaded release jars (same as 'atc run').
-  atc run [atc-args...]    Run ATC; every argument is passed to it ('atc run --help').
+  atc run [atc-args...]    Run ATC; every argument but -Xmx/-Xms is passed to it ('atc run --help').
   atc setup                Install this wrapper into ~/.local/bin, put ~/.local/bin on
                            PATH, check for Java 17+ and download the latest release.
   atc update               Download the latest release jars when they are missing or
@@ -51,15 +59,24 @@ Usage:
 Locations:
   Wrapper:   ${INSTALL_PATH}
   Jars:      ${CACHE_DIR}/  (override with ATC_CACHE_DIR)
+  Startup cache: ${STARTUP_CACHE_DIR}/  (rebuilt when the jars or the JDK change)
+
+JVM options (taken by the wrapper, passed to java, not to ATC):
+  -Xmx<size>           maximum heap, e.g. -Xmx4g (default: -Xmx2g)
+  -Xms<size>           initial heap, e.g. -Xms512m (default: -Xms256m)
+                       Both go after ATC_JAVA_OPTS, so they win over a value given there.
 
 Environment:
   ATC_JAVA_OPTS        extra JVM flags for 'atc run'
+  ATC_STARTUP_CACHE=0  run without the JVM startup cache (AOT cache on Java 25+,
+                       class-data-sharing archive on Java 19-24)
   ATC_CHECK_UPDATES=0  skip the release check on interactive startup
   GITHUB_TOKEN         raises the GitHub API rate limit for release checks and downloads
 
 Examples:
   atc setup
   atc -C ~/my-project
+  atc -Xmx4g -C ~/my-project
   atc run -p 'run: 1 + 1'
   atc update
   atc dev ~/src/atc
@@ -117,12 +134,14 @@ java_major_version() {
   java_major_from_line "$version_line"
 }
 
+# Sets JAVA_MAJOR and VERSIONED_JVM_OPTS (the defaults that only some Java versions accept).
 ensure_java() {
-  local major
-
   command -v java >/dev/null 2>&1 || fail "Java 17+ is required. Install Java and try again."
-  major="$(java_major_version)" || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
-  (( major >= 17 )) || fail "Java 17+ is required. Found Java ${major}. Install a newer Java version and try again."
+  JAVA_MAJOR="$(java_major_version)" || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
+  (( JAVA_MAJOR >= 17 )) || fail "Java 17+ is required. Found Java ${JAVA_MAJOR}. Install a newer Java version and try again."
+  VERSIONED_JVM_OPTS=()
+  # Scala's LazyVals still use sun.misc.Unsafe; Java 23+ warns about it on every run (JEP 471).
+  (( JAVA_MAJOR < 23 )) || VERSIONED_JVM_OPTS+=("--sun-misc-unsafe-memory-access=allow")
 }
 
 # ---------------------------------------------------------------------------
@@ -734,6 +753,8 @@ cmd_uninstall() {
     # Remove known artifacts only. A dev.* or download.* directory name does not
     # establish ownership, especially when ATC_CACHE_DIR points to a shared directory.
     rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp"
+    rm -f -- "${STARTUP_CACHE_DIR}/atc.aot" "${STARTUP_CACHE_DIR}/atc.jsa" "$STARTUP_CACHE_KEY"
+    rmdir -- "$STARTUP_CACHE_DIR" 2>/dev/null || true
     if rmdir -- "$CACHE_DIR" 2>/dev/null; then
       echo "Removed ${CACHE_DIR}"
     else
@@ -749,15 +770,102 @@ cmd_dev() {
   install_dev_build "${1:-}"
 }
 
+# Take the JVM heap flags `-Xmx<size>` / `-Xms<size>` out of the run arguments: they go to
+# java, and ATC itself does not know them. Leaves the rest, in order, in RUN_ARGS and the
+# flags in JVM_OPTS. Bash 3.2: an empty array must be expanded as ${A[@]+"${A[@]}"}
+# under `set -u`.
+extract_jvm_options() {
+  JVM_OPTS=()
+  RUN_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -Xmx*|-Xms*)
+        [[ "${1#-Xm?}" =~ ^[0-9]+[kKmMgG]?$ ]] ||
+          fail "Invalid JVM heap size '$1': use a number with an optional k, m or g suffix, e.g. -Xmx4g or -Xms512m"
+        JVM_OPTS+=("$1"); shift ;;
+      *)
+        RUN_ARGS+=("$1"); shift ;;
+    esac
+  done
+}
+
+# The startup cache file and the flags that create and use it, for JAVA_MAJOR; false below 19.
+startup_cache_flags() {
+  if (( JAVA_MAJOR >= 25 )); then
+    STARTUP_CACHE_FILE="${STARTUP_CACHE_DIR}/atc.aot"
+    STARTUP_CACHE_CREATE="-XX:AOTCacheOutput=${STARTUP_CACHE_FILE}"
+    STARTUP_CACHE_USE="-XX:AOTCache=${STARTUP_CACHE_FILE}"
+  elif (( JAVA_MAJOR >= 19 )); then
+    STARTUP_CACHE_FILE="${STARTUP_CACHE_DIR}/atc.jsa"
+    STARTUP_CACHE_CREATE="-XX:ArchiveClassesAtExit=${STARTUP_CACHE_FILE}"
+    STARTUP_CACHE_USE="-XX:SharedArchiveFile=${STARTUP_CACHE_FILE}"
+  else
+    return 1
+  fi
+}
+
+# What the cache was built for: the JDK (its whole -version output) and the release marker.
+startup_cache_key() {
+  java -version 2>&1
+  cat "$RELEASE_MARKER" 2>/dev/null || true
+}
+
+# True when the key file matches and neither jar is newer than it.
+startup_cache_current() {
+  [[ -f "$STARTUP_CACHE_KEY" ]] || return 1
+  [[ "$(cat "$STARTUP_CACHE_KEY")" == "$(startup_cache_key)" ]] || return 1
+  [[ -z "$(find "$APP_JAR" "$LIB_JAR" -newer "$STARTUP_CACHE_KEY" 2>/dev/null)" ]]
+}
+
+# One echo-model turn with the cache-creating flag; output is discarded and a failure leaves
+# no cache file. The key is written either way, so a JDK that cannot build the cache does not
+# pay for another attempt on every run, and it is dated like a jar that is newer than it, so a
+# future-dated jar cannot force a rebuild on every run.
+build_startup_cache() {
+  local tmp jar
+  echo "atc: preparing the JVM startup cache (once per release and JDK, a few seconds)..." >&2
+  mkdir -p "$STARTUP_CACHE_DIR"
+  rm -f -- "$STARTUP_CACHE_FILE"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/atc-startup-cache.XXXXXX")"
+  printf '%s\n' '{"providers":{"echo":{"api":"echo","models":{"echo":{}}}},"model":"echo"}' > "${tmp}/train.json"
+  # shellcheck disable=SC2086
+  java ${DEFAULT_JVM_OPTS} ${VERSIONED_JVM_OPTS[@]+"${VERSIONED_JVM_OPTS[@]}"} "$STARTUP_CACHE_CREATE" \
+    -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" \
+    -c "${tmp}/train.json" -C "$tmp" -p 'run: 1 + 1' >/dev/null 2>&1 || true
+  rm -rf -- "$tmp"
+  startup_cache_key > "$STARTUP_CACHE_KEY"
+  for jar in "$APP_JAR" "$LIB_JAR"; do
+    [[ -z "$(find "$jar" -newer "$STARTUP_CACHE_KEY" 2>/dev/null)" ]] || touch -r "$jar" "$STARTUP_CACHE_KEY"
+  done
+  if [[ ! -s "$STARTUP_CACHE_FILE" ]]; then
+    rm -f -- "$STARTUP_CACHE_FILE"
+    echo "atc: could not build the startup cache; running without it." >&2
+  fi
+}
+
+# Sets STARTUP_CACHE_OPTS to the flag that uses the cache, or leaves it empty.
+prepare_startup_cache() {
+  STARTUP_CACHE_OPTS=()
+  [[ "${ATC_STARTUP_CACHE:-1}" != "0" ]] || return 0
+  startup_cache_flags || return 0
+  startup_cache_current || build_startup_cache
+  [[ -s "$STARTUP_CACHE_FILE" ]] && STARTUP_CACHE_OPTS=("$STARTUP_CACHE_USE")
+  return 0
+}
+
 cmd_run() {
   local dev_dir
+  extract_jvm_options "$@"
+  set -- ${RUN_ARGS[@]+"${RUN_ARGS[@]}"}
   ensure_java
   require_cached_jars
   offer_startup_update "$@" || return $?
   dev_dir="$(dev_source)"
   [[ -z "$dev_dir" ]] || echo "atc: running the local build from ${dev_dir} ('atc update' restores the release)" >&2
+  prepare_startup_cache
+  # Later flags win: the defaults, then ATC_JAVA_OPTS, then -Xmx/-Xms from the command line.
   # shellcheck disable=SC2086
-  exec java ${ATC_JAVA_OPTS:-} -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" "$@"
+  exec java ${DEFAULT_JVM_OPTS} ${VERSIONED_JVM_OPTS[@]+"${VERSIONED_JVM_OPTS[@]}"} ${STARTUP_CACHE_OPTS[@]+"${STARTUP_CACHE_OPTS[@]}"} ${ATC_JAVA_OPTS:-} ${JVM_OPTS[@]+"${JVM_OPTS[@]}"} -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" "$@"
 }
 
 main() {
@@ -809,7 +917,7 @@ main() {
       cmd_dev "$@"
       ;;
     ""|-*)
-      # No command, or ATC's own flags (-C, -m, -p, --mode, --init, --version...): run ATC.
+      # No command, or ATC's own flags (-C, -m, -p, --mode, --init, --version...) or -Xmx/-Xms: run ATC.
       cmd_run "$@"
       ;;
     *)
