@@ -11,7 +11,7 @@ import atc.llm.{ChatModel, TokenUsage}
 import atc.perms.*
 import atc.platform.PlatformPath
 import atc.sandbox.{ReplSession, SandboxConfig}
-import atc.ui.{Ansi, Tui}
+import atc.ui.{Ansi, Notifier, Tui}
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
@@ -121,6 +121,7 @@ final class App(args: Cli.Args, val tui: Tui):
     () => (host.currentTaskNotes, host.currentTodos),
   )
   tui.onSubmit = agent.submit
+  if args.prompt.isEmpty then tui.notifier = Notifier.fromSetting(config.notifications)
   tui.queuedInputs = () => agent.queuedInputCount
   tui.onInterrupt = () =>
     agent.interrupt()
@@ -539,7 +540,7 @@ final class App(args: Cli.Args, val tui: Tui):
     if keys.sources.nonEmpty then
       tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
     tui.println(
-      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput} autoCompactThreshold=${config.autoCompactThreshold} compactKeepRatio=${config.compactKeepRatio}"
+      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput} autoCompactThreshold=${config.autoCompactThreshold} compactKeepRatio=${config.compactKeepRatio} notifications=${config.notifications}"
     )
     tui.println(s"open permission scopes: ${policy.openScopeCount}")
 

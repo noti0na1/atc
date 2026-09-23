@@ -907,6 +907,27 @@ replacement, shrinkage and clearing while preserving a footer outside the owned 
 Background process events between turns use `LineReader.printAbove`
 so notifications do not overwrite the user's input.
 
+`Notifier` sends the `notifications` alert when a turn ends, a permission request or
+question opens, or the tool budget runs out. `Tui.alert` schedules it ten seconds ahead and
+drops it on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
+changed buffer) and the end of a pop-up count as input. The terminal's focus reports
+(`ESC[?1004h`) come through JLine's focus widgets at the prompt and through the key reader
+during a turn. Reporting is on only while one of those raw-mode readers runs (`callback-init`
+to `callback-finish` for the line reader, `keys.start` to `keys.stop`): between reads the
+terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends a pending alert at once, and an alert raised while
+unfocused is not delayed. jline-prompt menus do not parse focus reports, so reporting is
+off while a menu reads. There are no alerts for `-p` runs or dumb terminals.
+The alert title is `atc · <directory>`. A turn's alert shows the start of its last prose
+block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
+the turn did not finish normally (`Tui.turnAlert`). Permission alerts name the request and
+its details, and question alerts show the question.
+Terminal alerts are OSC 9, 99 (kitty) or 777 sequences, chosen from `TERM` and
+`TERM_PROGRAM` and wrapped for tmux passthrough; they are written as style text so they
+leave the line tracking alone. System alerts start `osascript`, a Base64-encoded PowerShell
+toast script or `notify-send` on a daemon thread, passing the text as arguments or quoted
+script data, and ring the bell if the command cannot start. Alert text is sanitized, put
+on one line and capped at 200 characters.
+
 `TextLayout` wraps complete lines by terminal cell width, preserving ANSI styles and whole
 Unicode code points. It scans long lines once, with word boundaries preferred over hard
 breaks. Help and banner fields retain aligned continuation lines; when their value column

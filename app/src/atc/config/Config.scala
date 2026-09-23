@@ -132,6 +132,10 @@ case class Config(
   /** Fraction of the context window reserved for recent verbatim exchanges
     * during manual or automatic compaction. Zero summarizes everything. */
   compactKeepRatio: Double = 0.2,
+  /** How to tell the user that a turn ended or a question waits, when they do
+    * not type within ten seconds: `auto`, `system` (a desktop notification),
+    * `terminal` (the terminal's own notification sequence), `bell` or `off`. */
+  notifications: String = "auto",
 ) derives ReadWriter
 
 object Config:
@@ -387,6 +391,7 @@ object Config:
 
   private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
+  private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
   private val ProviderApis =
     Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "echo")
   private val AnthropicWebSearchVersions = Set("20250305", "20260209")
@@ -454,6 +459,7 @@ object Config:
       s"compactKeepRatio must be between 0 and 1 (was ${config.compactKeepRatio})"
     )
     config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
+    validateChoice("notifications", config.notifications, NotificationChoices)
     config.mode.foreach { m =>
       try Mode.parse(m)
       catch case e: IllegalArgumentException => invalid(e.getMessage.nn)

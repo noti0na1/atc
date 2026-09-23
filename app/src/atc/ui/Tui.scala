@@ -33,6 +33,7 @@ import java.io.{InputStream, OutputStream}
 import java.nio.charset.StandardCharsets
 import java.nio.file.attribute.{PosixFileAttributeView, PosixFilePermissions}
 import java.nio.file.{FileAlreadyExistsException, Files, LinkOption, Path}
+import java.util.concurrent.{Executors, ScheduledFuture, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.jdk.CollectionConverters.*
 
@@ -51,6 +52,53 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   Debug.log(
     s"terminal: ${terminal.getClass.getSimpleName} type=${terminal.getType} size=${terminal.getSize} encoding=${terminal.encoding()}"
   )
+  /** Notifies the user when a turn ends or a question waits (config `notifications`). */
+  @volatile var notifier: Notifier = Notifier.Off
+  /** Whether the terminal has the focus. Terminals without focus reporting never
+    * say otherwise, so they count as focused. */
+  @volatile private var focused = true
+  /** The alert waiting for input, with its text; guarded by `this`. */
+  private var pendingAlert: Option[(ScheduledFuture[?], String)] = None
+  private lazy val alertTimer = Executors.newSingleThreadScheduledExecutor { r =>
+    val t = Thread(r, "atc-alert")
+    t.setDaemon(true)
+    t
+  }.nn
+
+  /** Tell the user that atc waits for them: at once when the terminal is not
+    * focused, otherwise after [[Tui.NotifyAfterMillis]] unless they type first
+    * or the focus leaves, which sends it then. */
+  private def alert(body: String): Unit = if !plain && notifier != Notifier.Off then
+    if !focused then sendAlert(body)
+    else
+      val task: Runnable = () => takeAlert().foreach(sendAlert)
+      synchronized:
+        takeAlert()
+        pendingAlert = Some((alertTimer.schedule(task, Tui.NotifyAfterMillis, TimeUnit.MILLISECONDS).nn, body))
+
+  /** Cancel the pending alert and return its text. */
+  private def takeAlert(): Option[String] = synchronized:
+    val body = pendingAlert.map((future, body) => { future.cancel(false); body })
+    pendingAlert = None
+    body
+
+  private def sendAlert(body: String): Unit =
+    val title = if alertDirectory.isEmpty then "atc" else s"atc ${g.dot} $alertDirectory"
+    notifier.send(title, body, text => frame(writeStyle(text)))
+
+  /** The working directory's name, for alert titles. */
+  @volatile private var alertDirectory = ""
+  /** The current turn's last prose block and last error, for its alert. */
+  private val turnProse = StringBuilder()
+  private var turnError = ""
+
+  /** The user typed or answered, so they have seen what waits. */
+  private def touchInput(): Unit = takeAlert()
+
+  private def focusChanged(in: Boolean): Unit =
+    focused = in
+    if !in then takeAlert().foreach(sendAlert)
+
   /** The predicted next message (`suggest`), drawn as ghost text after what
     * is typed as long as that is a prefix of it. */
   @volatile private var suggestion: Option[String] = None
@@ -61,7 +109,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * style. The cursor is positioned from the buffer, not from this string,
     * so the extra text is display only. */
   private object ghostHighlighter extends DefaultHighlighter:
+    /** The buffer at the last redraw: a change means the user is typing. */
+    var seen = ""
     override def highlight(r: LineReader, buffer: String): AttributedString =
+      if buffer != seen then
+        seen = buffer
+        touchInput()
       val base = super.highlight(r, buffer).nn
       ghost(buffer) match
         case Some(rest) if !plain =>
@@ -103,6 +156,16 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** Not a real terminal (piped / `-p` in a script): no spinner, no cursor tricks, no menus, nothing folded. */
   private val plain: Boolean = terminal.getType == Terminal.TYPE_DUMB || terminal.getType == Terminal.TYPE_DUMB_COLOR
+  /** Whether the terminal can report focus changes (`ESC[I` / `ESC[O`). */
+  private val focusSupported = !plain && terminal.hasFocusSupport
+  @volatile private var reportingFocus = false
+
+  /** Focus reports are on only while a raw-mode reader that consumes them runs
+    * (the prompt, the turn's key reader). In line mode the terminal driver
+    * would echo them as `^[[I` text. */
+  private def reportFocus(on: Boolean): Unit = if focusSupported && on != reportingFocus then
+    reportingFocus = on
+    terminal.trackFocus(on)
 
   /** The line `readLine` returns when the user presses Shift-Tab on an empty
     * prompt: the app treats it as the `/mode` command (cycle the sandbox mode). */
@@ -267,6 +330,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def setContext(model: String, mode: String, directory: String): Unit = synchronized:
     contextLabel = s"$model ${g.dot} $mode ${g.dot} $directory"
+    alertDirectory = directory
     refreshStatus()
 
   private def refreshStatus(): Unit =
@@ -322,11 +386,17 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   @volatile var askToContinue: Boolean = true
 
   override def confirmMoreToolCalls(used: Int, budget: Int): Boolean =
+    if askToContinue then alert(s"Tool limit reached after ${Tui.plural(used, "call")}. Continue?")
     askToContinue && confirm(
       s"Tool limit reached after ${Tui.plural(used, "call")}. Allow ${Tui.plural(budget, "more call")}?"
     )
 
-  terminal.handle(Terminal.Signal.INT, _ => if busy then { interrupted.set(true); onInterrupt() })
+  terminal.handle(
+    Terminal.Signal.INT,
+    _ =>
+      touchInput()
+      if busy then { interrupted.set(true); onInterrupt() }
+  )
   terminal.handle(
     Terminal.Signal.WINCH,
     _ =>
@@ -341,6 +411,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def beginTurn(): Unit =
     frame:
       interrupted.set(false)
+      turnProse.clear()
+      turnError = ""
       turnStarted = System.nanoTime()
       busy = true
       operation = "starting turn"
@@ -372,6 +444,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       blankLine()
       refreshStatus()
     keys.stop() // outside the lock: the key thread may be waiting for it
+    stats.foreach(s => alert(synchronized(Tui.turnAlert(s, turnProse.toString, turnError))))
   def isInterrupted: Boolean = interrupted.get()
 
   // ── low-level writing ─────────────────────────────────────────────
@@ -498,7 +571,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def preview(s: String): Unit = info(fit(Ansi.sanitize(s).replace('\n', ' '), 0))
   def success(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Green))
   def warn(s: String): Unit = renderedLine(styled(s"${g.warn} ${Ansi.sanitize(s)}", Yellow))
-  def error(s: String): Unit = renderedLine(styled(s"${g.cross} ${Ansi.sanitize(s)}", Red))
+  def error(s: String): Unit =
+    synchronized { if busy then turnError = s }
+    renderedLine(styled(s"${g.cross} ${Ansi.sanitize(s)}", Red))
 
   def showHelp(rows: List[(String, String)]): Unit = frame:
     println("Commands:")
@@ -598,10 +673,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     stopSpinner()
     val clean = Ansi.sanitize(text) // model text: no terminal control may reach the screen
     prose match
-      case Some(md) => writeGuttered(md.push(clean), Indent)
+      case Some(md) =>
+        if turnProse.length < Tui.AlertProseChars then turnProse.append(clean)
+        writeGuttered(md.push(clean), Indent)
       case None =>
         val t = clean.dropWhile(_ == '\n')
         if t.nonEmpty then
+          turnProse.clear()
+          turnProse.append(t)
           beginBlock()
           write(styled(g.bullet, Bold) + " ")
           val md = newProse()
@@ -900,6 +979,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
     def start(): Unit = if !plain && thread.isEmpty then
       saved = Some(terminal.enterRawMode())
+      reportFocus(true)
       out.print(Ansi.Esc + "[?2004h")
       out.flush()
       running = true
@@ -913,6 +993,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       pauseLock.synchronized(pauseLock.notifyAll())
       thread.foreach(t => t.join(2500))
       thread = None
+      // Still in raw mode: a report arriving now waits unechoed for the next reader.
+      reportFocus(false)
       saved.foreach(terminal.setAttributes)
       saved = None
       if !plain then
@@ -930,6 +1012,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         pauseLock.synchronized:
           pauseDepth -= 1
           if pauseDepth == 0 && running then
+            reportFocus(true) // an answer read by the line reader turned it off
             out.print(Ansi.Esc + "[?2004h")
             out.flush()
           pauseLock.notifyAll()
@@ -956,6 +1039,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             val c =
               try in.read(100L)
               catch case _: Exception => -1
+            if c >= 0 && c != 27 then touchInput()
             c match
               case NonBlockingReader.READ_EXPIRED => () // no key read: leave skipLf pending
               case -1 => running = false
@@ -974,9 +1058,12 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
                 other match
                   case 15 => toggleExpanded() // Ctrl-O
                   case 27 => Tui.readEscapeSequence(() => in.read(30L)) match
-                      case "[200~" => pasting = true
-                      case "[201~" => pasting = false
-                      case _ => ()
+                      case "[I" => focusChanged(true)
+                      case "[O" => focusChanged(false)
+                      case sequence =>
+                        touchInput()
+                        if sequence == "[200~" then pasting = true
+                        else if sequence == "[201~" then pasting = false
                   case 127 | 8 =>
                     if typeAhead.nonEmpty then
                       val end = typeAhead.length
@@ -1019,12 +1106,19 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     val prompter = PrompterFactory.create(terminal, config.withCancellableFirstPrompt(true))
     val builder = prompter.newBuilder()
     define(builder)
+    // jline-prompt does not understand focus reports, so they are off while it reads.
+    val tracking = reportingFocus
+    reportFocus(false)
     try Option(prompter.prompt(List.empty[AttributedString].asJava, builder.build()).get("a")).flatMap(read)
     catch case _: UserInterruptException | _: EndOfFileException => None
       // The prompter redraws the answer, clears the menu below it and prints one
       // more newline (`DefaultPrompter.close`), so the cursor is already past a
       // blank line: tell `blankLine` so the block does not get a second one.
-    finally tail = "\n\n"
+    finally
+      tail = "\n\n"
+      if tracking then
+        focused = true // the user just answered the menu
+        reportFocus(true)
 
   /** A single-choice menu, returning its index so duplicate display labels do
     * not collapse into the first option. */
@@ -1077,6 +1171,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           beginBlock()
         try body
         finally frame:
+            touchInput()
             blankLine()
             popupDepth -= 1
             if popupDepth == 0 then
@@ -1094,6 +1189,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def askPermission(req: PermissionRequest): Decision = withOperation("waiting for permission"):
     popupBlock:
+      alert(s"Permission needed: ${req.title} (${req.details.mkString(", ")})")
       // The request embeds model-chosen paths and command lines: sanitize.
       write(Indent + styled(s"${g.warn} Permission request: ${Ansi.sanitize(req.title)}", Yellow, Bold) + "\n")
       req.details.foreach { detail =>
@@ -1144,6 +1240,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
     withOperation("waiting for your answer"):
       popupBlock:
+        alert(s"Question: $question")
         // The question and options are model-written: sanitize.
         write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
         val cleanOptions = options.map(Ansi.sanitize(_))
@@ -1178,7 +1275,9 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     withPromptHint(s"Enter send ${g.dot} Ctrl-C cancel"):
       flushOutput()
       try Tui.readAnswer(reader.readLine(prompt))
-      finally tail = "\n"
+      finally
+        tail = "\n"
+        reportFocus(false)
 
   // ── TODO panel ────────────────────────────────────────────────────
 
@@ -1224,11 +1323,13 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     var again = true
     while again do
       try
+        val typed = keys.takeTypeAhead()
+        ghostHighlighter.seen = typed
         result = Some(reader.readLine(
           styled(prompt, Cyan, Bold),
           null: String | Null,
           null: org.jline.reader.MaskingCallback | Null,
-          keys.takeTypeAhead()
+          typed
         ))
         again = false
       catch
@@ -1241,7 +1342,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
         case e: Throwable =>
           Debug.log(s"readLine failed: $e"); Debug.trace(e)
           throw e
-      finally tail = "\n" // the reader echoed the line and moved to the next one
+      finally
+        tail = "\n" // the reader echoed the line and moved to the next one
+        reportFocus(false)
+        touchInput()
     result
 
   /** Offer `text` as the predicted next message: ghost text at the prompt,
@@ -1258,11 +1362,21 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** Whether the terminal can show ghost text (a real terminal). */
   def suggestionsAvailable: Boolean = !plain
 
+  // Registered last: the widgets use state initialized throughout the class.
+  if focusSupported then
+    reader.getWidgets.put(LineReader.FOCUS_IN, (() => { focusChanged(true); true }): Widget)
+    reader.getWidgets.put(LineReader.FOCUS_OUT, (() => { focusChanged(false); true }): Widget)
+    // Called in raw mode: after `readLine` enters it, and on Enter before it leaves it.
+    reader.getWidgets.put(LineReader.CALLBACK_INIT, (() => { reportFocus(true); true }): Widget)
+    reader.getWidgets.put(LineReader.CALLBACK_FINISH, (() => { reportFocus(false); true }): Widget)
+
   def close(): Unit =
     if closed then return
     closed = true
     stopSpinner()
     keys.stop()
+    takeAlert()
+    reportFocus(false)
     synchronized(flushOutput())
     statusLine.foreach(_.close())
     try reader.getHistory.save()
@@ -1270,6 +1384,24 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     terminal.close()
 
 object Tui:
+  /** How long a finished turn or a waiting question waits for input before it notifies the user. */
+  val NotifyAfterMillis: Long = 10_000L
+  /** How much of the turn's last prose block is kept for its alert. */
+  val AlertProseChars = 1000
+
+  /** The alert text for an ended turn: the start of the agent's last reply,
+    * after the outcome unless the turn finished normally, or the error that
+    * ended it. The outcome and duration alone when there is neither. */
+  private[atc] def turnAlert(stats: TurnStats, prose: String, error: String): String =
+    val outcome = stats.outcome.label.capitalize
+    val reply = Notifier.plainText(prose)
+    stats.outcome match
+      case TurnOutcome.Finished if reply.nonEmpty => reply
+      case TurnOutcome.Failed | TurnOutcome.Blocked if error.nonEmpty => s"$outcome: $error"
+      case TurnOutcome.Interrupted => s"$outcome after ${duration(stats.seconds)}"
+      case _ if reply.nonEmpty => s"$outcome: $reply"
+      case _ => s"$outcome in ${duration(stats.seconds)}"
+
   /** Draw the one-line footer and flush it. JLine's `Status.update` flushes the text itself
     * but leaves the closing synchronized-update sequence (`ESC[?2026l`) in the buffered
     * writer: a terminal honouring mode 2026 (xterm.js/VS Code, iTerm2, kitty, Ghostty, WezTerm)
