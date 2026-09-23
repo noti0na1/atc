@@ -926,6 +926,10 @@ The alert title is `atc · <directory>`. A turn's alert shows the start of its l
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
 its details, and question alerts show the question.
+`Tui.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
+the status refreshes, writing only changes. The previous title is pushed on xterm's title
+stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
+stack keep ATC's title until the shell sets its own.
 Terminal alerts are OSC 9, 99 (kitty) or 777 sequences, chosen from `TERM` and
 `TERM_PROGRAM` and wrapped for tmux passthrough; they are written as style text so they
 leave the line tracking alone. System alerts start `osascript`, a Base64-encoded PowerShell

@@ -136,10 +136,29 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def setContext(model: String, mode: String, directory: String): Unit = screen.synchronized:
     contextLabel = s"$model ${g.dot} $mode ${g.dot} $directory"
-    alerts.title = s"atc ${g.dot} $directory"
+    titleBase = s"atc ${g.dot} $directory"
+    alerts.title = titleBase
     refreshStatus()
 
+  // ── window title ──────────────────────────────────────────────────
+
+  /** `atc · <directory>`, marked while a turn runs (`●`) or a pop-up waits during one (`?`),
+    * so a tab that needs the user stands out. The terminal's own title is saved first
+    * (xterm's title stack) and restored by `close`. */
+  private var titleBase = "atc"
+  private var lastTitle = ""
+  if !plain then screen.frame(screen.writeStyle(s"${Ansi.Esc}[22;0t"))
+
+  private def refreshTitle(): Unit = if !plain && !closed then
+    val marker = if busy && popupDepth > 0 then "? " else if busy then s"${g.bullet} " else ""
+    val title = Ansi.sanitize(marker + titleBase)
+    if title != lastTitle then
+      lastTitle = title
+      screen.writeStyle(s"${Ansi.Esc}]0;$title\u0007")
+      screen.flush()
+
   private def refreshStatus(): Unit =
+    refreshTitle()
     if closed || statusLine.isEmpty then return
     val elapsed = if busy then s" ${Tui.duration((System.nanoTime() - turnStarted) / 1e9)}" else ""
     val queued = queuedInputs()
@@ -510,6 +529,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       keys.withPaused:
         frame:
           popupDepth += 1
+          refreshTitle()
           liveOutput.end()
           flushTodos()
           beginBlock()
@@ -518,6 +538,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             alerts.touch()
             blankLine()
             popupDepth -= 1
+            refreshTitle()
             if popupDepth == 0 then
               while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
     finally popupLock.unlock()
@@ -702,6 +723,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     screen.stopSpinner()
     keys.stop()
     alerts.close()
+    if !plain then screen.synchronized(screen.writeStyle(s"${Ansi.Esc}[23;0t"))
     screen.synchronized(screen.flush())
     statusLine.foreach(_.close())
     prompt.saveHistory()

@@ -528,6 +528,10 @@ foot, a desktop notification on a local machine (`osascript` on macOS, a toast o
 Windows, `notify-send` on Linux) and the terminal bell otherwise, for example over SSH.
 `system`, `terminal`, `bell` and `off` select one method.
 
+The terminal title shows `atc · <directory>`, with `●` while a turn runs and `?` while a
+question or permission waits, so a tab that needs you stands out; the previous title comes
+back on exit.
+
 Without a terminal (`-p` in a pipe) everything is printed plainly and nothing asks: an
 unconfigured permission request fails rather than waits for input, so use `--approve-all`
 only in a trusted setup. The content shapes, keys, sessions and compaction settings are in
