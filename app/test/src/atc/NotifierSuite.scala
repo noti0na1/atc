@@ -49,10 +49,10 @@ class NotifierSuite extends munit.FunSuite:
 
   test("turn alerts lead with the reply, or say why the turn stopped"):
     import atc.agent.TurnOutcome
-    import atc.ui.Tui
+    import atc.ui.{Alerts, Tui}
     def stats(outcome: TurnOutcome) = Tui.TurnStats(42, 3, 100, 1000, None, outcome)
-    assertEquals(Tui.turnAlert(stats(TurnOutcome.Finished), "All **tests** pass.", ""), "All tests pass.")
-    assertEquals(Tui.turnAlert(stats(TurnOutcome.Finished), "", ""), "Finished in 42 s")
-    assertEquals(Tui.turnAlert(stats(TurnOutcome.Failed), "partial", "HTTP 429"), "Failed: HTTP 429")
-    assertEquals(Tui.turnAlert(stats(TurnOutcome.Interrupted), "partial", ""), "Interrupted after 42 s")
-    assertEquals(Tui.turnAlert(stats(TurnOutcome.LimitReached), "Halfway", ""), "Limit reached: Halfway")
+    assertEquals(Alerts.turnText(stats(TurnOutcome.Finished), "All **tests** pass.", ""), "All tests pass.")
+    assertEquals(Alerts.turnText(stats(TurnOutcome.Finished), "", ""), "Finished in 42 s")
+    assertEquals(Alerts.turnText(stats(TurnOutcome.Failed), "partial", "HTTP 429"), "Failed: HTTP 429")
+    assertEquals(Alerts.turnText(stats(TurnOutcome.Interrupted), "partial", ""), "Interrupted after 42 s")
+    assertEquals(Alerts.turnText(stats(TurnOutcome.LimitReached), "Halfway", ""), "Limit reached: Halfway")

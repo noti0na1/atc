@@ -1,6 +1,6 @@
 package atc
 
-import atc.ui.{Ansi, Glyphs, Tui}
+import atc.ui.{Ansi, Glyphs, KeyReader, Menus, PromptReader, Screen, TailBuffer, Tui}
 import atc.perms.Decision
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -29,7 +29,7 @@ class TuiSuite extends munit.FunSuite:
       rows(11) = "footer must remain"
       var row = before.size
       var column = 0
-      var remaining = Tui.replaceRows(before, after, force)
+      var remaining = Screen.replaceRows(before, after, force)
       while remaining.nonEmpty do
         control.findPrefixMatchOf(remaining) match
           case Some(sequence) =>
@@ -53,29 +53,29 @@ class TuiSuite extends munit.FunSuite:
       assert(rows.slice(after.size, 11).forall(_.isEmpty))
       assertEquals(rows(11), "footer must remain")
       assertEquals(row, after.size)
-    assert(!Tui.replaceRows(List("header", "old"), List("header", "new")).contains("header"))
+    assert(!Screen.replaceRows(List("header", "old"), List("header", "new")).contains("header"))
 
   test("cancelling a text answer clears JLine's interrupt before returning to the menu"):
     try
-      val answer = Tui.readAnswer {
+      val answer = PromptReader.readAnswer {
         Thread.currentThread().interrupt()
         throw org.jline.reader.UserInterruptException("unfinished")
       }
       assertEquals(answer, None)
       assert(!Thread.currentThread().isInterrupted)
-      assertEquals(Tui.readAnswer(" revised instructions "), Some("revised instructions"))
-      assertEquals(Tui.readAnswer(throw org.jline.reader.EndOfFileException()), None)
+      assertEquals(PromptReader.readAnswer(" revised instructions "), Some("revised instructions"))
+      assertEquals(PromptReader.readAnswer(throw org.jline.reader.EndOfFileException()), None)
     finally Thread.interrupted()
 
   test("plain permission prompts require an exact approval and preserve qualified answers as instructions"):
     for answer <- List("y", "YES", " yes ") do
-      assertEquals(Tui.permissionReply(Some(answer)), Decision.AllowOnce)
+      assertEquals(Menus.permissionReply(Some(answer)), Decision.AllowOnce)
     for answer <- List("s", "SESSION", " session ") do
-      assertEquals(Tui.permissionReply(Some(answer)), Decision.AllowSession)
+      assertEquals(Menus.permissionReply(Some(answer)), Decision.AllowSession)
     for answer <- List(None, Some(""), Some("  "), Some("n"), Some("NO")) do
-      assertEquals(Tui.permissionReply(answer), Decision.Deny)
+      assertEquals(Menus.permissionReply(answer), Decision.Deny)
     for answer <- List("yes, except the fifth command", "skip deployment", "session only for tests", "只运行测试") do
-      assertEquals(Tui.permissionReply(Some(answer)), Decision.Revise(answer))
+      assertEquals(Menus.permissionReply(Some(answer)), Decision.Revise(answer))
 
   test("escape sequences stop at their final byte, timeout or EOF"):
     val expired = org.jline.utils.NonBlockingReader.READ_EXPIRED
@@ -88,12 +88,12 @@ class TuiSuite extends munit.FunSuite:
       )
     do
       val input = (sequence :+ 'x'.toInt).iterator
-      Tui.readEscapeSequence(() => input.next())
+      KeyReader.readEscapeSequence(() => input.next())
       assertEquals(input.next(), 'x'.toInt)
 
   test("malformed escape sequences cannot retain the terminal reader indefinitely"):
     var reads = 0
-    val sequence = Tui.readEscapeSequence(() =>
+    val sequence = KeyReader.readEscapeSequence(() =>
       reads += 1
       if reads == 1 then '['.toInt else ';'.toInt
     )
@@ -159,21 +159,21 @@ class TuiSuite extends munit.FunSuite:
   // ── row arithmetic behind the output fold ───────────────────────
 
   test("place: a short line is one row, whatever the gutter"):
-    assertEquals(Tui.place(0, "hello\n", 80, 4), (rows = 1, column = 0))
-    assertEquals(Tui.place(0, "\n", 80, 4), (rows = 1, column = 0))
+    assertEquals(Screen.place(0, "hello\n", 80, 4), (rows = 1, column = 0))
+    assertEquals(Screen.place(0, "\n", 80, 4), (rows = 1, column = 0))
 
   test("place: a long line costs the rows it wraps over"):
     // 4 columns of gutter + 4000 characters = 4004 / 80, rounded up
-    assertEquals(Tui.place(0, "x" * 4000 + "\n", 80, 4).rows, 51)
-    assertEquals(Tui.place(0, "y" * 300 + "\n", 80, 4).rows, 4)
+    assertEquals(Screen.place(0, "x" * 4000 + "\n", 80, 4).rows, 51)
+    assertEquals(Screen.place(0, "y" * 300 + "\n", 80, 4).rows, 4)
 
   test("place: text without a newline keeps the column, so later chunks add rows"):
-    val first = Tui.place(0, "chunk ", 80, 4)
+    val first = Screen.place(0, "chunk ", 80, 4)
     assertEquals(first, (rows = 1, column = 10))
     // continuing the same row adds nothing until it wraps
-    assertEquals(Tui.place(first.column, "more ", 80, 4), (rows = 0, column = 15))
-    assertEquals(Tui.place(70, "z" * 90, 80, 4), (rows = 1, column = 80))
-    assertEquals(Tui.place(76, "abcd", 80, 4), (rows = 0, column = 80)) // exactly fills the row
+    assertEquals(Screen.place(first.column, "more ", 80, 4), (rows = 0, column = 15))
+    assertEquals(Screen.place(70, "z" * 90, 80, 4), (rows = 1, column = 80))
+    assertEquals(Screen.place(76, "abcd", 80, 4), (rows = 0, column = 80)) // exactly fills the row
 
   test("count: short forms, without a pointless .0"):
     assertEquals(Tui.count(999), "999")
@@ -188,20 +188,20 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Tui.contextUsage(45_200, None), "context ~45.2k")
 
   test("uniqueIds keeps labels and disambiguates duplicates"):
-    assertEquals(Tui.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
-    assertEquals(Tui.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
-    assertEquals(Tui.uniqueIds(Nil), Nil)
+    assertEquals(Menus.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
+    assertEquals(Menus.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
+    assertEquals(Menus.uniqueIds(Nil), Nil)
 
   test("history is an owner-only regular file where POSIX permissions exist"):
     val dir = Files.createTempDirectory("atc-history").nn
     val history = dir.resolve("nested/history").nn
-    assertEquals(Tui.secureHistoryFile(history), history.toRealPath())
+    assertEquals(PromptReader.secureHistoryFile(history), history.toRealPath())
     assert(Files.isRegularFile(history))
     val view = Files.getFileAttributeView(history, classOf[java.nio.file.attribute.PosixFileAttributeView])
     if view != null then
       val permissive = java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--")
       Files.setPosixFilePermissions(history, permissive)
-      Tui.secureHistoryFile(history)
+      PromptReader.secureHistoryFile(history)
       val perms = Files.getPosixFilePermissions(history).nn
       assertEquals(perms, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
 
@@ -211,7 +211,7 @@ class TuiSuite extends munit.FunSuite:
     Files.writeString(target, "do not append here")
     val link = dir.resolve("history-link").nn
     assume(TestEnv.trySymbolicLink(link, target), "symbolic links are unavailable for this account")
-    val e = intercept[IllegalArgumentException](Tui.secureHistoryFile(link))
+    val e = intercept[IllegalArgumentException](PromptReader.secureHistoryFile(link))
     assert(e.getMessage.nn.contains("symbolic link"), e.getMessage)
     assertEquals(Files.readString(target), "do not append here")
 
@@ -238,13 +238,13 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Tui.duration(60.0), "1 min 0 s")
 
   test("place counts wide (CJK) characters as two columns"):
-    assertEquals(Tui.displayWidth("abc"), 3)
-    assertEquals(Tui.displayWidth("中文"), 4)
-    assertEquals(Tui.displayWidth("\u001b[36m$ git status\u001b[0m"), 12) // styles take no cells
-    assertEquals(Tui.place(0, "中" * 40 + "\n", 80, 4).rows, 2) // 4 + 80 columns: wraps
+    assertEquals(Screen.displayWidth("abc"), 3)
+    assertEquals(Screen.displayWidth("中文"), 4)
+    assertEquals(Screen.displayWidth("\u001b[36m$ git status\u001b[0m"), 12) // styles take no cells
+    assertEquals(Screen.place(0, "中" * 40 + "\n", 80, 4).rows, 2) // 4 + 80 columns: wraps
 
   test("TailBuffer: the tail is the last n lines; a trailing newline is not a line"):
-    val b = Tui.TailBuffer(1000)
+    val b = TailBuffer(1000)
     b.append("a\nb\nc")
     assertEquals(b.tail(2), List("b", "c")) // the unfinished last line counts
     assertEquals(b.lineCount, 3L)
@@ -255,7 +255,7 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(b.tail(10), List("a", "b", "cd", "e", "f"))
 
   test("TailBuffer: past the cap the front goes, the counts stay exact"):
-    val b = Tui.TailBuffer(10)
+    val b = TailBuffer(10)
     b.append("01234\n67890\n")
     assertEquals(b.text, "67890\n")
     assertEquals(b.lineCount, 2L) // the dropped line still counts
