@@ -200,7 +200,7 @@ class MarkdownStream(
     else Align.Left
 
   /** Terminal cell width after removing inline style markers. */
-  private def visibleLength(cell: String): Int = Tui.displayWidth(cell.replace("**", "").replace("`", ""))
+  private def visibleLength(cell: String): Int = Screen.displayWidth(cell.replace("**", "").replace("`", ""))
 
   /** Draw the collected table: bold header, a rule with junctions, cells
     * padded to the column width and aligned as the delimiter row says. */

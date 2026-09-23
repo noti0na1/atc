@@ -648,6 +648,14 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(Config.combine(List(global, project)).settings.autoCompactThreshold, 0.6)
     assertEquals(Config.combine(List(global, project, explicit)).settings.autoCompactThreshold, 0.0)
 
+  test("notifications accepts the known methods only"):
+    assertEquals(upickle.default.read[Config]("{}").notifications, "auto")
+    List("auto", "system", "terminal", "bell", "off", "Bell").foreach { value =>
+      assertEquals(Config.validate(Config(notifications = value)).notifications, value)
+    }
+    val error = intercept[IllegalArgumentException](Config.validate(Config(notifications = "popup")))
+    assert(error.getMessage.nn.contains("notifications"), error.getMessage)
+
   test("compactKeepRatio validates fractions and follows layer precedence"):
     assertEquals(upickle.default.read[Config]("{}").compactKeepRatio, 0.2)
     List(0.0, 0.3, 1.0).foreach { ratio =>

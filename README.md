@@ -519,6 +519,19 @@ you can correct an assumption it did not list. Interactive sessions are saved wh
 leave, and the next start in the same directory offers to resume. Long conversations are
 compacted automatically before they outgrow the model's context window.
 
+When a turn ends or the agent waits for a permission or an answer, ATC sends a notification
+unless you start typing within ten seconds. If the terminal reports focus and is not focused,
+the notification comes at once. It shows the start of the agent's reply, the permission it
+needs or its question. `"notifications"` in the config chooses how: `auto`
+(the default) uses the terminal's own notifications in kitty, iTerm2, WezTerm, Ghostty and
+foot, a desktop notification on a local machine (`osascript` on macOS, a toast on
+Windows, `notify-send` on Linux) and the terminal bell otherwise, for example over SSH.
+`system`, `terminal`, `bell` and `off` select one method.
+
+The terminal title shows `atc · <directory>`, with `●` while a turn runs and `?` while a
+question or permission waits, so a tab that needs you stands out; the previous title comes
+back on exit.
+
 Without a terminal (`-p` in a pipe) everything is printed plainly and nothing asks: an
 unconfigured permission request fails rather than waits for input, so use `--approve-all`
 only in a trusted setup. The content shapes, keys, sessions and compaction settings are in

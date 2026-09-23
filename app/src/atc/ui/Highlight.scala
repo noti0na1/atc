@@ -29,7 +29,7 @@ object Highlight:
     var start = 0
     var i = 0
     while i < ansi.length do
-      val styleEnd = Tui.sgrEnd(ansi, i)
+      val styleEnd = Screen.sgrEnd(ansi, i)
       if styleEnd > 0 then
         active = if ansi.startsWith(Reset, i) && styleEnd == i + Reset.length then "" else ansi.substring(i, styleEnd)
         i = styleEnd

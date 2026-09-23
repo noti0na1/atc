@@ -870,7 +870,12 @@ Predictions are reduced to visible single-line text and reported separately in u
 
 ## The terminal
 
-`Tui` owns JLine input, streaming response blocks, tool panels and permission menus.
+`Tui` implements `AgentUI` and owns the turn lifecycle, status line, prose, tool blocks,
+pop-ups and TODO panel. It composes parts that live in their own files: `Screen` (writes
+that track line boundaries, styles, width, live regions and the spinner; its monitor is the
+TUI's lock), `ThinkingView` and `LiveOutput` (the reasoning window and folded tool output),
+`KeyReader` (the key thread during a turn), `PromptReader` (the JLine line reader and its
+bindings), `Menus` (jline-prompt menus) and `Alerts` (notifications and focus tracking).
 `Ansi` removes terminal controls from external text before display. Keep model-visible
 capture text unchanged; sanitize only at display boundaries. `TextSink` incrementally
 handles UTF-8 and BOM-marked UTF-16 process output.
@@ -907,6 +912,31 @@ replacement, shrinkage and clearing while preserving a footer outside the owned 
 Background process events between turns use `LineReader.printAbove`
 so notifications do not overwrite the user's input.
 
+`Notifier` sends the `notifications` alert when a turn ends, a permission request or
+question opens, or the tool budget runs out. `Alerts.alert` schedules it ten seconds ahead and
+drops it on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
+changed buffer) and the end of a pop-up count as input. The terminal's focus reports
+(`ESC[?1004h`) come through JLine's focus widgets at the prompt and through the key reader
+during a turn. Reporting is on only while one of those raw-mode readers runs (`callback-init`
+to `callback-finish` for the line reader, `KeyReader.start` to `KeyReader.stop`): between reads the
+terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends a pending alert at once, and an alert raised while
+unfocused is not delayed. jline-prompt menus do not parse focus reports, so reporting is
+off while a menu reads. There are no alerts for `-p` runs or dumb terminals.
+The alert title is `atc · <directory>`. A turn's alert shows the start of its last prose
+block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
+the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
+its details, and question alerts show the question.
+`Tui.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
+the status refreshes, writing only changes. The previous title is pushed on xterm's title
+stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
+stack keep ATC's title until the shell sets its own.
+Terminal alerts are OSC 9, 99 (kitty) or 777 sequences, chosen from `TERM` and
+`TERM_PROGRAM` and wrapped for tmux passthrough; they are written as style text so they
+leave the line tracking alone. System alerts start `osascript`, a Base64-encoded PowerShell
+toast script or `notify-send` on a daemon thread, passing the text as arguments or quoted
+script data, and ring the bell if the command cannot start. Alert text is sanitized, put
+on one line and capped at 200 characters.
+
 `TextLayout` wraps complete lines by terminal cell width, preserving ANSI styles and whole
 Unicode code points. It scans long lines once, with word boundaries preferred over hard
 breaks. Help and banner fields retain aligned continuation lines; when their value column
@@ -929,7 +959,7 @@ added to the history, and `/new` clears it. These records are for inspection and
 part of saved conversations.
 
 Permission menus include **Tell the agent what to change**, followed by free-text input.
-Empty or cancelled feedback returns to the menu. `Tui.readAnswer` consumes JLine's
+Empty or cancelled feedback returns to the menu. `PromptReader.readAnswer` consumes JLine's
 preserved input-cancellation interrupt so the next menu can read normally.
 Plain prompts accept exact `y`/`yes` or
 `s`/`session` approvals, exact `n`/`no` denials, and treat other non-empty input as

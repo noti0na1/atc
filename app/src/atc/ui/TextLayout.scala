@@ -6,7 +6,7 @@ import org.jline.utils.{AttributedString, WCWidth}
 private[atc] object TextLayout:
   /** Cells the text occupies from column 0: tabs advance to the next stop and controls
     * count nothing (`columnLength` would make a tab -1 and let `wrap` skip such a line). */
-  def width(text: String): Int = Tui.displayWidth(AttributedString.fromAnsi(text).nn.toString)
+  def width(text: String): Int = Screen.displayWidth(AttributedString.fromAnsi(text).nn.toString)
 
   def wrap(text: String, columns: Int): List[String] =
     val room = columns.max(2)
