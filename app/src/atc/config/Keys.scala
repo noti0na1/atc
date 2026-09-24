@@ -28,6 +28,21 @@ final case class KeyBindings(files: List[(Path, Map[String, String])]):
 object KeyBindings:
   val empty: KeyBindings = KeyBindings(Nil)
 
+  /** Bind `name` to `value` in the key file at `path`: an existing binding of
+    * `name` is replaced and every other line is kept. A new file is readable
+    * by its owner only. */
+  def bind(path: Path, name: String, value: String): Unit =
+    require(!value.exists(c => c == '\n' || c == '\r'), "a key must be a single line")
+    val line = s"$name=${value.replace("\\", "\\\\")}"
+    if !Files.exists(path) then
+      Option(path.getParent).foreach(Files.createDirectories(_))
+      Config.writeOwnerOnly(path, s"# API keys for the providers in config.json, one NAME=value per line.\n$line\n")
+    else
+      val lines = TextFiles.splitLines(TextFiles.stripBom(Files.readString(path).nn)).lines
+      val binds = s"^\\s*${java.util.regex.Pattern.quote(name)}\\s*[=:\\s]".r
+      val kept = lines.filterNot(l => binds.findFirstIn(l + " ").isDefined)
+      Files.writeString(path, (kept :+ line).mkString("", "\n", "\n"))
+
   /** Read existing `keys.properties` files from most to least specific. Warn if
     * a file containing API keys is readable by other users. */
   def load(paths: List[Path]): KeyBindings =

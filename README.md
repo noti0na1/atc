@@ -130,19 +130,18 @@ assets of a newer release.
 </details>
 
 **1. Start it.** Change to the project you want to work on (`cd ~/my-project`) and run
-`atc`. If the first run finds no `~/.atc/config.json`, it offers to create a starter file
-with the providers and machine-wide permissions, plus `~/.atc/keys.properties` for your API
-keys, one `NAME=value` per line, then exits so you can fill them in. On Windows, `~/.atc` is
-`%USERPROFILE%\.atc`. You can also export the variables in your shell, or use a local model
-that needs no key.
+`atc`. The first start asks you to choose a provider, paste its API key and choose one of
+its models; the key is saved in `~/.atc/keys.properties`, readable only by you. To set up
+providers by hand instead, choose *Configure providers myself*: ATC writes
+`~/.atc/config.json` and exits. On Windows, `~/.atc` is `%USERPROFILE%\.atc`.
 
-**2. Start it again.** If no configuration grants access to the current directory and the
-directory has no `.atc/config.json` of its own, ATC offers to create a starter one there and
-applies it immediately. That file
-is what opens the project to the agent: its own tree, the read-only git commands and a set
-of documentation hosts. Review it to choose which **files, commands and hosts** the agent
-may use without asking; see [Configuration](#configuration). `/models` lists the models your
-providers offer, and `/model` picks one.
+**2. Open the project.** If no configuration grants access to the current directory and
+the directory has no `.atc/config.json` of its own, ATC offers to create a starter one there
+and applies it immediately. That file is what opens the project to the agent: its own tree,
+the read-only git commands and a set of documentation hosts. Review it to choose which
+**files, commands and hosts** the agent may use without asking; see
+[Configuration](#configuration). `/models` lists the models your providers offer, and
+`/model` picks one.
 
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
 Scala in the sandbox, and asks before touching anything the config does not grant. `/help`

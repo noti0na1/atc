@@ -78,6 +78,24 @@ case class ProviderConfig(
   models: Map[String, ModelConfig] = Map.empty,
 ) derives ReadWriter
 
+/** A provider the first run can set up, from `atc/providers.json`; the starting
+  * global config lists all of them. */
+case class ProviderPreset(
+  name: String,
+  label: String,
+  api: String,
+  url: Option[String] = None,
+  key: Option[String] = None,
+  /** Where to create a key, shown when the first run asks for one. */
+  keyUrl: Option[String] = None,
+) derives ReadWriter:
+  def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key)
+  /** The variable a `${VAR}` key is read from. */
+  def keyVariable: Option[String] = key.flatMap(Config.envRefName)
+
+object ProviderPreset:
+  lazy val all: List[ProviderPreset] = read[List[ProviderPreset]](Config.resource("/atc/providers.json"))
+
 /** One file-permission rule. See `atc.perms.Policy` for the semantics. */
 case class FileRuleConfig(
   path: String,
@@ -177,12 +195,13 @@ object Config:
     * missing, ensuring that narrowing layers have a base. Key bindings are
     * readable only by the owner because they may contain API keys. Returns the
     * paths created. */
-  def ensureGlobal(path: Path = globalPath): List[Path] =
+  def ensureGlobal(path: Path = globalPath, providers: List[ProviderPreset] = ProviderPreset.all): List[Path] =
     val keys = path.getParent.nn.resolve(KeysFile).nn
-    List(
-      writeIfMissing(path, globalTemplate, ownerOnly = false),
-      writeIfMissing(keys, keysTemplate, ownerOnly = true),
-    ).flatten
+    List(writeGlobalConfig(path, providers), writeIfMissing(keys, keysTemplate, ownerOnly = true)).flatten
+
+  /** Write the starting global config with `providers` unless the file exists. */
+  def writeGlobalConfig(path: Path, providers: List[ProviderPreset]): Option[Path] =
+    writeIfMissing(path, globalTemplateWith(providers), ownerOnly = false)
 
   private def writeIfMissing(target: Path, content: String, ownerOnly: Boolean): Option[Path] =
     if Files.exists(target) then None
@@ -196,7 +215,7 @@ object Config:
 
   /** Create `target` with owner-only access on POSIX file systems, falling back
     * to a regular (new-file) write when POSIX permissions are unavailable. */
-  private def writeOwnerOnly(target: Path, content: String): Unit =
+  private[config] def writeOwnerOnly(target: Path, content: String): Unit =
     import java.nio.file.attribute.PosixFilePermissions
     val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
     try Files.createFile(target, ownerOnly)
@@ -541,6 +560,11 @@ object Config:
 
   private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
 
+  /** The variable a `${VAR}` value names. */
+  def envRefName(value: String): Option[String] = value match
+    case EnvRef(name) => Some(name.nn)
+    case _ => None
+
   /** A `${VAR}` reference resolved through `bindings`; anything else is the
     * literal value. `None` when nothing binds the variable or the literal is
     * empty, the same as an empty value in `keys.properties`. */
@@ -620,8 +644,14 @@ object Config:
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
 
-  /** The starter global config written by `--init-global`. */
-  def globalTemplate: String = resource("/atc/config-template.json")
+  /** The starter global config written by `--init-global`, with every preset provider. */
+  def globalTemplate: String = globalTemplateWith(ProviderPreset.all)
+
+  /** The starter global config with `providers` as its providers. */
+  def globalTemplateWith(providers: List[ProviderPreset]): String =
+    val template = resource("/atc/config-template.json")
+    val rendered = ujson.write(ujson.Obj.from(providers.map(p => p.name -> writeJs(p.config))), indent = 2)
+    template.replace("\"providers\": {}", "\"providers\": " + rendered.linesIterator.mkString("\n  "))
 
   /** The starter key bindings written beside it. */
   def keysTemplate: String = resource("/atc/keys-template.properties")
@@ -629,6 +659,6 @@ object Config:
   /** The starter project config written by `--init`. */
   def projectTemplate: String = resource("/atc/project-template.json")
 
-  private def resource(path: String): String = atc.Resources.text(path).getOrElse(
+  private[config] def resource(path: String): String = atc.Resources.text(path).getOrElse(
     throw IllegalStateException(s"config template resource missing ($path)")
   )

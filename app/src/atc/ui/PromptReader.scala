@@ -175,6 +175,14 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
   /** Read a typed answer; `None` when it is empty or cancelled. */
   def readAnswer(prompt: String): Option[String] = PromptReader.readAnswer(read(prompt, ""))
 
+  /** Read a secret: echoed as `*` and kept out of the history. */
+  def readSecret(prompt: String): Option[String] =
+    reader.setVariable(LineReader.DISABLE_HISTORY, true)
+    try PromptReader.readAnswer(reader.readLine(prompt, Character.valueOf('*')))
+    finally
+      reader.setVariable(LineReader.DISABLE_HISTORY, false)
+      alerts.reportFocus(false)
+
   /** Redraw the prompt (new ghost text), under the reader's lock and only while it is reading. */
   def redisplay(): Unit =
     try reader.callWidget(LineReader.REDISPLAY)

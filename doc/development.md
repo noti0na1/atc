@@ -651,6 +651,17 @@ skipped. Anthropic's list supplies context windows and effort levels, OpenRouter
 context window. Without `-m` or `model`, a session starts with the model last chosen with
 `/model`.
 
+**First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:
+the user chooses one of the `atc/providers.json` presets, gives its key unless one is
+already bound (read by `Tui.askSecret`, masked and kept out of the prompt history), and
+chooses a model from the provider's list, which also checks the key. `App.setup` then
+writes a global config naming only that provider, binds the key in
+`~/.atc/keys.properties` (`KeyBindings.bind`, owner-only, other lines kept), stores the
+list and records the model as the last one, so the session starts without another fetch.
+*Configure providers myself* writes the starting config with every preset and exits;
+*Not now* or Esc runs on the built-in starting config. `-p` runs and terminals without
+menus never ask.
+
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
 to `max` for OpenAI). `/effort [level]` switches the agent model's effort for the session,

@@ -600,6 +600,16 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
     yes
 
+  /** Ask for a secret such as an API key: the typed text is shown as `*` and
+    * never enters the prompt history. `None` when empty or cancelled. */
+  def askSecret(question: String): Option[String] = popupBlock:
+    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
+    keys.withPaused:
+      withPromptHint(s"Enter send ${g.dot} Ctrl-C cancel"):
+        screen.synchronized(screen.flush())
+        try prompt.readSecret(styled("key> ", Cyan))
+        finally screen.tail = "\n"
+
   /** Ask the user a question on behalf of the agent. Options render as a
     * menu (or checkboxes when `multiple`), always with a custom-answer
     * entry; no options → a free-text line. `None` on Ctrl-C/Ctrl-D. */

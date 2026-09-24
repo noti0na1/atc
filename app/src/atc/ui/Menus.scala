@@ -22,6 +22,8 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
     val byId = Menus.uniqueIds(labels).zip(labels)
     run { b =>
       val lp = b.createListPrompt().name("a").message(message)
+      // A long list (a provider's models) is paged, and typing filters it.
+      if labels.size > Menus.FilterFrom then lp.filterable(true)
       byId.foreach((id, l) => lp.add(id, l))
       lp.addPrompt()
     } {
@@ -61,6 +63,9 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
       finally screen.tail = "\n\n"
 
 private[atc] object Menus:
+  /** Lists longer than this can be filtered by typing. */
+  val FilterFrom = 12
+
   val AllowOnce = "Allow once"
   val AllowSession = "Allow for this session"
   val DenyLabel = "Deny this request"

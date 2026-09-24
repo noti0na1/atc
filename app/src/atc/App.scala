@@ -4,7 +4,7 @@ import atc.SlashCommand as Cmd
 import atc.agent.{
   Agent, AgentEnvironment, InputPredictor, Prompts, ScalaToolRunner, SessionSnapshot, SessionStore, TurnOutcome
 }
-import atc.config.{Config, Configuration, ModelCatalog, ModelListStore, ModelSpec, Origin}
+import atc.config.{Config, Configuration, KeyBindings, ModelCatalog, ModelListStore, ModelSpec, Origin, ProviderPreset}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.{ChatModel, TokenUsage}
@@ -771,16 +771,41 @@ object App:
   def setup(args: Cli.Args, tui: Tui): Configuration =
     val interactive = args.prompt.isEmpty
     val global = Config.globalPath
+    val globalKeys = global.getParent.nn.resolve(Config.KeysFile).nn
     val globalMissing = !Files.isRegularFile(global)
-    val writeGlobal =
-      globalMissing && interactive && {
-        tui.println(s"No configuration at ${pretty(global)}.")
-        tui.confirm("Write the starting config and key bindings there? (No: use the built-in ones for now)")
-      }
-    if writeGlobal then tui.println(s"Wrote ${Config.ensureGlobal().map(pretty).mkString(" and ")}.")
-    else if globalMissing then
-      tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
-    val bundledGlobal = globalMissing && !writeGlobal
+    // A `-c` file may define the providers itself, so only a plain start asks.
+    val firstRun =
+      if !globalMissing || !interactive || args.config.nonEmpty then FirstRun.Outcome.NotNow
+      else
+        tui.println(s"Welcome to atc. There is no configuration at ${pretty(global)} yet.")
+        if tui.menusAvailable then
+          val keys = KeyBindings.load(Config.projectRoot(args.cwd).map(Config.keysPath).toList :+ globalKeys)
+          FirstRun.run(firstRunUi(tui), ProviderPreset.all, keys, ChatModel.listModels)
+        else if tui.confirm("Write the starting config and key bindings there?") then
+          FirstRun.Outcome.ConfigureYourself
+        else FirstRun.Outcome.NotNow
+    firstRun match
+      case FirstRun.Outcome.ConfigureYourself =>
+        val written = Config.ensureGlobal()
+        if written.nonEmpty then tui.println(s"Wrote ${written.map(pretty).mkString(" and ")}.")
+        tui.println(
+          s"Add your providers and models to ${pretty(global)} and their API keys to ${pretty(globalKeys)} " +
+            "(or export them in the environment), then start atc again."
+        )
+        throw Exit(0)
+      case FirstRun.Outcome.Ready(provider, key, endpoint, models, model) =>
+        for name <- provider.keyVariable; value <- key do KeyBindings.bind(globalKeys, name, value)
+        Config.writeGlobalConfig(global, List(provider))
+        ModelListStore.global.save(endpoint, models)
+        rememberLastModel(model.ref)
+        tui.success(
+          s"Wrote ${pretty(global)}${if key.isDefined then s" and ${pretty(globalKeys)}" else ""}; " +
+            s"starting with ${model.ref}. /model switches models."
+        )
+      case FirstRun.Outcome.NotNow =>
+        if globalMissing then
+          tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
+    val bundledGlobal = globalMissing && firstRun == FirstRun.Outcome.NotNow
 
     def cwdReadable(c: Configuration): Boolean =
       Policy(fileRules(c, args.cwd), Nil, Nil, _ => Decision.Deny)
@@ -806,15 +831,13 @@ object App:
     // grants it, whatever an ancestor's project config (or the home `.atc`,
     // which the walk-up also finds) says: the new file becomes the nearest
     // project config and takes over from there.
-    val configuration = offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
+    offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
 
-    if writeGlobal then
-      tui.println(
-        s"Fill in the API keys in ${pretty(global.getParent.nn.resolve(Config.KeysFile).nn)} " +
-          "(or export them in the environment), then start atc again."
-      )
-      throw Exit(0)
-    configuration
+  private def firstRunUi(tui: Tui): FirstRun.Ui = new FirstRun.Ui:
+    def choose(title: String, options: List[String]): Option[String] = tui.choose(title, options)
+    def askSecret(question: String): Option[String] = tui.askSecret(question)
+    def info(text: String): Unit = tui.info(text)
+    def error(text: String): Unit = tui.error(text)
 
   /** Bare lines that quit like `/quit`: what shells and editors use. */
   val QuitWords: Set[String] = Set(":q", "exit", "quit")
