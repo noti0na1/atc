@@ -48,6 +48,8 @@ case class ModelConfig(
   /** Optional human-facing name used in the banner and model list. It never
     * changes the alias used to select the model or the id sent to the provider. */
   displayName: Option[String] = None,
+  /** `false` hides the model from `/models` and `/model` and keeps its settings. */
+  enabled: Boolean = true,
 ) derives ReadWriter
 
 /** One LLM endpoint and the models reachable through it. `api` is the wire
@@ -76,6 +78,8 @@ case class ProviderConfig(
     * (`GET /models`) are fetched the first time they are needed, and each is
     * named `provider/model-id`. */
   models: Map[String, ModelConfig] = Map.empty,
+  /** `false` turns the provider off: none of its models is offered or fetched. */
+  enabled: Boolean = true,
 ) derives ReadWriter
 
 /** A provider the first run can set up, from `atc/providers.json`; the starting
@@ -599,10 +603,14 @@ object Config:
     * line, and re-serialising it would lose that). See [[withTopLevel]]; the
     * positions come from the [[ObjectText]] scanner. */
   def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
+    editFile(path)(withTopLevel(_, key, value, after, path.toString))
+
+  /** Replace a config file's text with `update(text)`, keeping a symlinked file a symlink. */
+  def editFile(path: Path)(update: String => String): Unit =
     val text =
       try Files.readString(path).nn
       catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
-    val updated = withTopLevel(text, key, value, after, path.toString)
+    val updated = update(text)
     // Preserve intentional shared configs: resolve an existing symlink and
     // atomically replace its target, rather than replacing the link itself.
     val target = path.toRealPath().nn
@@ -644,6 +652,49 @@ object Config:
             text.substring(0, obj.open + 1) + separator + entry + newline + text.substring(obj.close)
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
+
+  /** `text` (a JSON object) with the member at `path` set to `value`, or removed
+    * when `value` is `None`. Objects missing on the way are created, and a new
+    * member goes last in its object, written on one line. Everything else keeps
+    * its text, like [[withTopLevel]]. */
+  def withMember(text: String, path: List[String], value: Option[ujson.Value], where: String = "config"): String =
+    readObj(text, where)
+    member(text, path, value)
+
+  private def member(text: String, path: List[String], value: Option[ujson.Value]): String =
+    val obj = ObjectText.scan(text)
+    val key = path.head
+    def replace(m: ObjectText.Member, by: String) = text.substring(0, m.valueStart) + by + text.substring(m.valueEnd)
+    def nested(v: ujson.Value) = path.tail.foldRight(v)((k, inner) => ujson.Obj(k -> inner))
+    obj.members.findLast(_.key == key) match
+      case Some(m) if path.tail.isEmpty => value.fold(removeMember(obj, m))(v => replace(m, oneLine(v)))
+      case Some(m) =>
+        val inner = text.substring(m.valueStart, m.valueEnd)
+        if inner.startsWith("{") then replace(m, member(inner, path.tail, value))
+        else value.fold(text)(v => replace(m, oneLine(nested(v))))
+      case None =>
+        value.fold(text) { v =>
+          val entry = s"${ujson.write(ujson.Str(key))}: ${oneLine(nested(v))}"
+          obj.members.lastOption match
+            case Some(last) => text.substring(0, last.valueEnd) + s",${obj.separator}$entry" +
+                text.substring(last.valueEnd)
+            case None => text.substring(0, obj.open + 1) + s" $entry " + text.substring(obj.close)
+        }
+
+  /** Remove `m` with the comma that separates it from a neighbour. */
+  private def removeMember(obj: ObjectText, m: ObjectText.Member): String =
+    val text = obj.text
+    val i = obj.members.indexOf(m)
+    if i + 1 < obj.members.size then text.substring(0, m.keyStart) + text.substring(obj.members(i + 1).keyStart)
+    else if i > 0 then text.substring(0, obj.members(i - 1).valueEnd) + text.substring(m.valueEnd)
+    else text.substring(0, obj.open + 1) + text.substring(obj.close)
+
+  /** A value on one line, spaced like a hand-written config. */
+  private def oneLine(v: ujson.Value): String = v match
+    case ujson.Obj(o) if o.isEmpty => "{}"
+    case ujson.Obj(o) => o.map((k, x) => s"${ujson.write(ujson.Str(k))}: ${oneLine(x)}").mkString("{ ", ", ", " }")
+    case ujson.Arr(a) => a.map(oneLine).mkString("[", ", ", "]")
+    case other => ujson.write(other)
 
   /** The starter global config written by `--init-global`, with every preset provider. */
   def globalTemplate: String = globalTemplateWith(ProviderPreset.all)

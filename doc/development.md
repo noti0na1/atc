@@ -662,6 +662,19 @@ list and records the model as the last one, so the session starts without anothe
 *Not now* or Esc runs on the built-in starting config. `-p` runs and terminals without
 menus never ask.
 
+**Turning providers and models on and off.** `"enabled": false` on a provider or a model
+hides it; a disabled provider is never listed. `/providers` edits these switches and the
+model entries in place (`Config.withMember` keeps the file's formatting). Choosing models
+for a provider that lists its own writes the ticked ones as entries with the context
+window, efforts and display name the list reported, which makes them its shortlist;
+*Offer every model it lists* drops the entries again. A listed id with `/` gets an alias
+without one (`ProviderEdits.aliasFor`). Each edit goes to the last layer holding the
+longest part of its path (`ProviderEdits.owner`), because layers merge a model entry as a
+whole; a new provider goes to the global config. The configuration is then loaded again
+(an invalid result restores the files) and the catalog rebuilt; a model in use that the
+change renamed moves to its new name. A provider or model in use, by the session or as
+`model`/`classifiedModel`, cannot be turned off.
+
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
 to `max` for OpenAI). `/effort [level]` switches the agent model's effort for the session,

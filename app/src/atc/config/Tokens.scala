@@ -12,6 +12,10 @@ object Tokens:
   inline def apply(n: Int): Tokens = n
   extension (t: Tokens) inline def toInt: Int = t
 
+  /** The short form a config would use: `1m`, `200k`, else the number. */
+  def format(t: Tokens): String =
+    if t % 1000000 == 0 then s"${t / 1000000}m" else if t % 1000 == 0 then s"${t / 1000}k" else t.toString
+
   private val Form = raw"(?i)\s*(\d+(?:\.\d+)?)\s*([km]?)\s*".r
 
   /** Parse `text`; throws `IllegalArgumentException` for anything else. */

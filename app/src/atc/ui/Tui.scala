@@ -511,8 +511,15 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   private def menu(message: String, labels: List[String]): Option[String] =
     menuIndex(message, labels).flatMap(labels.lift)
 
-  private def checkboxIndices(message: String, labels: List[String]): Option[List[Int]] =
-    keys.withPaused(withPromptHint(menus.CheckboxHint)(menus.checkbox(message, labels)))
+  private def checkboxIndices(message: String, labels: List[String], checked: Set[Int] = Set.empty)
+    : Option[List[Int]] =
+    keys.withPaused(withPromptHint(menus.CheckboxHint)(menus.checkbox(message, labels, checked)))
+
+  /** A multi-choice pop-up with the `checked` options ticked at first: the
+    * indices ticked when confirmed, `None` when cancelled or without menus. */
+  def chooseMany(title: String, options: List[String], checked: Set[Int]): Option[Set[Int]] =
+    if plain || options.isEmpty then None
+    else popupBlock(checkboxIndices(Ansi.sanitize(title), options.map(Ansi.sanitize), checked)).map(_.toSet)
 
   /** Whether pop-up menus can be drawn (a real terminal). */
   def menusAvailable: Boolean = !plain

@@ -184,7 +184,7 @@ object ModelCatalog:
     discover: Option[ModelSpec => List[ModelSpec]] = None,
     store: Option[ModelListStore] = None,
   ): ModelCatalog =
-    val providers = config.providers.toList.sortBy(_._1).map { (name, p) =>
+    val providers = config.providers.toList.sortBy(_._1).filter(_._2.enabled).map { (name, p) =>
       val key = Config.resolveApiKey(p, keys)
       val defaults = ModelConfig(webSearch = config.webSearch)
       val endpoint =
@@ -192,7 +192,7 @@ object ModelCatalog:
       (p, endpoint)
     }
     val configured = providers.flatMap { (p, endpoint) =>
-      p.models.toList.sortBy(_._1).map((alias, m) =>
+      p.models.toList.sortBy(_._1).filter(_._2.enabled).map((alias, m) =>
         endpoint.copy(
           alias = alias,
           modelId = m.name.getOrElse(alias),

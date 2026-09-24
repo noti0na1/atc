@@ -12,6 +12,7 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
         "/classified",
       )
   case Models extends SlashCommand("/models", "list configured models")
+  case Providers extends SlashCommand("/providers", "turn providers and models on or off, or add a provider")
   case Effort extends SlashCommand("/effort [level]", "choose the agent model's reasoning effort")
   case Mode
       extends SlashCommand(

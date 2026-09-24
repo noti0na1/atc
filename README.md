@@ -410,8 +410,9 @@ The exact merge rules are in
 ```
 
 **Models.** A provider is one endpoint (`api`, an optional `url`, a key) with its
-`models`; leave `models` out and ATC lists the provider's own. `/model` switches the model
-and `/effort` its reasoning effort; `webSearch` turns on the provider's web search where it
+`models`; leave `models` out and ATC lists the provider's own. `/providers` turns providers
+and their models on or off, or adds a provider. `/model` switches the model and `/effort`
+its reasoning effort; `webSearch` turns on the provider's web search where it
 has one. **Keys** never go in a config: `"key": "${DEEPSEEK_API_KEY}"` names a variable set
 in `.atc/keys.properties` or in the environment. Set `classifiedModel` only for a model that
 runs in an isolated environment with no outward connection. Every setting is described in

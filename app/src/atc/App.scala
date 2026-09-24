@@ -4,7 +4,10 @@ import atc.SlashCommand as Cmd
 import atc.agent.{
   Agent, AgentEnvironment, InputPredictor, Prompts, ScalaToolRunner, SessionSnapshot, SessionStore, TurnOutcome
 }
-import atc.config.{Config, Configuration, KeyBindings, ModelCatalog, ModelListStore, ModelSpec, Origin, ProviderPreset}
+import atc.config.{
+  Config, Configuration, KeyBindings, ModelCatalog, ModelListStore, ModelSpec, Origin, ProviderConfig, ProviderEdits,
+  ProviderPreset
+}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.{ChatModel, TokenUsage}
@@ -33,7 +36,9 @@ final class App(args: Cli.Args, val tui: Tui):
 
   /** Every model of every configured provider, resolved with its key; a
     * provider that configures none is asked for its list after the start. */
-  val catalog: ModelCatalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
+  var catalog: ModelCatalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
+  /** The configuration as `/providers` last left it; the policy keeps the one loaded at start. */
+  private var current: Configuration = configuration
   private val modelCache = mutable.Map[String, ChatModel]()
 
   /** The client for one configured model, created once per session. */
@@ -412,6 +417,7 @@ final class App(args: Cli.Args, val tui: Tui):
     case Cmd.ClassifiedModel => switchClassifiedModel(arg)
     case Cmd.Models => showModels()
     case Cmd.Effort => switchEffort(arg)
+    case Cmd.Providers => manageProviders()
     case Cmd.Mode => switchMode(arg)
     case Cmd.Perms => permissions(arg)
     case Cmd.Config => showConfig()
@@ -575,7 +581,7 @@ final class App(args: Cli.Args, val tui: Tui):
     if detail == label then label + role else s"${label.padTo(labelWidth, ' ')}  $detail$role"
 
   /** The name column's width: the configured models' names, as a listed name can be very long. */
-  private lazy val labelWidth: Int = catalog.configured.map(catalog.label(_).length).maxOption.getOrElse(0).max(24)
+  private def labelWidth: Int = catalog.configured.map(catalog.label(_).length).maxOption.getOrElse(0).max(24)
 
   private def showModels(): Unit =
     catalog.models.foreach(m => tui.println("  " + modelRow(m)))
@@ -622,6 +628,163 @@ final class App(args: Cli.Args, val tui: Tui):
           model.effort = Option.when(e != App.DefaultEffort)(e)
           updateStatusContext()
           tui.success(s"effort -> $e")
+
+  // ── providers ─────────────────────────────────────────────────────
+
+  /** `/providers`: the provider list, back to it after each change until the
+    * user leaves it. A provider or model in use cannot be turned off, so the
+    * session and the config never name one that is gone. */
+  private def manageProviders(): Unit =
+    var open = true
+    while open do
+      val settings = current.settings
+      val names = settings.providers.keys.toList.sorted
+      val width = names.map(_.length).maxOption.getOrElse(0)
+      val rows = names.map { name =>
+        val p = settings.providers(name)
+        val models =
+          if p.models.isEmpty then "offers every model it lists"
+          else s"${p.models.count(_._2.enabled)} of ${p.models.size} models on"
+        s"${name.padTo(width, ' ')}  ${if p.enabled then "on " else "off"}  $models"
+      }
+      val addable = ProviderPreset.all.filterNot(p => settings.providers.contains(p.name))
+      val all = rows ++ Option.when(addable.nonEmpty)(App.AddProvider)
+      tui.choose("Providers (Esc when done)", all) match
+        case None =>
+          if !tui.menusAvailable then all.foreach(r => tui.println("  " + r))
+          open = false
+        case Some(App.AddProvider) => addProvider(addable)
+        case Some(row) => providerActions(names(rows.indexOf(row)))
+
+  /** The models the session or the config uses, with the role each plays. */
+  private def modelsInUse: List[(ModelSpec, String)] =
+    def spec(ref: String) = scala.util.Try(catalog.find(ref)).toOption
+    spec(agent.model.ref).map(_ -> "the agent model").toList ++
+      agent.classifiedModel.flatMap(m => spec(m.ref)).map(_ -> "the classified model") ++
+      current.settings.model.flatMap(spec).map(_ -> "the config's model") ++
+      current.settings.classifiedModel.flatMap(spec).map(_ -> "the config's classified model")
+
+  private def providerActions(name: String): Unit =
+    val p = current.settings.providers(name)
+    val toggle = if p.enabled then "Turn off" else "Turn on"
+    val showAll = "Offer every model it lists (drop its model entries)"
+    tui.choose(name, List(toggle, "Choose its models") ++ Option.when(p.models.nonEmpty)(showAll)) match
+      case Some(`toggle`) =>
+        modelsInUse.find(_._1.provider == name) match
+          case Some((m, role)) if p.enabled => tui.error(s"${m.ref} is $role; switch to another model first")
+          case _ =>
+            applyEdits(ProviderEdits.setEnabled(name, !p.enabled), s"$name turned ${if p.enabled then "off" else "on"}")
+      case Some(`showAll`) =>
+        if tui.confirm(s"Drop the ${p.models.size} model entries of $name and their settings?") then
+          applyEdits(ProviderEdits.showAll(name), s"$name offers every model it lists")
+      case Some(_) => chooseModels(name, p)
+      case None => ()
+
+  /** Tick the models to offer. A provider without entries starts with only the
+    * models in use ticked; ticking none keeps offering everything it lists. */
+  private def chooseModels(name: String, p: ProviderConfig): Unit =
+    import ProviderEdits.Choice
+    val endpoint = ModelCatalog
+      .from(Config(providers = Map(name -> p.copy(models = Map.empty, enabled = true))), current.keys)
+      .discoverable.headOption
+    val listed = endpoint.fold(Nil) { spec =>
+      tui.info(s"Fetching the models of $name...")
+      try
+        val models = ChatModel.listModels(spec)
+        ModelListStore.global.save(spec, models)
+        models
+      catch
+        case scala.util.control.NonFatal(e) =>
+          tui.error(s"Could not list the models of $name; showing its configured ones (${e.getMessage})")
+          Nil
+    }
+    val choices = ProviderEdits.choices(p, listed)
+    val used = modelsInUse.filter(_._1.provider == name)
+    def isUsed(c: Choice) = used.exists((m, _) =>
+      c match
+        case Choice.Configured(alias, _) => m.alias == alias
+        case Choice.Listed(spec) => spec.modelId == m.modelId
+    )
+    val labels = choices.map {
+      case Choice.Configured(alias, m) => s"$alias  ${m.displayName.orElse(m.name).getOrElse("")}".trim
+      case Choice.Listed(spec) => spec.displayName.fold(spec.modelId)(n => s"$n  (${spec.modelId})")
+    }
+    val checked = choices.indices.filter(i =>
+      choices(i) match
+        case Choice.Configured(_, m) => m.enabled
+        case c => isUsed(c)
+    ).toSet
+    if choices.isEmpty then tui.error(s"$name has no models to choose from")
+    else
+      tui.chooseMany(s"Models $name offers (type to filter)", labels, checked).foreach { ticked =>
+        val chosen = ticked.map(choices)
+        choices.filterNot(chosen).find(isUsed) match
+          case Some(c) => tui.error(s"${labels(choices.indexOf(c))} is in use; switch to another model first")
+          case None =>
+            val edits = ProviderEdits.shortlist(name, p, choices, chosen)
+            if edits.isEmpty then tui.info("No change.")
+            else applyEdits(edits, s"$name: ${chosen.size} model${if chosen.size == 1 then "" else "s"} on")
+      }
+
+  private def addProvider(addable: List[ProviderPreset]): Unit =
+    tui.choose("Add a provider", addable.map(_.label)).flatMap(l => addable.find(_.label == l)).foreach { preset =>
+      FirstRun.provider(App.firstRunUi(tui), preset, current.keys, ChatModel.listModels) match
+        case Some(FirstRun.Outcome.Ready(provider, key, endpoint, models, model)) =>
+          val keysPath = Config.globalPath.getParent.nn.resolve(Config.KeysFile).nn
+          for name <- provider.keyVariable; value <- key do KeyBindings.bind(keysPath, name, value)
+          ModelListStore.global.save(endpoint, models)
+          val add = ProviderEdits.Edit(List("providers", provider.name), Some(upickle.default.writeJs(provider.config)))
+          if applyEdits(List(add), s"${provider.label} added", into = Some(Config.globalPath)) then
+            switchModel(model.ref)
+        case _ => tui.info("No provider added.")
+    }
+
+  /** Write `edits`, each to the file that owns it (or `into`), and reload the
+    * models. A change that leaves an invalid config is undone. */
+  private def applyEdits(edits: List[ProviderEdits.Edit], done: String, into: Option[Path] = None): Boolean =
+    val global = Config.globalPath
+    val byFile = edits.groupBy(e =>
+      into.orElse(ProviderEdits.owner(current.layers, e.path).flatMap(_.path)).getOrElse(global)
+    )
+    val created = if byFile.contains(global) && !Files.exists(global) then Config.ensureGlobal() else Nil
+    val originals = byFile.keys.filterNot(created.contains).map(p => p -> Files.readString(p).nn).toMap
+    try
+      byFile.foreach((path, es) =>
+        Config.editFile(path)(text => es.foldLeft(text)((t, e) => Config.withMember(t, e.path, e.value, path.toString)))
+      )
+      reloadModels()
+      tui.success(s"$done (saved to ${byFile.keys.map(App.pretty).mkString(", ")})")
+      true
+    catch
+      case scala.util.control.NonFatal(e) =>
+        originals.foreach((p, text) => Files.writeString(p, text))
+        created.foreach(Files.deleteIfExists)
+        tui.error(s"Nothing changed: ${Option(e.getMessage).getOrElse(e.toString)}")
+        false
+
+  /** Load the configuration again and rebuild the catalog. A model in use that
+    * the change renamed (a listed model now an entry) moves to its new name. */
+  private def reloadModels(): Unit =
+    val reloaded = Config.load(cwd, args.config, bundledGlobal = App.bundled(configuration))
+    val next = reloaded.catalog(ChatModel.listModels, ModelListStore.global)
+    current = reloaded
+    catalog = next
+    def moved(m: ChatModel): ChatModel =
+      if scala.util.Try(next.find(m.ref)).isSuccess then m
+      else
+        val provider = m.ref.takeWhile(_ != '/')
+        next.configured.find(s => s.provider == provider && s.modelId == m.modelId).fold(m) { spec =>
+          val renamed = modelFor(spec)
+          renamed.effort = m.effort.filter(renamed.efforts.contains).orElse(renamed.effort)
+          renamed
+        }
+    val agentModel = moved(agent.model)
+    if agentModel ne agent.model then
+      agent.model = agentModel
+      App.rememberLastModel(agentModel.ref)
+    agent.classifiedModel = agent.classifiedModel.map(moved)
+    next.refresh()
+    updateStatusContext()
 
   /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   private def switchClassifiedModel(arg: String): Unit =
@@ -735,6 +898,12 @@ object App:
       Files.writeString(lastModelPath, ref + "\n")
     catch case scala.util.control.NonFatal(_) => ()
 
+  private[atc] val AddProvider = "Add a provider"
+
+  /** Whether `configuration` stands the bundled starting config in for a missing global one. */
+  private def bundled(configuration: Configuration): Boolean =
+    configuration.layers.exists(l => l.origin == Origin.Global && l.path.isEmpty)
+
   /** The `/effort` choice that sends no effort, leaving it to the provider. */
   private val DefaultEffort = "default"
 
@@ -833,7 +1002,7 @@ object App:
     // project config and takes over from there.
     offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
 
-  private def firstRunUi(tui: Tui): FirstRun.Ui = new FirstRun.Ui:
+  private[atc] def firstRunUi(tui: Tui): FirstRun.Ui = new FirstRun.Ui:
     def choose(title: String, options: List[String]): Option[String] = tui.choose(title, options)
     def askSecret(question: String): Option[String] = tui.askSecret(question)
     def info(text: String): Unit = tui.info(text)

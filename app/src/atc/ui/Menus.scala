@@ -32,11 +32,12 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
     }
 
   /** A multi-choice menu; `Some(Nil)` if nothing was ticked. */
-  def checkbox(message: String, labels: List[String]): Option[List[Int]] =
+  def checkbox(message: String, labels: List[String], checked: Set[Int] = Set.empty): Option[List[Int]] =
     val byId = Menus.uniqueIds(labels).zip(labels)
     run { b =>
       val cb = b.createCheckboxPrompt().name("a").message(message)
-      byId.foreach((id, l) => cb.add(id, l))
+      if labels.size > Menus.FilterFrom then cb.filterable(true)
+      byId.zipWithIndex.foreach { case ((id, l), i) => cb.add(id, l, checked.contains(i)) }
       cb.addPrompt()
     } {
       case r: CheckboxResult =>
