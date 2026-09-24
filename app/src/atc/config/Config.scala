@@ -88,8 +88,9 @@ case class ProviderPreset(
   key: Option[String] = None,
   /** Where to create a key, shown when the first run asks for one. */
   keyUrl: Option[String] = None,
+  headers: Map[String, String] = Map.empty,
 ) derives ReadWriter:
-  def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key)
+  def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key, headers = headers)
   /** The variable a `${VAR}` key is read from. */
   def keyVariable: Option[String] = key.flatMap(Config.envRefName)
 

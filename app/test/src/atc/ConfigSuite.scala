@@ -325,7 +325,7 @@ class ConfigSuite extends munit.FunSuite:
 
   test("the starting keys file binds the variables the starting config names"):
     val named = "\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}".r
-      .findAllMatchIn(Config.globalTemplate).map(_.group(1).nn).toSet
+      .findAllMatchIn(Config.globalTemplate).map(_.group(1).nn).toSet - "ATC_SESSION" // filled in per conversation
     val bound = Config.keysTemplate.linesIterator.filter(_.contains("=")).map(_.takeWhile(_ != '=').trim).toSet
     assertEquals(named -- bound, Set.empty[String], "every ${VAR} the config names should have a line to fill in")
 

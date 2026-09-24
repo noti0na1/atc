@@ -7,6 +7,9 @@
     "key": "${DEEPSEEK_API_KEY}", "keyUrl": "https://platform.deepseek.com/api_keys" },
   { "name": "openrouter", "label": "OpenRouter", "api": "openai", "url": "https://openrouter.ai/api/v1",
     "key": "${OPENROUTER_API_KEY}", "keyUrl": "https://openrouter.ai/keys" },
+  { "name": "opencode-go", "label": "OpenCode Go", "api": "openai", "url": "https://opencode.ai/zen/go/v1",
+    "key": "${OPENCODE_GO_API_KEY}", "keyUrl": "https://opencode.ai/auth",
+    "headers": { "x-opencode-session": "${ATC_SESSION}" } },
   { "name": "ollama", "label": "Ollama (local models, no key)", "api": "openai", "url": "http://localhost:11434/v1",
     "key": "ollama" }
 ]

@@ -96,6 +96,17 @@ class FirstRunSuite extends munit.FunSuite:
     assertEquals(all.providers.keySet, presets.map(_.name).toSet)
     assertEquals(Config.writeGlobalConfig(path, presets), None, "an existing config is left alone")
 
+  test("a preset's headers reach the written config and the listing request"):
+    val path = Files.createTempDirectory("atc-first").nn.resolve("config.json").nn
+    Config.writeGlobalConfig(path, List(preset("opencode-go")))
+    val written = upickle.default.read[Config](Files.readString(path).nn).providers("opencode-go")
+    assertEquals(written.headers, Map("x-opencode-session" -> Config.SessionRef))
+    val keys = KeyBindings(List(Path.of("keys.properties") -> Map("OPENCODE_GO_API_KEY" -> "good")))
+    val seen = scala.collection.mutable.ListBuffer[ModelSpec]()
+    val ui = Script(Some("OpenCode Go"), Some("model-a"))
+    FirstRun.run(ui, presets, keys, spec => { seen += spec; List(spec.copy(alias = "model-a", modelId = "model-a")) })
+    assertEquals(seen.map(_.headers).toList, List(Map("x-opencode-session" -> Config.SessionRef)))
+
   test("binding a key keeps the other lines of the keys file and replaces the old binding"):
     val path = Files.createTempDirectory("atc-first").nn.resolve("keys.properties").nn
     KeyBindings.bind(path, "A_KEY", "one")
