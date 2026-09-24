@@ -95,13 +95,15 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
   private[llm] def listModels(): List[ModelSpec] =
     val options = com.openai.core.RequestOptions.builder().timeout(Providers.ListTimeout).build()
     client.models().list(options).items().asScala.toList.map { m =>
+      // Gemini's compatible list names models `models/<id>`; its chat endpoint takes the bare id.
+      val id = m.id().stripPrefix("models/")
       val extra = m._additionalProperties().asScala
       def number(key: String) = extra.get(key).flatMap(_.asNumber().toScala).map(_.longValue)
       val window = number("context_length").orElse(number("max_model_len")).filter(n => n > 0 && n <= Int.MaxValue)
       val name = extra.get("name").flatMap(_.asString().toScala).map(_.trim).filter(_.nonEmpty)
       spec.copy(
-        alias = m.id(),
-        modelId = m.id(),
+        alias = id,
+        modelId = id,
         settings = spec.settings.copy(contextWindow = window.map(n => Tokens(n.toInt)), displayName = name),
       )
     }

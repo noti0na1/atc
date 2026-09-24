@@ -236,13 +236,14 @@ class ProviderRequestSuite extends munit.FunSuite:
       """{"object":"list","data":[
         {"id":"vendor/big","object":"model","created":1,"owned_by":"x","name":"Big","context_length":262144},
         {"id":"local","object":"model","created":1,"owned_by":"x","max_model_len":32768},
-        {"id":"plain","object":"model","created":1,"owned_by":"x"}]}"""
+        {"id":"plain","object":"model","created":1,"owned_by":"x"},
+        {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"}]}"""
     withServer((_, _, _) => (200, "application/json", list)) { (url, requests) =>
       val models = ChatModel.listModels(endpoint("openai", url))
       assertEquals(requests(), List("GET /models"))
-      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain"))
-      assertEquals(models.map(_.settings.contextWindow.map(_.toInt)), List(Some(262144), Some(32768), None))
-      assertEquals(models.map(_.displayName), List(Some("Big"), None, None))
+      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x"))
+      assertEquals(models.map(_.settings.contextWindow.map(_.toInt)), List(Some(262144), Some(32768), None, None))
+      assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None))
       assertEquals(models.head.baseUrl, Some(url))
     }
 
