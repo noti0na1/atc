@@ -243,7 +243,7 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
         settings = spec.settings.copy(
           efforts = efforts,
           thinking = adaptive.filterNot(identity),
-          contextWindow = info.maxInputTokens().toScala.map(n => Tokens(n.toInt)),
+          contextWindow = info.maxInputTokens().toScala.flatMap(n => Tokens.from(n)),
           displayName = optional(info.displayName().linesIterator.nextOption()).flatten.map(_.trim).filter(_.nonEmpty),
         ),
       )

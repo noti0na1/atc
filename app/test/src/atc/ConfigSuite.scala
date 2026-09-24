@@ -364,8 +364,15 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(parsed("""{ "contextWindow": "1.5m" }"""), Some(1500000))
     assertEquals(parsed("""{ "contextWindow": " 128 K " }"""), Some(128000))
     assertEquals(parsed("""{}"""), None)
-    for bad <- List("\"abc\"", "\"-5k\"", "\"\"", "0", "\"0k\"", "1.5", "true", "\"1g\"") do
+    for bad <- List("\"abc\"", "\"-5k\"", "\"\"", "0", "-1", "\"0k\"", "1.5", "3e9", "true", "\"1g\"") do
       intercept[Exception](parsed(s"""{ "contextWindow": $bad }"""))
+    // every Tokens is a positive count, however it is made
+    intercept[IllegalArgumentException](Tokens(0))
+    intercept[IllegalArgumentException](Tokens(-5))
+    assertEquals(Tokens(1).toInt, 1)
+    assertEquals(Tokens.from(200000L).map(_.toInt), Some(200000))
+    assertEquals(Tokens.from(0L), None)
+    assertEquals(Tokens.from(Int.MaxValue.toLong + 1), None)
     // Tokens.parse is the same reader, for anything that wants to accept the notation
     assertEquals(Tokens.parse("64k").toInt, 64000)
     intercept[IllegalArgumentException](Tokens.parse("lots"))

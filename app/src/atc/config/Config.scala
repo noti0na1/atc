@@ -462,7 +462,6 @@ object Config:
       s"$where.displayName must be a single line"
     )
     model.maxTokens.foreach(requirePositive(s"$where.maxTokens", _))
-    model.contextWindow.foreach(tokens => requirePositive(s"$where.contextWindow", tokens.toInt))
     model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))
     model.reasoning.foreach(validateChoice(s"$where.reasoning", _, ReasoningEfforts))
     model.efforts.foreach { efforts =>

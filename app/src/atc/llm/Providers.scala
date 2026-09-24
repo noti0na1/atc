@@ -99,12 +99,12 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
       val id = m.id().stripPrefix("models/")
       val extra = m._additionalProperties().asScala
       def number(key: String) = extra.get(key).flatMap(_.asNumber().toScala).map(_.longValue)
-      val window = number("context_length").orElse(number("max_model_len")).filter(n => n > 0 && n <= Int.MaxValue)
+      val window = number("context_length").orElse(number("max_model_len")).flatMap(Tokens.from)
       val name = extra.get("name").flatMap(_.asString().toScala).map(_.trim).filter(_.nonEmpty)
       spec.copy(
         alias = id,
         modelId = id,
-        settings = spec.settings.copy(contextWindow = window.map(n => Tokens(n.toInt)), displayName = name),
+        settings = spec.settings.copy(contextWindow = window, displayName = name),
       )
     }
 
