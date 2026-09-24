@@ -4,7 +4,7 @@ import atc.SlashCommand as Cmd
 import atc.agent.{
   Agent, AgentEnvironment, InputPredictor, Prompts, ScalaToolRunner, SessionSnapshot, SessionStore, TurnOutcome
 }
-import atc.config.{Config, Configuration, ModelCatalog, ModelSpec, Origin}
+import atc.config.{Config, Configuration, ModelCatalog, ModelListStore, ModelSpec, Origin}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.{ChatModel, TokenUsage}
@@ -31,8 +31,9 @@ final class App(args: Cli.Args, val tui: Tui):
 
   // ── models ────────────────────────────────────────────────────────
 
-  /** Every model of every configured provider, resolved with its key. */
-  val catalog: ModelCatalog = configuration.catalog
+  /** Every model of every configured provider, resolved with its key; a
+    * provider that configures none is asked for its list after the start. */
+  val catalog: ModelCatalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
   private val modelCache = mutable.Map[String, ChatModel]()
 
   /** The client for one configured model, created once per session. */
@@ -41,8 +42,11 @@ final class App(args: Cli.Args, val tui: Tui):
   /** The client for a model reference (`alias` or `provider/alias`). */
   def modelFor(reference: String): ChatModel = modelFor(catalog.find(reference))
 
+  /** `-m`, else the config's `model`, else the model last chosen with `/model` (while
+    * it still resolves), else the first model. */
   val initialModel: ChatModel =
-    modelFor(args.model.orElse(config.model).map(catalog.find).getOrElse(catalog.default))
+    val last = App.lastModel.flatMap(ref => scala.util.Try(catalog.find(ref)).toOption)
+    modelFor(args.model.orElse(config.model).map(catalog.find).orElse(last).getOrElse(catalog.default))
   val initialClassified: Option[ChatModel] = config.classifiedModel.map(modelFor)
 
   // ── sandbox session ───────────────────────────────────────────────
@@ -129,7 +133,8 @@ final class App(args: Cli.Args, val tui: Tui):
 
   private def updateStatusContext(): Unit =
     val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)
-    tui.setContext(catalog.label(catalog.find(agent.model.ref)), policy.mode.label, directory)
+    val effort = agent.model.effort.fold("")(e => s" ($e)")
+    tui.setContext(catalog.label(catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
   updateStatusContext()
 
   // ── running ───────────────────────────────────────────────────────
@@ -237,6 +242,7 @@ final class App(args: Cli.Args, val tui: Tui):
           runTurn(p).exitCode
         case None =>
           banner()
+          catalog.refresh()
           if tui.menusAvailable then offerResume()
           warmSession() // after the resume offer: restoring would only discard it
           interactive()
@@ -378,6 +384,7 @@ final class App(args: Cli.Args, val tui: Tui):
   tui.completions = {
     case _ :: Nil => SlashCommand.names
     case "/model" :: _ :: Nil => catalog.labels
+    case "/effort" :: _ :: Nil => effortChoices
     case "/classifiedmodel" :: _ :: Nil => catalog.labels :+ "off"
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
     case "/perms" :: _ :: Nil => List("revoke")
@@ -404,6 +411,7 @@ final class App(args: Cli.Args, val tui: Tui):
     case Cmd.Model => switchModel(arg)
     case Cmd.ClassifiedModel => switchClassifiedModel(arg)
     case Cmd.Models => showModels()
+    case Cmd.Effort => switchEffort(arg)
     case Cmd.Mode => switchMode(arg)
     case Cmd.Perms => permissions(arg)
     case Cmd.Config => showConfig()
@@ -554,19 +562,23 @@ final class App(args: Cli.Args, val tui: Tui):
     val window = context.window.fold(" (no contextWindow configured for this model)")(_ => "")
     tui.println(s"${Tui.contextUsage(context.tokens, context.window)} estimated for the next request$window")
 
-  /** One line per configured model: its selectable name, friendly name (or
-    * `provider/model-id` fallback), and the role it currently plays. */
+  /** One line per model: its selectable name, friendly name (or `provider/model-id`
+    * fallback, left out when that is the name already), and the role it currently plays. */
   private def modelRow(spec: ModelSpec): String =
     val marks = List(
       Option.when(agent.model.ref == spec.ref)("agent"),
       Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
     ).flatten
     val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-    s"${catalog.label(spec).padTo(labelWidth, ' ')}  ${App.modelDetail(spec)}$role"
+    val label = catalog.label(spec)
+    val detail = App.modelDetail(spec)
+    if detail == label then label + role else s"${label.padTo(labelWidth, ' ')}  $detail$role"
 
-  private lazy val labelWidth: Int = catalog.labels.map(_.length).maxOption.getOrElse(0)
+  /** The name column's width: the configured models' names, as a listed name can be very long. */
+  private lazy val labelWidth: Int = catalog.configured.map(catalog.label(_).length).maxOption.getOrElse(0).max(24)
 
-  private def showModels(): Unit = catalog.models.foreach(m => tui.println("  " + modelRow(m)))
+  private def showModels(): Unit =
+    catalog.models.foreach(m => tui.println("  " + modelRow(m)))
 
   /** Pick a model from the list. Without a menu (plain mode) the list is
     * printed instead, so the user can name one with `/model <ref>`. */
@@ -582,10 +594,34 @@ final class App(args: Cli.Args, val tui: Tui):
   private def switchModel(arg: String): Unit =
     setModel(arg, "model", describe(agent.model)) { spec =>
       agent.model = modelFor(spec)
+      App.rememberLastModel(spec.ref)
       updateStatusContext()
       refreshPrediction()
       tui.success(s"model -> ${describe(agent.model)}" + remember("model", Some(spec)))
     }
+
+  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
+  private def effortChoices: List[String] =
+    if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ App.DefaultEffort
+
+  /** `/effort`: pick the agent model's reasoning effort, or set the named one,
+    * for the rest of the session. */
+  private def switchEffort(arg: String): Unit =
+    val model = agent.model
+    val current = model.effort.getOrElse(App.DefaultEffort)
+    val choices = effortChoices
+    if choices.isEmpty then tui.info(s"${model.ref} takes no reasoning effort")
+    else
+      val chosen =
+        if arg.nonEmpty then Some(arg.toLowerCase(java.util.Locale.ROOT))
+        else tui.choose(s"Choose the reasoning effort of ${model.ref}", choices)
+      chosen match
+        case None => tui.info(s"effort: $current (${choices.mkString(" | ")})")
+        case Some(e) if !choices.contains(e) => tui.error(s"${model.ref} takes ${choices.mkString(" | ")}, not '$e'")
+        case Some(e) =>
+          model.effort = Option.when(e != App.DefaultEffort)(e)
+          updateStatusContext()
+          tui.success(s"effort -> $e")
 
   /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   private def switchClassifiedModel(arg: String): Unit =
@@ -684,6 +720,23 @@ object App:
     * form retained when no friendly name is configured. */
   private[atc] def modelDetail(spec: ModelSpec): String =
     spec.displayName.getOrElse(s"${spec.provider}/${spec.modelId}")
+
+  private def lastModelPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("last-model").nn
+
+  /** The model last chosen with `/model`, the default when nothing names one. */
+  private def lastModel: Option[String] =
+    try Some(Files.readString(lastModelPath).nn.trim).filter(_.nonEmpty)
+    catch case scala.util.control.NonFatal(_) => None
+
+  /** Remember a model choice; losing it only loses a default. */
+  private def rememberLastModel(ref: String): Unit =
+    try
+      Files.createDirectories(lastModelPath.getParent)
+      Files.writeString(lastModelPath, ref + "\n")
+    catch case scala.util.control.NonFatal(_) => ()
+
+  /** The `/effort` choice that sends no effort, leaving it to the provider. */
+  private val DefaultEffort = "default"
 
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")

@@ -419,7 +419,21 @@ optional `headers`) and its `models`; a model is an alias with a provider-specif
 (Chat Completions: Ollama, vLLM, OpenRouter, …) and `echo` (keyless, for smoke tests). Name
 a model by its alias, or `provider/alias` when two providers share one; `/models` lists
 them. Set `contextWindow` to the model's real window so the conversation is compacted and
-trimmed to fit. **Keys** never go in a config: a provider names a variable
+trimmed to fit. A provider whose `models` is empty or absent lists its own, and each
+of its models is named `provider/model-id`. ATC keeps the last list each provider returned
+in `~/.atc/model-lists.json` and fetches a new one in the background once a session has
+started; `/models` and the `/model` picker wait for that fetch. Anthropic's list also
+supplies each model's context window and effort levels; OpenRouter's supplies the context
+window. A provider whose configured key is unset is not asked. Without `-m` or `model`, a
+session starts with the model last chosen with `/model`. **Efforts.** `reasoning` is
+the effort a session starts with; `efforts` lists the ones the model accepts (by default
+every effort its api knows: `low` to `max` for Anthropic, `none` to `max` for OpenAI). `/effort
+[level]` switches the agent model's effort for the rest of the session, and `default`
+sends none. **Web search.** A model's `webSearch` turns on the provider's own search tool;
+the top-level `webSearch` does so for every model that does not set its own, so a
+project config can ask for it wherever the provider has one. It is best effort: when a
+provider rejects the tool, the model continues without it for the rest of the session.
+**Keys** never go in a config: a provider names a variable
 (`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (project,
 then `~/.atc`, then the environment). `headers` are extra HTTP headers sent with every
 request to the provider; a value may be a `${VAR}` resolved the same way, or `${ATC_SESSION}`,
@@ -504,7 +518,7 @@ and the configured permissions.
 
 ## The terminal
 
-`/help` lists the slash commands: `/model` and `/mode` switch for the session, `/cost`
+`/help` lists the slash commands: `/model`, `/effort` and `/mode` switch for the session, `/cost`
 shows tokens and how full the context is, `/run <code>` runs Scala in the sandbox yourself,
 `/output` inspects recent tool results, `/perms` lists and revokes session grants,
 `/compact [focus]` summarizes the older conversation, `/clear` forgets it, `/new` starts

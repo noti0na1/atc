@@ -19,7 +19,7 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   /** The effort for a call: as configured, or the lowest the model takes for a
     * non-thinking one (not needed when the model has a thinking switch). */
   private def effort(thinking: Boolean): Option[ReasoningEffort] =
-    (if thinking then cfg.reasoning else lowestEffort).map(x =>
+    (if thinking then effort else lowestEffort).map(x =>
       ReasoningEffort.of(x.toLowerCase(java.util.Locale.ROOT))
     )
 
@@ -94,25 +94,27 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     sink: StreamSink,
     cancelled: () => Boolean
   ): Completion =
-    val feed = OpenAIChatModel.ChunkFeed()
-    val stream = streamingClient.async().chat().completions().createStreaming(params(system, history, tools))
-    ModelRequest.awaitStream(() => stream.close()) {
-      stream.subscribe { chunk =>
-        if cancelled() then throw CancelledException()
-        if feed.accumulate(chunk) then
-          chunk.choices().asScala.headOption.foreach { ch =>
-            val delta = ch.delta()
-            // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
-            // OpenRouter `reasoning`. A mixed chunk ends reasoning before starting the answer.
-            List("reasoning_content", "reasoning").iterator
-              .flatMap(key => Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala))
-              .filter(_.nonEmpty)
-              .nextOption().foreach(sink.thinking)
-            delta.content().toScala.filter(_.nonEmpty).foreach(sink.text)
-          }
-      }.onCompleteFuture()
+    withWebSearchFallback(sink) { sink =>
+      val feed = OpenAIChatModel.ChunkFeed()
+      val stream = streamingClient.async().chat().completions().createStreaming(params(system, history, tools))
+      ModelRequest.awaitStream(() => stream.close()) {
+        stream.subscribe { chunk =>
+          if cancelled() then throw CancelledException()
+          if feed.accumulate(chunk) then
+            chunk.choices().asScala.headOption.foreach { ch =>
+              val delta = ch.delta()
+              // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
+              // OpenRouter `reasoning`. A mixed chunk ends reasoning before starting the answer.
+              List("reasoning_content", "reasoning").iterator
+                .flatMap(key => Option(delta._additionalProperties().get(key)).flatMap(_.asString().toScala))
+                .filter(_.nonEmpty)
+                .nextOption().foreach(sink.thinking)
+              delta.content().toScala.filter(_.nonEmpty).foreach(sink.text)
+            }
+        }.onCompleteFuture()
+      }
+      feed.partialCompletion.getOrElse(extract(feed.completion()))
     }
-    feed.partialCompletion.getOrElse(extract(feed.completion()))
 
   private def usageOf(c: ChatCompletion): TokenUsage =
     OpenAIChatModel.usageOf(c.usage().toScala)

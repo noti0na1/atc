@@ -1,7 +1,7 @@
 package atc.llm
 
 import atc.Debug
-import atc.config.ModelSpec
+import atc.config.{ModelSpec, Tokens}
 
 import com.anthropic.client.{AnthropicClient, AnthropicClientImpl}
 import com.anthropic.core.JsonValue
@@ -16,6 +16,7 @@ import scala.jdk.OptionConverters.*
 final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   val providerKey: String = "anthropic"
   private val DefaultMaxTokens = 32000
+  protected def knownEfforts: List[String] = List("low", "medium", "high", "xhigh", "max")
   /** What the request asks for: the context fitter reserves exactly this. */
   override val maxOutputTokens: Option[Int] = Some(cfg.maxTokens.getOrElse(DefaultMaxTokens))
 
@@ -155,34 +156,36 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     sink: StreamSink,
     cancelled: () => Boolean
   ): Completion =
-    val acc = MessageAccumulator.create()
-    val stream = streamingClient.async().messages().createStreaming(params(system, history, tools))
-    ModelRequest.awaitStream(() => stream.close()) {
-      stream.subscribe { ev =>
-        if cancelled() then throw CancelledException()
-        acc.accumulate(ev)
-        ev.contentBlockStart().toScala.foreach { start =>
-          val cb = start.contentBlock()
-          if cb.serverToolUse().isPresent then sink.note("web search")
-          else if cb.text().isPresent then sink.note("") // new text block: separator
-        }
-        ev.contentBlockDelta().toScala.foreach { d =>
-          d.delta().text().toScala.foreach(t => sink.text(t.text()))
-          d.delta().thinking().toScala.foreach(t => sink.thinking(t.thinking()))
-        }
-      }.onCompleteFuture()
+    withWebSearchFallback(sink) { sink =>
+      val acc = MessageAccumulator.create()
+      val stream = streamingClient.async().messages().createStreaming(params(system, history, tools))
+      ModelRequest.awaitStream(() => stream.close()) {
+        stream.subscribe { ev =>
+          if cancelled() then throw CancelledException()
+          acc.accumulate(ev)
+          ev.contentBlockStart().toScala.foreach { start =>
+            val cb = start.contentBlock()
+            if cb.serverToolUse().isPresent then sink.note("web search")
+            else if cb.text().isPresent then sink.note("") // new text block: separator
+          }
+          ev.contentBlockDelta().toScala.foreach { d =>
+            d.delta().text().toScala.foreach(t => sink.text(t.text()))
+            d.delta().thinking().toScala.foreach(t => sink.thinking(t.thinking()))
+          }
+        }.onCompleteFuture()
+      }
+      val m = acc.message()
+      Debug.log(
+        s"anthropic stop=${m.stopReason().toScala} blocks=${m.content().asScala.map(b => b.toString.takeWhile(_ != '{')).mkString(",")}"
+      )
+      extract(m)
     }
-    val m = acc.message()
-    Debug.log(
-      s"anthropic stop=${m.stopReason().toScala} blocks=${m.content().asScala.map(b => b.toString.takeWhile(_ != '{')).mkString(",")}"
-    )
-    extract(m)
 
   /** Thinking and effort as the model is configured (adaptive thinking unless
-    * `"thinking": false`, `output_config.effort` from `reasoning`). */
+    * `"thinking": false`, `output_config.effort` from the current [[effort]]). */
   private def configuredThinking(b: MessageCreateParams.Builder): Unit =
     if cfg.thinking.getOrElse(true) then b.thinking(ThinkingConfigAdaptive.builder().build())
-    cfg.reasoning.foreach(e =>
+    effort.foreach(e =>
       b.outputConfig(
         OutputConfig.builder().effort(OutputConfig.Effort.of(e.toLowerCase(java.util.Locale.ROOT))).build()
       )
@@ -206,6 +209,45 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
     if thinking then configuredThinking(b) else b.thinking(ThinkingConfigDisabled.builder().build())
     val m = client.messages().create(b.build())
     Reply(m.content().asScala.flatMap(_.text().toScala).map(_.text()).mkString, usageOf(m))
+
+  /** `GET /v1/models`, with the display name, input limit, effort levels and
+    * whether adaptive thinking is supported (the only kind this adapter asks for).
+    * Capabilities a response leaves out are left to the defaults. */
+  private[llm] def listModels(): List[ModelSpec] =
+    val options = com.anthropic.core.RequestOptions.builder().timeout(Providers.ListTimeout).build()
+    val params = com.anthropic.models.models.ModelListParams.builder().limit(1000L).build()
+    def optional[T](read: => T): Option[T] = scala.util.Try(read).toOption
+    client.models().list(params, options).autoPager().asScala.toList.map { info =>
+      val capabilities = optional(info.capabilities().toScala).flatten
+      val efforts = capabilities.flatMap { c =>
+        optional {
+          val e = c.effort()
+          if !e.supported() then Nil
+          else
+            List(
+              "low" -> Some(e.low()),
+              "medium" -> Some(e.medium()),
+              "high" -> Some(e.high()),
+              "xhigh" -> e.xhigh().toScala,
+              "max" -> Some(e.max())
+            )
+              .collect { case (level, Some(s)) if s.supported() => level }
+        }
+      }
+      val adaptive = capabilities.flatMap(c =>
+        optional(c.thinking().supported() && c.thinking().types().adaptive().supported())
+      )
+      spec.copy(
+        alias = info.id(),
+        modelId = info.id(),
+        settings = spec.settings.copy(
+          efforts = efforts,
+          thinking = adaptive.filterNot(identity),
+          contextWindow = info.maxInputTokens().toScala.map(n => Tokens(n.toInt)),
+          displayName = optional(info.displayName().linesIterator.nextOption()).flatten.map(_.trim).filter(_.nonEmpty),
+        ),
+      )
+    }
 
 private[atc] object AnthropicModel:
   /** Where the second cache breakpoint goes: the index of the last user-role

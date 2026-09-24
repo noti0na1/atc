@@ -131,6 +131,11 @@ trait ChatModel:
   /** Configured maximum output tokens, when the adapter sends one. Context
     * fitting reserves at least this much room for the answer. */
   def maxOutputTokens: Option[Int] = None
+  /** The efforts [[effort]] may be set to; empty when the model takes none. */
+  def efforts: List[String] = Nil
+  /** The reasoning effort later requests ask for, one of [[efforts]]; `None`
+    * sends none. Starts as configured (`reasoning`); `/effort` switches it. */
+  @volatile var effort: Option[String] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;
     * `cancelled` is polled between events. */
@@ -160,3 +165,14 @@ object ChatModel:
       case other => throw IllegalArgumentException(
           s"Unknown api '$other' for provider '${spec.provider}' (expected anthropic | openai | openai-responses | echo)"
         )
+
+  /** The models a provider's endpoint lists (`provider` has an empty alias and
+    * model id), each as a spec named by its model id. */
+  def listModels(provider: ModelSpec): List[ModelSpec] =
+    val client = create(provider)
+    try
+      client match
+        case m: AnthropicModel => m.listModels()
+        case m: OpenAIShapedModel => m.listModels()
+        case _ => Nil
+    finally client.close()

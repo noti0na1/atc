@@ -20,11 +20,15 @@ case class ModelConfig(
   name: Option[String] = None,
   /** Enable the provider's built-in web search tool (Anthropic
     * `web_search`, OpenAI Responses `web_search`, Chat Completions
-    * `web_search_options`). */
-  webSearch: Boolean = false,
+    * `web_search_options`). Unset: the top-level `webSearch`. */
+  webSearch: Option[Boolean] = None,
   /** Reasoning effort: OpenAI `none|minimal|low|medium|high|xhigh|max`,
-    * Anthropic `low|medium|high|xhigh|max` (`output_config.effort`). */
+    * Anthropic `low|medium|high|xhigh|max` (`output_config.effort`). The effort
+    * a session starts with; `/effort` switches it. */
   reasoning: Option[String] = None,
+  /** The efforts the model accepts, offered by `/effort`. Unset: every effort
+    * its provider's api knows. `[]`: the model takes no effort setting. */
+  efforts: Option[List[String]] = None,
   /** Anthropic: adaptive thinking (default on); `false` disables it. OpenAI-
     * compatible vendors with a `thinking: {"type": ...}` switch (DeepSeek, GLM,
     * Kimi, MiniMax): sends `enabled`/`disabled`; leave it unset for OpenAI
@@ -68,7 +72,9 @@ case class ProviderConfig(
     * conversation (renewed by `/new` and `/clear`), which gateways such as
     * OpenCode use for routing and prompt caching. */
   headers: Map[String, String] = Map.empty,
-  /** The provider's models, by alias. */
+  /** The provider's models, by alias. Empty: the models the provider lists
+    * (`GET /models`) are fetched the first time they are needed, and each is
+    * named `provider/model-id`. */
   models: Map[String, ModelConfig] = Map.empty,
 ) derives ReadWriter
 
@@ -120,6 +126,10 @@ case class Config(
   maxToolCalls: Int = 200,
   /** Max characters of tool output returned to the model. */
   maxToolOutputChars: Int = 40000,
+  /** Enable the provider's web search for every model whose entry does not set
+    * `webSearch` (listed models included). Best effort, as is a model's own
+    * setting: a model whose provider rejects the tool continues without it. */
+  webSearch: Option[Boolean] = None,
   /** Extra text appended to the system prompt (project conventions etc.). */
   instructions: Option[String] = None,
   /** After each turn, ask the agent model to guess the next request and offer
@@ -389,7 +399,8 @@ object Config:
       catch case e: IllegalArgumentException => throw invalid(e.getMessage.nn)
     }
 
-  private val ReasoningEfforts = Set("none", "minimal", "low", "medium", "high", "xhigh", "max")
+  /** Every effort a provider api knows, lowest first. */
+  val ReasoningEfforts: List[String] = List("none", "minimal", "low", "medium", "high", "xhigh", "max")
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
   private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
   private val ProviderApis =
@@ -404,10 +415,10 @@ object Config:
   private def requirePositive(name: String, value: Long): Unit =
     requireValid(value > 0, s"$name must be greater than zero (was $value)")
 
-  private def validateChoice(where: String, value: String, allowed: Set[String]): Unit =
+  private def validateChoice(where: String, value: String, allowed: Iterable[String]): Unit =
     requireValid(value == value.trim, s"$where must not start or end with whitespace (was '$value')")
     requireValid(
-      allowed.contains(value.trim.toLowerCase(java.util.Locale.ROOT)),
+      allowed.exists(_ == value.trim.toLowerCase(java.util.Locale.ROOT)),
       s"$where must be one of ${allowed.toList.sorted.mkString("|")} (was '$value')"
     )
 
@@ -430,6 +441,15 @@ object Config:
     model.contextWindow.foreach(tokens => requirePositive(s"$where.contextWindow", tokens.toInt))
     model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))
     model.reasoning.foreach(validateChoice(s"$where.reasoning", _, ReasoningEfforts))
+    model.efforts.foreach { efforts =>
+      efforts.foreach(validateChoice(s"$where.efforts", _, ReasoningEfforts))
+      model.reasoning.foreach(r =>
+        requireValid(
+          efforts.exists(_.equalsIgnoreCase(r)),
+          s"$where.reasoning '$r' is not one of its efforts (${efforts.mkString("|")})"
+        )
+      )
+    }
     model.reasoningSummary.foreach(validateChoice(s"$where.reasoningSummary", _, ReasoningSummaries))
     model.webSearchVersion.foreach(validateChoice(s"$where.webSearchVersion", _, AnthropicWebSearchVersions))
 
@@ -469,13 +489,13 @@ object Config:
     // config error, and the catalog message lists what is configured.
     val catalog = ModelCatalog.from(config)
     val duplicateRefs =
-      catalog.models.groupBy(_.ref.toLowerCase(java.util.Locale.ROOT)).values.filter(_.size > 1).toList
+      catalog.configured.groupBy(_.ref.toLowerCase(java.util.Locale.ROOT)).values.filter(_.size > 1).toList
     requireValid(
       duplicateRefs.isEmpty,
       s"model references must be unique ignoring case: ${duplicateRefs.flatten.map(_.ref).sorted.mkString(", ")}"
     )
-    config.model.foreach(catalog.find)
-    config.classifiedModel.foreach(catalog.find)
+    config.model.foreach(catalog.check)
+    config.classifiedModel.foreach(catalog.check)
     config
 
   /** List settings extend rather than replace (a later layer can add a deny

@@ -89,7 +89,7 @@ class ConfigSuite extends munit.FunSuite:
           s"the starting denyCommands must refuse shell invocation `$command`: ${denied.mkString(", ")}",
         )
 
-  test("a provider may list no models: an endpoint written down, ready to be filled in"):
+  test("a provider may list no models: an endpoint whose models are listed or filled in later"):
     val dir = Files.createTempDirectory("atc-cfg-empty-provider").nn
     val cfg = writeCfg(
       dir,
@@ -98,7 +98,9 @@ class ConfigSuite extends munit.FunSuite:
     )
     val loaded = load(dir, Some(cfg))
     assertEquals(loaded.settings.providers("openrouter").models, Map.empty[String, ModelConfig])
-    assert(ModelCatalog.from(loaded.settings).isEmpty, "it contributes no model until one is added")
+    val catalog = ModelCatalog.from(loaded.settings)
+    assertEquals(catalog.configured, Nil, "it configures no model")
+    assertEquals(catalog.discoverable.map(_.provider), List("openrouter"), "it lists its own")
     // and a later layer can add one without repeating the endpoint
     val withModel = upickle.default.read[Config](Config.mergeJson(
       ujson.read(Files.readString(cfg)).obj,
@@ -272,7 +274,7 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(p.url, Some("http://new")) // provider scalars still override
     assertEquals(p.models.keySet, Set("old", "fresh")) // model added, not replaced wholesale
     assertEquals(p.models("old").name, Some("v2")) // redefined alias replaced entirely
-    assertEquals(p.models("old").webSearch, false) // ... including its dropped settings
+    assertEquals(p.models("old").webSearch, None) // ... including its dropped settings
     assertEquals(c.providers("anthropic").models.keySet, Set("claude")) // other providers untouched
 
   // ── API-key resolution ──────────────────────────────────────────
@@ -699,3 +701,108 @@ class ConfigSuite extends munit.FunSuite:
       Map("x-literal" -> "plain", "x-secret" -> "from-file", "x-session" -> "${ATC_SESSION}"),
     )
     assertEquals(Config.resolveHeaders(ProviderConfig(api = Some("openai"))), Map.empty)
+
+  // ── efforts and listed models ───────────────────────────────────
+
+  private def withModel(model: String): Config =
+    upickle.default.read[Config](
+      s"""{ "providers": { "p": { "api": "anthropic", "models": { "m": $model } } } }"""
+    )
+
+  test("efforts must be known efforts and include the starting one"):
+    Config.validate(withModel("""{ "reasoning": "high", "efforts": ["low", "high"] }"""))
+    val unknown = intercept[IllegalArgumentException](Config.validate(withModel("""{ "efforts": ["low", "huge"] }""")))
+    assert(unknown.getMessage.contains("providers.p.models.m.efforts"), unknown.getMessage)
+    val outside =
+      intercept[IllegalArgumentException](Config.validate(withModel("""{ "reasoning": "max", "efforts": ["low"] }""")))
+    assert(outside.getMessage.contains("not one of its efforts"), outside.getMessage)
+
+  private def listing = upickle.default.read[Config](
+    """{ "providers": {
+      "fixed": { "api": "openai", "models": { "a": { "name": "model-a" } } },
+      "open":  { "api": "openai", "url": "http://localhost:1" },
+      "keyed": { "api": "openai", "key": "${ATC_TEST_UNSET_KEY}" },
+      "echo":  { "api": "echo" }
+    } }"""
+  )
+
+  private def listingCatalog(list: ModelSpec => List[ModelSpec]): (ModelCatalog, () => List[String]) =
+    val asked = java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val catalog = ModelCatalog.from(
+      listing,
+      discover = Some { p =>
+        asked.add(p.provider)
+        list(p)
+      }
+    )
+    (catalog, () => scala.jdk.CollectionConverters.IterableHasAsScala(asked).asScala.toList)
+
+  private def listed(p: ModelSpec, ids: String*) = ids.toList.map(id => p.copy(alias = id, modelId = id))
+
+  test("a provider without models is listed once, when needed, and its models are named by reference"):
+    val (catalog, asked) = listingCatalog(p => listed(p, "vendor/big", "small"))
+    assertEquals(catalog.find("a").modelId, "model-a")
+    assertEquals(asked(), Nil, "a configured model needs no listing")
+    assertEquals(
+      catalog.discoverable.map(_.provider),
+      List("open"),
+      "echo and a provider with an unset key are not asked"
+    )
+    assertEquals(catalog.labels, List("a", "open/vendor/big", "open/small"))
+    assertEquals(catalog.find("open/vendor/big").modelId, "vendor/big")
+    assertEquals(catalog.find("SMALL").ref, "open/small")
+    assertEquals(catalog.find("open/small").baseUrl, Some("http://localhost:1"))
+    val missing = intercept[IllegalArgumentException](catalog.find("open/typo"))
+    assert(missing.getMessage.contains("open list their own"), missing.getMessage)
+    assertEquals(asked(), List("open"))
+
+  test("a failed listing is ignored and a provider/model-id reference is taken as given"):
+    val (catalog, _) = listingCatalog(_ => throw RuntimeException("connection refused"))
+    assertEquals(catalog.find("open/anything").modelId, "anything")
+    assertEquals(catalog.labels, List("a"))
+    intercept[IllegalArgumentException](catalog.find("anything"))
+
+  test("validation accepts a model a provider may list without fetching the list"):
+    Config.validate(listing.copy(model = Some("open/gpt-x"), classifiedModel = Some("gpt-y")))
+    val noListing = listing.copy(providers = listing.providers - "open")
+    intercept[IllegalArgumentException](Config.validate(noListing.copy(model = Some("gpt-y"))))
+
+  test("the top-level webSearch applies to every model that does not set its own"):
+    val c = upickle.default.read[Config](
+      """{ "webSearch": true, "providers": {
+        "p": { "api": "openai", "models": { "on": {}, "off": { "webSearch": false } } },
+        "q": { "api": "openai", "url": "http://localhost:1" } } }"""
+    )
+    val catalog = ModelCatalog.from(c, discover = Some(p => List(p.copy(alias = "listed", modelId = "listed"))))
+    assertEquals(catalog.find("on").settings.webSearch, Some(true))
+    assertEquals(catalog.find("off").settings.webSearch, Some(false))
+    assertEquals(catalog.find("q/listed").settings.webSearch, Some(true))
+    assertEquals(ModelCatalog.from(c.copy(webSearch = None)).find("on").settings.webSearch, None)
+
+  test("a stored list names models without fetching, and a refresh replaces it in the background"):
+    val store = ModelListStore(Files.createTempDirectory("atc-lists").nn.resolve("model-lists.json").nn)
+    val open = ModelCatalog.from(listing).discoverable.head
+    store.save(
+      open,
+      List(open.copy(alias = "old", modelId = "old", settings = ModelConfig(efforts = Some(List("high")))))
+    )
+    val release = java.util.concurrent.CountDownLatch(1)
+    val catalog = ModelCatalog.from(
+      listing.copy(webSearch = Some(true)),
+      discover = Some { p =>
+        release.await()
+        listed(p, "new")
+      },
+      store = Some(store),
+    )
+    val old = catalog.find("open/old")
+    assertEquals(old.settings.efforts, Some(List("high")), "found without waiting for a fetch")
+    assertEquals(old.settings.webSearch, Some(true), "the current defaults apply to a stored list")
+    assertEquals(catalog.find("open/unlisted").modelId, "unlisted", "an unknown id is taken as given before a fetch")
+    catalog.refresh() // returns at once, the fetch is still blocked
+    assertEquals(catalog.find("old").ref, "open/old")
+    release.countDown()
+    assertEquals(catalog.labels, List("a", "open/new"))
+    intercept[IllegalArgumentException](catalog.find("open/old"))
+    assertEquals(store.load(open).map(_.map(_.modelId)), Some(List("new")), "the fetched list is stored")
+    assertEquals(store.load(open.copy(baseUrl = Some("http://elsewhere"))), None, "only for the same endpoint")

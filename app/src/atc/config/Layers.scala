@@ -59,3 +59,8 @@ final case class Configuration(
 
   /** Every configured model, resolved, with its provider's key. */
   def catalog: ModelCatalog = ModelCatalog.from(settings, keys)
+
+  /** As [[catalog]], with the providers that configure no models listed by `discover`
+    * and their lists kept in `store` between sessions. */
+  def catalog(discover: ModelSpec => List[ModelSpec], store: ModelListStore): ModelCatalog =
+    ModelCatalog.from(settings, keys, Some(discover), Some(store))

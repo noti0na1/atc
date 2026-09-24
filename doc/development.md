@@ -672,7 +672,25 @@ newline and encoding conventions (commonly CRLF, sometimes BOM-marked UTF-16 on 
 ## Models and providers
 
 `ModelCatalog` resolves `provider/alias` or an unambiguous bare alias, ignoring case.
-`displayName` affects presentation only. `ChatModel` has streaming `complete` and one-shot
+`displayName` affects presentation only. A provider without configured models is listed
+through `ChatModel.listModels` (the adapter's own client, with `Providers.ListTimeout`), at
+most once per catalog and in parallel across providers: `App` starts `refresh()` after the
+banner, and `models` waits for it. Lookups never wait: they use this session's list when
+it has arrived, else the one `ModelListStore` kept (`~/.atc/model-lists.json`, reused only
+for the same provider name, api and url), else take `provider/model-id` as given. A model
+taken as given keeps its unknown context window until a later session finds it in the
+stored list. Configuration validation never fetches: `ModelCatalog.check` accepts any name
+a list could hold. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
+always labelled by their full reference, so fetching a list never changes the labels of
+configured models. `ChatModel.effort` is mutable per client and read at request time;
+`App` caches one client per reference, so an effort chosen with `/effort` survives
+switching away and back.
+
+Web search is best effort. `ModelCatalog` gives every model without its own `webSearch`
+the top-level one, listed models included. `SpecModel.withWebSearchFallback` resends a
+streaming request without the tool when the provider answers 400 or 422 naming web
+search before anything was streamed, and turns the tool off for that client. A gateway
+that drops the tool silently cannot be detected. `ChatModel` has streaming `complete` and one-shot
 `simple` operations. Provider adapters normalize stop reasons into `CompletionStop`.
 
 `Msg` carries neutral text and tool calls. Assistant messages may also carry a `NativeTurn`

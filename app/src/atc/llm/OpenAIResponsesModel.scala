@@ -20,9 +20,10 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     * the lowest effort the model takes for a non-thinking one. */
   private def reasoning(thinking: Boolean): Option[Reasoning] =
     if thinking then
-      Option.when(cfg.reasoning.isDefined || cfg.reasoningSummary.isDefined) {
+      val chosen = effort
+      Option.when(chosen.isDefined || cfg.reasoningSummary.isDefined) {
         val r = Reasoning.builder()
-        cfg.reasoning.foreach(e => r.effort(ReasoningEffort.of(e.toLowerCase(java.util.Locale.ROOT))))
+        chosen.foreach(e => r.effort(ReasoningEffort.of(e.toLowerCase(java.util.Locale.ROOT))))
         cfg.reasoningSummary.foreach(s => r.summary(Reasoning.Summary.of(s.toLowerCase(java.util.Locale.ROOT))))
         r.build()
       }
@@ -118,39 +119,41 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     sink: StreamSink,
     cancelled: () => Boolean
   ): Completion =
-    val acc = ResponseAccumulator.create()
-    val stream = streamingClient.async().responses().createStreaming(params(system, history, tools))
-    ModelRequest.awaitStream(() => stream.close()) {
-      stream.subscribe { ev =>
-        if cancelled() then throw CancelledException()
-        acc.accumulate(ev)
-        ev.outputItemAdded().toScala.foreach { added =>
-          val item = added.item()
-          if item.isWebSearchCall then sink.note("web search")
-          else if item.isMessage then sink.note("")
-        }
-        ev.outputTextDelta().toScala.foreach(d => sink.text(d.delta()))
-        ev.reasoningTextDelta().toScala.foreach(d => sink.thinking(d.delta()))
-        ev.reasoningSummaryTextDelta().toScala.foreach(d => sink.thinking(d.delta()))
-        ev.reasoningSummaryPartDone().toScala.foreach(_ => sink.thinking("\n\n"))
-        ev.error().toScala.foreach(e => throw RuntimeException(s"OpenAI stream error: ${e.message()}"))
-        ev.failed().toScala.foreach(f =>
-          throw RuntimeException(
-            s"OpenAI response failed: ${f.response().error().toScala.map(_.message()).getOrElse("unknown")}"
+    withWebSearchFallback(sink) { sink =>
+      val acc = ResponseAccumulator.create()
+      val stream = streamingClient.async().responses().createStreaming(params(system, history, tools))
+      ModelRequest.awaitStream(() => stream.close()) {
+        stream.subscribe { ev =>
+          if cancelled() then throw CancelledException()
+          acc.accumulate(ev)
+          ev.outputItemAdded().toScala.foreach { added =>
+            val item = added.item()
+            if item.isWebSearchCall then sink.note("web search")
+            else if item.isMessage then sink.note("")
+          }
+          ev.outputTextDelta().toScala.foreach(d => sink.text(d.delta()))
+          ev.reasoningTextDelta().toScala.foreach(d => sink.thinking(d.delta()))
+          ev.reasoningSummaryTextDelta().toScala.foreach(d => sink.thinking(d.delta()))
+          ev.reasoningSummaryPartDone().toScala.foreach(_ => sink.thinking("\n\n"))
+          ev.error().toScala.foreach(e => throw RuntimeException(s"OpenAI stream error: ${e.message()}"))
+          ev.failed().toScala.foreach(f =>
+            throw RuntimeException(
+              s"OpenAI response failed: ${f.response().error().toScala.map(_.message()).getOrElse("unknown")}"
+            )
           )
+        }.onCompleteFuture()
+      }
+      val r = acc.response()
+      Debug.log {
+        val kinds = r.output().asScala.map(i =>
+          if i.isMessage then "message"
+          else if i.isFunctionCall then "function_call"
+          else if i.isWebSearchCall then "web_search" else if i.isReasoning then "reasoning" else "other"
         )
-      }.onCompleteFuture()
+        s"responses status=${r.status().toScala} incomplete=${r.incompleteDetails().toScala.map(_.toString)} items=${kinds.mkString(",")}"
+      }
+      extract(r)
     }
-    val r = acc.response()
-    Debug.log {
-      val kinds = r.output().asScala.map(i =>
-        if i.isMessage then "message"
-        else if i.isFunctionCall then "function_call"
-        else if i.isWebSearchCall then "web_search" else if i.isReasoning then "reasoning" else "other"
-      )
-      s"responses status=${r.status().toScala} incomplete=${r.incompleteDetails().toScala.map(_.toString)} items=${kinds.mkString(",")}"
-    }
-    extract(r)
 
   private def usageOf(r: Response): TokenUsage =
     r.usage().toScala.map { u =>

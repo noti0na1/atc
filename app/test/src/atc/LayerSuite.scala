@@ -69,7 +69,7 @@ class LayerSuite extends munit.FunSuite:
     assertEquals(w.access("src/A.scala"), Access.None)
     assertEquals(w.outside(Path.of("/etc/passwd")), Access.None)
     assert(!w.policy.commandAllowed(ScopeId.Base, "ls"))
-    assert(ModelCatalog.from(w.settings).isEmpty)
+    assert(ModelCatalog.from(w.settings).models.isEmpty)
 
   test("a project config grants its own tree"):
     val w = World(global = "", project = """{ "files": [ { "path": ".", "access": "write" } ] }""")

@@ -1,12 +1,13 @@
 package atc.llm
 
-import atc.config.{ModelConfig, ModelSpec}
+import atc.config.{Config, ModelConfig, ModelSpec, Tokens}
 
 import com.openai.client.{OpenAIClient, OpenAIClientImpl}
 import com.openai.core.JsonValue
 import com.openai.errors.BadRequestException
 
 import java.time.Duration
+import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
 /** What every provider adapter takes from its [[ModelSpec]]: the names, the
@@ -16,9 +17,35 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   override val ref: String = spec.ref
   val modelId: String = spec.modelId
   protected val cfg: ModelConfig = spec.settings
-  val webSearch: Boolean = cfg.webSearch
+  /** Set once the provider rejected its web search tool for this model. */
+  @volatile private var webSearchRejected = false
+  def webSearch: Boolean = cfg.webSearch.getOrElse(false) && !webSearchRejected
+
+  /** Run one streaming request. Web search is best effort: when the provider
+    * rejects the tool before anything was streamed, this model continues
+    * without it and the request is sent again. */
+  protected def withWebSearchFallback(sink: StreamSink)(request: StreamSink => Completion): Completion =
+    if !webSearch then request(sink)
+    else
+      val streamed = java.util.concurrent.atomic.AtomicBoolean(false)
+      val tracking = StreamSink(
+        t => { streamed.set(true); sink.text(t) },
+        n => { streamed.set(true); sink.note(n) },
+        d => { streamed.set(true); sink.thinking(d) },
+      )
+      try request(tracking)
+      catch
+        case scala.util.control.NonFatal(e) if !streamed.get() && Providers.isWebSearchRejection(e) =>
+          webSearchRejected = true
+          atc.Debug.log(s"$ref: the provider rejected web search; continuing without it (${e.getMessage})")
+          request(sink)
   override val contextWindow: Option[Int] = cfg.contextWindow.map(_.toInt)
   override val maxOutputTokens: Option[Int] = cfg.maxTokens
+  override val efforts: List[String] = cfg.efforts.getOrElse(knownEfforts).map(_.toLowerCase(java.util.Locale.ROOT))
+  effort = cfg.reasoning.map(_.toLowerCase(java.util.Locale.ROOT))
+
+  /** Every effort the provider's api accepts, for a model whose config lists none. */
+  protected def knownEfforts: List[String]
 
 /** Shared by the two OpenAI-shaped adapters (Chat Completions and Responses):
   * the client, the vendor `thinking` switch, and the guessed lowest reasoning
@@ -35,6 +62,7 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
     }
   }
   protected def client: OpenAIClient = connection._1
+  protected def knownEfforts: List[String] = Config.ReasoningEfforts
   protected def streamingClient: OpenAIClient =
     val (base, transport) = connection
     base.withOptions(_.httpClient(Providers.borrowed(
@@ -53,7 +81,7 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
     * not rejected the parameter). Only for `thinking = false`. */
   protected def lowestEffort: Option[String] =
     if effortRejected || cfg.thinking.isDefined then None
-    else Providers.lowestEffort(modelId, cfg.reasoning.isDefined)
+    else Providers.lowestEffort(modelId, effort.isDefined)
 
   /** `thinking: {"type": "enabled"|"disabled"}`, the switch of the
     * OpenAI-compatible vendors that have one (DeepSeek, GLM, Kimi, MiniMax).
@@ -61,6 +89,22 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
     * rejects the parameter. A non-thinking call always says `disabled`. */
   protected def thinkingSwitch(thinking: Boolean): Option[JsonValue] =
     cfg.thinking.map(on => Providers.thinkingSwitch(thinking && on))
+
+  /** `GET /models`. Besides the id, reads the context window that OpenRouter
+    * (`context_length`) and vLLM (`max_model_len`) report, and OpenRouter's `name`. */
+  private[llm] def listModels(): List[ModelSpec] =
+    val options = com.openai.core.RequestOptions.builder().timeout(Providers.ListTimeout).build()
+    client.models().list(options).items().asScala.toList.map { m =>
+      val extra = m._additionalProperties().asScala
+      def number(key: String) = extra.get(key).flatMap(_.asNumber().toScala).map(_.longValue)
+      val window = number("context_length").orElse(number("max_model_len")).filter(n => n > 0 && n <= Int.MaxValue)
+      val name = extra.get("name").flatMap(_.asString().toScala).map(_.trim).filter(_.nonEmpty)
+      spec.copy(
+        alias = m.id(),
+        modelId = m.id(),
+        settings = spec.settings.copy(contextWindow = window.map(n => Tokens(n.toInt)), displayName = name),
+      )
+    }
 
   /** Send `request` with `effort` (the reasoning setting of a one-shot call).
     * When that was a *guessed* lowest effort (a non-thinking call) and the
@@ -80,6 +124,9 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
 private[atc] object Providers:
   /** Deliberately generous: a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
+
+  /** For listing a provider's models, which a user waits for. */
+  val ListTimeout: Duration = Duration.ofSeconds(20)
 
   /** How ATC identifies itself; a configured `User-Agent` header replaces it. */
   lazy val UserAgent: String = s"atc/${atc.Main.Version}"
@@ -123,6 +170,20 @@ private[atc] object Providers:
       val s = value.trim.toLowerCase(java.util.Locale.ROOT)
       s.contains("reasoning_effort") || s.contains("reasoning.effort") || s.contains("reasoning effort")
     param.exists(p => p.trim.equalsIgnoreCase("reasoning") || mentions(p)) || mentions(message)
+
+  /** Whether a failed request is the provider refusing its web search tool or
+    * parameter: a 400 or 422 whose message names it. */
+  def isWebSearchRejection(error: Throwable): Boolean =
+    Iterator.iterate[Throwable | Null](error)(_.nn.getCause).takeWhile(_ != null).take(8).exists {
+      case e: com.anthropic.errors.AnthropicServiceException => rejectsWebSearch(e.statusCode(), e.getMessage)
+      case e: com.openai.errors.OpenAIServiceException => rejectsWebSearch(e.statusCode(), e.getMessage)
+      case _ => false
+    }
+
+  def rejectsWebSearch(status: Int, message: String | Null): Boolean =
+    val text = Option(message).getOrElse("").toLowerCase(java.util.Locale.ROOT)
+    (status == 400 || status == 422) &&
+    List("web_search", "web search", "websearch", "web-search").exists(text.contains)
 
   /** The body of a `thinking` switch: `{"type": "enabled"}` / `{"type": "disabled"}`. */
   def thinkingSwitch(on: Boolean): JsonValue =

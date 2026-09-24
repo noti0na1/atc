@@ -46,6 +46,7 @@
   ],
   "denyHosts": [],
 
+  "webSearch": true,
   "respectGitignore": true,
   "safeMode": true,
 

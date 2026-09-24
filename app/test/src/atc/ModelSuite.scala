@@ -151,7 +151,7 @@ class ModelSuite extends munit.FunSuite:
           models = Map(
             "stable-alias" -> ModelConfig(
               name = Some("backend-id"),
-              webSearch = true,
+              webSearch = Some(true),
               displayName = Some("Friendly Model"),
             )
           ),
