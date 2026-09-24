@@ -625,6 +625,46 @@ the file under the private profile and check it with `icacls` on a shared machin
 occurrence, matching ujson's lookup. Writes use a temporary file and atomic replacement
 where supported, preserving POSIX permissions and resolving a configured symlink target.
 
+### Configuration reference
+
+The user-facing settings not covered by the README.
+
+**Providers.** `api` is `anthropic`, `openai-responses` (also DeepSeek and other services
+through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …) or `echo`
+(keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
+variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
+then the environment. `headers` are extra HTTP headers for every request; a value may be a
+`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
+`/clear`) for gateways that route by session, such as OpenCode
+(`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
+`headers` sets `User-Agent`.
+
+**Models.** A model is an alias with a provider-specific `name` and its own settings:
+`contextWindow` (the real window, so the conversation is compacted and trimmed to fit),
+`maxTokens`, `temperature`, `reasoning`, `efforts`, `thinking`, `reasoningSummary`,
+`webSearch`, `webSearchVersion` and `displayName`. Name a model by its alias, or
+`provider/alias` when two providers share one. A provider whose `models` is empty or absent
+lists its own, each named `provider/model-id`: the last list each provider returned is kept
+in `~/.atc/model-lists.json`, a new one is fetched in the background once a session has
+started, and a provider that cannot be reached, or whose configured key is unset, is
+skipped. Anthropic's list supplies context windows and effort levels, OpenRouter's the
+context window. Without `-m` or `model`, a session starts with the model last chosen with
+`/model`.
+
+**Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
+model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
+to `max` for OpenAI). `/effort [level]` switches the agent model's effort for the session,
+and `default` sends none.
+
+**Web search.** A model's `webSearch` turns on the provider's own search tool; the
+top-level `webSearch` does so for every model that does not set its own. It is best effort:
+when a provider rejects the tool, the model continues without it for the session.
+
+**Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
+in kitty, iTerm2, WezTerm, Ghostty and foot, a desktop notification on a local machine, the
+bell otherwise), `system`, `terminal`, `bell` or `off`. An alert waits ten seconds for
+input, or comes at once when the terminal reports that it lost focus.
+
 ### File rules and command patterns
 
 Each file rule has a `path` pattern and may specify `access` (`none|read|write`),

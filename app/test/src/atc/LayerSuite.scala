@@ -115,7 +115,7 @@ class LayerSuite extends munit.FunSuite:
     assert(alone.perm(".env").classified) // but its protections are in force
     assertEquals(alone.settings.mode, Some("full"))
     assert(alone.settings.safeMode && alone.settings.respectGitignore)
-    assert(ModelCatalog.from(alone.settings).models.nonEmpty)
+    assert(ModelCatalog.from(alone.settings).discoverable.nonEmpty, "its providers list their models")
     // add the starting project config and the project becomes workable
     // (what that config contains is the next test)
     val opened = World(global = Config.globalTemplate, project = Config.projectTemplate)

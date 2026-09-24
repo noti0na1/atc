@@ -1,7 +1,4 @@
 {
-  "model": "chat",
-  "classifiedModel": "local",
-
   "files": [
     { "path": ".", "access": "write" },
     { "path": "./.git", "access": "read" },
@@ -48,7 +45,5 @@
 
   "webSearch": true,
   "respectGitignore": true,
-  "safeMode": true,
-
-  "instructions": "Match the conventions of the surrounding code. Run the project's build and tests before reporting that the work is done."
+  "safeMode": true
 }

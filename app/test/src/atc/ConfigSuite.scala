@@ -116,13 +116,9 @@ class ConfigSuite extends munit.FunSuite:
     val start = upickle.default.read[Config](ujson.read(Config.globalTemplate))
     assert(start.providers.nonEmpty)
     assert(start.providers.forall((_, p) => p.api.exists(_.nonEmpty)), start.toString)
-    assert(start.providers.exists((_, p) => p.models.nonEmpty), "at least one provider must be usable as it stands")
-    val catalog = ModelCatalog.from(start)
-    assert(catalog.models.forall(_.modelId.nonEmpty))
-    assert(catalog.labels.distinct == catalog.labels, s"ambiguous aliases: ${catalog.labels}")
-    // the roles it names have to resolve
-    start.model.foreach(catalog.find)
-    start.classifiedModel.foreach(catalog.find)
+    assert(start.providers.forall((_, p) => p.models.isEmpty), "each provider lists its own models")
+    assertEquals(start.model, None, "no model is named before one is listed")
+    assertEquals(start.classifiedModel, None, "a classified model is chosen deliberately")
 
   // ── parsing a single file ───────────────────────────────────────
 
@@ -394,11 +390,6 @@ class ConfigSuite extends munit.FunSuite:
     val json = Config.globalTemplate
     val c = upickle.default.read[Config](ujson.read(json))
     assert(c.providers.nonEmpty, "template should define providers")
-    val catalog = ModelCatalog.from(c)
-    assert(catalog.models.size >= 4, catalog.labels.toString)
-    // the roles the template names must resolve
-    c.model.foreach(catalog.find)
-    c.classifiedModel.foreach(catalog.find)
     assert(c.files.nonEmpty, "template should define file rules")
 
   // ── editing a config in place (`/model` remembers the choice) ───
@@ -468,9 +459,9 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(ujson.read(out)("providers")("p")("models")("model")("name").str, "m }, \" { [")
     // the whole template survives a round trip with only the value changed
     val template = Config.projectTemplate
-    val edited = Config.withTopLevel(template, "model", ujson.Str("gpt"))
-    assertEquals(edited, template.replace("\"model\": \"chat\"", "\"model\": \"gpt\""))
-    assertEquals(upickle.default.read[Config](ujson.read(edited)).model, Some("gpt"))
+    val edited = Config.withTopLevel(template, "safeMode", ujson.False)
+    assertEquals(edited, template.replace("\"safeMode\": true", "\"safeMode\": false"))
+    assertEquals(upickle.default.read[Config](ujson.read(edited)).safeMode, false)
 
   test("withTopLevel rejects text that is not a JSON object"):
     intercept[IllegalArgumentException](Config.withTopLevel("[1, 2]", "model", ujson.Str("x")))
