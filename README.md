@@ -496,7 +496,8 @@ and the configured permissions.
 
 ## The terminal
 
-`/help` lists the slash commands. Ctrl-C interrupts the turn, Ctrl-O shows folded output
+`/help` lists the slash commands, and typing `/` lists them under the prompt (↑/↓ select,
+Tab fills in, Enter runs). Ctrl-C interrupts the turn, Ctrl-O shows folded output
 and reasoning in full, Shift-Tab cycles the mode, and Shift+Enter adds a line. While the
 agent is working, type a correction and press Enter: it reaches the agent before its next
 tool call. Sessions are saved when you leave, and the next start in the same directory

@@ -46,7 +46,7 @@ final class Commands(app: App):
         true
 
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
-    case Cmd.Help => tui.showHelp(SlashCommand.values.toList.map(command => command.usage -> command.help))
+    case Cmd.Help => tui.showHelp(SlashCommand.table)
     case Cmd.Model => modelCommands.switchModel(arg)
     case Cmd.ClassifiedModel => modelCommands.switchClassified(arg)
     case Cmd.Models => modelCommands.show()

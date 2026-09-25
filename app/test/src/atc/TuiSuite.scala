@@ -303,3 +303,30 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(pending("val x = 1\nx + 1", block = true), Some(0))
     assertEquals(pending("val x = 1\n", block = true), None)
     assertEquals(pending("", block = true), None)
+
+  private def commandRows =
+    List("/model [ref]" -> "choose a model", "/models" -> "list models", "/mode [name]" -> "change mode")
+
+  test("matchingCommands: a single word starting with / lists the names it starts, case-insensitively"):
+    assertEquals(PromptReader.matchingCommands("/", commandRows), commandRows)
+    assertEquals(
+      PromptReader.matchingCommands("/MODE", commandRows).map(_._1),
+      List("/model [ref]", "/models", "/mode [name]")
+    )
+    assertEquals(PromptReader.matchingCommands("/models", commandRows).map(_._1), List("/models"))
+    assertEquals(PromptReader.matchingCommands("/x", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("/model ", commandRows), Nil) // arguments: Tab completion instead
+    assertEquals(PromptReader.matchingCommands("/mo\nx", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("model", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("", commandRows), Nil)
+
+  test("renderCommands: aligned rows cut to the width, scrolled to keep the selection in view"):
+    def plain(selected: Int, width: Int, height: Int) =
+      PromptReader.renderCommands(commandRows, selected, ">", width, height).toString.split("\n").toList
+    assertEquals(
+      plain(0, 80, 5),
+      List("> /model [ref]  choose a model", "  /models       list models", "  /mode [name]  change mode"),
+    )
+    assertEquals(plain(2, 80, 2), List("  /models       list models", "> /mode [name]  change mode"))
+    assertEquals(plain(0, 80, 2).head, "> /model [ref]  choose a model")
+    assert(plain(1, 12, 5).forall(_.length <= 11))

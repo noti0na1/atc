@@ -52,6 +52,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   def completions: List[String] => List[String] = prompt.completions
   def completions_=(value: List[String] => List[String]): Unit = prompt.completions = value
 
+  /** The commands listed under a prompt holding a partial command (see [[PromptReader.commandList]]). */
+  def commandList: List[(String, String)] = prompt.commandList
+  def commandList_=(value: List[(String, String)]): Unit = prompt.commandList = value
+
   // ── state ─────────────────────────────────────────────────────────
 
   /** Set while an agent turn is running; Ctrl-C sets it. */

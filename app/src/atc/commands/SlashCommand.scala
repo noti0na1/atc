@@ -40,6 +40,9 @@ object SlashCommand:
   /** The names, in `/help` order, for Tab completion (aliases are accepted but not offered). */
   def names: List[String] = values.toList.map(_.name)
 
+  /** Usage and description of each command, as `/help` and the prompt's command list show them. */
+  def table: List[(String, String)] = values.toList.map(command => command.usage -> command.help)
+
   /** The command a typed line names (case-insensitively), with its argument:
     * the rest of the line, trimmed. `Left(typed)` when nothing answers to it. */
   def parse(line: String): Either[String, (SlashCommand, String)] =

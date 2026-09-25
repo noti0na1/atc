@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.{Agent, AgentEnvironment, InputPredictor, TurnOutcome}
-import atc.commands.Commands
+import atc.commands.{Commands, SlashCommand}
 import atc.config.{Config, Configuration}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -130,6 +130,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   private val commands = Commands(this)
   tui.completions = commands.complete
+  tui.commandList = SlashCommand.table
 
   // ── running ───────────────────────────────────────────────────────
 

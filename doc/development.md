@@ -1046,6 +1046,16 @@ cancels block input. During a turn, a separate reader collects corrections and u
 draft text and handles escape sequences, stopping on timeout or EOF. Menu reads pause that
 reader.
 
+While the main prompt holds a single word starting with `/`, `PromptReader` lists the matching
+`SlashCommand.table` rows in JLine's `post` area under the buffer, with an exact name
+preselected. It sets `post` in a `redisplay` override, leaves it to other users (completion
+lists, history search) while they hold it, and skips it in the final display `doCleanup` draws.
+↑/↓ move the selection, Tab fills in the name (and a space for commands with arguments), and
+Enter replaces the word with the selected name before accepting. A line that ↑/↓ recalled from
+history is not listed until it is edited, so the arrows keep browsing history. Answers, block
+input and dumb terminals get no list. Enter runs the selection, so no alias may be a prefix
+of another command's name.
+
 During a turn, Enter submits a correction and unsent text is shown in the status line.
 Bracketed pastes are collected without submitting individual lines. The status line uses
 JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
