@@ -1,21 +1,24 @@
 package atc
 
-import atc.host.{CommandLine, Processes}
+import atc.host.{CommandLine, OutputBuffer, Processes}
+
+import java.util.concurrent.{CompletableFuture, TimeUnit}
+import java.util.regex.Pattern
 import scala.jdk.CollectionConverters.*
 
 class ProcessesSuite extends munit.FunSuite:
   test("waiting for output rechecks buffered text before sleeping and wakes on exit"):
-    val buffer = Processes.TailBuffer(64)
-    val pattern = java.util.regex.Pattern.compile("ready")
+    val buffer = OutputBuffer.Tail(64)
+    val pattern = Pattern.compile("ready")
     assertEquals(buffer.consumeThrough(pattern), None)
     // Output can arrive after readUntil's first check but before it starts waiting.
     buffer.append("ready\ntail")
-    val done = java.util.concurrent.CompletableFuture[Option[String]]()
+    val done = CompletableFuture[Option[String]]()
     val waiter = Thread(() => { done.complete(buffer.awaitMatch(pattern, 10000)); () })
     waiter.setDaemon(true)
     waiter.start()
     try
-      assertEquals(done.get(2, java.util.concurrent.TimeUnit.SECONDS), Some("ready"))
+      assertEquals(done.get(2, TimeUnit.SECONDS), Some("ready"))
       assertEquals(buffer.take(), "\ntail")
     finally
       waiter.interrupt()
@@ -31,7 +34,7 @@ class ProcessesSuite extends munit.FunSuite:
     assert(result.stderr.contains("truncated"), result.stderr.takeRight(100))
 
   test("tail output coalesces fragmented appends and truncates only past the cap"):
-    val buffer = Processes.TailBuffer(64)
+    val buffer = OutputBuffer.Tail(64)
     val text = (0 until 64).map(i => ('a' + i % 26).toChar).mkString
     text.foreach(char => buffer.append(char.toString))
 
@@ -51,7 +54,7 @@ class ProcessesSuite extends munit.FunSuite:
   test("tail output preserves consume and take semantics across physical chunks"):
     val chunkSize = 8 * 1024
     val cap = chunkSize + 808
-    val buffer = Processes.TailBuffer(cap)
+    val buffer = OutputBuffer.Tail(cap)
     buffer.append("a" * chunkSize)
     List("b" * 400, "b" * 408).foreach(buffer.append)
     assertEquals(buffer.retainedChunkCount, 2)

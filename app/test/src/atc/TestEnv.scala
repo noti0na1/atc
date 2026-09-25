@@ -4,8 +4,9 @@ import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.sandbox.{ReplSession, SandboxConfig}
+import atc.sandbox.{ReplSession, Sandbox, SandboxConfig}
 
+import java.io.IOException
 import java.nio.file.{Files, Path}
 import scala.collection.mutable.ListBuffer
 
@@ -14,8 +15,7 @@ import scala.collection.mutable.ListBuffer
   * TODO updates are captured. Optionally opens sandbox REPL sessions on it.
   *
   * The `IOCap` for direct host calls is constructed here (its constructor is
-  * `private[atc]`); it is only a label, so any instance will do.
-  */
+  * `private[atc]`); it is only a label, so any instance will do. */
 final class TestEnv(
   mkRules: Path => List[FileRule] = TestEnv.defaultRules,
   commands: List[String] = List("echo"),
@@ -35,7 +35,9 @@ final class TestEnv(
     requests += r
     onRequest(r)
     decisions match
-      case d :: rest => decisions = rest; d
+      case d :: rest =>
+        decisions = rest
+        d
       case Nil => Decision.Deny
 
   val policy: Policy = Policy(mkRules(root), commands, hosts, prompter, denyCommands, denyHosts)
@@ -85,14 +87,20 @@ final class TestEnv(
     override def commandOutput(text: String): Unit = liveCommandOut.synchronized(liveCommandOut.append(text))
 
   val llm: HostLlm = new HostLlm:
-    def chat(m: String): String = { chats += m; s"normal:$m" }
-    def classifiedChat(m: String): String = { classifiedChats += m; s"safe:$m" }
+    def chat(m: String): String =
+      chats += m
+      s"normal:$m"
+    def classifiedChat(m: String): String =
+      classifiedChats += m
+      s"safe:$m"
 
   val ui: HostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       questions += ((question, options, multiple))
       answers match
-        case a :: rest => answers = rest; a
+        case a :: rest =>
+          answers = rest
+          a
         case Nil => None
     def showTodos(items: List[Todo]): Unit = shownTodos = items
 
@@ -120,14 +128,15 @@ final class TestEnv(
   def scalaString(value: Any): String = ScalaSource.stringLiteral(String.valueOf(value))
 
   def clearOutput(): Unit =
-    agentOut.clear(); userOut.clear()
+    agentOut.clear()
+    userOut.clear()
 
   /** Re-install this env's host as the sandbox implementation. The installed
     * host is process-global (one sandbox per JVM), so a suite that keeps more
     * than one session alive must activate the right env before evaluating.
     * Otherwise a session picks up another env's host when its `api` object is
     * first forced, and its effects land in the wrong temp root. */
-  def activate(): Unit = atc.sandbox.Sandbox.installHost(host)
+  def activate(): Unit = Sandbox.installHost(host)
 
   /** Open a sandbox session on this host (installs it as the sandbox API). */
   def newSession(
@@ -148,7 +157,7 @@ object TestEnv:
     try
       Files.createSymbolicLink(link, target)
       true
-    catch case _: java.io.IOException | _: UnsupportedOperationException | _: SecurityException => false
+    catch case _: IOException | _: UnsupportedOperationException | _: SecurityException => false
 
   /** The working directory is writable; nothing else is accessible. */
   val defaultRules: Path => List[FileRule] = root => List(FileRule(PathPattern(".", root), Some(Access.Write), None))

@@ -7,10 +7,10 @@ import atc.llm.{Msg, NativeTurn, ToolCall, ToolResult}
 class ContextManagerSuite extends munit.FunSuite:
   test("context cuts retain task constraints alongside the latest request"):
     val manager = ContextManager()
-    val model = ContextManager.ModelContext("m", "p", "m", Some(1000))
+    val model = ModelContext("m", "p", "m", Some(1000))
     val history = List(Msg.User("original goal"), Msg.Assistant("x" * 6000, Nil, None), Msg.User("continue"))
     val notes = "Goal: finish the change. Constraint: preserve the public API. Remaining: run tests."
-    val result = manager.prepareWithContext(10, history, model, notes)
+    val result = manager.prepare(10, history, model, notes)
     assertEquals(result.dropped, 2)
     val text = result.history.head.asInstanceOf[Msg.User].text
     assert(text.contains(notes), text)
@@ -59,7 +59,7 @@ class ContextManagerSuite extends munit.FunSuite:
     val manager = ContextManager()
     val model = ModelContext("m", "p", "p/m")
     val history = List(user("abcd"), assistant("abcdefgh"))
-    val prepared = manager.prepare(10, history, model)
+    val prepared = manager.prepare(10, history, model, "")
     assertEquals(prepared.history, history)
     assertEquals(prepared.estimatedInput, 21L)
     assertEquals(prepared.calibratedInput, 21L)
@@ -73,7 +73,7 @@ class ContextManagerSuite extends munit.FunSuite:
     val model = ModelContext("small", "p", "p/small", contextWindow = Some(400))
     val history = List(user("q1"), assistant("x" * 1600), user("q2"), assistant("done"))
 
-    val first = manager.prepare(0, history, model)
+    val first = manager.prepare(0, history, model, "")
     assertEquals(first.dropped, 2)
     assertEquals(first.totalDropped, 2)
     assertEquals(first.history.tail, history.drop(3))
@@ -84,7 +84,7 @@ class ContextManagerSuite extends munit.FunSuite:
     assertEquals(first.warnings, List(AgentMessages.contextDroppedWarning("small", 400, 2)))
 
     // A later cut reports the conversation-wide total, not merely this round's count.
-    val second = manager.prepare(0, history, model)
+    val second = manager.prepare(0, history, model, "")
     assertEquals(second.dropped, 2)
     assertEquals(second.totalDropped, 4)
     assertEquals(second.history.head, Msg.User(s"${AgentMessages.contextCutNotice(4)}\n\nq2"))
@@ -107,10 +107,10 @@ class ContextManagerSuite extends munit.FunSuite:
       600,
       Some(600),
     )
-    assertEquals(manager.prepare(500, Nil, model).warnings, List(expected))
-    assertEquals(manager.prepare(500, Nil, model).warnings, Nil)
+    assertEquals(manager.prepare(500, Nil, model, "").warnings, List(expected))
+    assertEquals(manager.prepare(500, Nil, model, "").warnings, Nil)
     manager.beginTurn()
-    assertEquals(manager.prepare(500, Nil, model).warnings, List(expected))
+    assertEquals(manager.prepare(500, Nil, model, "").warnings, List(expected))
 
   test("calibration follows provider counts, clamps extremes, and resets for a model change"):
     val manager = ContextManager()

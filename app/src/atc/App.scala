@@ -1,21 +1,22 @@
 package atc
 
-import atc.SlashCommand as Cmd
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, TurnOutcome}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, TurnOutcome}
+import atc.commands.Commands
 import atc.config.{Config, Configuration}
-import atc.host.{Host, HostLlm, HostOutput, HostUi}
+import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.ui.{Ansi, Notifier, Tui}
+import atc.ui.{Notifier, Tui}
 
 import java.nio.file.Path
+import java.util.Locale
 
 /** The running application: wires configuration, models, permission policy,
   * host, sandbox, agent loop and terminal UI together, then runs either one
-  * non-interactive turn (`-p`) or the interactive loop. The slash commands
-  * live in the `*Commands` classes and [[ProvidersMenu]]. */
+  * non-interactive turn (`-p`) or the interactive loop. [[Commands]] runs the
+  * slash commands. */
 final class App(args: Cli.Args, val tui: Tui):
   val cwd: Path = args.cwd
 
@@ -54,7 +55,7 @@ final class App(args: Cli.Args, val tui: Tui):
   private def withClockPaused[T](body: => T): T = sandbox.withClockPaused(body)
 
   private val output: HostOutput = new HostOutput:
-    override def fileChanged(change: atc.host.FileChange): Unit = tui.fileChanged(change)
+    override def fileChanged(change: FileChange): Unit = tui.fileChanged(change)
     def print(agentText: String, userText: String): Unit =
       sandbox.session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
@@ -120,27 +121,15 @@ final class App(args: Cli.Args, val tui: Tui):
 
   /** Show the model, its effort, the mode and the directory in the status line. */
   def updateStatus(): Unit =
-    val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)
+    val directory = Option(cwd.getFileName).fold(PlatformPath.display(cwd))(_.toString)
     val effort = agent.model.effort.fold("")(e => s" ($e)")
     tui.setContext(models.catalog.label(models.catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
   updateStatus()
 
   // ── commands ──────────────────────────────────────────────────────
 
-  val modelCommands: ModelCommands = ModelCommands(this)
-  private val sessionCommands = SessionCommands(this)
-  private val statusCommands = StatusCommands(this)
-  private val providersMenu = ProvidersMenu(this)
-
-  tui.completions = {
-    case _ :: Nil => SlashCommand.names
-    case "/model" :: _ :: Nil => models.catalog.labels
-    case "/effort" :: _ :: Nil => modelCommands.effortChoices
-    case "/classifiedmodel" :: _ :: Nil => models.catalog.labels :+ "off"
-    case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
-    case "/perms" :: _ :: Nil => List("revoke")
-    case _ => Nil
-  }
+  private val commands = Commands(this)
+  tui.completions = commands.complete
 
   // ── running ───────────────────────────────────────────────────────
 
@@ -162,10 +151,10 @@ final class App(args: Cli.Args, val tui: Tui):
         case None =>
           banner()
           models.catalog.refresh()
-          if tui.menusAvailable then sessionCommands.offerResume()
+          if tui.menusAvailable then commands.sessionCommands.offerResume()
           sandbox.warm() // after the resume offer: restoring would only discard it
           interactive()
-          if tui.menusAvailable then sessionCommands.saveOnExit()
+          if tui.menusAvailable then commands.sessionCommands.saveOnExit()
           0
     finally
       predictor.invalidate()
@@ -179,7 +168,7 @@ final class App(args: Cli.Args, val tui: Tui):
       List(
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
-        "directory" -> App.pretty(cwd),
+        "directory" -> PlatformPath.display(cwd),
       ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model)),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
         ++ Option.when(predictor.enabled)("Tab or → accept the suggested next request")).mkString(" · "),
@@ -224,8 +213,8 @@ final class App(args: Cli.Args, val tui: Tui):
           running = false
         case Some(line) if line.trim.isEmpty => ()
         // Typed out of habit; not listed in /help.
-        case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(java.util.Locale.ROOT)) => running = false
-        case Some(line) if line.trim.startsWith("/") => running = command(line.trim)
+        case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(Locale.ROOT)) => running = false
+        case Some(line) if line.trim.startsWith("/") => running = commands.run(line.trim)
         case Some(line) => runTurn(line)
 
   /** The input prompt names the mode unless it is the full one. */
@@ -233,55 +222,12 @@ final class App(args: Cli.Args, val tui: Tui):
     case Mode.Full => "> "
     case m => s"${m.label} > "
 
-  /** Handle a slash command line; returns false to quit. */
-  private def command(line: String): Boolean =
-    SlashCommand.parse(line) match
-      case Left(typed) =>
-        tui.error(s"unknown command $typed (try /help)")
-        true
-      case Right((Cmd.Quit, _)) => false
-      case Right((cmd, arg)) =>
-        try dispatch(cmd, arg)
-        catch
-          case scala.util.control.NonFatal(error) =>
-            tui.error(Option(error.getMessage).getOrElse(error.getClass.getSimpleName))
-            Debug.trace(error)
-        true
-
-  /** What each command does; the table of commands is [[SlashCommand]]. */
-  private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
-    case Cmd.Help => tui.showHelp(SlashCommand.values.toList.map(command => command.usage -> command.help))
-    case Cmd.Model => modelCommands.switchModel(arg)
-    case Cmd.ClassifiedModel => modelCommands.switchClassified(arg)
-    case Cmd.Models => modelCommands.show()
-    case Cmd.Effort => modelCommands.switchEffort(arg)
-    case Cmd.Providers => providersMenu.run()
-    case Cmd.Mode => sessionCommands.switchMode(arg)
-    case Cmd.Perms => statusCommands.permissions(arg)
-    case Cmd.Config => statusCommands.showConfig()
-    case Cmd.Interface => tui.println(Prompts.interfaceSource)
-    case Cmd.Run => sessionCommands.run(arg)
-    case Cmd.New => sessionCommands.newSession()
-    case Cmd.Reset => sessionCommands.reset()
-    case Cmd.Clear => sessionCommands.clear()
-    case Cmd.Compact => sessionCommands.compact(arg)
-    case Cmd.Todos => tui.showTodosNow(host.currentTodos)
-    // Both commands display model-generated process names, so strip terminal controls.
-    case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
-    case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
-    case Cmd.Cost => statusCommands.showCost()
-    case Cmd.Output => tui.showOutput(arg)
-    case Cmd.Task => statusCommands.showTask()
-    case Cmd.Save => sessionCommands.save(arg)
-    case Cmd.Resume => sessionCommands.resume(arg)
-    case Cmd.Quit => () // `command` ends the loop instead
-
 object App:
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
 
   /** Bare lines that quit like `/quit`: what shells and editors use. */
-  val QuitWords: Set[String] = Set(":q", "exit", "quit")
+  private val QuitWords: Set[String] = Set(":q", "exit", "quit")
 
   /** A scripted turn has nobody to answer permission pop-ups. Fail closed
     * without reading stdin unless the caller explicitly chose `--approve-all`. */
@@ -296,10 +242,3 @@ object App:
           "non-interactive run cannot ask for permission; configure a standing grant or use --approve-all in a trusted setup"
         )
     else request => interactive(request)
-
-  /** A path for display: under `~` when inside the home directory. */
-  def pretty(p: Path): String =
-    val home = PlatformPath.userHome
-    if p == home then "~"
-    else if p.startsWith(home) then "~/" + PlatformPath.portable(home.relativize(p))
-    else PlatformPath.portable(p)

@@ -2,14 +2,17 @@ package atc
 
 import atc.perms.*
 import atc.platform.{Platform, PlatformPath}
+
 import java.nio.file.{Files, Path}
+import scala.collection.mutable
+import scala.util.matching.Regex
 
 class PolicySuite extends munit.FunSuite:
 
   val root: Path = Files.createTempDirectory("atc-policy").toRealPath()
 
   test("access comparisons evaluate receiver and argument once in order"):
-    val evaluated = collection.mutable.ListBuffer[Access]()
+    val evaluated = mutable.ListBuffer[Access]()
     def record(access: Access): Access =
       evaluated += access
       access
@@ -144,7 +147,7 @@ class PolicySuite extends munit.FunSuite:
     val commands = List("one", "two", "three", "four", "five")
     intercept[SecurityException](policy.requestExec(ScopeId.Base, commands, "run the task"))
     assertEquals(policy.openScopeCount, 0)
-    assertEquals(policy.base.commands, Nil)
+    assertEquals(policy.sessionGrants, Nil)
     assert(commands.forall(command => !policy.commandAllowed(ScopeId.Base, command)))
     assertEquals(policy.decisionsSince(0).map(_._1), List(feedback))
 
@@ -153,7 +156,7 @@ class PolicySuite extends munit.FunSuite:
     assert(!policy.commandAllowed(scope, "five"))
     policy.closeScope(scope)
     assertEquals(prompter.asked.size, 2)
-    assertEquals(policy.base.commands, Nil)
+    assertEquals(policy.sessionGrants, Nil)
 
   test("feedback on file and network requests leaves grants and scopes unchanged"):
     val feedback = Decision.Revise("Use a different resource.")
@@ -163,8 +166,7 @@ class PolicySuite extends munit.FunSuite:
     intercept[SecurityException](policy.requestNet(ScopeId.Base, List("example.com"), "fetch"))
     assertEquals(policy.effective(ScopeId.Base, path).access, Access.None)
     assert(!policy.hostAllowed(ScopeId.Base, "example.com"))
-    assertEquals(policy.base.fileGrants, Nil)
-    assertEquals(policy.base.hosts, Nil)
+    assertEquals(policy.sessionGrants, Nil)
     assertEquals(policy.openScopeCount, 0)
     assertEquals(policy.decisionsSince(0).map(_._1), List(feedback, feedback))
 
@@ -327,6 +329,13 @@ class PolicySuite extends munit.FunSuite:
     assert(GlobMatcher.matchesHost("API.GitHub.com", "*.github.com"))
     assert(!GlobMatcher.matchesHost("github.com", "*.github.com"))
 
+  test("a bracketed host name is not resolved through DNS"):
+    assertEquals(GlobMatcher.normalizeHost("[localhost]"), "localhost")
+    assert(!GlobMatcher.matchesHost("[localhost]", "127.0.0.1"))
+    assertEquals(GlobMatcher.normalizeHost("[cafe]"), "cafe")
+    assertEquals(GlobMatcher.normalizeHost("[::1]"), "0:0:0:0:0:0:0:1")
+    assertEquals(GlobMatcher.normalizeHost("::FFFF:127.0.0.1"), "127.0.0.1")
+
   test("direct glob matching preserves the previous regex semantics"):
     def strings(alphabet: List[Char], maxLength: Int): List[String] =
       def exact(length: Int): List[String] =
@@ -336,18 +345,14 @@ class PolicySuite extends munit.FunSuite:
 
     val patterns = strings(List('a', '*', '.', '\\', '\n'), 3)
     val values = strings(List('a', 'b', '.', '\\', '\n', '\r', '\u0085', '\u2028', '\u2029'), 3)
-    patterns.foreach { pattern =>
-      val reference = scala.util.matching.Regex(
-        pattern.split("\\*", -1).map(scala.util.matching.Regex.quote).mkString(".*")
-      )
-      values.foreach { value =>
+    patterns.foreach: pattern =>
+      val reference = Regex(pattern.split("\\*", -1).map(Regex.quote).mkString(".*"))
+      values.foreach: value =>
         assertEquals(
           GlobMatcher.matches(value, pattern),
           reference.matches(value),
           s"value ${value.map(c => f"U+${c.toInt}%04X")} pattern ${pattern.map(c => f"U+${c.toInt}%04X")}",
         )
-      }
-    }
 
   test("configPerm memoizes per path, inherits from the parent directory, and clears on reset"):
     val p = Policy(

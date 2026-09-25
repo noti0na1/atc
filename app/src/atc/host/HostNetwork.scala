@@ -1,7 +1,9 @@
 package atc.host
 
 import atc.lib.*
+import atc.perms.GlobMatcher
 
+import java.io.InputStream
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse as JHttpResponse}
 import java.nio.charset.StandardCharsets
@@ -29,9 +31,9 @@ private[host] trait HostNetwork:
     .build().nn
 
   private def requireAllowedHost(net: Network, uri: URI, originalUrl: String): Unit =
-    val host = Option(uri.getHost).map(Host.normalizeHost(_)).getOrElse {
-      throw SecurityException(s"Invalid URL (no host): $originalUrl")
-    }
+    val host = Option(uri.getHost)
+      .map(GlobMatcher.normalizeHost)
+      .getOrElse(throw SecurityException(s"Invalid URL (no host): $originalUrl"))
     policy.hostDenied(host) match
       case Some(pattern) =>
         throw SecurityException(
@@ -84,12 +86,12 @@ private[host] trait HostNetwork:
     * failure observable. The resulting `Try` is consumed only inside another
     * classified value. */
   private def resolveSecretHeaders(headers: Map[String, Classified[String]]): Try[Map[String, String]] =
-    headers.iterator.foldLeft(Try(Map.empty[String, String])) { case (result, (name, classified)) =>
-      for
-        resolved <- result
-        value <- ClassifiedImpl.unwrap(classified)
-      yield resolved.updated(name, value)
-    }
+    headers.foldLeft(Try(Map.empty[String, String])):
+      case (result, (name, classified)) =>
+        for
+          resolved <- result
+          value <- ClassifiedImpl.unwrap(classified)
+        yield resolved.updated(name, value)
 
   private def requestBody(
     builder: HttpRequest.Builder,
@@ -105,15 +107,12 @@ private[host] trait HostNetwork:
 
   /** Consume a response through a bounded stream. `ofString`/`ofByteArray`
     * buffer without a limit and let an allowed peer exhaust the process heap. */
-  private def responseBody(response: JHttpResponse[java.io.InputStream], url: String): String =
-    Using.resource(response.body.nn) { input =>
+  private def responseBody(response: JHttpResponse[InputStream], url: String): String =
+    Using.resource(response.body.nn): input =>
       val body = input.readNBytes(Host.HttpMaxResponseBytes + 1).nn
       if body.length > Host.HttpMaxResponseBytes then
-        throw RuntimeException(
-          s"HTTP response from $url exceeded the ${Host.HttpMaxResponseBytes}-byte limit"
-        )
+        throw RuntimeException(s"HTTP response from $url exceeded the ${Host.HttpMaxResponseBytes}-byte limit")
       String(body, StandardCharsets.UTF_8)
-    }
 
   private def send(
     prepared: Prepared,

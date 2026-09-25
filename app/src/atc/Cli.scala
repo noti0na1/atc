@@ -20,17 +20,7 @@ private[atc] object Cli:
     version: Boolean = false,
   )
 
-  private val FlagsWithValues = Set(
-    "-c",
-    "--config",
-    "-C",
-    "--cwd",
-    "-m",
-    "--model",
-    "-p",
-    "--prompt",
-    "--mode",
-  )
+  private val FlagsWithValues = Set("-c", "--config", "-C", "--cwd", "-m", "--model", "-p", "--prompt", "--mode")
 
   /** Parse first, then resolve paths once. In particular, `-c extra.json -C
     * project` and `-C project -c extra.json` have identical meaning. */
@@ -63,9 +53,8 @@ private[atc] object Cli:
 
   private def path(value: String): Path =
     val expanded = PlatformPath.expandHome(value)
-    PlatformPath.validationError(expanded).foreach(reason =>
+    PlatformPath.validationError(expanded).foreach: reason =>
       throw IllegalArgumentException(s"Invalid Windows path ${ScalaSource.stringLiteral(value)}: $reason")
-    )
     Paths.get(PlatformPath.native(expanded)).nn
 
   /** Validate paths only for actions that use them, so `--help` and
@@ -77,9 +66,8 @@ private[atc] object Cli:
       if !Files.isDirectory(args.cwd) then
         throw IllegalArgumentException(s"Working directory is not a directory: ${args.cwd}")
     if !args.help && !args.version && !args.init && !args.initGlobal then
-      args.config.foreach { config =>
+      args.config.foreach: config =>
         if !Files.exists(config) then throw IllegalArgumentException(s"Config file does not exist: $config")
         if !Files.isRegularFile(config) then
           throw IllegalArgumentException(s"Config path is not a regular file: $config")
-      }
     args

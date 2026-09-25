@@ -1,8 +1,10 @@
-package atc
+package atc.commands
 
+import atc.App
+import atc.lib.TaskNotes
 import atc.llm.TokenUsage
 import atc.perms.SessionGrant
-import atc.ui.Tui
+import atc.ui.Format
 
 /** `/perms`, `/config`, `/cost` and `/task`: what the session has been
   * granted, is configured with, has spent and is working on. */
@@ -44,9 +46,17 @@ final class StatusCommands(app: App):
     val keys = app.configuration.keys
     if keys.sources.nonEmpty then
       tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
-    tui.println(
-      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput} autoCompactThreshold=${config.autoCompactThreshold} compactKeepRatio=${config.compactKeepRatio} notifications=${config.notifications}"
+    val settings = List(
+      "safeMode" -> config.safeMode,
+      "executionTimeoutMs" -> config.executionTimeoutMs.getOrElse("none"),
+      "maxToolCalls" -> config.maxToolCalls,
+      "respectGitignore" -> config.respectGitignore,
+      "predictInput" -> config.predictInput,
+      "autoCompactThreshold" -> config.autoCompactThreshold,
+      "compactKeepRatio" -> config.compactKeepRatio,
+      "notifications" -> config.notifications,
     )
+    tui.println(settings.map((key, value) => s"$key=$value").mkString(" "))
     tui.println(s"open permission scopes: ${policy.openScopeCount}")
 
   /** `/cost`: token usage in total and, when there is more than one purpose, by purpose. */
@@ -57,16 +67,16 @@ final class StatusCommands(app: App):
     if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
     val context = agent.contextUsage
     val window = context.window.fold(" (no contextWindow configured for this model)")(_ => "")
-    tui.println(s"${Tui.contextUsage(context.tokens, context.window)} estimated for the next request$window")
+    tui.println(s"${Format.contextUsage(context.tokens, context.window)} estimated for the next request$window")
 
   /** `/task`: the agent's task notes. */
   def showTask(): Unit =
     val notes = app.host.currentTaskNotes
-    if notes == atc.lib.TaskNotes() then tui.info("No task notes yet.")
+    if notes == TaskNotes() then tui.info("No task notes yet.")
     else
       if notes.goal.nonEmpty then tui.println(s"Goal: ${notes.goal}")
-      List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
-        .filter(_._2.nonEmpty).foreach((label, values) =>
-          tui.println(s"$label:")
-          values.foreach(value => tui.println(s"  - $value"))
-        )
+      val lists =
+        List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
+      lists.filter(_._2.nonEmpty).foreach: (label, values) =>
+        tui.println(s"$label:")
+        values.foreach(value => tui.println(s"  - $value"))

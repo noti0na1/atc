@@ -2,12 +2,14 @@ package atc.llm
 
 import atc.config.ModelSpec
 
+import java.util.Locale
+
 /** A tool the model may call. `parametersJson` is a JSON-schema object. */
-case class ToolSpec(name: String, description: String, parametersJson: String)
+final case class ToolSpec(name: String, description: String, parametersJson: String)
 
-case class ToolCall(id: String, name: String, arguments: String)
+final case class ToolCall(id: String, name: String, arguments: String)
 
-case class ToolResult(
+final case class ToolResult(
   callId: String,
   output: String,
   isError: Boolean,
@@ -20,7 +22,7 @@ case class ToolResult(
   * items). Reused only by the exact model endpoint that produced it; another
   * model using the same wire protocol rebuilds the turn from the neutral
   * fields. This matters for model-bound data such as encrypted reasoning. */
-case class NativeTurn(providerKey: String, modelRef: String, payload: Any):
+final case class NativeTurn(providerKey: String, modelRef: String, payload: Any):
   def isFor(key: String, ref: String): Boolean = providerKey == key && modelRef == ref
 
   /** Cache the rendered size of `payload`. The context-window estimator revisits
@@ -39,7 +41,7 @@ enum Msg:
     * context-cut boundaries and transcript accounting. */
   case Continuation(text: String)
 
-case class TokenUsage(input: Long = 0, output: Long = 0, cacheRead: Long = 0):
+final case class TokenUsage(input: Long = 0, output: Long = 0, cacheRead: Long = 0):
   def +(o: TokenUsage): TokenUsage = TokenUsage(input + o.input, output + o.output, cacheRead + o.cacheRead)
 
 /** Why a provider stopped producing the current assistant turn.
@@ -65,7 +67,7 @@ object CompletionStop:
 
   /** Normalize a provider's raw reason at the adapter boundary. */
   def fromReason(reason: String): CompletionStop =
-    val normalized = reason.trim.toLowerCase(java.util.Locale.ROOT).replace('-', '_')
+    val normalized = reason.trim.toLowerCase(Locale.ROOT).replace('-', '_')
     if ResumeReasons.contains(normalized) then CompletionStop.Resume
     else if TruncatedReasons.contains(normalized) then CompletionStop.Truncated
     else if BlockedReasons.contains(normalized) then CompletionStop.Blocked
@@ -77,7 +79,7 @@ object CompletionStop:
     case CompletionStop.Complete if paused => CompletionStop.Resume
     case other => other
 
-case class Completion(
+final case class Completion(
   text: String,
   toolCalls: List[ToolCall],
   native: Option[NativeTurn],
@@ -89,7 +91,7 @@ case class Completion(
 type SystemPrompt = String
 
 /** What a one-shot [[ChatModel.simple]] call returned, with what it cost. */
-case class Reply(text: String, usage: TokenUsage)
+final case class Reply(text: String, usage: TokenUsage)
 
 /** Thrown when the user cancels a streaming completion. */
 class CancelledException extends RuntimeException("cancelled")
@@ -157,7 +159,7 @@ trait ChatModel:
 object ChatModel:
   /** The client for one configured model, chosen by its provider's `api`. */
   def create(spec: ModelSpec): ChatModel =
-    spec.api.trim.toLowerCase(java.util.Locale.ROOT) match
+    spec.api.trim.toLowerCase(Locale.ROOT) match
       case "anthropic" | "claude" => AnthropicModel(spec)
       case "openai-responses" | "responses" => OpenAIResponsesModel(spec)
       case "openai" | "openai-chat" | "chat" => OpenAIChatModel(spec)

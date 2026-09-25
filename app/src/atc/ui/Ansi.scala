@@ -1,5 +1,7 @@
 package atc.ui
 
+import scala.util.matching.Regex
+
 /** The terminal escape sequences the UI writes, by hand: JLine's `toAnsi`
   * would rewrite box-drawing glyphs (into the DEC charset or plain ASCII).
   * The named codes are the SGR parameters the front-end uses, by role. */
@@ -25,7 +27,7 @@ object Ansi:
   def styled(s: String, codes: Int*): String = if s.isEmpty then s else sgr(codes*) + s + Reset
 
   /** Matches one SGR sequence. */
-  val Sgr = """\u001b\[[0-9;]*m""".r
+  val Sgr: Regex = """\u001b\[[0-9;]*m""".r
 
   /** Strip terminal control from untrusted text (model prose, program output,
     * file content, paths): C0 controls except `\n` and `\t`, DEL, C1, and the

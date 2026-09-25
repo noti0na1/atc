@@ -2,14 +2,15 @@ package atc.host
 
 import atc.lib.ProcessResult
 
+import java.io.{IOException, InputStream}
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
+import java.util.regex.Pattern
 import scala.jdk.CollectionConverters.*
 
 /** Running external processes with bounded, deadlock-free output capture. */
 object Processes:
   private val MaxStreamChars = 8 * 1024 * 1024
-  private val TruncationMarker = "\n...[truncated: output exceeded 8 MiB cap]..."
   /** A command still running after this long has its output shown live from then on. */
   val LiveAfterMs = 1000L
   /** How much of a command's early output is kept to show when it goes live (the tail). */
@@ -24,145 +25,6 @@ object Processes:
   trait LiveOutput:
     def begin(): Unit
     def output(text: String): Unit
-
-  /** A bounded text buffer fed by a drain thread and read by the agent. With
-    * `keepHead` the first `cap` characters are kept and the rest dropped,
-    * which suits a foreground command whose first megabytes carry the
-    * diagnostics; otherwise the oldest text is dropped, which suits a
-    * long-running process whose recent output matters. Reads may consume, so
-    * an interactive session sees each chunk once. */
-  private[atc] sealed trait OutputBuffer:
-    def append(text: String): Unit
-    /** The unread text, left in place. */
-    def peek: String
-    /** The unread text, consumed. */
-    def take(): String
-    /** The first `n` unread characters, consumed. */
-    def consume(n: Int): String
-    /** The unread text up to and including the first match of `pattern`, consumed; `None`
-      * (nothing consumed) when it does not match. One critical section: a tail buffer
-      * dropping its front between a peek and a consume would shift the offsets. */
-    def consumeThrough(pattern: java.util.regex.Pattern): Option[String] = synchronized:
-      val m = pattern.matcher(peek)
-      if m.find() then Some(consume(m.end())) else None
-    /** Whether the cap ever dropped text (reported once, in `marker`). */
-    def marker: String
-    /** Set once the process has exited and its output has all landed (`end()`). */
-    private var ended = false
-    /** Check for a match and begin waiting under the same lock as append/end,
-      * so output arriving just before the wait cannot lose its notification. */
-    def awaitMatch(pattern: java.util.regex.Pattern, ms: Long): Option[String] = synchronized:
-      consumeThrough(pattern).orElse {
-        if !ended then wait(math.max(1L, ms))
-        consumeThrough(pattern)
-      }
-    def end(): Unit = synchronized:
-      ended = true
-      notifyAll()
-
-  private object OutputBuffer:
-    def apply(cap: Int, keepHead: Boolean): OutputBuffer =
-      if keepHead then new HeadBuffer(cap) else new TailBuffer(cap)
-
-  /** Keeps the first `cap` characters (head mode). */
-  private final class HeadBuffer(cap: Int) extends OutputBuffer:
-    private val sb = StringBuilder()
-    private var truncated = false
-    def append(text: String): Unit = synchronized:
-      val room = cap - sb.length
-      if room > 0 then sb.append(text.take(room))
-      if text.length > room then truncated = true
-      notifyAll()
-    def peek: String = synchronized(sb.toString)
-    def take(): String = synchronized:
-      val s = sb.toString
-      sb.clear()
-      s
-    def consume(n: Int): String = synchronized:
-      val end = math.min(n, sb.length)
-      val s = sb.substring(0, end)
-      sb.delete(0, end)
-      s
-    def marker: String = synchronized(if !truncated then "" else TruncationMarker)
-
-  /** Keeps the last `cap` characters (tail mode) in bounded-size chunks, so
-    * dropping the front is a constant-time list removal rather than a
-    * full-buffer shift. Small appends share a chunk: a process producing one
-    * character at a time therefore cannot turn the character cap into millions
-    * of retained `String` objects. */
-  private[atc] final class TailBuffer(cap: Int) extends OutputBuffer:
-    private val MaxChunkChars = 8 * 1024
-    private val chunkChars = math.max(1, math.min(cap, MaxChunkChars))
-    private val chunks = java.util.ArrayDeque[java.lang.StringBuilder]()
-    /** Characters already dropped from the front of the first chunk. */
-    private var headSkip = 0
-    /** Total retained characters, excluding [[headSkip]]. */
-    private var length = 0
-    private var truncated = false
-    def append(text: String): Unit = synchronized:
-      var offset = 0
-      while offset < text.length do
-        val last = chunks.peekLast()
-        val chunk =
-          if last != null && last.length < chunkChars then last
-          else
-            val fresh = java.lang.StringBuilder(chunkChars)
-            chunks.addLast(fresh)
-            fresh
-        val copied = math.min(chunkChars - chunk.length, text.length - offset)
-        chunk.append(text, offset, offset + copied)
-        offset += copied
-        length += copied
-        while length > cap do
-          val first = chunks.peekFirst().nn
-          val firstLen = first.length - headSkip
-          val excess = length - cap
-          if firstLen <= excess then
-            chunks.removeFirst()
-            length -= firstLen
-            headSkip = 0
-            truncated = true
-          else
-            headSkip += excess
-            length -= excess
-            truncated = true
-      notifyAll()
-    def peek: String = synchronized:
-      val out = java.lang.StringBuilder(length + headSkip)
-      chunks.asScala.foreach(c => out.append(c))
-      val s = out.toString
-      if headSkip == 0 then s else s.substring(headSkip)
-    def take(): String = synchronized:
-      val s = peek
-      chunks.clear()
-      headSkip = 0
-      length = 0
-      s
-    def consume(n: Int): String = synchronized:
-      val out = java.lang.StringBuilder(math.min(n, length))
-      var remaining = n
-      while remaining > 0 && !chunks.isEmpty do
-        val first = chunks.peekFirst().nn
-        val avail = first.length - headSkip
-        if avail <= remaining then
-          out.append(first, headSkip, first.length)
-          chunks.removeFirst()
-          headSkip = 0
-          length -= avail
-          remaining -= avail
-        else
-          out.append(first.substring(headSkip, headSkip + remaining))
-          headSkip += remaining
-          length -= remaining
-          remaining = 0
-      out.toString
-    def marker: String = synchronized(
-      if !truncated then "" else "\n...[older output dropped: exceeded 8 MiB cap]...\n"
-    )
-
-    /** Exposed only for a focused invariant test: retained storage must be
-      * bounded by chunks, not by the number of append calls. */
-    private[atc] def retainedChunkCount: Int = synchronized(chunks.size)
 
   /** The gate between the draining threads and the live view: text is held
     * back until `goLive()` (keeping at most the last [[LiveBacklogChars]]),
@@ -209,7 +71,7 @@ object Processes:
         stdin.write(text.getBytes(StandardCharsets.UTF_8))
         stdin.flush()
       catch
-        case e: java.io.IOException =>
+        case e: IOException =>
           throw RuntimeException(
             s"could not write to '$line' (exited? ${exitCode.fold("no")(c => s"yes, code $c")}): ${e.getMessage}"
           )
@@ -217,7 +79,7 @@ object Processes:
       if !stdinClosed then
         stdinClosed = true
         try stdin.close()
-        catch case _: java.io.IOException => ()
+        catch case _: IOException => ()
 
     /** Unread stdout, consumed; "" when there is none. */
     def read(): String = stdoutBuf.take()
@@ -227,7 +89,8 @@ object Processes:
       if texts.lengthIs == 1 then texts.head
       else
         stageLines.zip(texts).zipWithIndex.collect {
-          case ((l, t), i) if t.nonEmpty => s"[stage ${i + 1}: $l]\n" + (if t.endsWith("\n") then t else t + "\n")
+          case ((stageLine, text), index) if text.nonEmpty =>
+            s"[stage ${index + 1}: $stageLine]\n" + (if text.endsWith("\n") then text else text + "\n")
         }.mkString
 
     /** Wait until `regex` matches the unread stdout (returns the text up to and
@@ -235,7 +98,7 @@ object Processes:
       * `timeoutMs` passes; the latter two throw `RuntimeException` carrying what
       * did arrive (left unread, so `read()` can still fetch it). */
     def readUntil(regex: String, timeoutMs: Long): String =
-      val pattern = java.util.regex.Pattern.compile(regex)
+      val pattern = Pattern.compile(regex)
       val started = System.nanoTime()
       def tryMatch(): Option[String] = stdoutBuf.consumeThrough(pattern)
       var found = tryMatch()
@@ -259,10 +122,9 @@ object Processes:
     /** Wait (at most `timeoutMs`) for every stage to exit; whether they did. */
     def awaitExit(timeoutMs: Long): Boolean =
       val started = System.nanoTime()
-      procs.foreach { p =>
+      procs.foreach: process =>
         val remaining = math.max(0L, timeoutMs - (System.nanoTime() - started) / 1_000_000L)
-        if p.isAlive then p.waitFor(remaining, TimeUnit.MILLISECONDS)
-      }
+        if process.isAlive then process.waitFor(remaining, TimeUnit.MILLISECONDS)
       !isAlive
 
     /** Let the drains deliver the last chunks; then everything unread, consumed. */
@@ -280,7 +142,7 @@ object Processes:
 
     def goLive(): Unit = gate.foreach(_.goLive())
 
-    private def descendants(): List[java.lang.ProcessHandle] =
+    private def descendants(): List[ProcessHandle] =
       procs.flatMap { process =>
         val stream = process.descendants().nn
         try stream.iterator().nn.asScala.toList
@@ -308,7 +170,7 @@ object Processes:
   object ManagedProcess:
     /** Every started, not yet exited process tree of this JVM: killed at
       * shutdown so an agent's dev server cannot outlive atc. */
-    private val live = java.util.concurrent.ConcurrentHashMap.newKeySet[ManagedProcess]().nn
+    private val live = ConcurrentHashMap.newKeySet[ManagedProcess]().nn
     java.lang.Runtime.getRuntime.nn.addShutdownHook(Thread(() => live.forEach(_.kill())))
 
     /** Start the stages (one `ProcessBuilder` each; the caller may already have
@@ -346,49 +208,44 @@ object Processes:
       if stdin.isEmpty then
         if closeStdinAfter then m.closeStdin()
       else
-        val feeder = Thread(() =>
+        daemon: () =>
           try m.send(stdin)
           catch case _: RuntimeException => ()
           finally if closeStdinAfter then m.closeStdin()
-        )
-        feeder.setDaemon(true)
-        feeder.start()
-      def drainer(stream: java.io.InputStream, into: OutputBuffer): Thread =
-        Thread(() =>
-          val text = TextSink { decoded =>
+      def drainer(stream: InputStream, into: OutputBuffer): Thread =
+        daemon: () =>
+          val text = TextSink: decoded =>
             into.append(decoded)
             gate.foreach(_.feed(decoded))
-          }
-          val buf = new Array[Byte](8192)
+          val bytes = new Array[Byte](8192)
           try
-            var n = stream.read(buf)
-            while n >= 0 do
-              text.write(buf, 0, n)
-              n = stream.read(buf)
-          catch case _: java.io.IOException => ()
+            var count = stream.read(bytes)
+            while count >= 0 do
+              text.write(bytes, 0, count)
+              count = stream.read(bytes)
+          catch case _: IOException => ()
           finally
             text.finish()
             try stream.close()
-            catch case _: java.io.IOException => ()
-        )
+            catch case _: IOException => ()
       m.drains = drainer(procs.last.getInputStream.nn, m.stdoutBuf) ::
-        procs.zip(m.stderrBufs).map((p, b) => drainer(p.getErrorStream.nn, b))
-      m.drains.foreach { t =>
-        t.setDaemon(true); t.start()
-      }
-      val watcher = Thread(() =>
-        procs.foreach(p =>
-          try p.waitFor()
+        procs.zip(m.stderrBufs).map((process, buffer) => drainer(process.getErrorStream.nn, buffer))
+      daemon: () =>
+        procs.foreach: process =>
+          try process.waitFor()
           catch case _: InterruptedException => ()
-        )
         m.drains.foreach(_.join(5000))
         m.stdoutBuf.end() // wakes a `readUntil` that is waiting for output that will never come
         ManagedProcess.live.remove(m)
         onExit(m.exitCode.getOrElse(-1))
-      )
-      watcher.setDaemon(true)
-      watcher.start()
       m
+
+    /** Start `body` on a new daemon thread. */
+    private def daemon(body: Runnable): Thread =
+      val thread = Thread(body)
+      thread.setDaemon(true)
+      thread.start()
+      thread
 
   /** Start `pb`, capture both streams (capped), enforce the timeout; with `live`,
     * show the output as it comes once the command has run for [[LiveAfterMs]].
@@ -417,10 +274,9 @@ object Processes:
         m.goLive()
         if !m.awaitExit(timeoutMs - firstWait) then
           val (out, err) = m.tails
+          val stderr = if err.isEmpty then "" else s"\n[stderr]\n$err"
           throw RuntimeException(
-            s"Process '$name' timed out after ${timeoutMs}ms (raise it with ExecOptions(timeoutMs = ...)); output so far:\n$out${
-                if err.isEmpty then "" else s"\n[stderr]\n$err"
-              }"
+            s"Process '$name' timed out after ${timeoutMs}ms (raise it with ExecOptions(timeoutMs = ...)); output so far:\n$out$stderr"
           )
       m.result()
     catch

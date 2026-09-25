@@ -9,7 +9,6 @@ object Resources:
   /** The UTF-8 content of a bundled resource, or `None` when it is absent
     * (running from a classpath the build did not produce). */
   def text(path: String): Option[String] =
-    Option(getClass.getResourceAsStream(path)).map { in =>
+    Option(getClass.getResourceAsStream(path)).map: in =>
       try String(in.readAllBytes(), StandardCharsets.UTF_8)
       finally in.close()
-    }

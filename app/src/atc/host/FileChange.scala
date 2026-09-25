@@ -1,10 +1,11 @@
 package atc.host
 
 import atc.TextFiles
+
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
-import scala.util.control.NonFatal
 import scala.util.Using
+import scala.util.control.NonFatal
 
 /** A bounded preview of an unclassified file operation, for the terminal only. */
 final case class FileChange(path: String, summary: String, preview: String)

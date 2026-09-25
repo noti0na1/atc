@@ -1,17 +1,21 @@
-package atc
+package atc.commands
 
+import atc.{App, Debug, Models}
 import atc.config.{Config, ModelSpec, Origin}
 import atc.llm.ChatModel
+import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
+import java.util.Locale
+import scala.util.Try
 
 /** `/model`, `/models`, `/effort` and `/classifiedmodel`: which models the
   * agent uses, and what happens to them when the configuration changes. */
 final class ModelCommands(app: App):
   import app.{agent, models, tui}
 
-  /** One line per model: its selectable name, friendly name (or `provider/model-id`
-    * fallback, left out when that is the name already), and the role it currently plays. */
+  /** One line per model: its selectable name, its friendly name (else `provider/model-id`,
+    * left out when that is the name already) and the role it plays now. */
   private def row(spec: ModelSpec): String =
     val marks = List(
       Option.when(agent.model.ref == spec.ref)("agent"),
@@ -42,17 +46,16 @@ final class ModelCommands(app: App):
 
   /** `/model`: pick from the list, or switch to the named one. */
   def switchModel(arg: String): Unit =
-    choose(arg, "model", models.describe(agent.model)) { spec =>
+    choose(arg, "model", models.describe(agent.model)): spec =>
       agent.model = models.client(spec)
       Models.rememberLast(spec.ref)
       app.updateStatus()
       app.predictor.start()
       tui.success(s"model -> ${models.describe(agent.model)}" + remember("model", Some(spec)))
-    }
 
   /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   def switchClassified(arg: String): Unit =
-    if Set("off", "none").contains(arg.trim.toLowerCase(java.util.Locale.ROOT)) then
+    if Set("off", "none").contains(arg.trim.toLowerCase(Locale.ROOT)) then
       agent.classifiedModel = None
       app.predictor.start()
       tui.success(
@@ -60,19 +63,18 @@ final class ModelCommands(app: App):
       )
     else
       val current = agent.classifiedModel.map(models.describe).getOrElse("(none)")
-      choose(arg, "classified model", current) { spec =>
+      choose(arg, "classified model", current): spec =>
         val m = models.client(spec)
         agent.classifiedModel = Some(m)
         app.predictor.start()
         tui.success(s"classified model -> ${models.describe(m)}" + remember("classifiedModel", Some(spec)))
-      }
 
   /** Shared by the two switches: an argument names a model, no argument opens
     * the picker; the current one is reported when nothing is chosen. */
   private def choose(arg: String, what: String, current: String)(use: ModelSpec => Unit): Unit =
     if arg.nonEmpty then
       try use(models.catalog.find(arg))
-      catch case e: IllegalArgumentException => tui.error(e.getMessage)
+      catch case e: IllegalArgumentException => tui.error(Debug.message(e))
     else
       pick(s"Choose the $what") match
         case Some(spec) => use(spec)
@@ -91,7 +93,7 @@ final class ModelCommands(app: App):
     if choices.isEmpty then tui.info(s"${model.ref} takes no reasoning effort")
     else
       val chosen =
-        if arg.nonEmpty then Some(arg.toLowerCase(java.util.Locale.ROOT))
+        if arg.nonEmpty then Some(arg.toLowerCase(Locale.ROOT))
         else tui.choose(s"Choose the reasoning effort of ${model.ref}", choices)
       chosen match
         case None => tui.info(s"effort: $current (${choices.mkString(" | ")})")
@@ -103,7 +105,7 @@ final class ModelCommands(app: App):
 
   /** The models the session or the config uses, with the role each plays. */
   def inUse: List[(ModelSpec, String)] =
-    def spec(ref: String) = scala.util.Try(models.catalog.find(ref)).toOption
+    def spec(ref: String) = Try(models.catalog.find(ref)).toOption
     val settings = models.configuration.settings
     spec(agent.model.ref).map(_ -> "the agent model").toList ++
       agent.classifiedModel.flatMap(m => spec(m.ref)).map(_ -> "the classified model") ++
@@ -116,14 +118,13 @@ final class ModelCommands(app: App):
     models.reload()
     val next = models.catalog
     def moved(m: ChatModel): ChatModel =
-      if scala.util.Try(next.find(m.ref)).isSuccess then m
+      if Try(next.find(m.ref)).isSuccess then m
       else
         val provider = m.ref.takeWhile(_ != '/')
-        next.configured.find(s => s.provider == provider && s.modelId == m.modelId).fold(m) { spec =>
+        next.configured.find(s => s.provider == provider && s.modelId == m.modelId).fold(m): spec =>
           val renamed = models.client(spec)
           renamed.effort = m.effort.filter(renamed.efforts.contains).orElse(renamed.effort)
           renamed
-        }
     val agentModel = moved(agent.model)
     if agentModel ne agent.model then
       agent.model = agentModel
@@ -141,7 +142,7 @@ final class ModelCommands(app: App):
     val cwd = app.cwd
     def show(p: Path): String =
       val abs = p.toAbsolutePath.nn.normalize.nn
-      if abs.startsWith(cwd) then cwd.relativize(abs).toString else App.pretty(abs)
+      if abs.startsWith(cwd) then cwd.relativize(abs).toString else PlatformPath.display(abs)
     Some(Config.projectPath(cwd)).filter(Files.isRegularFile(_)) match
       case None => ""
       case Some(path) =>
@@ -159,9 +160,9 @@ final class ModelCommands(app: App):
           s" (saved to ${show(path)}$overridden)"
         catch
           case e: Exception =>
-            tui.error(s"could not save the choice to ${show(path)}: ${e.getMessage}")
+            tui.error(s"could not save the choice to ${show(path)}: ${Debug.message(e)}")
             ""
 
 object ModelCommands:
   /** The `/effort` choice that sends no effort, leaving it to the provider. */
-  val DefaultEffort = "default"
+  private val DefaultEffort = "default"

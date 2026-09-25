@@ -63,13 +63,12 @@ class ProviderRequestSuite extends munit.FunSuite:
     }
 
   test("auxiliary chat calls honor configured output and sampling settings"):
-    withModel(_ => "application/json" -> answer) { (model, request) =>
+    withModel(_ => "application/json" -> answer): (model, request) =>
       for thinking <- List(false, true) do
         assertEquals(model.simple(None, "hello", thinking).text, "done")
         assertEquals(request()("max_completion_tokens").num, 1234.0)
         assertEquals(request()("temperature").num, 0.25)
         assert(!request().obj.contains("stream_options"))
-    }
 
   private def chunk(delta: ujson.Obj, finish: ujson.Value = ujson.Null): String = ujson.write(ujson.Obj(
     "id" -> "one",
@@ -165,22 +164,20 @@ class ProviderRequestSuite extends munit.FunSuite:
       "type" -> "function",
       "function" -> ujson.Obj("name" -> "run_scala", "arguments" -> "{\"code\":\"println(1)\"}")
     ))
-    withModel(_ => events(chunk(ujson.Obj("role" -> "assistant", "tool_calls" -> calls)), "[DONE]")) { (model, _) =>
+    withModel(_ => events(chunk(ujson.Obj("role" -> "assistant", "tool_calls" -> calls)), "[DONE]")): (model, _) =>
       val result = model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
       assertEquals(result.stop, CompletionStop.Incomplete)
       assertEquals(result.toolCalls, Nil)
       assertEquals(result.native, None)
-    }
 
   test("incomplete streams retain reported usage and do not turn reasoning into answer text"):
     val usage =
       """{"id":"one","object":"chat.completion.chunk","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":2,"total_tokens":44}}"""
-    withModel(_ => events(chunk(ujson.Obj("reasoning_content" -> "unfinished thought")), usage)) { (model, _) =>
+    withModel(_ => events(chunk(ujson.Obj("reasoning_content" -> "unfinished thought")), usage)): (model, _) =>
       val result = model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
       assertEquals(result.stop, CompletionStop.Incomplete)
       assertEquals(result.text, "")
       assertEquals(result.usage, TokenUsage(42, 2))
-    }
 
   test("deltas after the finish chunk cannot add stray answer or thinking blocks"):
     withModel(_ =>
@@ -238,14 +235,13 @@ class ProviderRequestSuite extends munit.FunSuite:
         {"id":"local","object":"model","created":1,"owned_by":"x","max_model_len":32768},
         {"id":"plain","object":"model","created":1,"owned_by":"x"},
         {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"}]}"""
-    withServer((_, _, _) => (200, "application/json", list)) { (url, requests) =>
+    withServer((_, _, _) => (200, "application/json", list)): (url, requests) =>
       val models = ChatModel.listModels(endpoint("openai", url))
       assertEquals(requests(), List("GET /models"))
       assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x"))
       assertEquals(models.map(_.settings.contextWindow.map(_.toInt)), List(Some(262144), Some(32768), None, None))
       assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None))
       assertEquals(models.head.baseUrl, Some(url))
-    }
 
   test("an Anthropic provider's models come with their input limit, effort levels and thinking support"):
     def support(on: Boolean) = s"""{"supported":$on}"""
@@ -270,7 +266,7 @@ class ProviderRequestSuite extends munit.FunSuite:
         )}},
         {"id":"claude-bare","type":"model","display_name":"Bare","created_at":"2024-01-01T00:00:00Z"}],
         "has_more":false,"first_id":"claude-new","last_id":"claude-bare"}"""
-    withServer((_, _, _) => (200, "application/json", list)) { (url, requests) =>
+    withServer((_, _, _) => (200, "application/json", list)): (url, requests) =>
       val models = ChatModel.listModels(endpoint("anthropic", url))
       assertEquals(requests(), List("GET /v1/models"))
       assertEquals(models.map(_.modelId), List("claude-new", "claude-old", "claude-bare"))
@@ -279,15 +275,14 @@ class ProviderRequestSuite extends munit.FunSuite:
       assertEquals(models.map(_.settings.efforts), List(Some(List("low", "medium", "high")), Some(Nil), None))
       assertEquals(models.map(_.settings.thinking), List(None, Some(false), None))
       assertEquals(ChatModel.create(models.head).efforts, List("low", "medium", "high"))
-    }
 
   test("a switched effort applies to the next request"):
-    withServer((_, _, _) => (200, "application/json", answer)) { (url, requests) =>
+    withServer((_, _, _) => (200, "application/json", answer)): (url, requests) =>
       val spec =
         endpoint("openai", url).copy(alias = "m", modelId = "m", settings = ModelConfig(reasoning = Some("low")))
       val model = ChatModel.create(spec)
       try
-        assertEquals(model.efforts, atc.config.Config.ReasoningEfforts)
+        assertEquals(model.efforts, ModelConfig.ReasoningEfforts)
         assertEquals(model.effort, Some("low"))
         model.simple(None, "one")
         model.effort = Some("high")
@@ -297,7 +292,6 @@ class ProviderRequestSuite extends munit.FunSuite:
         val efforts = requests().map(r => ujson.read(r.dropWhile(_ != '{')).obj.get("reasoning_effort").map(_.str))
         assertEquals(efforts, List(Some("low"), Some("high"), None))
       finally model.close()
-    }
 
   private val streamedDone =
     List(
@@ -328,11 +322,10 @@ class ProviderRequestSuite extends munit.FunSuite:
 
   test("an unrelated bad request is not retried and keeps web search on"):
     val rejection = """{"error":{"message":"messages: bad role","type":"invalid_request_error"}}"""
-    withServer((_, _, _) => (400, "application/json", rejection)) { (url, requests) =>
+    withServer((_, _, _) => (400, "application/json", rejection)): (url, requests) =>
       val model = ChatModel.create(searching(url))
       try
         intercept[Exception](model.complete("s", List(Msg.User("hi")), Nil, StreamSink(_ => ()), () => false))
         assert(model.webSearch)
         assertEquals(requests().size, 1)
       finally model.close()
-    }

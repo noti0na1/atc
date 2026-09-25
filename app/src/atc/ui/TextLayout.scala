@@ -10,7 +10,7 @@ private[atc] object TextLayout:
 
   def wrap(text: String, columns: Int): List[String] =
     val room = columns.max(2)
-    text.split("\n", -1).toList.flatMap { line =>
+    text.split("\n", -1).toList.flatMap: line =>
       if width(line) <= room then List(line)
       else
         val lines = List.newBuilder[String]
@@ -35,18 +35,15 @@ private[atc] object TextLayout:
           start = cut
           while start < plain.length && plain.charAt(start).isWhitespace do start += 1
         lines.result()
-    }
 
   /** Keep labels beside their values when there is room, otherwise place values below them. */
   def fields(rows: List[(String, String)], columns: Int): List[String] =
     val labelWidth = rows.map(row => width(row._1)).maxOption.getOrElse(0)
     val valueWidth = columns - labelWidth - 5
-    rows.flatMap { (label, value) =>
+    rows.flatMap: (label, value) =>
       if valueWidth < 28 then
         wrap(label, columns - 3).map("  " + _) ++ wrap(value, columns - 5).map("    " + _)
       else
         val prefix = "  " + label + " " * (labelWidth - width(label) + 2)
-        wrap(value, valueWidth).zipWithIndex.map((line, index) =>
-          (if index == 0 then prefix else " " * (labelWidth + 4)) + line
-        )
-    }
+        val continuation = " " * (labelWidth + 4)
+        wrap(value, valueWidth).zipWithIndex.map((line, index) => (if index == 0 then prefix else continuation) + line)

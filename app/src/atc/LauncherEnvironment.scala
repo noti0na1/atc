@@ -7,7 +7,7 @@ import java.nio.file.{Path, Paths}
   * sandbox, and child-process logic. */
 private[atc] object LauncherEnvironment:
   private val Prefix = "ATC_INTERNAL_"
-  val LibraryClasspath = Prefix + "LIB_CLASSPATH"
+  val LibraryClasspath: String = Prefix + "LIB_CLASSPATH"
 
   private val WorkingDirectory = Prefix + "LAUNCH_CWD"
   private val ArgCount = Prefix + "ARG_COUNT"
@@ -26,14 +26,13 @@ private[atc] object LauncherEnvironment:
         val count = rawCount.toIntOption.filter(n => n >= 0 && n <= MaxArguments).getOrElse(
           throw IllegalArgumentException(s"Invalid internal launcher argument count: $rawCount")
         )
-        List.tabulate(count) { index =>
+        List.tabulate(count): index =>
           val encoded = environment(ArgPrefix + index).getOrElse(
             throw IllegalArgumentException(s"Windows launcher did not provide argument $index of $count")
           )
           if !encoded.startsWith(EncodedArgSentinel) then
             throw IllegalArgumentException(s"Windows launcher provided an invalid argument $index of $count")
           encoded.drop(EncodedArgSentinel.length)
-        }
 
   /** The user's launch directory. Windows launchers may temporarily enter the
     * installation directory so Java can open jars through a legacy argv path. */

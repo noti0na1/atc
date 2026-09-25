@@ -1,8 +1,18 @@
 package atc.config
 
+import atc.Debug
+
+import upickle.default.*
+
+import java.nio.file.{Files, Path}
+import java.util.Locale
+import java.util.concurrent.CompletableFuture
+import scala.collection.mutable
+import scala.util.control.NonFatal
+
 /** One model resolved against its provider: everything a client adapter needs
   * to talk to it. */
-case class ModelSpec(
+final case class ModelSpec(
   /** The provider's name in the config (`providers` key). */
   provider: String,
   /** The model's alias within that provider (`models` key). */
@@ -23,6 +33,9 @@ case class ModelSpec(
   def ref: String = s"$provider/$alias"
   /** Optional human-facing name; model identity and lookup never use it. */
   def displayName: Option[String] = settings.displayName
+
+  /** The model `id` of this spec's provider, as the provider lists it: named by its id. */
+  def listed(id: String, settings: ModelConfig): ModelSpec = copy(alias = id, modelId = id, settings = settings)
 
   /** Redact the API key from diagnostics. */
   override def toString: String =
@@ -52,9 +65,7 @@ final class ModelCatalog(
   discover: Option[ModelSpec => List[ModelSpec]] = None,
   store: Option[ModelListStore] = None,
 ):
-  import java.util.concurrent.CompletableFuture
-
-  private def lower(s: String) = s.toLowerCase(java.util.Locale.ROOT)
+  private def lower(s: String) = s.toLowerCase(Locale.ROOT)
 
   private lazy val aliasCount: Map[String, Int] =
     configured.groupBy(m => lower(m.alias)).map((a, ms) => a -> ms.size)
@@ -64,11 +75,11 @@ final class ModelCatalog(
     discoverable.flatMap(p => store.flatMap(_.load(p)).map(p.provider -> _)).toMap
 
   /** This session's fetches by provider name, `None` for one that failed. */
-  private val fetches = scala.collection.mutable.Map[String, CompletableFuture[Option[List[ModelSpec]]]]()
+  private val fetches = mutable.Map[String, CompletableFuture[Option[List[ModelSpec]]]]()
 
   private def fetching(provider: ModelSpec): Option[CompletableFuture[Option[List[ModelSpec]]]] =
-    discover.map { list =>
-      synchronized {
+    discover.map: list =>
+      synchronized:
         fetches.getOrElseUpdate(
           provider.provider,
           CompletableFuture.supplyAsync(() =>
@@ -77,13 +88,11 @@ final class ModelCatalog(
               store.foreach(_.save(provider, models))
               Some(models)
             catch
-              case scala.util.control.NonFatal(e) =>
-                atc.Debug.log(s"could not list the models of ${provider.provider}: ${atc.Debug.describe(e)}")
+              case NonFatal(e) =>
+                Debug.log(s"could not list the models of ${provider.provider}: ${Debug.describe(e)}")
                 None
           )
         )
-      }
-    }
 
   /** The finished fetch of `provider`, if any. */
   private def fetched(provider: ModelSpec): Option[Option[List[ModelSpec]]] =
@@ -119,8 +128,7 @@ final class ModelCatalog(
         case Some((provider, id)) =>
           known(provider).flatMap(_.find(m => lower(m.alias) == id)).getOrElse {
             if fetched(provider).exists(_.isDefined) then throw unknown(reference)
-            val named = reference.trim.drop(provider.provider.length + 1)
-            provider.copy(alias = named, modelId = named)
+            provider.listed(reference.trim.drop(provider.provider.length + 1), provider.settings)
           }
         case None =>
           def matching = discoverable.flatMap(known(_).getOrElse(Nil)).filter(m => lower(m.alias) == wanted)
@@ -178,22 +186,16 @@ object ModelCatalog:
     discover: Option[ModelSpec => List[ModelSpec]] = None,
     store: Option[ModelListStore] = None,
   ): ModelCatalog =
-    val providers = config.providers.toList.sortBy(_._1).filter(_._2.enabled).map { (name, p) =>
-      val key = Config.resolveApiKey(p, keys)
-      val defaults = ModelConfig(webSearch = config.webSearch)
-      val endpoint =
-        ModelSpec(name, "", p.api.getOrElse(""), "", p.url, key, defaults, Config.resolveHeaders(p, keys))
-      (p, endpoint)
-    }
-    val configured = providers.flatMap { (p, endpoint) =>
-      p.models.toList.sortBy(_._1).filter(_._2.enabled).map((alias, m) =>
+    val defaults = ModelConfig(webSearch = config.webSearch)
+    val providers = config.providers.toList.sortBy(_._1).filter(_._2.enabled).map: (name, p) =>
+      (p, ModelSpec(name, "", p.api.getOrElse(""), "", p.url, keys.apiKey(p), defaults, keys.headers(p)))
+    val configured = providers.flatMap: (p, endpoint) =>
+      p.models.toList.sortBy(_._1).filter(_._2.enabled).map: (alias, m) =>
         endpoint.copy(
           alias = alias,
           modelId = m.name.getOrElse(alias),
           settings = m.copy(webSearch = m.webSearch.orElse(config.webSearch))
         )
-      )
-    }
     val discoverable = providers.collect {
       case (p, endpoint)
           if p.models.isEmpty && !endpoint.api.trim.equalsIgnoreCase("echo") &&
@@ -206,38 +208,27 @@ object ModelCatalog:
   * again. A list is used again only for a provider of the same name, api and url;
   * the current defaults (`webSearch`) apply to it, not the ones it was saved with.
   * A file that cannot be read or written is only a missing list. */
-final class ModelListStore(path: java.nio.file.Path):
+final class ModelListStore(path: Path):
   import ModelListStore.*
-  import upickle.default.*
 
   private def all(): Map[String, Saved] =
-    try read[Map[String, Saved]](java.nio.file.Files.readString(path).nn)
-    catch case scala.util.control.NonFatal(_) => Map.empty
+    try read[Map[String, Saved]](Files.readString(path).nn)
+    catch case NonFatal(_) => Map.empty
 
   def load(provider: ModelSpec): Option[List[ModelSpec]] =
-    all().get(provider.provider).filter(s => s.api == provider.api && s.url == provider.baseUrl).map(_.models.map {
-      m =>
-        provider.copy(alias = m.id, modelId = m.id, settings = m.settings.copy(webSearch = provider.settings.webSearch))
-    })
+    all().get(provider.provider).filter(s => s.api == provider.api && s.url == provider.baseUrl).map: saved =>
+      saved.models.map(m => provider.listed(m.id, m.settings.copy(webSearch = provider.settings.webSearch)))
 
-  def save(provider: ModelSpec, models: List[ModelSpec]): Unit = ModelListStore.synchronized {
+  def save(provider: ModelSpec, models: List[ModelSpec]): Unit = ModelListStore.synchronized:
     try
       val saved =
         Saved(provider.api, provider.baseUrl, models.map(m => Model(m.modelId, m.settings.copy(webSearch = None))))
-      val text = write(all().updated(provider.provider, saved))
-      java.nio.file.Files.createDirectories(path.getParent)
-      val temp = java.nio.file.Files.createTempFile(path.getParent, s".${path.getFileName}.", ".tmp").nn
-      try
-        java.nio.file.Files.writeString(temp, text)
-        java.nio.file.Files.move(temp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-      finally java.nio.file.Files.deleteIfExists(temp)
-    catch case scala.util.control.NonFatal(_) => ()
-  }
+      Config.replaceFile(path, write(all().updated(provider.provider, saved)), keepPermissions = false)
+    catch case NonFatal(_) => ()
 
 object ModelListStore:
-  private case class Model(id: String, settings: ModelConfig) derives upickle.default.ReadWriter
-  private case class Saved(api: String, url: Option[String], models: List[Model]) derives upickle.default.ReadWriter
+  private final case class Model(id: String, settings: ModelConfig) derives ReadWriter
+  private final case class Saved(api: String, url: Option[String], models: List[Model]) derives ReadWriter
 
   /** `~/.atc/model-lists.json`. */
-  def global: ModelListStore =
-    ModelListStore(atc.platform.PlatformPath.userHome.resolve(".atc").nn.resolve("model-lists.json").nn)
+  def global: ModelListStore = ModelListStore(Config.globalDir.resolve("model-lists.json").nn)

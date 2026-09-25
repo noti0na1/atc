@@ -104,10 +104,10 @@ class ChatGPTSuite extends munit.FunSuite:
 
   test("the browser's callback exchanges the code with its PKCE verifier and saves the tokens for the owner only"):
     val access = jwt(ujson.Obj("exp" -> expiry))
-    withServer(_ => (200, "application/json", tokenAnswer(access, "refresh-1"))) { (url, requests) =>
+    withServer(_ => (200, "application/json", tokenAnswer(access, "refresh-1"))): (url, requests) =>
       val file = tempFile()
       val auth = ChatGPTAuth(file, url, List(0))
-      scala.util.Using.resource(auth.begin()) { login =>
+      scala.util.Using.resource(auth.begin()): login =>
         assert(login.url.startsWith(s"$url/oauth/authorize?"), login.url)
         val asked = query(login.url)
         assertEquals(asked("client_id"), ChatGPTAuth.ClientId)
@@ -127,7 +127,6 @@ class ChatGPTSuite extends munit.FunSuite:
         val digest =
           java.security.MessageDigest.getInstance("SHA-256").nn.digest(exchange("code_verifier").getBytes(UTF_8))
         assertEquals(Base64.getUrlEncoder.nn.withoutPadding().nn.encodeToString(digest), asked("code_challenge"))
-      }
       val saved = auth.load().get
       assertEquals(saved.refresh, "refresh-1")
       assertEquals(saved.accountId, Some("account-1"))
@@ -138,12 +137,11 @@ class ChatGPTSuite extends munit.FunSuite:
           java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(file)),
           "rw-------"
         )
-    }
 
   test("a callback of another attempt is refused, and the address the browser ended on completes the sign-in"):
-    withServer(_ => (200, "application/json", tokenAnswer("access", "refresh"))) { (url, requests) =>
+    withServer(_ => (200, "application/json", tokenAnswer("access", "refresh"))): (url, requests) =>
       val auth = ChatGPTAuth(tempFile(), url, List(0))
-      scala.util.Using.resource(auth.begin()) { login =>
+      scala.util.Using.resource(auth.begin()): login =>
         val asked = query(login.url)
         val callback = asked("redirect_uri").replace("localhost", "127.0.0.1")
         assertEquals(visit(s"$callback?code=forged&state=other"), 400)
@@ -153,22 +151,18 @@ class ChatGPTSuite extends munit.FunSuite:
         val pasted = login.paste(s"  ${asked("redirect_uri")}?code=real&state=${asked("state")}  ")
         assertEquals(pasted.map(_.access), Right("access"))
         assertEquals(requests().filter(_.path == "/oauth/token").map(_.form("code")), List("real"))
-      }
       assert(auth.load().isDefined)
-    }
 
   test("a sign-in the user declines in the browser fails with the reason"):
-    withServer(_ => (500, "text/plain", "unexpected")) { (url, requests) =>
+    withServer(_ => (500, "text/plain", "unexpected")): (url, requests) =>
       val auth = ChatGPTAuth(tempFile(), url, List(0))
-      scala.util.Using.resource(auth.begin()) { login =>
+      scala.util.Using.resource(auth.begin()): login =>
         val asked = query(login.url)
         val callback = asked("redirect_uri").replace("localhost", "127.0.0.1")
         assertEquals(visit(s"$callback?error=access_denied&error_description=No&state=${asked("state")}"), 400)
         assertEquals(login.await(java.time.Duration.ofSeconds(5)), Some(Left("access_denied: No")))
-      }
       assert(requests().isEmpty, "no code, no exchange")
       assertEquals(auth.load(), None)
-    }
 
   // ── refreshing ──────────────────────────────────────────────────
 
@@ -180,7 +174,7 @@ class ChatGPTSuite extends munit.FunSuite:
 
   test("tokens that expire soon are refreshed and the rotated refresh token is saved"):
     val fresh = jwt(ujson.Obj("exp" -> expiry))
-    withServer(_ => (200, "application/json", tokenAnswer(fresh, "refresh-2"))) { (url, requests) =>
+    withServer(_ => (200, "application/json", tokenAnswer(fresh, "refresh-2"))): (url, requests) =>
       val file = tempFile()
       saved(file, "old", "refresh-1", expiresIn = 60_000)
       val auth = ChatGPTAuth(file, url, List(0))
@@ -192,7 +186,6 @@ class ChatGPTSuite extends munit.FunSuite:
       assertEquals(auth.load().map(_.refresh), Some("refresh-2"))
       assertEquals(auth.current().access, fresh, "fresh tokens are used as they are")
       assertEquals(requests().size, 1)
-    }
 
   test("a refresh token another process used gives way to the tokens it saved; otherwise sign in again"):
     val file = tempFile()
@@ -204,12 +197,11 @@ class ChatGPTSuite extends munit.FunSuite:
       saved(file, "old", "refresh-1", expiresIn = 0)
       assertEquals(ChatGPTAuth(file, url, List(0)).current().access, "theirs")
     }
-    withServer(_ => (400, "application/json", rejected)) { (url, _) =>
+    withServer(_ => (400, "application/json", rejected)): (url, _) =>
       saved(file, "old", "refresh-1", expiresIn = 0)
       val e = intercept[ChatGPTAuth.SignInNeeded](ChatGPTAuth(file, url, List(0)).current())
       assert(e.getMessage.contains("refresh_token_reused"), e.getMessage)
       assert(e.getMessage.contains("/providers"), e.getMessage)
-    }
 
   // ── the backend ─────────────────────────────────────────────────
 
@@ -263,7 +255,7 @@ class ChatGPTSuite extends munit.FunSuite:
   test("tool calls come from the streamed items, since the closing event carries none"):
     val call =
       """{"id":"fc","type":"function_call","status":"completed","call_id":"call-1","name":"run_scala","arguments":"{\"code\":\"1 + 1\"}"}"""
-    withServer(_ => (200, "text/event-stream", backendStream(call))) { (url, _) =>
+    withServer(_ => (200, "text/event-stream", backendStream(call))): (url, _) =>
       val file = tempFile()
       saved(file, "token", "refresh", expiresIn = 3_600_000)
       val model = ChatGPTModel(backend(url), ChatGPTAuth(file, url, List(0)))
@@ -272,10 +264,9 @@ class ChatGPTSuite extends munit.FunSuite:
         assertEquals(completion.toolCalls, List(ToolCall("call-1", "run_scala", """{"code":"1 + 1"}""")))
         assertEquals(completion.stop, CompletionStop.Complete)
       finally model.close()
-    }
 
   test("a one-shot call streams and carries instructions"):
-    withServer(_ => (200, "text/event-stream", streamed)) { (url, requests) =>
+    withServer(_ => (200, "text/event-stream", streamed)): (url, requests) =>
       val file = tempFile()
       saved(file, "token", "refresh", expiresIn = 3_600_000)
       val model = ChatGPTModel(backend(url), ChatGPTAuth(file, url, List(0)))
@@ -285,10 +276,9 @@ class ChatGPTSuite extends munit.FunSuite:
         assertEquals(body("stream"), ujson.Bool(true))
         assert(body("instructions").str.nonEmpty)
       finally model.close()
-    }
 
   test("without a sign-in a request fails before reaching the backend and says how to sign in"):
-    withServer(_ => (200, "text/event-stream", streamed)) { (url, requests) =>
+    withServer(_ => (200, "text/event-stream", streamed)): (url, requests) =>
       val model = ChatGPTModel(backend(url), ChatGPTAuth(tempFile(), url, List(0)))
       try
         val e = intercept[Exception](model.simple(Some("s"), "hello", thinking = true))
@@ -296,7 +286,6 @@ class ChatGPTSuite extends munit.FunSuite:
         assert(messages.exists(m => m != null && m.contains("/providers")), e.toString)
         assert(requests().isEmpty)
       finally model.close()
-    }
 
   test("the backend's model list gives the listed models in order with names, context windows and efforts"):
     val listed = ujson.read("""{"models":[

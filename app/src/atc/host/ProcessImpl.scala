@@ -7,7 +7,7 @@ import atc.perms.{Policy, ScopeId}
   * scope. Operations require the originating scope to remain open. */
 final class ProcessImpl(
   val id: Int,
-  private[atc] val managed: Processes.ManagedProcess,
+  private[host] val managed: Processes.ManagedProcess,
   output: HostOutput,
   val scope: ScopeId,
   policy: Policy,

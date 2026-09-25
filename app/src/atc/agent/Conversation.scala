@@ -5,18 +5,23 @@ import atc.llm.{Msg, ToolResult}
 /** Stores conversation history and pending notes, and repairs incomplete
   * message sequences after failed or interrupted rounds. */
 private[agent] final class Conversation:
+  import Conversation.*
+
   private var messages: List[Msg] = Nil
   private var pendingNotes: List[String] = Nil
   private var requests = Vector.empty[String]
 
   def history: List[Msg] = messages
+
+  /** The first user request of the conversation and up to [[RecentRequests]] recent ones. */
   def userRequests: List[String] = requests.toList
+
   def notes: List[String] = pendingNotes
 
   private def remember(input: String): Unit =
     if input.nonEmpty then
-      requests :+= input.take(8000)
-      if requests.size > 9 then requests = requests.take(1) ++ requests.takeRight(8)
+      requests :+= input.take(MaxRequestChars)
+      if requests.size > RecentRequests + 1 then requests = requests.take(1) ++ requests.takeRight(RecentRequests)
 
   def queueNote(note: String): Unit = pendingNotes :+= note
 
@@ -34,7 +39,7 @@ private[agent] final class Conversation:
       case Some(Msg.User(text)) =>
         messages = messages.init :+ Msg.User(List(text, input).filter(_.nonEmpty).mkString("\n\n"))
       case Some(_: Msg.ToolResults | _: Msg.Continuation) =>
-        append(Msg.Assistant("[paused to apply the user's update]", Nil, None))
+        append(Msg.Assistant(AgentMessages.pausedForUpdate, Nil, None))
         append(Msg.User(input))
       case _ => append(Msg.User(input))
 
@@ -51,7 +56,11 @@ private[agent] final class Conversation:
     pendingNotes = queued
     requests = inputs.toVector
 
-  /** Close whichever protocol edge a failed round left open. */
+  /** Close whichever protocol edge a failed round left open, since providers reject
+    * consecutive user messages and tool requests without matching results. Pending
+    * tool requests each get an error result; a trailing user message or continuation
+    * gets an assistant marker. A history that already ends with an assistant message
+    * or tool results needs no repair, and another assistant message would be invalid. */
   def repairAfter(error: Throwable): Unit =
     val marker = AgentMessages.turnFailed(error)
     messages.lastOption match
@@ -61,8 +70,16 @@ private[agent] final class Conversation:
         append(Msg.Assistant(marker, Nil, None))
       case _ => ()
 
-  /** Close an interrupted user/tool-result edge without creating consecutive
-    * assistant messages after a provider pause. */
+  /** Close an interrupted user/tool-result edge. A round paused by the provider
+    * already ends with an assistant message, and a second one would break the role
+    * alternation that neutral replays require. */
   def interrupt(): Unit =
     if !messages.lastOption.exists(_.isInstanceOf[Msg.Assistant]) then
       append(Msg.Assistant(AgentMessages.interrupted, Nil, None))
+
+private[agent] object Conversation:
+  /** Recent user requests kept besides the first one. */
+  val RecentRequests = 8
+
+  /** Characters kept of each remembered user request. */
+  val MaxRequestChars = 8000

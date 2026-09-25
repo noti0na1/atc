@@ -3,7 +3,7 @@ package atc.sandbox
 import atc.perms.Mode
 
 /** What one evaluation of agent code produced. */
-case class ExecutionResult(success: Boolean, output: String, error: Option[String] = None):
+final case class ExecutionResult(success: Boolean, output: String, error: Option[String] = None):
   /** What the agent gets to see. */
   def render: String =
     val parts = List(
@@ -15,8 +15,12 @@ case class ExecutionResult(success: Boolean, output: String, error: Option[Strin
     else "(failed, no output)"
 
 object ExecutionResult:
+  /** A run that failed with `error` before producing output. */
+  def failed(error: String): ExecutionResult = ExecutionResult(false, "", Some(error))
+
   private val hostFrame = """^\s+at (atc\.|java\.|jdk\.|scala\.|dotty\.|sun\.).*$""".r
   private val elided = """^\s+\.\.\. \d+ (more|elided)$""".r
+
   /** Drop stack frames that point into the host or the runtime; frames in
     * agent code (`rs$line$N`) are kept because they locate the failing line. */
   def trimStackFrames(text: String): String =
@@ -35,16 +39,22 @@ final class ExecutionClock:
   def pause(): Unit = synchronized:
     depth += 1
     if pauseStart < 0 then pauseStart = System.nanoTime()
+
   def resume(): Unit = synchronized:
     if depth > 0 then depth -= 1
     if depth == 0 && pauseStart >= 0 then
       pausedNanos += System.nanoTime() - pauseStart
       pauseStart = -1L
-  /** Nanoseconds spent paused since the last `reset()`, including an open pause. */
-  def paused: Long = synchronized { pausedNanos + (if pauseStart >= 0 then System.nanoTime() - pauseStart else 0L) }
-  def reset(): Unit = synchronized { pausedNanos = 0L; pauseStart = -1L; depth = 0 }
 
-case class SandboxConfig(
+  /** Nanoseconds spent paused since the last `reset()`, including an open pause. */
+  def paused: Long = synchronized(pausedNanos + (if pauseStart >= 0 then System.nanoTime() - pauseStart else 0L))
+
+  def reset(): Unit = synchronized:
+    pausedNanos = 0L
+    pauseStart = -1L
+    depth = 0
+
+final case class SandboxConfig(
   safeMode: Boolean = true,
   /** Which capabilities the preamble hands to the agent (see `ReplSession.preambleChunks`). */
   mode: Mode = Mode.Full,

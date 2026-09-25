@@ -6,39 +6,36 @@ import atc.perms.{Decision, Policy, ScopeId}
 import atc.platform.{Platform, PlatformPath}
 import atc.ui.Tui
 
-import java.nio.file.Files
+import java.nio.file.{Files, Path}
 
 /** What happens before a session starts: the first-run setup and the offer of
   * a project config. */
 object Setup:
-  import App.pretty
 
   /** Load the configuration, offering to write what is missing first. No
     * configuration is written without asking, and nothing is asked in a
     * scripted (`-p`) run:
     *
-    *  - no `~/.atc/config.json`: offer to write the starting config and the
-    *    key bindings beside it. Declined (or `-p`), the bundled starting config
-    *    stands in for this run.
+    *  - no `~/.atc/config.json`: offer [[FirstRun]], which sets up one provider,
+    *    or writes the starting config and key bindings for the user to edit.
+    *    Declined (or `-p`), the bundled starting config stands in for this run.
     *  - no config grants the working directory and it has no `.atc/config.json`
     *    of its own: offer to write the starting project config there (as
     *    `--init` does), and use it at once.
     *
-    * When the global config was written the program then stops (via
-    * [[App.Exit]]), so the user can fill in the keys or export them and start
-    * again. */
+    * When the user chooses to edit the starting config, the program stops after
+    * writing it (via [[App.Exit]]), so they can fill in the keys and start again. */
   def load(args: Cli.Args, tui: Tui): Configuration =
     val interactive = args.prompt.isEmpty
     val global = Config.globalPath
-    val globalKeys = global.getParent.nn.resolve(Config.KeysFile).nn
     val globalMissing = !Files.isRegularFile(global)
     // A `-c` file may define the providers itself, so only a plain start asks.
     val firstRun =
       if !globalMissing || !interactive || args.config.nonEmpty then FirstRun.Outcome.NotNow
       else
-        tui.println(s"Welcome to atc. There is no configuration at ${pretty(global)} yet.")
+        tui.println(s"Welcome to atc. There is no configuration at ${PlatformPath.display(global)} yet.")
         if tui.menusAvailable then
-          val keys = KeyBindings.load(Config.projectRoot(args.cwd).map(Config.keysPath).toList :+ globalKeys)
+          val keys = KeyBindings.load(Config.projectRoot(args.cwd).map(Config.keysPath).toList :+ Config.globalKeysPath)
           FirstRun.run(firstRunUi(tui), ProviderPreset.all, keys, ChatModel.listModels, signIn(again = false))
         else if tui.confirm("Write the starting config and key bindings there?") then
           FirstRun.Outcome.ConfigureYourself
@@ -46,24 +43,25 @@ object Setup:
     firstRun match
       case FirstRun.Outcome.ConfigureYourself =>
         val written = Config.ensureGlobal()
-        if written.nonEmpty then tui.println(s"Wrote ${written.map(pretty).mkString(" and ")}.")
+        if written.nonEmpty then tui.println(s"Wrote ${written.map(PlatformPath.display).mkString(" and ")}.")
         tui.println(
-          s"Add your providers and models to ${pretty(global)} and their API keys to ${pretty(globalKeys)} " +
+          s"Add your providers and models to ${PlatformPath.display(global)} and their API keys to ${PlatformPath.display(Config.globalKeysPath)} " +
             "(or export them in the environment), then start atc again."
         )
         throw App.Exit(0)
-      case FirstRun.Outcome.Ready(provider, key, endpoint, models, model) =>
-        for name <- provider.keyVariable; value <- key do KeyBindings.bind(globalKeys, name, value)
-        Config.writeGlobalConfig(global, List(provider))
-        ModelListStore.global.save(endpoint, models)
-        Models.rememberLast(model.ref)
+      case ready: FirstRun.Outcome.Ready =>
+        saveKeyAndModels(ready)
+        Config.writeGlobalConfig(global, List(ready.provider))
+        Models.rememberLast(ready.model.ref)
         tui.success(
-          s"Wrote ${pretty(global)}${if key.isDefined then s" and ${pretty(globalKeys)}" else ""}; " +
-            s"starting with ${model.ref}. /model switches models."
+          s"Wrote ${PlatformPath.display(global)}${
+              if ready.key.isDefined then s" and ${PlatformPath.display(Config.globalKeysPath)}" else ""
+            }; " +
+            s"starting with ${ready.model.ref}. /model switches models."
         )
       case FirstRun.Outcome.NotNow =>
         if globalMissing then
-          tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
+          tui.info("Using the built-in starting config for this run (`atc --init-global` writes it).")
     val bundledGlobal = globalMissing && firstRun == FirstRun.Outcome.NotNow
 
     def cwdReadable(c: Configuration): Boolean =
@@ -76,13 +74,15 @@ object Setup:
       if !shouldOffer then current
       else
         tui.println(
-          s"No configuration grants access to ${pretty(args.cwd)}, so the agent would have to ask for every file."
+          s"No configuration grants access to ${PlatformPath.display(args.cwd)}, so the agent would have to ask for every file."
         )
         val accepted =
-          tui.confirm(s"Write a starting project config to ${pretty(project)}? (It opens this directory to the agent)")
+          tui.confirm(
+            s"Write a starting project config to ${PlatformPath.display(project)}? (It opens this directory to the agent)"
+          )
         if !accepted then current
         else
-          val created = Config.initProject(args.cwd).map(pretty).mkString(" and ")
+          val created = Config.initProject(args.cwd).map(PlatformPath.display).mkString(" and ")
           tui.println(s"Wrote $created; edit it to change what the agent may touch here.")
           Config.load(args.cwd, args.config, bundledGlobal)
 
@@ -91,6 +91,12 @@ object Setup:
     // which the walk-up also finds) says: the new file becomes the nearest
     // project config and takes over from there.
     offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
+
+  /** Save what setting up a provider produced besides its config entry: the key
+    * the user typed, and the model list fetched with it. */
+  def saveKeyAndModels(ready: FirstRun.Outcome.Ready): Unit =
+    for name <- ready.provider.keyVariable; value <- ready.key do KeyBindings.bind(Config.globalKeysPath, name, value)
+    ModelListStore.global.save(ready.endpoint, ready.models)
 
   /** Sign in with a ChatGPT plan, keeping a sign-in already saved unless `again`. */
   def signIn(again: Boolean)(ui: FirstRun.Ui): Boolean =

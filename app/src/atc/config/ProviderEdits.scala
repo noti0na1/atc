@@ -1,11 +1,13 @@
 package atc.config
 
+import scala.collection.mutable
+
 /** The config changes `/providers` makes. Each goes to the file holding the
   * most of its path: layers merge a model entry as a whole, so writing part of
   * an entry to another file would replace the entry defined there. */
 object ProviderEdits:
   /** Set (`Some`) or remove (`None`) the member at `path`. */
-  case class Edit(path: List[String], value: Option[ujson.Value])
+  final case class Edit(path: List[String], value: Option[ujson.Value])
 
   /** A model `/providers` can offer: a configured entry, or one the provider lists. */
   enum Choice:
@@ -30,8 +32,8 @@ object ProviderEdits:
   def shortlist(providerName: String, provider: ProviderConfig, choices: List[Choice], chosen: Set[Choice])
     : List[Edit] =
     val models = List("providers", providerName, "models")
-    val taken = scala.collection.mutable.Set.from(provider.models.keys)
-    choices.flatMap {
+    val taken = mutable.Set.from(provider.models.keys)
+    choices.flatMap:
       case c @ Choice.Configured(alias, m) =>
         val on = chosen.contains(c)
         Option.when(on != m.enabled)(Edit(models :+ alias :+ "enabled", Option.when(!on)(ujson.False)))
@@ -40,7 +42,6 @@ object ProviderEdits:
         taken += alias
         Some(Edit(models :+ alias, Some(entry(alias, spec))))
       case _ => None
-    }
 
   /** An alias for a listed id: aliases cannot contain `/`, so an OpenRouter id
     * such as `vendor/model` becomes `model`, or `vendor-model` when taken. */
@@ -54,9 +55,10 @@ object ProviderEdits:
     ujson.Obj.from(
       Option.when(alias != spec.modelId)("name" -> ujson.Str(spec.modelId)).toList ++
         s.displayName.map("displayName" -> ujson.Str(_)) ++
-        s.contextWindow.map(t =>
-          "contextWindow" -> Tokens.format(t).toIntOption.fold[ujson.Value](ujson.Str(Tokens.format(t)))(ujson.Num(_))
-        ) ++
+        s.contextWindow.map { t =>
+          val short = Tokens.format(t)
+          "contextWindow" -> short.toIntOption.fold[ujson.Value](ujson.Str(short))(ujson.Num(_))
+        } ++
         s.efforts.map(e => "efforts" -> ujson.Arr.from(e.map(ujson.Str(_)))) ++
         s.thinking.map("thinking" -> ujson.Bool(_))
     )

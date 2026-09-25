@@ -96,7 +96,8 @@ requests are echoed. It needs no API key or network connection.
 |---|---|
 | `lib` | Agent-facing capability types, data types and `Interface`; compiled with capture checking |
 | `app` | Configuration, models, permissions, host operations, REPL and terminal |
-| `app` root package | `App` wires the parts together and runs the loop; `Setup` runs the first start; `Models` holds the catalog and clients; `SandboxRepl` owns the REPL session; `ModelCommands`, `ProvidersMenu`, `SessionCommands` and `StatusCommands` implement the slash commands |
+| `app` root package | `Main` and `Cli` parse the command line; `App` wires the parts together and runs the loop; `Setup` and `FirstRun` run the first start; `Models` holds the catalog and clients; `SandboxRepl` owns the REPL session |
+| `commands/` | `SlashCommand` is the table of commands; `Commands` parses, dispatches and completes them; `ModelCommands`, `ProvidersMenu`, `SessionCommands` and `StatusCommands` implement them |
 | `agent/` | Turn loop, completion decisions, history, context estimates, prompts and input prediction |
 | `config/` | Configuration layers, validation, key bindings and model catalog |
 | `host/` | File, process, network and user operations implementing `Interface` |
@@ -132,7 +133,7 @@ exit code and the size of each stream only (`toString` in `Interface.scala`), be
 snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
-traits. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
+traits; `HostPaths` holds the path resolution and permission checks they share. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
 The REPL shares library classes with the application, so calls need no serialization layer.
 
 ## Type-system background
@@ -609,7 +610,7 @@ Only explicitly defined project settings narrow a value. `executionTimeoutMs` de
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
 
-`Config.combine` first merges ordinary settings in layer order, then obtains policy
+`Configuration.combine` first merges ordinary settings in layer order, then obtains policy
 settings from granting layers and applies project restrictions. Numeric restrictions use
 minimum; enabled safety flags use logical OR. These operations are order-independent for
 narrowing layers. A field omitted from a project JSON object is not an explicit request
@@ -667,7 +668,7 @@ menus never ask.
 
 **Turning providers and models on and off.** `"enabled": false` on a provider or a model
 hides it; a disabled provider is never listed. `/providers` edits these switches and the
-model entries in place (`Config.withMember` keeps the file's formatting). Choosing models
+model entries in place (`ObjectText.withMember` keeps the file's formatting). Choosing models
 for a provider that lists its own writes the ticked ones as entries with the context
 window, efforts and display name the list reported, which makes them its shortlist;
 *Offer every model it lists* drops the entries again. A listed id with `/` gets an alias
@@ -777,9 +778,9 @@ parameter; unrelated bad requests are not retried by this fallback.
 Provider SDK request construction remains in each adapter. Shared configuration and client
 setup belong in `Providers`; model selection belongs in `ModelCatalog`.
 
-A provider's `headers` are extra HTTP headers for every request to it. `Config.resolveHeaders`
+A provider's `headers` are extra HTTP headers for every request to it. `KeyBindings.headers`
 resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
-keeps the placeholder `${ATC_SESSION}` (`Config.SessionRef`), which `Providers.headers(spec)`
+keeps the placeholder `${ATC_SESSION}` (`ProviderConfig.SessionRef`), which `Providers.headers(spec)`
 replaces per request with the conversation id, a UUID that `Agent.clear()` renews. The same
 call adds `User-Agent: atc/<version>` unless the config sets one, regardless of header-name
 case. Every adapter applies the set to both `complete` and `simple` with the params builder's
@@ -897,7 +898,7 @@ unchanged; usage is recorded separately. Before the summary request is sent, the
 is estimated against the model's input allowance, using the same output reservation as
 ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
 
-`Agent.autoCompact` runs at the top of every round, after queued input is accepted and
+`autoCompact` in `Agent`'s turn loop runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
 between tool rounds, so a long tool loop can be summarized while it runs. It never runs
 between a tool request and its results, which would make the history invalid, and never
@@ -985,12 +986,15 @@ Predictions are reduced to visible single-line text and reported separately in u
 
 ## The terminal
 
-`Tui` implements `AgentUI` and owns the turn lifecycle, status line, prose, tool blocks,
-pop-ups and TODO panel. It composes parts that live in their own files: `Screen` (writes
+`Tui` implements `AgentUI` and owns the turn lifecycle, prose, the TODO panel, input and
+the framing of pop-ups. It composes parts that live in their own files: `Screen` (writes
 that track line boundaries, styles, width, live regions and the spinner; its monitor is the
-TUI's lock), `ThinkingView` and `LiveOutput` (the reasoning window and folded tool output),
-`KeyReader` (the key thread during a turn), `PromptReader` (the JLine line reader and its
-bindings), `Menus` (jline-prompt menus) and `Alerts` (notifications and focus tracking).
+TUI's lock), `StatusLine` (the footer and the window title), `ToolBlock` (one tool call's
+block, its live output and the `/output` history), `ThinkingView` and `LiveOutput` (the
+reasoning window and folded tool output), `Dialogs` (what pop-ups show and read, through
+the jline-prompt `Menus`), `KeyReader` (the key thread during a turn), `PromptReader` (the
+JLine line reader and its bindings) and `Alerts` (notifications and focus tracking).
+`Format` holds the short number, duration and plural forms of status and summary lines.
 `Ansi` removes terminal controls from external text before display. Keep model-visible
 capture text unchanged; sanitize only at display boundaries. `TextSink` incrementally
 handles UTF-8 and BOM-marked UTF-16 process output.
@@ -1010,7 +1014,7 @@ not scroll the banner away. Its activity indicator replaces a separate spinner w
 terminal supports a status line. Idle state shows a short model, mode and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
-Every footer update goes through `Tui.drawStatus`, which flushes the terminal writer after
+Every footer update goes through `StatusLine.draw`, which flushes the terminal writer after
 JLine's `Status.update`: JLine flushes the footer text but leaves the closing
 synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honours mode 2026
 (xterm.js in VS Code, iTerm2, kitty, Ghostty, WezTerm) freezes rendering until it arrives.
@@ -1041,7 +1045,7 @@ The alert title is `atc · <directory>`. A turn's alert shows the start of its l
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
 its details, and question alerts show the question.
-`Tui.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
+`StatusLine.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
 the status refreshes, writing only changes. The previous title is pushed on xterm's title
 stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
 stack keep ATC's title until the shell sets its own.
@@ -1165,6 +1169,8 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
   terminal helpers, retained output, rendering, prediction and error reporting.
 - `ReplInterruptionSuite`: cancellation recovery in an isolated compiler process.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
+- `MainSuite`, `FirstRunSuite`, `commands.SlashCommandSuite`: command-line parsing, first-run setup and
+  slash-command parsing.
 
 `TestEnv` supplies temporary directories, scripted permissions and recording host ports.
 `ReplAssertions` checks snippets. Prefer `ProcessFixture` over host shell commands for

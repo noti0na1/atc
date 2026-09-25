@@ -20,32 +20,33 @@ class ProviderEditsSuite extends munit.FunSuite:
       |  }
       |}""".stripMargin
 
-  private def apply(t: String, edits: Edit*) = edits.foldLeft(t)((acc, e) => Config.withMember(acc, e.path, e.value))
+  private def apply(t: String, edits: Edit*) =
+    edits.foldLeft(t)((acc, e) => ObjectText.withMember(acc, e.path, e.value))
 
   test("a nested member is set, added and removed without touching the rest of the text"):
-    val off = Config.withMember(text, List("providers", "p", "models", "b", "enabled"), Some(ujson.False))
+    val off = ObjectText.withMember(text, List("providers", "p", "models", "b", "enabled"), Some(ujson.False))
     assertEquals(off, text.replace("""{ "name": "model-b" }""", """{ "name": "model-b", "enabled": false }"""))
-    assertEquals(Config.withMember(off, List("providers", "p", "models", "b", "enabled"), None), text)
-    val added = Config.withMember(text, List("providers", "p", "enabled"), Some(ujson.False))
+    assertEquals(ObjectText.withMember(off, List("providers", "p", "models", "b", "enabled"), None), text)
+    val added = ObjectText.withMember(text, List("providers", "p", "enabled"), Some(ujson.False))
     assert(added.contains("      }," + "\n      \"enabled\": false\n    }"), added)
-    val created = Config.withMember(text, List("providers", "q", "models", "x"), Some(ujson.Obj("name" -> "y")))
+    val created = ObjectText.withMember(text, List("providers", "q", "models", "x"), Some(ujson.Obj("name" -> "y")))
     assert(created.contains("""    "q": { "models": { "x": { "name": "y" } } }"""), created)
     assertEquals(ujson.read(created)("providers")("q")("models")("x")("name").str, "y")
 
   test("removing a member drops the comma next to it, wherever it stands"):
     val models = List("providers", "p", "models")
-    val noA = Config.withMember(text, models :+ "a", None)
+    val noA = ObjectText.withMember(text, models :+ "a", None)
     assertEquals(ujson.read(noA)("providers")("p")("models").obj.keySet, Set("b"))
-    val noB = Config.withMember(text, models :+ "b", None)
+    val noB = ObjectText.withMember(text, models :+ "b", None)
     assertEquals(ujson.read(noB)("providers")("p")("models").obj.keySet, Set("a"))
-    val none = Config.withMember(noA, models :+ "b", None)
+    val none = ObjectText.withMember(noA, models :+ "b", None)
     assertEquals(ujson.read(none)("providers")("p")("models").obj.size, 0)
     assert(
       noB.contains(""""a":    { "name": "model-a",  "contextWindow": "1m" }"""),
       "the kept entry keeps its spacing"
     )
     assertEquals(
-      Config.withMember(text, List("providers", "absent", "x"), None),
+      ObjectText.withMember(text, List("providers", "absent", "x"), None),
       text,
       "removing nothing changes nothing"
     )

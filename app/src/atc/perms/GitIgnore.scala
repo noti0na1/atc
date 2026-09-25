@@ -3,15 +3,14 @@ package atc.perms
 import atc.platform.{Platform, PlatformPath}
 
 import java.nio.file.{Files, Path}
-import scala.util.matching.Regex
 import scala.collection.concurrent.TrieMap
 import scala.jdk.CollectionConverters.*
+import scala.util.matching.Regex
 
-/** Whether a path is hidden from directory listings because git ignores it
-  * (config `respectGitignore`). This is *visibility*, not permission: an
-  * ignored path is left out of `ls`/`walk`/`find`/`grepRecursive`, but reading
-  * or writing it by name still works if the policy allows it.
-  */
+/** Whether a path is hidden from directory listings because git ignores it (config
+  * `respectGitignore`). This is visibility, not permission: an ignored path is left out of
+  * `ls`/`walk`/`find`/`grepRecursive`, but reading or writing it by name still works if the policy
+  * allows it. */
 trait GitIgnore:
   /** True if `p` (absolute) is ignored. */
   def ignores(p: Path): Boolean
@@ -25,9 +24,9 @@ object GitIgnore:
     * Files are read on first use and then cached for the session. */
   def apply(cwd: Path): GitIgnore = Rules(repoRoot(cwd))
 
-  /** The nearest ancestor of `dir` holding a `.git` entry, `dir` itself if
-    * there is none: a `.gitignore` above the working directory still applies. */
-  def repoRoot(dir: Path): Path =
+  /** The nearest ancestor of `dir` holding a `.git` entry, `dir` itself if there is none. A
+    * `.gitignore` above the working directory still applies. */
+  private def repoRoot(dir: Path): Path =
     def up(p: Path | Null): Option[Path] = p match
       case null => None
       case d: Path => if Files.exists(d.resolve(".git")) then Some(d) else up(d.getParent)
@@ -43,12 +42,11 @@ object GitIgnore:
       if !Files.isRegularFile(file) then Nil
       else
         try
-          Files.readAllLines(file).nn.asScala.toList.flatMap { line =>
+          Files.readAllLines(file).nn.asScala.toList.flatMap: line =>
             // A malformed pattern, such as an unbalanced character class,
             // disables its own line and not the file, as git does.
             try Rule.parse(line)
             catch case _: Exception => None
-          }
         catch case _: Exception => Nil // unreadable or not text: no rules from it
 
     /** Component by component, as git decides it: a path is ignored as soon as
@@ -69,13 +67,11 @@ object GitIgnore:
             var j = 0
             while j <= i do
               val dir = if j == 0 then root else root.resolve(rel.subpath(0, j)).nn
-              val name = slashes(rel.subpath(j, i + 1).nn)
+              val name = PlatformPath.portable(rel.subpath(j, i + 1).nn)
               for r <- rulesOf(dir) if r.matches(name, isDir) do ignored = !r.negated
               j += 1
           i += 1
         ignored
-
-    private def slashes(p: Path): String = PlatformPath.portable(p)
 
   /** One `.gitignore` line, compiled against paths relative to its own directory. */
   private final class Rule(val negated: Boolean, dirOnly: Boolean, regex: Regex):
@@ -110,8 +106,10 @@ object GitIgnore:
     private def unescapeLead(p: String): String =
       if p.startsWith("\\#") || p.startsWith("\\!") then p.drop(1) else p
 
-    /** Git glob → regex over a `/`-separated relative path: `*` and `?` stop at
-      * a separator, `**` crosses them, `[…]` is a character class. */
+    /** Git glob to regex over a `/`-separated relative path: `*` and `?` stop at a separator, `**`
+      * crosses them, `[…]` is a character class. Unlike [[atc.platform.PathGlob]] it follows git:
+      * `**` inside a name is two single stars, `\` escapes a character, an unclosed `[` is
+      * literal and braces have no meaning. */
     private def toRegex(glob: String): String =
       val out = StringBuilder()
       var i = 0

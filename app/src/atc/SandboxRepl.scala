@@ -2,11 +2,12 @@ package atc
 
 import atc.config.Config
 import atc.host.Host
+import atc.llm.CancelledException
 import atc.perms.Policy
 import atc.sandbox.{ReplSession, SandboxConfig}
 import atc.ui.Tui
 
-import java.util.concurrent.FutureTask
+import java.util.concurrent.{ExecutionException, FutureTask}
 
 /** The sandbox's REPL session. It starts on a background thread so that
   * compiling its preamble (about two seconds) overlaps the user's typing and
@@ -43,32 +44,29 @@ final class SandboxRepl(config: Config, policy: => Policy, host: => Host, tui: T
   /** Drop a session still starting in the background: a daemon thread closes it once it
     * is ready, so a mode switch does not wait for a compiler it no longer needs. */
   private def discardWarming(): Unit =
-    warming.foreach { task =>
+    warming.foreach: task =>
       warming = None
-      daemon("atc-sandbox-discard") { () =>
+      daemon("atc-sandbox-discard"): () =>
         try task.get().close()
         catch case _: Exception => ()
-      }
-    }
 
   /** The live session: the one warming in the background once it is ready (the status
     * line says so only if the wait is real), else one started here and now. */
-  def ensure(): ReplSession = live.getOrElse {
+  def ensure(): ReplSession = live.getOrElse:
     val created = warming match
       case Some(task) =>
         warming = None
         if !task.isDone then tui.status(s"starting sandbox (${policy.mode.label} mode)")
         try task.get()
-        catch case e: java.util.concurrent.ExecutionException => throw e.getCause.nn
+        catch case e: ExecutionException => throw e.getCause.nn
       case None =>
         tui.status(s"starting sandbox (${policy.mode.label} mode)")
         start()
     if tui.isInterrupted then
       created.close()
-      throw atc.llm.CancelledException()
+      throw CancelledException()
     live = Some(created)
     created
-  }
 
   /** Discard the REPL (live or still warming) and its processes, and start warming the
     * next one, so a mode switch or `/new` costs the first tool call nothing either.
@@ -81,7 +79,7 @@ final class SandboxRepl(config: Config, policy: => Policy, host: => Host, tui: T
       true
     catch
       case e: Exception =>
-        tui.error(s"$failure: ${e.getMessage}")
+        tui.error(s"$failure: ${Debug.message(e)}")
         Debug.trace(e)
         false
 

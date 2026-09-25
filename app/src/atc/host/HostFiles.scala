@@ -2,177 +2,18 @@ package atc.host
 
 import atc.{ScalaSource, TextFiles}
 import atc.lib.*
-import atc.perms.{Perm, ScopeId}
 import atc.platform.{PathGlob, PlatformPath}
 
-import java.nio.charset.StandardCharsets
-import java.nio.file.attribute.BasicFileAttributes
-import java.nio.file.{FileSystems, Files, LinkOption, Path, Paths, StandardOpenOption}
-import scala.jdk.CollectionConverters.*
-import scala.util.{Failure, Success, Try, Using}
-import scala.util.control.NonFatal
+import java.nio.file.{FileSystems, Paths}
+import java.util.regex.{Matcher, Pattern}
+import scala.collection.mutable
+import scala.util.Using
+import scala.util.matching.Regex
 
-/** Filesystem effects and file-oriented convenience operations supplied by
-  * [[Host]]. All paths pass through the same canonicalization and policy checks. */
+/** The agent-facing file operations supplied by [[Host]]. They work through
+  * [[FileEntryImpl]] handles, so every path passes the checks in [[HostPaths]]. */
 private[host] trait HostFiles:
   self: Host =>
-
-  /** Resolve a path against the host working directory and canonicalize it for
-    * policy evaluation, including symlinks and dangling write targets. */
-  private[atc] def canonical(path: String): Path =
-    val expanded = PlatformPath.expandHome(path)
-    PlatformPath.validationError(expanded).foreach(reason =>
-      throw IllegalArgumentException(s"Invalid Windows path ${ScalaSource.stringLiteral(path)}: $reason")
-    )
-    val raw = Paths.get(PlatformPath.native(expanded)).nn
-    PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
-
-  /** `operation` carries its own preposition, so that it reads as a phrase in
-    * front of the path (`read '/x'`, `running a command in '/x'`). */
-  private def denied(path: Path, operation: String, permission: Perm, hint: String): SecurityException =
-    val shown = PlatformPath.portable(path)
-    val guidance =
-      if permission.locked then
-        "The file rule is locked. Permission requests cannot widen access; the user must change the configuration."
-      else hint
-    SecurityException(
-      s"Access denied: $operation '$shown' is not permitted (current permission: ${permission.describe}). $guidance"
-    )
-
-  private[atc] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
-    requireAccess(scope, path, operation, write = false)
-
-  private[atc] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
-    requireAccess(scope, path, operation, write = true)
-
-  private def requireAccess(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
-    val permission = policy.effective(scope, path)
-    if !(if write then permission.canWrite else permission.canRead) then
-      val access = if write then "Access.Write" else "Access.Read"
-      val shown = ScalaSource.stringLiteral(PlatformPath.portable(path))
-      throw denied(path, operation, permission, s"Use requestFiles($shown, $access, reason) { ... } to ask the user.")
-    permission
-
-  private[atc] def requireNotClassified(
-    permission: Perm,
-    path: Path,
-    operation: String,
-    alternative: String
-  ): Unit =
-    if permission.classified then
-      throw SecurityException(
-        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
-      )
-
-  /** Require read access and that the content is not classified. `alternative`
-    * names what to use instead on a classified path. */
-  private[atc] def requireReadable(scope: ScopeId, path: Path, operation: String, alternative: String): Perm =
-    val permission = requireRead(scope, path, operation)
-    requireNotClassified(permission, path, operation, alternative)
-    permission
-
-  /** Require write access and that the target is not classified. */
-  private[atc] def requireWritable(
-    scope: ScopeId,
-    path: Path,
-    operation: String,
-    alternative: String = "writeClassified(path, classify(content))"
-  ): Perm =
-    val permission = requireWrite(scope, path, operation)
-    requireNotClassified(permission, path, operation, alternative)
-    permission
-
-  private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
-
-  private[host] def withFileChange[A](path: Path, operation: String)(body: => A): A =
-    val before = FileChange.snapshot(path)
-    val result = body
-    try
-      FileChange.between(display(PlatformPath.portable(path)), operation, before, FileChange.snapshot(path))
-        .foreach(output.fileChanged)
-    catch case NonFatal(error) => atc.Debug.trace(error)
-    result
-
-  private[atc] def writeFile(scope: ScopeId, path: Path, content: String, append: Boolean): Unit =
-    requireWritable(scope, path, if append then "append" else "write")
-    withFileChange(path, "updated") {
-      ensureParent(path)
-      if append then
-        Files.writeString(path, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
-      else Files.writeString(path, content, StandardCharsets.UTF_8)
-    }
-
-  private[atc] def writeFileBytes(scope: ScopeId, path: Path, content: Array[Byte]): Unit =
-    requireWritable(scope, path, "writeBytes")
-    withFileChange(path, "updated") {
-      ensureParent(path)
-      Files.write(path, content)
-    }
-    ()
-
-  private[atc] def writeClassifiedFile(scope: ScopeId, path: Path, content: Try[String]): Unit =
-    // Check the target before inspecting the classified computation. Otherwise
-    // its success or failure could become an observable bit.
-    val permission = requireWrite(scope, path, "writeClassified")
-    if !permission.classified then
-      throw SecurityException(
-        s"Access denied: '${PlatformPath.portable(path)}' is not a classified path; writing classified content there would declassify it."
-      )
-    ensureParent(path)
-    content match
-      case Success(value) =>
-        // Once the classified computation has been inspected, neither an I/O
-        // failure nor its message may escape to the agent. It would reveal a
-        // success/failure bit, and an exception can itself quote the content.
-        try Files.writeString(path, value, StandardCharsets.UTF_8)
-        catch case NonFatal(_) => classifiedSinkFailed(s"writing '$path'")
-      case Failure(_) =>
-        // Equalise the observable existence side effect with the successful
-        // branch. `exists` is available even for classified paths.
-        try
-          if !Files.exists(path) then
-            Files.createFile(path)
-            ()
-        catch case NonFatal(_) => ()
-        classifiedSinkFailed(s"writing '$path'")
-
-  /** Visible children paired with whether the original directory entry was a
-    * symlink. Policy checks use canonical paths; gitignore checks use the entry. */
-  private def visibleEntries(scope: ScopeId, dir: Path): List[(Path, Boolean)] =
-    val entries = Using.resource(Files.list(dir).nn) { stream =>
-      stream.iterator.nn.asScala.toList.sortBy(_.getFileName.toString).flatMap { entry =>
-        try
-          // Canonicalize every entry. Windows junctions/reparse points are not
-          // reported as symbolic links, but their NOFOLLOW attributes are
-          // `isOther`. Keep every final reparse point out of recursive traversal
-          // and evaluate policy on what it actually reaches.
-          val lexical = entry.toAbsolutePath.nn.normalize.nn
-          val path = PlatformPath.canonical(lexical)
-          val attributes = Files.readAttributes(entry, classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS).nn
-          val isLinkLike = attributes.isSymbolicLink || attributes.isOther
-          Option.when(!gitIgnore.ignores(entry) && policy.effective(scope, path).canRead)((path, isLinkLike))
-        catch case _: Exception => None
-      }
-    }
-    // A link beside its own target resolves to the same path: list that path once, as the plain entry.
-    val plain = entries.collect { case (path, false) => path }.toSet
-    entries.filter((path, link) => !link || !plain.contains(path)).distinctBy(_._1)
-
-  private[atc] def visibleChildren(scope: ScopeId, dir: Path): List[Path] = visibleEntries(scope, dir).map(_._1)
-
-  /** Visible descendants in pre-order. Classified trees require an explicit
-    * classified traversal, and symlinked directories are never followed. */
-  private[atc] def walkPaths(scope: ScopeId, dir: Path, intoClassified: Boolean): List[Path] =
-    iteratePaths(scope, dir, intoClassified).toList
-
-  private[host] def iteratePaths(scope: ScopeId, dir: Path, intoClassified: Boolean): Iterator[Path] =
-    def descendInto(child: Path, isLink: Boolean): Boolean =
-      !isLink && Files.isDirectory(child) && (intoClassified || !policy.effective(scope, child).classified)
-    def visit(current: Path): Iterator[Path] =
-      visibleEntries(scope, current).iterator.flatMap { (child, isLink) =>
-        Iterator.single(child) ++ (if descendInto(child, isLink) then visit(child) else Iterator.empty)
-      }
-    visit(dir)
 
   def requestFiles[T, C <: caps.CapSet](path: String)(using UserIO, FileSystem)(op: FileSystem ?=> T): T =
     requestFiles(path, Access.Read, "")(op)
@@ -192,9 +33,8 @@ private[host] trait HostFiles:
     val requestedAccess = access match
       case Access.Read => atc.perms.Access.Read
       case Access.Write => atc.perms.Access.Write
-    inScope(policy.requestFile(scopeOf(parent), canonical(path), requestedAccess, reason)) { id =>
+    inScope(policy.requestFile(scopeOf(parent), canonical(path), requestedAccess, reason)): id =>
       op(using FileSystemImpl(id, this))
-    }
 
   def access(path: String)(using fs: FileSystem): FileEntry = fs.access(path)
 
@@ -209,11 +49,10 @@ private[host] trait HostFiles:
       )
     val lines = List.newBuilder[String]
     val limited =
-      impl(fs.access(path)).scanLines("readRange", Host.CatMaxLineChars, Host.ReadRangeMaxChars) {
+      impl(fs.access(path)).scanLines("readRange", Host.CatMaxLineChars, Host.ReadRangeMaxChars):
         (line, chars, number) =>
           if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
           number < to
-      }
     if limited then lines += "[read limit reached before completing the requested range]"
     lines.result().mkString("\n")
 
@@ -222,13 +61,12 @@ private[host] trait HostFiles:
     * are kept. */
   def cat(path: String)(using fs: FileSystem, user: UserIO): Unit =
     val entry = impl(fs.access(path))
-    val kept = collection.mutable.ListBuffer[CappedLine]()
+    val kept = mutable.ListBuffer[CappedLine]()
     var lineCount = 0
-    val cut = entry.scanLines("cat", Host.CatMaxLineChars, Host.CatMaxReadChars) { (prefix, chars, number) =>
+    val cut = entry.scanLines("cat", Host.CatMaxLineChars, Host.CatMaxReadChars): (prefix, chars, number) =>
       lineCount = number
       if lineCount <= Host.CatMaxLines then kept += CappedLine(prefix, chars)
       true
-    }
     val text =
       if lineCount == 0 then "[empty file]\n"
       else
@@ -237,9 +75,9 @@ private[host] trait HostFiles:
         if lineCount <= Host.CatMaxLines && !cut then body
         else
           val next = math.min(math.max(lineCount, Host.CatMaxLines + 1), 2 * Host.CatMaxLines)
-          body +
-            s"... [${(lineCount - Host.CatMaxLines).max(0)}$more more lines ($lineCount$more in all): cat(${ScalaSource
-                .stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next) shows the next]\n"
+          val continuation = s"cat(${ScalaSource.stringLiteral(path)}, ${Host.CatMaxLines + 1}, $next)"
+          val remaining = (lineCount - Host.CatMaxLines).max(0)
+          body + s"... [$remaining$more more lines ($lineCount$more in all): $continuation shows the next]\n"
     output.print(text, text)
 
   /** Print an inclusive, one-based range, bounded like the default file preview. */
@@ -247,14 +85,13 @@ private[host] trait HostFiles:
     if from < 1 || to < from then
       throw IllegalArgumentException(s"cat: the range must satisfy 1 <= from <= to (got $from, $to)")
     val entry = impl(fs.access(path))
-    val kept = collection.mutable.ListBuffer[CappedLine]()
+    val kept = mutable.ListBuffer[CappedLine]()
     val last = to.toLong.min(from.toLong + Host.CatMaxLines - 1).toInt
     var lineCount = 0
-    val limited = entry.scanLines("cat", Host.CatMaxLineChars, Host.ReadRangeMaxChars) { (prefix, chars, number) =>
+    val limited = entry.scanLines("cat", Host.CatMaxLineChars, Host.ReadRangeMaxChars): (prefix, chars, number) =>
       lineCount = number
       if number >= from && number <= last then kept += CappedLine(prefix, chars)
       number < to && number <= last
-    }
     val text =
       if limited then numbered(kept.toList, from) + "[read limit reached before completing the requested range]\n"
       else if from > lineCount then s"[nothing to show: $path has $lineCount lines]\n"
@@ -266,18 +103,15 @@ private[host] trait HostFiles:
         else body
     output.print(text, text)
 
-  private case class CappedLine(prefix: String, chars: Long)
+  /** The retained prefix of a line and the line's full length. */
+  private final case class CappedLine(prefix: String, chars: Long)
 
   private def numbered(lines: List[CappedLine], first: Int): String =
     val result = StringBuilder()
-    var number = first
-    lines.foreach { line =>
-      val shown =
-        val omitted = line.chars - line.prefix.length
-        if omitted == 0 then line.prefix else line.prefix + s" ... [+$omitted chars]"
-      result.append(f"$number%6d\t").append(shown).append('\n')
-      number += 1
-    }
+    for (line, index) <- lines.zipWithIndex do
+      val omitted = line.chars - line.prefix.length
+      val shown = if omitted == 0 then line.prefix else line.prefix + s" ... [+$omitted chars]"
+      result.append(f"${first + index}%6d\t").append(shown).append('\n')
     result.toString
 
   def readBytes(path: String)(using fs: FileSystem): Array[Byte] = fs.access(path).readBytes()
@@ -315,11 +149,11 @@ private[host] trait HostFiles:
     * pass both counts and rewrites, so a large file is scanned once. */
   def sed(path: String, pattern: String, replacement: String)(using fs: FileSystem): Int =
     if pattern.isEmpty then throw IllegalArgumentException("sed: the pattern must not be empty")
-    val regex = java.util.regex.Pattern.compile(pattern, java.util.regex.Pattern.MULTILINE)
+    val regex = Pattern.compile(pattern, Pattern.MULTILINE)
     val entry = fs.access(path)
     val before = entry.read()
     val javaReplacement = sedReplacement(replacement)
-    val rewritten = new java.lang.StringBuffer()
+    val rewritten = StringBuffer()
     val matcher = regex.matcher(before)
     var count = 0
     while matcher.find() do
@@ -352,9 +186,9 @@ private[host] trait HostFiles:
     result.toString
 
   // TODO(safe-mode): remove with the Interface declarations once safe mode admits these methods.
-  def quote(text: String): String = java.util.regex.Pattern.quote(text).nn
+  def quote(text: String): String = Pattern.quote(text).nn
 
-  def quoteReplacement(text: String): String = java.util.regex.Matcher.quoteReplacement(text).nn
+  def quoteReplacement(text: String): String = Matcher.quoteReplacement(text).nn
 
   def replaceExact(path: String, expected: String, replacement: String)(using fs: FileSystem): Unit =
     if expected.isEmpty then throw IllegalArgumentException("replaceExact: expected text must not be empty")
@@ -406,16 +240,8 @@ private[host] trait HostFiles:
 
   def walk(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).walk().map(entry => display(entry.path))
 
-  private lazy val canonicalCwd: Path = canonical(".")
-
-  private def display(absolute: String): String =
-    val path = Paths.get(absolute).nn
-    if path == canonicalCwd then "."
-    else if path.startsWith(canonicalCwd) then PlatformPath.portable(canonicalCwd.relativize(path).nn)
-    else PlatformPath.portable(path)
-
-  private def grepEntry(entry: FileEntryImpl, operation: String, regex: scala.util.matching.Regex): List[GrepMatch] =
-    val matches = collection.mutable.ListBuffer[GrepMatch]()
+  private def grepEntry(entry: FileEntryImpl, operation: String, regex: Regex): List[GrepMatch] =
+    val matches = mutable.ListBuffer[GrepMatch]()
     val shown = display(entry.path)
     entry.forEachLine(
       operation,
@@ -437,17 +263,20 @@ private[host] trait HostFiles:
     filesNamed(dir, glob).map(entry => display(entry.path))
 
   def search(dir: String, pattern: String, glob: String, options: SearchOptions)(using fs: FileSystem): SearchResult =
-    if options.maxMatches < 1 || options.maxMatches > 10000 || options.maxFiles < 1 || options.maxFiles > 100000 ||
-      options.maxLinesPerFile < 1 || options.maxLinesPerFile > 1000000 || options.maxLineChars < 1 ||
-      options.maxLineChars > 10000 ||
-      options.maxCharsPerFile < 1 || options.maxCharsPerFile > 10000000
-    then
+    val limits = List(
+      options.maxMatches -> 10000,
+      options.maxFiles -> 100000,
+      options.maxLinesPerFile -> 1000000,
+      options.maxLineChars -> 10000,
+      options.maxCharsPerFile -> 10000000,
+    )
+    if limits.exists((value, max) => value < 1 || value > max) then
       throw IllegalArgumentException(
         "search: limits must be positive (maxMatches <= 10000, maxFiles <= 100000, maxLinesPerFile <= 1000000, maxLineChars <= 10000, maxCharsPerFile <= 10000000)"
       )
     val regex = pattern.r
     val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.isClassified)
-    val matches = collection.mutable.ListBuffer[GrepMatch]()
+    val matches = mutable.ListBuffer[GrepMatch]()
     var scanned = 0
     // `limited` is set only where something was left out: a line cut at the
     // character cap, a line past the per-file line budget, or a match past the
@@ -457,16 +286,19 @@ private[host] trait HostFiles:
       val entry = entries.next()
       scanned += 1
       val readLimit =
-        entry.scanLines("search", options.maxLineChars, options.maxCharsPerFile) { (line, chars, number) =>
-          if number > options.maxLinesPerFile then { limited = true; false }
+        entry.scanLines("search", options.maxLineChars, options.maxCharsPerFile): (line, chars, number) =>
+          if number > options.maxLinesPerFile then
+            limited = true
+            false
           else
             if chars > line.length then limited = true
             val hit = regex.findFirstIn(line).isDefined
-            if hit && matches.size >= options.maxMatches then { limited = true; false }
+            if hit && matches.size >= options.maxMatches then
+              limited = true
+              false
             else
               if hit then matches += GrepMatch(display(entry.path), number, line)
               true
-        }
       if readLimit then limited = true
     SearchResult(matches.toList, scanned, limited || entries.hasNext)
 
@@ -474,8 +306,8 @@ private[host] trait HostFiles:
   private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntryImpl] =
     matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).toList
 
-  private def matchingFiles(files0: Iterator[FileEntryImpl], dir: String, glob: String): Iterator[FileEntryImpl] =
-    val files = files0.filterNot(_.isDirectory)
+  private def matchingFiles(entries: Iterator[FileEntryImpl], dir: String, glob: String): Iterator[FileEntryImpl] =
+    val files = entries.filterNot(_.isDirectory)
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)
       val regex = PathGlob.regex(glob)

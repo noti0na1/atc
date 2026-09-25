@@ -1,20 +1,19 @@
 package atc.config
 
-import upickle.default.*
-
-import atc.TextFiles
-import atc.perms.{Access, Mode, PathPattern}
+import atc.{Debug, Resources, TextFiles}
 import atc.platform.PlatformPath
 
+import upickle.default.*
+
 import java.nio.file.{
-  AtomicMoveNotSupportedException, FileAlreadyExistsException, Files, Path, Paths, StandardCopyOption,
-  StandardOpenOption
+  AtomicMoveNotSupportedException, FileAlreadyExistsException, Files, Path, StandardCopyOption, StandardOpenOption
 }
+import java.nio.file.attribute.PosixFilePermissions
 
 /** One model of a provider: the id the provider knows it by, plus the
   * settings that apply to this model only. Everything about *where* to send
   * the request (API shape, URL, key) belongs to its [[ProviderConfig]]. */
-case class ModelConfig(
+final case class ModelConfig(
   /** The provider's model id. Defaults to the alias the model is listed under,
     * so `"models": { "gpt-5": {} }` needs no `name`. */
   name: Option[String] = None,
@@ -52,13 +51,17 @@ case class ModelConfig(
   enabled: Boolean = true,
 ) derives ReadWriter
 
+object ModelConfig:
+  /** Every effort a provider api knows, lowest first. */
+  val ReasoningEfforts: List[String] = List("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
 /** One LLM endpoint and the models reachable through it. `api` is the wire
   * protocol: `anthropic`, `openai` (Chat Completions; also any
   * OpenAI-compatible server such as Ollama, vLLM, LM Studio via `url`),
   * `openai-responses` (the Responses API), `chatgpt` (the models of a ChatGPT
   * plan, signed in through the browser instead of a key), or `echo` (the
   * key-less test model). */
-case class ProviderConfig(
+final case class ProviderConfig(
   /** Optional only so a later layer can add models to a provider an earlier
     * one defined; every provider needs an `api` once the layers are combined. */
   api: Option[String] = None,
@@ -83,9 +86,14 @@ case class ProviderConfig(
   enabled: Boolean = true,
 ) derives ReadWriter
 
+object ProviderConfig:
+  /** The placeholder in a provider header for the conversation id, filled in
+    * per request by `Providers.headers`. */
+  val SessionRef = "${ATC_SESSION}"
+
 /** A provider the first run can set up, from `atc/providers.json`; the starting
   * global config lists all of them. */
-case class ProviderPreset(
+final case class ProviderPreset(
   name: String,
   label: String,
   api: String,
@@ -97,20 +105,20 @@ case class ProviderPreset(
 ) derives ReadWriter:
   def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key, headers = headers)
   /** The variable a `${VAR}` key is read from. */
-  def keyVariable: Option[String] = key.flatMap(Config.envRefName)
+  def keyVariable: Option[String] = key.flatMap(KeyBindings.envRefName)
 
 object ProviderPreset:
   lazy val all: List[ProviderPreset] = read[List[ProviderPreset]](Config.resource("/atc/providers.json"))
 
 /** One file-permission rule. See `atc.perms.Policy` for the semantics. */
-case class FileRuleConfig(
+final case class FileRuleConfig(
   path: String,
   access: Option[String] = None,
   classified: Option[Boolean] = None,
   locked: Boolean = false,
 ) derives ReadWriter
 
-case class Config(
+final case class Config(
   /** The agent's model: a model alias, or `provider/alias` when two providers
     * use the same alias. Unset picks the first configured model. */
   model: Option[String] = None,
@@ -172,9 +180,17 @@ case class Config(
   notifications: String = "auto",
 ) derives ReadWriter
 
+/** Where the configuration files are, and how they are created, loaded and edited in place.
+  * [[Configuration.combine]] merges the layers and [[ConfigValidation]] checks the result. */
 object Config:
+  /** `~/.atc`: the global configuration and the state atc keeps between sessions. */
+  def globalDir: Path = PlatformPath.userHome.resolve(".atc").nn
+
   /** The global configuration, loaded before project and explicit layers. */
-  def globalPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("config.json").nn
+  def globalPath: Path = globalDir.resolve("config.json").nn
+
+  /** The global key bindings, `~/.atc/keys.properties`. */
+  def globalKeysPath: Path = globalDir.resolve(KeysFile).nn
 
   /** `<dir>/.atc/config.json`, the project config of `dir`. */
   def projectPath(dir: Path): Path = dir.resolve(".atc").resolve("config.json")
@@ -188,7 +204,7 @@ object Config:
   /** The project a directory belongs to: the nearest ancestor of `from`
     * (itself included) whose `.atc` holds a `config.json` or a `keys.properties`. A
     * project config governs the folder its `.atc` sits in, so running atc in a
-    * sub-directory still picks up (and is bound by) the project's own
+    * subdirectory still picks up (and is bound by) the project's own
     * configuration and keys. */
   def projectRoot(from: Path): Option[Path] =
     def isProject(d: Path) = Files.isRegularFile(projectPath(d)) || Files.isRegularFile(keysPath(d))
@@ -196,6 +212,35 @@ object Config:
       case null => None
       case d: Path => if isProject(d) then Some(d) else up(d.getParent)
     up(from.toAbsolutePath.nn.normalize)
+
+  /** Load every layer and combine them: `~/.atc/config.json` ← the project's
+    * `.atc/config.json` ← `-c <file>`. See [[Configuration.combine]] for what
+    * "later" means per setting. With `bundledGlobal`, the starting config stands
+    * in for a missing `~/.atc/config.json` (the user declined to write it), as a
+    * layer with no path. */
+  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean): Configuration =
+    load(cwd, explicit, globalPath, bundledGlobal)
+
+  /** As [[load]], with the global path given explicitly (tests). */
+  def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
+    explicit.foreach: path =>
+      if !Files.exists(path) then throw IllegalArgumentException(s"Explicit config does not exist: $path")
+      if !Files.isRegularFile(path) then throw IllegalArgumentException(s"Explicit config is not a regular file: $path")
+    val root = projectRoot(cwd)
+    val candidates =
+      List(Origin.Global -> global) ++ root.map(Origin.Project -> projectPath(_)) ++ explicit.map(Origin.Explicit -> _)
+    // A path named twice is read once, in the first role it appears in. That
+    // keeps `~/.atc/config.json` a granting layer when atc runs in the home
+    // directory, and keeps `-c ./.atc/config.json` a narrowing one.
+    val layers = candidates
+      .filter((_, p) => Files.isRegularFile(p))
+      .distinctBy((_, p) => p.toAbsolutePath.normalize)
+      .map((origin, path) => ConfigLayer.read(origin, path))
+    val bundled = Option.when(bundledGlobal && !layers.exists(_.origin == Origin.Global))(ConfigLayer.bundled)
+    // Keys are read separately, most specific first: they are secrets, not
+    // settings, so they never take part in the layer merge.
+    val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
+    Configuration.combine(bundled.toList ++ layers, keys)
 
   /** Create the global configuration and adjacent key bindings if they are
     * missing, ensuring that narrowing layers have a base. Key bindings are
@@ -217,16 +262,7 @@ object Config:
         if ownerOnly then writeOwnerOnly(target, content)
         else Files.writeString(target, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
         Some(target)
-      catch case _: FileAlreadyExistsException => None // created meanwhile (another atc): not ours to overwrite
-
-  /** Create `target` with owner-only access on POSIX file systems, falling back
-    * to a regular (new-file) write when POSIX permissions are unavailable. */
-  private[config] def writeOwnerOnly(target: Path, content: String): Unit =
-    import java.nio.file.attribute.PosixFilePermissions
-    val ownerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
-    try Files.createFile(target, ownerOnly)
-    catch case _: UnsupportedOperationException => Files.createFile(target)
-    Files.writeString(target, content)
+      catch case _: FileAlreadyExistsException => None // another atc created it meanwhile; leave it alone
 
   /** Create the starter project configuration for `dir` and ensure that its
     * `.gitignore` excludes `keys.properties`. The configuration belongs in the
@@ -245,7 +281,7 @@ object Config:
   private def ensureIgnored(path: Path, entry: String): Boolean =
     val current = Option.when(Files.exists(path))(Files.readString(path).nn)
     // Git uses the last matching rule; an earlier exclusion followed by
-    // `!keys.properties` does not actually protect the key file.
+    // `!keys.properties` does not protect the key file.
     val lastRule = current.toList.flatMap(text => TextFiles.splitLines(TextFiles.stripBom(text)).lines)
       .map(_.trim).filter(line => line == entry || line == s"!$entry").lastOption
     if lastRule.contains(entry) then false
@@ -253,447 +289,47 @@ object Config:
       Files.writeString(path, TextFiles.appendLine(current.getOrElse(""), entry))
       true
 
-  // ── layers ────────────────────────────────────────────────────────
+  private val OwnerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
 
-  /** Load every layer and combine them: `~/.atc/config.json` ← the project's
-    * `.atc/config.json` ← `-c <file>`. See [[combine]] for what "later" means
-    * per setting. With `bundledGlobal`, the starting config stands in for a
-    * missing `~/.atc/config.json` (the user declined to write it), as a layer
-    * with no path. */
-  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean): Configuration =
-    load(cwd, explicit, globalPath, bundledGlobal)
+  /** Create `target` with owner-only access on POSIX file systems, falling back
+    * to a regular (new-file) write when POSIX permissions are unavailable. */
+  private[config] def writeOwnerOnly(target: Path, content: String): Unit =
+    try Files.createFile(target, OwnerOnly)
+    catch case _: UnsupportedOperationException => Files.createFile(target)
+    Files.writeString(target, content)
 
-  /** As [[load]], with the global path given explicitly (tests). */
-  def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
-    explicit.foreach { path =>
-      if !Files.exists(path) then throw IllegalArgumentException(s"Explicit config does not exist: $path")
-      if !Files.isRegularFile(path) then throw IllegalArgumentException(s"Explicit config is not a regular file: $path")
-    }
-    val root = projectRoot(cwd)
-    val project = root.map(projectPath)
-    val candidates =
-      List(Origin.Global -> global) ++ project.map(Origin.Project -> _) ++ explicit.map(Origin.Explicit -> _)
-    // A path named twice is read once, in the first role it appears in. That
-    // keeps `~/.atc/config.json` a granting layer when atc runs in the home
-    // directory, and keeps `-c ./.atc/config.json` a narrowing one.
-    val present = candidates
-      .filter((_, p) => Files.isRegularFile(p))
-      .distinctBy((_, p) => p.toAbsolutePath.normalize)
-    val layers = present.map((origin, path) => readLayer(origin, path))
-    val bundled = Option.when(bundledGlobal && !layers.exists(_.origin == Origin.Global))(bundledLayer)
-    // Keys are read separately, most specific first: they are secrets, not
-    // settings, so they never take part in the layer merge.
-    val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
-    combine(bundled.toList ++ layers, keys)
-
-  /** The starting global config as an in-memory layer, for a run without a
-    * `~/.atc/config.json`. */
-  private def bundledLayer: ConfigLayer =
-    val where = "the bundled starting config"
-    val json = readObj(globalTemplate, where)
-    ConfigLayer(Origin.Global, None, json, parse(json, where), None)
-
-  private def readLayer(origin: Origin, path: Path): ConfigLayer =
-    val text =
-      try Files.readString(path).nn
-      catch
-        case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
-    // Relative patterns of a project config are read against the folder its
-    // `.atc` sits in; every other layer reads them against the working directory.
-    // The policy evaluates canonical paths, so canonicalize the base as well.
-    // Otherwise, a project reached through a symlink would never grant access.
-    val base = Option.when(origin == Origin.Project)(PlatformPath.canonical(path.getParent.nn.getParent.nn))
-    val json = readObj(text, path.toString)
-    ConfigLayer(origin, Some(path), json, parse(json, path.toString), base)
-
-  private def readObj(text: String, where: String): ujson.Obj =
-    val parsed =
-      try ujson.read(TextFiles.stripBom(text))
-      catch case e: Exception => throw IllegalArgumentException(s"Cannot parse config $where: ${e.getMessage}")
-    parsed match
-      case o: ujson.Obj => o
-      case _ => throw IllegalArgumentException(s"Config $where must be a JSON object")
-
-  private def parse(json: ujson.Obj, where: String): Config =
-    try read[Config](json)
-    catch case e: Exception => throw IllegalArgumentException(s"Invalid config $where: ${e.getMessage}")
-
-  /** Settings that are policy: a narrowing layer may only make these stricter,
-    * so they are taken from the granting layers and then tightened. Everything
-    * else (models, providers, instructions, and the `commands` / `hosts` lists,
-    * which every layer may add to) merges in layer order. */
-  private val PolicyKeys =
-    Set("files", "denyCommands", "denyHosts") ++
-      Set("mode", "safeMode", "respectGitignore") ++
-      Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
-
-  /** Combine the layers.
-    *
-    *  - **models, providers, instructions** (nothing to do with permissions)
-    *    merge in layer order, the later layer winning; providers merge per
-    *    provider and then per model alias, so a project config can add a model
-    *    to a provider the global config defined.
-    *  - **`commands` / `hosts`** are the union of every layer's list: a project
-    *    config may pre-approve the commands and hosts its work needs, the way
-    *    it may open its own files. Deny rules restrict all grants.
-    *  - **policy settings** come from the *granting* layers (global, `-c`)
-    *    merged the same way, and are then narrowed by the project layer:
-    *    limits and the sandbox mode by the stricter value, `safeMode` /
-    *    `respectGitignore` only towards "on".
-    *  - **file rules** from every layer are kept with their anchor: a project
-    *    layer's rules grant only inside its own folder, and clamp everywhere
-    *    (see [[LayeredRule]] and `Policy.configPerm`).
-    *  - **`denyCommands` / `denyHosts`** are refusals, so every layer's patterns
-    *    apply; a narrowing layer can add to them but never drop one.
-    *
-    * Narrowing is order-independent (every combination is a min, an `or` or an
-    * intersection), so only the granting layers care about their order.
-    */
-  def combine(layers: List[ConfigLayer], keys: KeyBindings = KeyBindings.empty): Configuration =
-    // Validate each layer before merging so an invalid mode is attributed to the
-    // file that contains it rather than to whichever layer narrows it later.
-    layers.foreach(validateLayerMode)
-    val (granting, narrowing) = layers.partition(_.origin.grants)
-    def merged(ls: List[ConfigLayer]) = ls.map(_.json).foldLeft(ujson.Obj())(mergeJson)
-    val everything = merged(layers)
-    val granted = merged(granting)
-    // Non-policy settings from every layer, policy settings from the granting ones.
-    val effective = ujson.Obj()
-    for (k, v) <- everything.value do if !PolicyKeys.contains(k) then effective(k) = v
-    for (k, v) <- granted.value do if PolicyKeys.contains(k) then effective(k) = v
-    val base = parse(effective, "the merged configuration")
-    val settings = narrowing.foldLeft(base)(tighten)
-    val rules = layers.flatMap(l => l.config.files.map(LayeredRule(_, base = l.base)))
-    rules.foreach(validateRule)
-    Configuration(layers, validate(settings), rules, keys)
-
-  /** Apply one narrowing layer to the settings it defines. Every field moves
-    * towards "stricter" or stays put, so this can never widen the policy. */
-  private def tighten(base: Config, layer: ConfigLayer): Config =
-    val n = layer.config
-    def onlyIfSet[T](key: String)(stricter: => T)(keep: => T): T = if layer.defines(key) then stricter else keep
-    base.copy(
-      mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
-      safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
-      respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
-      // A missing timeout means "no limit", so it is the *least* strict value.
-      executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
-        (base.executionTimeoutMs, n.executionTimeoutMs) match
-          case (Some(a), Some(b)) => Some(a.min(b))
-          case (a, None) => a
-          case (None, b) => b
-      }(base.executionTimeoutMs),
-      maxToolCalls = onlyIfSet("maxToolCalls")(base.maxToolCalls.min(n.maxToolCalls))(base.maxToolCalls),
-      maxToolOutputChars =
-        onlyIfSet("maxToolOutputChars")(base.maxToolOutputChars.min(n.maxToolOutputChars))(base.maxToolOutputChars),
-      // Refusals only ever add (the same pattern in two layers is still one rule).
-      denyCommands = (base.denyCommands ++ n.denyCommands).distinct,
-      denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
-    )
-
-  /** Reject an invalid `mode` and identify the layer that defines it. `combine`
-    * validates every layer up front, so `stricterMode` can assume valid input. */
-  private def validateLayerMode(layer: ConfigLayer): Unit =
-    layer.config.mode.foreach { m =>
-      try Mode.parse(m)
-      catch
-        case e: IllegalArgumentException =>
-          throw IllegalArgumentException(
-            s"Invalid config ${layer.path.map(_.toString).getOrElse(s"(${layer.origin.label} layer)")}: ${e.getMessage}"
-          )
-    }
-
-  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an unset
-    * mode means the most permissive one. Both are already validated per layer. */
-  private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
-    def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
-    Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
-
-  /** A `files` entry of any layer (the project layer's included, which
-    * `settings.files` leaves out): the path must be a usable pattern and the
-    * access level one the policy knows, so a typo is reported as a config
-    * error here rather than when the policy is built. */
-  private def validateRule(r: LayeredRule): Unit =
-    val path = r.rule.path
-    def invalid(what: String) = IllegalArgumentException(s"Invalid config: files entry '$path': $what")
-    if path.trim.isEmpty then throw invalid("the path must not be blank")
-    try PathPattern(path, r.base.getOrElse(Paths.get("").toAbsolutePath))
-    catch case e: Exception => throw invalid(s"not a valid pattern (${e.getMessage})")
-    r.rule.access.foreach { a =>
-      try Access.parse(a)
-      catch case e: IllegalArgumentException => throw invalid(e.getMessage.nn)
-    }
-
-  /** Every effort a provider api knows, lowest first. */
-  val ReasoningEfforts: List[String] = List("none", "minimal", "low", "medium", "high", "xhigh", "max")
-  private val ReasoningSummaries = Set("auto", "concise", "detailed")
-  private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
-  private val ProviderApis =
-    Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "chatgpt", "echo")
-  private val AnthropicWebSearchVersions = Set("20250305", "20260209")
-
-  private def invalid(message: String): Nothing = throw IllegalArgumentException(s"Invalid config: $message")
-
-  private def requireValid(condition: Boolean, message: => String): Unit =
-    if !condition then invalid(message)
-
-  private def requirePositive(name: String, value: Long): Unit =
-    requireValid(value > 0, s"$name must be greater than zero (was $value)")
-
-  private def validateChoice(where: String, value: String, allowed: Iterable[String]): Unit =
-    requireValid(value == value.trim, s"$where must not start or end with whitespace (was '$value')")
-    requireValid(
-      allowed.exists(_ == value.trim.toLowerCase(java.util.Locale.ROOT)),
-      s"$where must be one of ${allowed.toList.sorted.mkString("|")} (was '$value')"
-    )
-
-  private def validateModel(provider: String, alias: String, model: ModelConfig): Unit =
-    val where = s"providers.$provider.models.$alias"
-    requireValid(alias.trim.nonEmpty, s"model aliases of provider '$provider' must not be blank")
-    requireValid(alias == alias.trim, s"model alias '$alias' must not start or end with whitespace")
-    requireValid(!alias.contains('/'), s"model alias '$alias' must not contain '/'")
-    requireValid(!model.name.exists(_.trim.isEmpty), s"$where.name must not be blank")
-    requireValid(!model.displayName.exists(_.trim.isEmpty), s"$where.displayName must not be blank")
-    requireValid(
-      !model.displayName.exists(name => name != name.trim),
-      s"$where.displayName must not start or end with whitespace"
-    )
-    requireValid(
-      !model.displayName.exists(name => name.contains('\n') || name.contains('\r')),
-      s"$where.displayName must be a single line"
-    )
-    model.maxTokens.foreach(requirePositive(s"$where.maxTokens", _))
-    model.temperature.foreach(value => requireValid(value.isFinite, s"$where.temperature must be finite"))
-    model.reasoning.foreach(validateChoice(s"$where.reasoning", _, ReasoningEfforts))
-    model.efforts.foreach { efforts =>
-      efforts.foreach(validateChoice(s"$where.efforts", _, ReasoningEfforts))
-      model.reasoning.foreach(r =>
-        requireValid(
-          efforts.exists(_.equalsIgnoreCase(r)),
-          s"$where.reasoning '$r' is not one of its efforts (${efforts.mkString("|")})"
-        )
-      )
-    }
-    model.reasoningSummary.foreach(validateChoice(s"$where.reasoningSummary", _, ReasoningSummaries))
-    model.webSearchVersion.foreach(validateChoice(s"$where.webSearchVersion", _, AnthropicWebSearchVersions))
-
-  private def validateProvider(name: String, provider: ProviderConfig): Unit =
-    requireValid(name.trim.nonEmpty, "provider names must not be blank")
-    requireValid(name == name.trim, s"provider name '$name' must not start or end with whitespace")
-    // `api` may be absent from a layer that only extends an earlier provider, but
-    // the fully merged provider must define it.
-    requireValid(
-      provider.api.exists(_.trim.nonEmpty),
-      s"provider '$name' has no api (expected anthropic | openai | openai-responses | chatgpt | echo)"
-    )
-    provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
-    provider.models.foreach((alias, model) => validateModel(name, alias, model))
-
-  /** Reject settings that would otherwise fail much later, in output slicing,
-    * timeout accounting or provider request construction. */
-  def validate(config: Config): Config =
-    requirePositive("maxToolOutputChars", config.maxToolOutputChars)
-    requireValid(config.maxToolCalls >= 0, s"maxToolCalls must be non-negative (was ${config.maxToolCalls})")
-    requireValid(
-      config.autoCompactThreshold.isFinite && config.autoCompactThreshold >= 0 && config.autoCompactThreshold <= 1,
-      s"autoCompactThreshold must be between 0 and 1 (0 disables it; was ${config.autoCompactThreshold})"
-    )
-    requireValid(
-      config.compactKeepRatio.isFinite && config.compactKeepRatio >= 0 && config.compactKeepRatio <= 1,
-      s"compactKeepRatio must be between 0 and 1 (was ${config.compactKeepRatio})"
-    )
-    config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
-    validateChoice("notifications", config.notifications, NotificationChoices)
-    config.mode.foreach { m =>
-      try Mode.parse(m)
-      catch case e: IllegalArgumentException => invalid(e.getMessage.nn)
-    }
-    config.providers.foreach(validateProvider)
-    // `model` and `classifiedModel` are not checked here: a model a provider
-    // lists may be named before the list is fetched, and the start warns
-    // about a name that resolves to nothing instead of refusing to run.
-    val catalog = ModelCatalog.from(config)
-    val duplicateRefs =
-      catalog.configured.groupBy(_.ref.toLowerCase(java.util.Locale.ROOT)).values.filter(_.size > 1).toList
-    requireValid(
-      duplicateRefs.isEmpty,
-      s"model references must be unique ignoring case: ${duplicateRefs.flatten.map(_.ref).sorted.mkString(", ")}"
-    )
-    config
-
-  /** List settings extend rather than replace (a later layer can add a deny
-    * pattern, and cannot drop one an earlier layer set). */
-  private val ListKeys = Set("files", "commands", "hosts", "denyCommands", "denyHosts")
-
-  /** `over` on top of `base`: list settings are concatenated, `providers` are
-    * merged by name (and within one, its `models` by alias, a redefined alias
-    * replacing the whole model entry), everything else is overwritten. So a
-    * project config can add a model to a provider the global config defined
-    * without repeating its url and key. */
-  def mergeJson(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
-    overlay(base, over) { (k, a, b) =>
-      (a, b) match
-        case (x: ujson.Arr, y: ujson.Arr) if ListKeys.contains(k) => ujson.Arr(x.value ++ y.value)
-        case (x: ujson.Obj, y: ujson.Obj) if k == "providers" => mergeProviders(x, y)
-        case _ => b
-    }
-
-  private def mergeProviders(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
-    overlay(base, over) { (_, a, b) =>
-      (a, b) match
-        case (x: ujson.Obj, y: ujson.Obj) => mergeProvider(x, y)
-        case _ => b
-    }
-
-  private def mergeProvider(base: ujson.Obj, over: ujson.Obj): ujson.Obj =
-    overlay(base, over) { (k, a, b) =>
-      (a, b) match
-        case (x: ujson.Obj, y: ujson.Obj) if k == "models" => overlay(x, y)((_, _, m) => m)
-        case _ => b
-    }
-
-  /** `over` laid over `base` key by key; `join` decides what happens where
-    * both define the same key. */
-  private def overlay(base: ujson.Obj, over: ujson.Obj)(
-    join: (String, ujson.Value, ujson.Value) => ujson.Value
-  ): ujson.Obj =
-    val out = ujson.Obj()
-    for (k, v) <- base.value do out(k) = v
-    for (k, v) <- over.value do out(k) = out.value.get(k).fold(v)(old => join(k, old, v))
-    out
-
-  private val EnvRef = """\$\{([A-Za-z_][A-Za-z0-9_]*)\}""".r
-
-  /** The variable a `${VAR}` value names. */
-  def envRefName(value: String): Option[String] = value match
-    case EnvRef(name) => Some(name.nn)
-    case _ => None
-
-  /** A `${VAR}` reference resolved through `bindings`; anything else is the
-    * literal value. `None` when nothing binds the variable or the literal is
-    * empty, the same as an empty value in `keys.properties`. */
-  def resolveEnvRef(value: String, bindings: KeyBindings = KeyBindings.empty): Option[String] = value match
-    case EnvRef(name) => bindings.get(name.nn)
-    case "" => None
-    case literal => Some(literal)
-
-  /** The provider's key: `key` (a literal or `${VAR}`), else the variable
-    * `keyEnv` names, else none, which leaves the SDK to resolve its own default
-    * variable. `${VAR}` and `keyEnv` are looked up in `.atc/keys.properties`
-    * before the environment. */
-  def resolveApiKey(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Option[String] =
-    p.key.flatMap(resolveEnvRef(_, bindings)).orElse(p.keyEnv.flatMap(bindings.get))
-
-  /** The placeholder in a provider header for the conversation id, filled in
-    * per request by `Providers.headers`. */
-  val SessionRef = "${ATC_SESSION}"
-
-  /** The provider's extra headers with `${VAR}` values resolved; a header
-    * whose variable is unset is dropped, [[SessionRef]] is kept for the request. */
-  def resolveHeaders(p: ProviderConfig, bindings: KeyBindings = KeyBindings.empty): Map[String, String] =
-    p.headers.flatMap { (name, value) =>
-      (if value == SessionRef then Some(value) else resolveEnvRef(value, bindings)).map(name -> _)
-    }
-
-  // ── editing a config file in place ────────────────────────────────
-
-  /** Set one top-level key of a config file, keeping the rest of the text as
-    * it is (a config is hand-formatted: blank lines, several patterns per
-    * line, and re-serialising it would lose that). See [[withTopLevel]]; the
-    * positions come from the [[ObjectText]] scanner. */
-  def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
-    editFile(path)(withTopLevel(_, key, value, after, path.toString))
-
-  /** Replace a config file's text with `update(text)`, keeping a symlinked file a symlink. */
-  def editFile(path: Path)(update: String => String): Unit =
-    val text =
-      try Files.readString(path).nn
-      catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${e.getMessage}")
-    val updated = update(text)
-    // Preserve intentional shared configs: resolve an existing symlink and
-    // atomically replace its target, rather than replacing the link itself.
-    val target = path.toRealPath().nn
-    val temp = Files.createTempFile(target.getParent.nn, s".${target.getFileName}.", ".tmp").nn
+  /** Replace `target` with `content` through a temporary file beside it, moved into place
+    * atomically where the file system allows. On POSIX file systems the new file is readable
+    * by its owner only, or with `keepPermissions` has the permissions `target` had. */
+  private[atc] def replaceFile(target: Path, content: String, keepPermissions: Boolean): Unit =
+    val dir = target.toAbsolutePath.nn.getParent.nn
+    Files.createDirectories(dir)
+    val prefix = s".${target.getFileName}."
+    val temp =
+      try Files.createTempFile(dir, prefix, ".tmp", OwnerOnly).nn
+      catch case _: UnsupportedOperationException => Files.createTempFile(dir, prefix, ".tmp").nn
     try
-      Files.writeString(temp, updated)
-      try Files.setPosixFilePermissions(temp, Files.getPosixFilePermissions(target))
-      catch case _: UnsupportedOperationException => ()
+      Files.writeString(temp, content)
+      if keepPermissions then
+        try Files.setPosixFilePermissions(temp, Files.getPosixFilePermissions(target))
+        catch case _: UnsupportedOperationException => ()
       try Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
       catch case _: AtomicMoveNotSupportedException => Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
     finally Files.deleteIfExists(temp)
 
-  /** `text` (a JSON object) with the top-level `key` set to `value`: an
-    * existing key keeps its place and only its value changes; a new one is
-    * added after the first of `after` that is present, else first, indented
-    * like the others. Everything else in the text is untouched. */
-  def withTopLevel(
-    text: String,
-    key: String,
-    value: ujson.Value,
-    after: List[String] = Nil,
-    where: String = "config"
-  ): String =
-    readObj(text, where) // fail clearly on anything that is not a JSON object
-    val obj = ObjectText.scan(text)
-    val rendered = ujson.write(value)
-    // ujson honors the final occurrence of a duplicate key. Rewrite that occurrence;
-    // changing an earlier one would have no effect on the parsed value.
-    obj.members.findLast(_.key == key) match
-      case Some(m) => text.substring(0, m.valueStart) + rendered + text.substring(m.valueEnd)
-      case None =>
-        val entry = s"${ujson.write(ujson.Str(key))}: $rendered"
-        after.flatMap(k => obj.members.find(_.key == k)).headOption match
-          case Some(prev) =>
-            text.substring(0, prev.valueEnd) + s",${obj.separator}$entry" + text.substring(prev.valueEnd)
-          case None if obj.members.isEmpty =>
-            val separator = obj.separator
-            val newline = TextFiles.firstLineEnding(separator).fold(TextFiles.DefaultLineEnding)(_.text)
-            text.substring(0, obj.open + 1) + separator + entry + newline + text.substring(obj.close)
-          case None =>
-            text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
+  /** Set one top-level key of a config file, keeping the rest of the text as
+    * it is (a config is hand-formatted: blank lines, several patterns per
+    * line, and serializing it again would lose that). See [[ObjectText.withTopLevel]]. */
+  def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
+    editFile(path)(ObjectText.withTopLevel(_, key, value, after, path.toString))
 
-  /** `text` (a JSON object) with the member at `path` set to `value`, or removed
-    * when `value` is `None`. Objects missing on the way are created, and a new
-    * member goes last in its object, written on one line. Everything else keeps
-    * its text, like [[withTopLevel]]. */
-  def withMember(text: String, path: List[String], value: Option[ujson.Value], where: String = "config"): String =
-    readObj(text, where)
-    member(text, path, value)
-
-  private def member(text: String, path: List[String], value: Option[ujson.Value]): String =
-    val obj = ObjectText.scan(text)
-    val key = path.head
-    def replace(m: ObjectText.Member, by: String) = text.substring(0, m.valueStart) + by + text.substring(m.valueEnd)
-    def nested(v: ujson.Value) = path.tail.foldRight(v)((k, inner) => ujson.Obj(k -> inner))
-    obj.members.findLast(_.key == key) match
-      case Some(m) if path.tail.isEmpty => value.fold(removeMember(obj, m))(v => replace(m, oneLine(v)))
-      case Some(m) =>
-        val inner = text.substring(m.valueStart, m.valueEnd)
-        if inner.startsWith("{") then replace(m, member(inner, path.tail, value))
-        else value.fold(text)(v => replace(m, oneLine(nested(v))))
-      case None =>
-        value.fold(text) { v =>
-          val entry = s"${ujson.write(ujson.Str(key))}: ${oneLine(nested(v))}"
-          obj.members.lastOption match
-            case Some(last) => text.substring(0, last.valueEnd) + s",${obj.separator}$entry" +
-                text.substring(last.valueEnd)
-            case None => text.substring(0, obj.open + 1) + s" $entry " + text.substring(obj.close)
-        }
-
-  /** Remove `m` with the comma that separates it from a neighbour. */
-  private def removeMember(obj: ObjectText, m: ObjectText.Member): String =
-    val text = obj.text
-    val i = obj.members.indexOf(m)
-    if i + 1 < obj.members.size then text.substring(0, m.keyStart) + text.substring(obj.members(i + 1).keyStart)
-    else if i > 0 then text.substring(0, obj.members(i - 1).valueEnd) + text.substring(m.valueEnd)
-    else text.substring(0, obj.open + 1) + text.substring(obj.close)
-
-  /** A value on one line, spaced like a hand-written config. */
-  private def oneLine(v: ujson.Value): String = v match
-    case ujson.Obj(o) if o.isEmpty => "{}"
-    case ujson.Obj(o) => o.map((k, x) => s"${ujson.write(ujson.Str(k))}: ${oneLine(x)}").mkString("{ ", ", ", " }")
-    case ujson.Arr(a) => a.map(oneLine).mkString("[", ", ", "]")
-    case other => ujson.write(other)
+  /** Replace a config file's text with `update(text)`. A symlinked config stays a
+    * symlink: its target is replaced, so a config shared that way stays shared. */
+  def editFile(path: Path)(update: String => String): Unit =
+    val text =
+      try Files.readString(path).nn
+      catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${Debug.message(e)}")
+    replaceFile(path.toRealPath().nn, update(text), keepPermissions = true)
 
   /** The starter global config written by `--init-global`, with every preset provider. */
   def globalTemplate: String = globalTemplateWith(ProviderPreset.all)
@@ -710,6 +346,5 @@ object Config:
   /** The starter project config written by `--init`. */
   def projectTemplate: String = resource("/atc/project-template.json")
 
-  private[config] def resource(path: String): String = atc.Resources.text(path).getOrElse(
-    throw IllegalStateException(s"config template resource missing ($path)")
-  )
+  private[config] def resource(path: String): String =
+    Resources.text(path).getOrElse(throw IllegalStateException(s"config template resource missing ($path)"))

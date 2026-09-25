@@ -2,6 +2,7 @@ package atc
 
 import atc.config.{Config, ModelCatalog, ModelConfig, ModelSpec, ProviderConfig}
 import atc.llm.*
+import atc.platform.PlatformPath
 
 /** The model layer: stop-reason normalization, provider settings, the echo
   * model, adapter dispatch and the model catalog. */
@@ -213,7 +214,9 @@ class ModelSuite extends munit.FunSuite:
     val warnings = warned.result()
     assertEquals(warnings.size, 1, warnings)
     assert(
-      warnings.head.startsWith(s"Ignoring model in ${App.pretty(Config.projectPath(project))}: Unknown model 'typo'"),
+      warnings.head.startsWith(
+        s"Ignoring model in ${PlatformPath.display(Config.projectPath(project))}: Unknown model 'typo'"
+      ),
       warnings.head
     )
     assertEquals(models.initial(_ => ()).ref, "p/a", "the only model stands in")
@@ -242,7 +245,7 @@ class ModelSuite extends munit.FunSuite:
     assert(Providers.UserAgent.startsWith("atc/"))
     assertEquals(Providers.headers(spec(Map("User-Agent" -> "mine/1")))("User-Agent"), "mine/1")
     assertEquals(Providers.headers(spec(Map("user-agent" -> "mine/1"))), Map("user-agent" -> "mine/1"))
-    val withSession = spec(Map("x-session" -> Config.SessionRef, "x-plain" -> "v"))
+    val withSession = spec(Map("x-session" -> ProviderConfig.SessionRef, "x-plain" -> "v"))
     val first = Providers.headers(withSession)
     assertEquals(first("x-plain"), "v")
     assert(first("x-session").matches("[0-9a-f-]{36}"), first("x-session"))

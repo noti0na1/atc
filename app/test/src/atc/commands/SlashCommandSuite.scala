@@ -1,4 +1,4 @@
-package atc
+package atc.commands
 
 /** The slash-command table: what `/help` prints, what Tab offers, and how a
   * typed line resolves (names, aliases, arguments). */

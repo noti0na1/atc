@@ -3,10 +3,13 @@ package atc
 import atc.agent.*
 import atc.config.Config
 import atc.host.*
+import atc.lib.{Todo, TodoStatus}
 import atc.llm.*
 import atc.perms.*
 import atc.sandbox.*
+
 import java.nio.file.{Files, Path}
+import scala.collection.mutable.ListBuffer
 
 /** End to end: echo model → agent loop → sandbox REPL → real host → policy. */
 class AgentSuite extends munit.FunSuite:
@@ -49,18 +52,18 @@ class AgentSuite extends munit.FunSuite:
     def chat(m: String) = s"normal:$m"
     def classifiedChat(m: String) = s"safe:$m"
   var answers: List[Option[String]] = Nil
-  val questions = collection.mutable.ListBuffer[(String, List[String], Boolean)]()
-  var shownTodos: List[atc.lib.Todo] = Nil
+  val questions = ListBuffer[(String, List[String], Boolean)]()
+  var shownTodos: List[Todo] = Nil
   val hostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       questions += ((question, options, multiple))
       answers match
         case a :: rest => answers = rest; a
         case Nil => None
-    def showTodos(items: List[atc.lib.Todo]): Unit = shownTodos = items
+    def showTodos(items: List[Todo]): Unit = shownTodos = items
   val host = Host(policy, root, output, llm, hostUi)
 
-  val toolLog = collection.mutable.ListBuffer[(String, ExecutionResult)]()
+  val toolLog = ListBuffer[(String, ExecutionResult)]()
   class TestUI extends AgentUI:
     var lastCode = ""
     def assistantDelta(text: String): Unit = ()
@@ -196,7 +199,7 @@ class AgentSuite extends munit.FunSuite:
       () => false
     )
     assert(lastToolText.contains("2"), lastToolText)
-    assertEquals(host.currentTodos.count(_.status == atc.lib.TodoStatus.Done), 2)
+    assertEquals(host.currentTodos.count(_.status == TodoStatus.Done), 2)
 
   test("cancellation between tool calls keeps history consistent"):
     var cancelled = false

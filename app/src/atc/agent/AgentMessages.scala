@@ -1,11 +1,8 @@
 package atc.agent
 
-/** Text exchanged between the agent loop, the model and the UI.
-  *
-  * Keeping these protocol-like messages here makes the loop about state
-  * transitions rather than string construction. Newlines are deliberately LF:
-  * model history has one stable representation on every host platform.
-  */
+/** Text exchanged between the agent loop, the model and the UI, kept here so the
+  * loop deals in state transitions rather than string construction. Newlines are
+  * LF so that model history has one representation on every host platform. */
 object AgentMessages:
   val interrupted: String = "[interrupted by user]"
   val interruptedWarning: String = "interrupted"
@@ -33,6 +30,15 @@ object AgentMessages:
     "[continuation request] The exchange in progress was compacted into the summary above. " +
       "Continue the task from that summary; do not repeat completed work."
 
+  val grantsNotRestored: String =
+    "[permissions] Grants from the saved session are no longer active. Check the current policy and request any permissions still needed."
+
+  def permissionRevoked(grant: String): String =
+    s"[permissions] The user revoked the session grant for $grant. Do not assume it remains available."
+
+  /** Closes the assistant side of an exchange that queued user input interrupts. */
+  val pausedForUpdate: String = "[paused to apply the user's update]"
+
   def sandboxRestarted(reason: String): String =
     s"[sandbox notice] The Scala REPL was restarted ($reason). Every `val`, `def` and `import` " +
       "you defined earlier is gone, so re-create anything you still need. The conversation itself is unchanged."
@@ -41,8 +47,7 @@ object AgentMessages:
     *
     * Markdown permits a backtick fence to be longer than three characters. A
     * fence longer than every backtick run in the snippet cannot be closed by
-    * snippet text that happens to contain ``` or a longer fence.
-    */
+    * snippet text that happens to contain ``` or a longer fence. */
   def userRan(code: String, renderedResult: String): String =
     val fence = "`" * (3 max (longestBacktickRun(code) + 1))
     s"[user ran code] The user ran this in the sandbox REPL themselves (its definitions persist for you too):\n" +

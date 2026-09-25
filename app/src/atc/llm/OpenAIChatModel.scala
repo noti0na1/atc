@@ -8,6 +8,7 @@ import com.openai.models.{FunctionDefinition, FunctionParameters, ReasoningEffor
 import com.openai.models.chat.completions.*
 import com.openai.models.completions.CompletionUsage
 
+import java.util.Locale
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
@@ -16,12 +17,8 @@ import scala.jdk.OptionConverters.*
 final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   val providerKey: String = "openai"
 
-  /** The effort for a call: as configured, or the lowest the model takes for a
-    * non-thinking one (not needed when the model has a thinking switch). */
-  private def effort(thinking: Boolean): Option[ReasoningEffort] =
-    (if thinking then effort else lowestEffort).map(x =>
-      ReasoningEffort.of(x.toLowerCase(java.util.Locale.ROOT))
-    )
+  private def reasoningEffort(thinking: Boolean): Option[ReasoningEffort] =
+    requestEffort(thinking).map(ReasoningEffort.of)
 
   private def functionTool(t: ToolSpec): ChatCompletionFunctionTool =
     val schema = ujson.read(t.parametersJson)
@@ -35,57 +32,42 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     val b = ChatCompletionCreateParams.builder().model(modelId).addSystemMessage(system)
     b.streamOptions(ChatCompletionStreamOptions.builder().includeUsage(true).build())
     Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
-    cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
-    cfg.temperature.foreach(b.temperature)
-    effort(thinking = true).foreach(b.reasoningEffort)
+    settings.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
+    settings.temperature.foreach(b.temperature)
+    reasoningEffort(thinking = true).foreach(b.reasoningEffort)
     thinkingSwitch(thinking = true).foreach(b.putAdditionalBodyProperty("thinking", _))
     tools.foreach(t => b.addTool(functionTool(t)))
     if webSearch then b.webSearchOptions(ChatCompletionCreateParams.WebSearchOptions.builder().build())
-    history.foreach {
+    history.foreach:
       case Msg.User(text) => b.addUserMessage(text)
       case Msg.Continuation(text) => b.addUserMessage(text)
       case Msg.Assistant(text, calls, native) =>
-        native match
-          case Some(n) if n.isFor(providerKey, ref) && n.payload.isInstanceOf[ChatCompletionAssistantMessageParam] =>
-            b.addMessage(n.payload.asInstanceOf[ChatCompletionAssistantMessageParam])
-          case _ =>
+        replay[ChatCompletionAssistantMessageParam](native) match
+          case Some(turn) => b.addMessage(turn)
+          case None =>
             val ab = ChatCompletionAssistantMessageParam.builder()
             if text.nonEmpty then ab.content(text)
-            calls.foreach { c =>
-              ab.addToolCall(ChatCompletionMessageFunctionToolCall.builder().id(c.id)
-                .function(
-                  ChatCompletionMessageFunctionToolCall.Function.builder().name(c.name).arguments(c.arguments).build()
-                )
-                .build())
-            }
+            calls.foreach: c =>
+              val function =
+                ChatCompletionMessageFunctionToolCall.Function.builder().name(c.name).arguments(c.arguments).build()
+              ab.addToolCall(ChatCompletionMessageFunctionToolCall.builder().id(c.id).function(function).build())
             // A resumed pause leaves an empty assistant turn behind; without its native
             // form (a restored session) there is nothing to send for it.
             if text.nonEmpty || calls.nonEmpty then b.addMessage(ab.build())
       case Msg.ToolResults(results) =>
-        results.foreach { r =>
+        results.foreach: r =>
           b.addMessage(ChatCompletionToolMessageParam.builder().toolCallId(r.callId).content(r.output).build())
-        }
-    }
     b.build()
 
   private def extract(c: ChatCompletion): Completion =
     val choice = c.choices().asScala.headOption
     val msg = choice.map(_.message())
     val text = msg.flatMap(_.content().toScala).getOrElse("")
-    val calls = msg.flatMap(_.toolCalls().toScala).map(_.asScala.toList).getOrElse(Nil).flatMap { tc =>
+    val calls = msg.flatMap(_.toolCalls().toScala).map(_.asScala.toList).getOrElse(Nil).flatMap: tc =>
       tc.function().toScala.map(f => ToolCall(f.id(), f.function().name(), f.function().arguments()))
-    }
-    val usage = usageOf(c)
-    val stop = choice.map(_.finishReason().toString.toLowerCase(java.util.Locale.ROOT)).getOrElse("stop")
-    val status = CompletionStop.fromReason(stop)
-    Completion(
-      text,
-      calls,
-      msg.map(m => NativeTurn(providerKey, ref, m.toParam())),
-      usage,
-      stop,
-      status,
-    )
+    val stop = choice.map(_.finishReason().toString.toLowerCase(Locale.ROOT)).getOrElse("stop")
+    val native = msg.map(m => NativeTurn(providerKey, ref, m.toParam()))
+    Completion(text, calls, native, usageOf(c), stop, CompletionStop.fromReason(stop))
 
   def complete(
     system: SystemPrompt,
@@ -94,15 +76,15 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
     sink: StreamSink,
     cancelled: () => Boolean
   ): Completion =
-    withWebSearchFallback(sink) { sink =>
+    withWebSearchFallback(sink): sink =>
       val feed = OpenAIChatModel.ChunkFeed()
       val stream = streamingClient.async().chat().completions().createStreaming(params(system, history, tools))
       ModelRequest.awaitStream(() => stream.close()) {
         stream.subscribe { chunk =>
           if cancelled() then throw CancelledException()
           if feed.accumulate(chunk) then
-            chunk.choices().asScala.headOption.foreach { ch =>
-              val delta = ch.delta()
+            chunk.choices().asScala.headOption.foreach: choice =>
+              val delta = choice.delta()
               // Reasoning is not part of the official schema: DeepSeek sends `reasoning_content`,
               // OpenRouter `reasoning`. A mixed chunk ends reasoning before starting the answer.
               List("reasoning_content", "reasoning").iterator
@@ -110,11 +92,9 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
                 .filter(_.nonEmpty)
                 .nextOption().foreach(sink.thinking)
               delta.content().toScala.filter(_.nonEmpty).foreach(sink.text)
-            }
         }.onCompleteFuture()
       }
       feed.partialCompletion.getOrElse(extract(feed.completion()))
-    }
 
   private def usageOf(c: ChatCompletion): TokenUsage =
     OpenAIChatModel.usageOf(c.usage().toScala)
@@ -125,19 +105,19 @@ final class OpenAIChatModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
       Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
       system.foreach(b.addSystemMessage)
       b.addUserMessage(prompt)
-      cfg.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
-      cfg.temperature.foreach(b.temperature)
+      settings.maxTokens.foreach(n => b.maxCompletionTokens(n.toLong))
+      settings.temperature.foreach(b.temperature)
       effort.foreach(b.reasoningEffort)
       thinkingSwitch(thinking).foreach(b.putAdditionalBodyProperty("thinking", _))
       client.chat().completions().create(b.build())
-    val c = withEffortFallback(thinking, effort(thinking))(request)
+    val c = withEffortFallback(thinking, reasoningEffort(thinking))(request)
     Reply(c.choices().asScala.headOption.flatMap(_.message().content().toScala).getOrElse(""), usageOf(c))
 
 object OpenAIChatModel:
-  private def usageOf(usage: Option[CompletionUsage]): TokenUsage = usage.map { u =>
-    val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
-    TokenUsage(u.promptTokens(), u.completionTokens(), cached)
-  }.getOrElse(TokenUsage())
+  private def usageOf(usage: Option[CompletionUsage]): TokenUsage =
+    usage.fold(TokenUsage()): u =>
+      val cached = u.promptTokensDetails().toScala.flatMap(_.cachedTokens().toScala).map(_.longValue).getOrElse(0L)
+      TokenUsage(u.promptTokens(), u.completionTokens(), cached)
 
   /** Feeds a stream's chunks to the SDK accumulator, which accepts the finish chunk and then
     * at most one choice-less chunk, and only if it carries the usage the completion lacks.
@@ -168,9 +148,10 @@ object OpenAIChatModel:
       else false
 
     /** A clean EOF or [DONE] without finish_reason does not confirm that any tool call is complete. */
-    def partialCompletion: Option[Completion] = Option.when(!finished) {
-      Completion(text.toString, Nil, None, usageOf(usage), "stream_incomplete", CompletionStop.Incomplete)
-    }
+    def partialCompletion: Option[Completion] =
+      Option.when(!finished)(
+        Completion(text.toString, Nil, None, usageOf(usage), "stream_incomplete", CompletionStop.Incomplete)
+      )
 
     /** The accumulated completion, with the usage if any was reported; throws when the
       * stream ended before its finish chunk. */

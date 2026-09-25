@@ -2,6 +2,8 @@ package atc.config
 
 import upickle.default.*
 
+import java.util.Locale
+
 /** A token count in a config, written as a number or as a string with a
   * suffix: `200000`, `"200000"`, `"256k"`, `"1m"`, `"1.5m"` (`k` = 1000,
   * `m` = 1000000, either case). The multipliers are decimal, so a window given
@@ -29,7 +31,7 @@ object Tokens:
   def parse(text: String): Tokens =
     text match
       case Form(number, unit) =>
-        val scale = unit.nn.toLowerCase(java.util.Locale.ROOT) match
+        val scale = unit.nn.toLowerCase(Locale.ROOT) match
           case "k" => 1e3
           case "m" => 1e6
           case _ => 1.0

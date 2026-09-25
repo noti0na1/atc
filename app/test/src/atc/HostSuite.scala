@@ -4,7 +4,12 @@ import atc.host.*
 import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
 import atc.perms.*
 import atc.platform.{PathGlob, Platform, PlatformPath}
+
+import java.io.IOException
+import java.nio.charset.{Charset, StandardCharsets}
 import java.nio.file.{Files, LinkOption, Path}
+import java.util.concurrent.{CountDownLatch, TimeUnit}
+import scala.collection.mutable.ListBuffer
 
 /** The host's `Interface` implementation under the policy, called directly. */
 class HostSuite extends munit.FunSuite:
@@ -273,7 +278,7 @@ class HostSuite extends munit.FunSuite:
         Files.createLink(copyAlias, original)
         true
       catch
-        case _: UnsupportedOperationException | _: java.io.IOException | _: SecurityException => false
+        case _: UnsupportedOperationException | _: IOException | _: SecurityException => false
     if !hardLinksSupported then Files.deleteIfExists(original)
     assume(hardLinksSupported, "hard links are not supported on this filesystem")
 
@@ -467,10 +472,10 @@ class HostSuite extends munit.FunSuite:
     assertEquals(read(returned), "content")
 
   test("parallel runs the tasks at once, keeps their order, and reports the first failure in task order"):
-    val started = java.util.concurrent.CountDownLatch(3)
+    val started = CountDownLatch(3)
     val results = parallel(List(1, 2, 3).map { i => () =>
       started.countDown()
-      assert(started.await(5, java.util.concurrent.TimeUnit.SECONDS), "the tasks did not run at once")
+      assert(started.await(5, TimeUnit.SECONDS), "the tasks did not run at once")
       i * 10
     })
     assertEquals(results, List(10, 20, 30))
@@ -488,8 +493,8 @@ class HostSuite extends munit.FunSuite:
         None
       catch case stop: ThreadDeath => Some(stop)
     assert(fatal.isDefined, "the fatal throwable did not win over the ordinary failure")
-    val sleeping = java.util.concurrent.CountDownLatch(1)
-    val taskInterrupted = java.util.concurrent.CountDownLatch(1)
+    val sleeping = CountDownLatch(1)
+    val taskInterrupted = CountDownLatch(1)
     @volatile var outcome: Option[Exception] = None
     val caller = Thread(() =>
       try
@@ -504,26 +509,26 @@ class HostSuite extends munit.FunSuite:
     )
     caller.setDaemon(true)
     caller.start()
-    assert(sleeping.await(5, java.util.concurrent.TimeUnit.SECONDS))
+    assert(sleeping.await(5, TimeUnit.SECONDS))
     caller.interrupt()
     caller.join(5000)
     assert(!caller.isAlive, "the caller did not return after the interrupt")
     assert(outcome.exists(_.isInstanceOf[InterruptedException]), outcome.toString)
-    assert(taskInterrupted.await(5, java.util.concurrent.TimeUnit.SECONDS), "the task was not interrupted")
+    assert(taskInterrupted.await(5, TimeUnit.SECONDS), "the task was not interrupted")
 
   test("writeBytes is refused on a classified path, like write"):
     intercept[SecurityException](writeBytes("secrets/x.dat", Array[Byte](1, 2)))
 
   test("forEachLine streams lines with 1-based numbers"):
     write("lines.txt", "alpha\nbeta\ngamma")
-    val seen = collection.mutable.ListBuffer[(String, Int)]()
+    val seen = ListBuffer[(String, Int)]()
     access("lines.txt").forEachLine((line, n) => seen += ((line, n)))
     assertEquals(seen.toList, List(("alpha", 1), ("beta", 2), ("gamma", 3)))
 
   test("forEachLine and grep tolerate non-UTF-8 bytes like read() does (no abort on binary files)"):
     val bytes = "ok\n".getBytes("UTF-8") ++ Array[Byte](0xff.toByte, 0xfe.toByte) ++ " bad\nend\n".getBytes("UTF-8")
     Files.write(root.resolve("latin.txt"), bytes)
-    val seen = collection.mutable.ListBuffer[String]()
+    val seen = ListBuffer[String]()
     access("latin.txt").forEachLine((line, _) => seen += line)
     assertEquals(seen.size, 3)
     assertEquals(seen.head, "ok")
@@ -613,7 +618,6 @@ class HostSuite extends munit.FunSuite:
 
   test("a command that runs long is shown live after Processes.LiveAfterMs, a quick one is not"):
     assume(!Platform.isWindows) // intentional integration with the real POSIX shell
-    import scala.collection.mutable.ListBuffer
     val begun = ListBuffer[Long]()
     val seen = StringBuilder()
     val live = new Processes.LiveOutput:
@@ -672,15 +676,15 @@ class HostSuite extends munit.FunSuite:
 
   test("normalizeHost canonicalises equivalent spellings so a deny rule cannot be dodged"):
     // Normalize non-canonical decimal IPv4 forms and trailing dots.
-    assertEquals(Host.normalizeHost("2852039166"), "169.254.169.254")
-    assertEquals(Host.normalizeHost("169.254.169.254."), "169.254.169.254")
+    assertEquals(GlobMatcher.normalizeHost("2852039166"), "169.254.169.254")
+    assertEquals(GlobMatcher.normalizeHost("169.254.169.254."), "169.254.169.254")
     // `URI.getHost` returns bracketed IPv4-mapped IPv6 addresses. Both forms of
     // the metadata address must normalize to the IPv4 literal used by deny rules.
-    assertEquals(Host.normalizeHost("[::ffff:169.254.169.254]"), "169.254.169.254")
-    assertEquals(Host.normalizeHost("[::ffff:a9fe:a9fe]"), "169.254.169.254")
+    assertEquals(GlobMatcher.normalizeHost("[::ffff:169.254.169.254]"), "169.254.169.254")
+    assertEquals(GlobMatcher.normalizeHost("[::ffff:a9fe:a9fe]"), "169.254.169.254")
     // Expand a pure IPv6 literal, but only lowercase a hostname; never resolve it.
-    assertEquals(Host.normalizeHost("[::1]"), "0:0:0:0:0:0:0:1")
-    assertEquals(Host.normalizeHost("Example.COM"), "example.com")
+    assertEquals(GlobMatcher.normalizeHost("[::1]"), "0:0:0:0:0:0:0:1")
+    assertEquals(GlobMatcher.normalizeHost("Example.COM"), "example.com")
 
   test("an IPv6-mapped spelling of a denied IPv4 host is refused, not just the IPv4 form"):
     val denyPolicy = Policy(
@@ -746,7 +750,7 @@ class HostSuite extends munit.FunSuite:
     val junction = root.resolve("junction-out").nn
     val process = ProcessBuilder("cmd.exe", "/d", "/c", "mklink", "/J", junction.toString, outside.toString)
       .redirectErrorStream(true).start().nn
-    val output = String(process.getInputStream.nn.readAllBytes(), java.nio.charset.Charset.defaultCharset())
+    val output = String(process.getInputStream.nn.readAllBytes(), Charset.defaultCharset())
     val exit = process.waitFor()
     assertEquals(exit, 0, s"could not create a junction: $output")
     assert(Files.isDirectory(junction, LinkOption.NOFOLLOW_LINKS), s"junction was not created: $output")
@@ -817,14 +821,14 @@ class HostSuite extends munit.FunSuite:
       out.toString
     val sample = "bom 🙂"
     assertEquals(
-      bomText(Array(0xef.toByte, 0xbb.toByte, 0xbf.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+      bomText(Array(0xef.toByte, 0xbb.toByte, 0xbf.toByte), sample.getBytes(StandardCharsets.UTF_8)),
       sample,
     )
     assertEquals(
-      bomText(Array(0xff.toByte, 0xfe.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_16LE)),
+      bomText(Array(0xff.toByte, 0xfe.toByte), sample.getBytes(StandardCharsets.UTF_16LE)),
       sample,
     )
     assertEquals(
-      bomText(Array(0xfe.toByte, 0xff.toByte), sample.getBytes(java.nio.charset.StandardCharsets.UTF_16BE)),
+      bomText(Array(0xfe.toByte, 0xff.toByte), sample.getBytes(StandardCharsets.UTF_16BE)),
       sample,
     )

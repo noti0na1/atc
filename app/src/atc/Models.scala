@@ -6,6 +6,8 @@ import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
 import scala.collection.mutable
+import scala.util.Try
+import scala.util.control.NonFatal
 
 /** The models of a session: every model of every provider, and one client per
   * model, created when first used. `/providers` changes the configuration they
@@ -28,7 +30,7 @@ final class Models(args: Cli.Args, start: Configuration):
     * it still resolves), else the first model. A `-m` that names no model stops
     * the start; the config's `model` is passed over with a warning. */
   def initial(warn: String => Unit): ChatModel =
-    def last = Models.last.flatMap(ref => scala.util.Try(catalog.find(ref)).toOption)
+    def last = Models.last.flatMap(ref => Try(catalog.find(ref)).toOption)
     args.model.map(client).orElse(configured("model", start.settings.model, warn))
       .getOrElse(client(last.getOrElse(catalog.default)))
 
@@ -36,14 +38,13 @@ final class Models(args: Cli.Args, start: Configuration):
     * (`model`, `classifiedModel`). `None` when it is unset, or names no model:
     * then `warn` says so. */
   def configured(setting: String, reference: Option[String], warn: String => Unit): Option[ChatModel] =
-    reference.flatMap { ref =>
+    reference.flatMap: ref =>
       try Some(client(ref))
       catch
         case e: IllegalArgumentException =>
-          val file = start.layers.findLast(_.defines(setting)).flatMap(_.path).fold("the config")(App.pretty)
-          warn(s"Ignoring $setting in $file: ${e.getMessage}")
+          val file = start.layers.findLast(_.defines(setting)).flatMap(_.path).fold("the config")(PlatformPath.display)
+          warn(s"Ignoring $setting in $file: ${Debug.message(e)}")
           None
-    }
 
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   def describe(m: ChatModel): String = Models.describe(m, catalog.find(m.ref))
@@ -54,33 +55,31 @@ final class Models(args: Cli.Args, start: Configuration):
     catalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
 
   def close(): Unit =
-    clients.values.foreach { model =>
+    clients.values.foreach: model =>
       try model.close()
-      catch case scala.util.control.NonFatal(error) => Debug.trace(error)
-    }
+      catch case NonFatal(error) => Debug.trace(error)
 
 object Models:
-  /** Presentation only: references and provider requests continue to use the
-    * configured alias and backend model id. */
+  /** For display only: references and provider requests use the configured
+    * alias and the provider's model id. */
   private[atc] def describe(model: ChatModel, spec: ModelSpec): String =
     s"${model.ref} — ${spec.displayName.getOrElse(model.modelId)}" +
       (if model.webSearch then " (web search)" else "")
 
-  /** The detail column of `/models`, with the historical provider/model-id
-    * form retained when no friendly name is configured. */
+  /** The detail column of `/models`: the friendly name, else `provider/model-id`. */
   private[atc] def detail(spec: ModelSpec): String =
     spec.displayName.getOrElse(s"${spec.provider}/${spec.modelId}")
 
-  private def lastPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("last-model").nn
+  private def lastPath: Path = Config.globalDir.resolve("last-model").nn
 
   /** The model last chosen with `/model`, the default when nothing names one. */
   private def last: Option[String] =
     try Some(Files.readString(lastPath).nn.trim).filter(_.nonEmpty)
-    catch case scala.util.control.NonFatal(_) => None
+    catch case NonFatal(_) => None
 
   /** Remember a model choice; losing it only loses a default. */
   def rememberLast(ref: String): Unit =
     try
       Files.createDirectories(lastPath.getParent)
       Files.writeString(lastPath, ref + "\n")
-    catch case scala.util.control.NonFatal(_) => ()
+    catch case NonFatal(_) => ()

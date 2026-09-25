@@ -4,11 +4,12 @@ import atc.agent.{Agent, AgentEnvironment, AgentMessages, ToolRunner, TurnOutcom
 import atc.config.Config
 import atc.llm.*
 import atc.perms.{Decision, Policy}
+import atc.sandbox.ReplSession
 
 import scala.collection.mutable.ListBuffer
 
 /** Agent-loop contract tests with all tool effects supplied by a small in-memory
-  * runner. These deliberately do not construct a sandbox or REPL session. */
+  * runner. They construct no sandbox or REPL session. */
 class AgentCoreLoopSuite extends munit.FunSuite:
   private val toolSpec = ToolSpec("test_tool", "A deterministic test tool.", "{\"type\":\"object\"}")
 
@@ -182,7 +183,7 @@ class AgentCoreLoopSuite extends munit.FunSuite:
   test("a text-only turn does not initialize the Scala REPL"):
     val (_, _, agent) = setup(Seq(ScriptedModel.Reply("explanation")))
     var initialized = false
-    def session: atc.sandbox.ReplSession =
+    def session: ReplSession =
       initialized = true
       throw IllegalStateException("REPL should not start")
     assertEquals(agent.turn(session, "explain", () => false), TurnOutcome.Finished)

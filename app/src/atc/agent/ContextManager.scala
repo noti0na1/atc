@@ -1,6 +1,6 @@
 package atc.agent
 
-import atc.llm.{ChatModel, Completion, Msg, NativeTurn, ToolCall}
+import atc.llm.{ChatModel, Msg, NativeTurn, ToolCall}
 
 /** Estimates context usage, calibrates estimates against provider token counts,
   * and removes older exchanges when necessary. Call [[beginTurn]] once per user
@@ -35,17 +35,11 @@ final class ContextManager:
 
   /** Correct the character-based estimate with the prompt count reported by a
     * completed provider request. Small counts are too noisy to be useful. */
-  def calibrate(completion: Completion, estimatedInput: Long): Unit =
-    calibrate(completion.usage.input, estimatedInput)
-
   def calibrate(inputTokens: Long, estimatedInput: Long): Unit =
     if inputTokens >= CalibrationMinTokens && estimatedInput > 0 then
       tokenCalibration = (inputTokens.toDouble / estimatedInput).max(0.25).min(8.0)
 
   /** Estimate what the next request would use without changing history. */
-  def contextUsage(fixedTokens: Long, history: List[Msg], model: ChatModel): ContextUsage =
-    contextUsage(fixedTokens, history, ModelContext.from(model))
-
   def contextUsage(fixedTokens: Long, history: List[Msg], model: ModelContext): ContextUsage =
     val raw = fixedTokens + history.map(estimateFor(_, model)).sum
     ContextUsage((raw * tokenCalibration).round, model.contextWindow)
@@ -57,22 +51,16 @@ final class ContextManager:
     * is the denominator to pass to [[calibrate]] after completion.
     * `calibratedInput` is the estimate shown to users and used for overflow
     * checks. `dropped` counts this preparation, while `totalDropped` is the
-    * cumulative count written into the context notice.
-    */
-  def prepare(fixedTokens: Long, history: List[Msg], model: ModelContext): Preparation =
-    prepareWithContext(fixedTokens, history, model, "")
-
-  def prepare(fixedTokens: Long, history: List[Msg], model: ChatModel, retained: String): Preparation =
-    prepareWithContext(fixedTokens, history, ModelContext.from(model), retained)
-
-  def prepareWithContext(fixedTokens: Long, history: List[Msg], model: ModelContext, retained: String): Preparation =
+    * cumulative count written into the context notice. When anything is dropped,
+    * the `retained` task context follows the cut notice, and room for it is
+    * reserved. */
+  def prepare(fixedTokens: Long, history: List[Msg], model: ModelContext, retained: String): Preparation =
     // Leave both estimation slack and, when configured, the full output
     // allowance. A maxTokens larger than the window leaves no room at all and
     // raises the warning below, which names both settings.
-    val allowance = model.contextWindow.map { window =>
+    val allowance = model.contextWindow.map: window =>
       val reserve = outputReserve(window, model.maxOutputTokens)
       Allowance(window, reserve, window.toLong - reserve)
-    }
     val (fitted, dropped) = allowance match
       case Some(a) =>
         val budget = (a.input / tokenCalibration).toLong - fixedTokens
@@ -82,8 +70,9 @@ final class ContextManager:
     contextDropped += dropped
     val preparedHistory = fitted match
       case Msg.User(text) :: rest if dropped > 0 =>
-        val notes = if retained.isEmpty then ""
-        else s"\n\n[retained task context; current user instructions take precedence]\n$retained"
+        val notes =
+          if retained.isEmpty then ""
+          else s"\n\n[retained task context; current user instructions take precedence]\n$retained"
         Msg.User(s"${AgentMessages.contextCutNotice(contextDropped)}$notes\n\n$text") :: rest
       case other => other
 
@@ -94,7 +83,7 @@ final class ContextManager:
     val droppedWarning =
       allowance.filter(_ => dropped > 0).map(a => AgentMessages.contextDroppedWarning(model.alias, a.window, dropped))
     val overflowWarning =
-      allowance.filter(a => calibratedInput > a.input && !contextOverflowWarned).map { a =>
+      allowance.filter(a => calibratedInput > a.input && !contextOverflowWarned).map: a =>
         contextOverflowWarned = true
         val cause =
           if (fixedTokens * tokenCalibration).round > a.input then AgentMessages.ContextOverflowCause.FixedPrompt
@@ -108,7 +97,6 @@ final class ContextManager:
           a.reserve,
           model.maxOutputTokens,
         )
-      }
 
     Preparation(
       history = preparedHistory,

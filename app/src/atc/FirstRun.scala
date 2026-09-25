@@ -4,7 +4,9 @@ import atc.config.{Config, KeyBindings, ModelCatalog, ModelSpec, ProviderPreset}
 import atc.llm.ChatGPTAuth
 
 import java.nio.file.Path
+import java.time.Duration
 import scala.annotation.tailrec
+import scala.util.Using
 import scala.util.control.NonFatal
 
 /** The first interactive start without a global config: choose one provider,
@@ -108,14 +110,13 @@ object FirstRun:
         true
       case None =>
         try
-          scala.util.Using.resource(auth.begin()) { login =>
+          Using.resource(auth.begin()): login =>
             ui.info(
               if openBrowser(login.url) then "Sign in to ChatGPT in the browser window that opened, or open:"
               else "Open this address in a browser to sign in to ChatGPT:"
             )
             ui.info(login.url)
             awaitSignIn(ui, login)
-          }
         catch
           case NonFatal(e) =>
             ui.error(s"Could not sign in: ${reasons(e)}")
@@ -126,8 +127,7 @@ object FirstRun:
       "Press Enter once the browser says you are signed in (or paste the address it ended on if that page did not load)"
     )
     // The browser's callback may still be exchanging its code for tokens.
-    val waited = if pasted.isEmpty && login.callbackReceived then java.time.Duration.ofSeconds(30)
-    else java.time.Duration.ZERO
+    val waited = if pasted.isEmpty && login.callbackReceived then Duration.ofSeconds(30) else Duration.ZERO
     pasted.map(login.paste).orElse(login.await(waited)) match
       case Some(Right(tokens)) =>
         ui.info(s"Signed in to ChatGPT${tokens.email.fold("")(e => s" as $e")}.")
@@ -145,11 +145,8 @@ object FirstRun:
 
   private def chooseModel(ui: Ui, models: List[ModelSpec]): Option[ModelSpec] =
     val labels = models.map(m => m.displayName.fold(m.modelId)(name => s"$name  (${m.modelId})"))
-    ui.choose("Choose a model (type to filter)", labels).flatMap(label =>
-      models.zip(labels).collectFirst {
-        case (m, l) if l == label => m
-      }
-    )
+    ui.choose("Choose a model (type to filter)", labels).flatMap: label =>
+      models.zip(labels).collectFirst { case (m, l) if l == label => m }
 
   /** The provider as the catalog resolves it; `None` when its key is not bound. */
   private def endpoint(preset: ProviderPreset, keys: KeyBindings): Option[ModelSpec] =

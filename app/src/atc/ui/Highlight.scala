@@ -52,10 +52,9 @@ object Highlight:
     * active at the end of the previous one and closing it at the line end. */
   def splitCarrying(ansi: String): List[String] =
     var active = ""
-    val lines = ansi.split("\n", -1).toList.map { line =>
+    val lines = ansi.split("\n", -1).toList.map: line =>
       val prefix = active
       Sgr.findAllIn(line).foreach(seq => active = if seq == Reset then "" else seq)
       val suffix = if active.nonEmpty then Reset else ""
       prefix + line + suffix
-    }
     if ansi.endsWith("\n") then lines.dropRight(1) else lines // no phantom line for the trailing newline

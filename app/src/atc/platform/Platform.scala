@@ -1,14 +1,14 @@
 package atc.platform
 
-import java.io.File
+import java.io.{File, IOException}
+import java.util.Locale
 import java.util.regex.Pattern
 
-/** Process-wide operating-system traits. Platform checks belong here so the
-  * rest of the application can depend on the behavior it needs instead of
-  * inspecting JVM path separators itself. */
+/** Process-wide operating-system traits. Platform checks belong here so the rest of the
+  * application depends on the behavior it needs instead of inspecting JVM path separators. */
 private[atc] object Platform:
   val isWindows: Boolean = File.separatorChar == '\\'
-  val isMac: Boolean = System.getProperty("os.name", "").nn.toLowerCase(java.util.Locale.ROOT).startsWith("mac")
+  val isMac: Boolean = System.getProperty("os.name", "").nn.toLowerCase(Locale.ROOT).startsWith("mac")
   val fileSeparator: Char = File.separatorChar
   val pathListSeparator: String = File.pathSeparator
   val pathRegexFlags: Int = if isWindows then Pattern.CASE_INSENSITIVE else 0
@@ -28,7 +28,7 @@ private[atc] object Platform:
       ProcessBuilder(command*).redirectInput(ProcessBuilder.Redirect.from(nullDevice))
         .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start()
       true
-    catch case _: java.io.IOException => false
+    catch case _: IOException => false
 
   /** Compare filesystem names using the host filesystem's case semantics. */
   def samePathName(left: String, right: String): Boolean =
