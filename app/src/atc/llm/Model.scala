@@ -166,9 +166,10 @@ object ChatModel:
       case "openai-responses" | "responses" => OpenAIResponsesModel(spec)
       case "openai" | "openai-chat" | "chat" => OpenAIChatModel(spec)
       case "chatgpt" => ChatGPTModel(spec, ChatGPTAuth.default)
+      case "claude-code" => ClaudeCodeModel(spec)
       case "echo" => EchoModel(spec.alias, spec.ref, spec.settings.contextWindow.map(_.toInt))
       case other => throw IllegalArgumentException(
-          s"Unknown api '$other' for provider '${spec.provider}' (expected anthropic | openai | openai-responses | chatgpt | echo)"
+          s"Unknown api '$other' for provider '${spec.provider}' (expected anthropic | openai | openai-responses | chatgpt | claude-code | echo)"
         )
 
   /** The models a provider's endpoint lists (`provider` has an empty alias and
@@ -179,5 +180,6 @@ object ChatModel:
       client match
         case m: AnthropicModel => m.listModels()
         case m: OpenAIShapedModel => m.listModels()
+        case m: ClaudeCodeModel => m.listModels()
         case _ => Nil
     finally client.close()

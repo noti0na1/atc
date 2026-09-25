@@ -23,7 +23,7 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   override val ref: String = spec.ref
   val modelId: String = spec.modelId
   protected val settings: ModelConfig = spec.settings
-  override val contextWindow: Option[Int] = settings.contextWindow.map(_.toInt)
+  override def contextWindow: Option[Int] = settings.contextWindow.map(_.toInt)
   override val maxOutputTokens: Option[Int] = settings.maxTokens
   override val efforts: List[String] = settings.efforts.getOrElse(knownEfforts).map(_.toLowerCase(Locale.ROOT))
   override val defaultEffort: Option[String] = settings.reasoning.map(_.toLowerCase(Locale.ROOT))
