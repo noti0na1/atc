@@ -182,8 +182,9 @@ final case class Config(
   /** Fraction of the context window reserved for recent verbatim exchanges
     * during manual or automatic compaction. Zero summarizes everything. */
   compactKeepRatio: Double = 0.2,
-  /** How to tell the user that a turn ended or a question waits, when they do
-    * not type within ten seconds: `auto`, `system` (a desktop notification),
+  /** How to tell the user that a question waits or a turn ended, when for ten
+    * or thirty seconds (respectively) they neither type nor have the terminal
+    * focused: `auto`, `system` (a desktop notification),
     * `terminal` (the terminal's own notification sequence), `bell` or `off`. */
   notifications: String = "auto",
 ) derives ReadWriter

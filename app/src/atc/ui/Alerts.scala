@@ -7,19 +7,30 @@ import org.jline.terminal.Terminal
 import java.util.concurrent.{Executors, ScheduledFuture, TimeUnit}
 
 /** Notifications for moments when atc waits for the user, and the terminal
-  * focus they depend on. An alert waits [[Alerts.NotifyAfterMillis]] for input
-  * and is sent at once when the terminal is not focused. `emit` writes control
-  * text to the terminal (for terminal notifications and the bell).
+  * focus they depend on. An alert is sent only after a wait in which the user
+  * neither typed nor had the terminal focused: [[Alerts.QuestionDelayMillis]] for
+  * a question or permission request, [[Alerts.TurnDelayMillis]] for a finished
+  * turn. `emit` writes control text to the terminal (for terminal notifications
+  * and the bell).
   *
   * Focus reports are on only while a raw-mode reader that consumes them runs
   * (the prompt, the turn's key reader): in line mode the terminal driver would
-  * echo them as `^[[I` text. Terminals without focus reporting count as focused. */
-private[ui] final class Alerts(terminal: Terminal, plain: Boolean, emit: String => Unit):
+  * echo them as `^[[I` text. Focus counts only once the terminal has reported
+  * it: a terminal may claim focus reporting (any `xterm*` type) and send none. */
+private[ui] final class Alerts(
+  terminal: Terminal,
+  plain: Boolean,
+  emit: String => Unit,
+  questionDelayMillis: Long = Alerts.QuestionDelayMillis,
+  turnDelayMillis: Long = Alerts.TurnDelayMillis,
+):
   @volatile var notifier: Notifier = Notifier.Off
   /** The notification title, naming the working directory once it is known. */
   @volatile var title = "atc"
 
   @volatile private var focused = true
+  /** Whether the terminal has sent a focus report, so `focused` means something. */
+  @volatile private var focusKnown = false
   /** The alert waiting for input, with its text; guarded by `this`. */
   private var pending: Option[(ScheduledFuture[?], String)] = None
   private lazy val timer = Executors.newSingleThreadScheduledExecutor { r =>
@@ -28,23 +39,27 @@ private[ui] final class Alerts(terminal: Terminal, plain: Boolean, emit: String 
     t
   }.nn
 
-  /** Tell the user that atc waits for them: at once when the terminal is not
-    * focused, otherwise after [[Alerts.NotifyAfterMillis]] unless they type
-    * first or the focus leaves, which sends it then. */
-  def alert(body: String): Unit = if !plain && notifier != Notifier.Off then
-    if !focused then send(body)
-    else
-      val task: Runnable = () => take().foreach(send)
-      synchronized:
-        take()
-        pending = Some((timer.schedule(task, Alerts.NotifyAfterMillis, TimeUnit.MILLISECONDS).nn, body))
+  /** Tell the user that a question or permission request waits for them. */
+  def alert(body: String): Unit = schedule(body, questionDelayMillis)
+
+  /** Tell the user after `delayMillis` unless they type or focus the terminal
+    * first. Nothing is sent while the terminal is known to be focused: they are
+    * looking at it. Until the terminal reports focus, only typing counts. */
+  private def schedule(body: String, delayMillis: Long): Unit = if !plain && notifier != Notifier.Off then
+    synchronized:
+      take()
+      if !(focusKnown && focused) then
+        val task: Runnable = () => take().foreach(send)
+        pending = Some((timer.schedule(task, delayMillis, TimeUnit.MILLISECONDS).nn, body))
 
   /** The user typed or answered, so they have seen what waits. */
   def touch(): Unit = take()
 
+  /** Coming back to the terminal counts as seeing what waits; leaving it sends nothing early. */
   def focusChanged(in: Boolean): Unit =
     focused = in
-    if !in then take().foreach(send)
+    focusKnown = true
+    if in then take()
 
   /** Cancel the pending alert and return its text. */
   private def take(): Option[String] = synchronized:
@@ -91,15 +106,18 @@ private[ui] final class Alerts(terminal: Terminal, plain: Boolean, emit: String 
 
   def turnError(message: String): Unit = synchronized { error = message }
 
-  def turnEnded(stats: Tui.TurnStats): Unit = alert(synchronized(Alerts.turnText(stats, prose.toString, error)))
+  def turnEnded(stats: Tui.TurnStats): Unit =
+    schedule(synchronized(Alerts.turnText(stats, prose.toString, error)), turnDelayMillis)
 
   def close(): Unit =
     take()
     reportFocus(false)
 
 private[atc] object Alerts:
-  /** How long a finished turn or a waiting question waits for input before it notifies the user. */
-  val NotifyAfterMillis: Long = 10_000L
+  /** How long a question or permission request waits for input or focus before it notifies the user. */
+  val QuestionDelayMillis: Long = 10_000L
+  /** The same for a finished turn, whose answer may take a while to read. */
+  val TurnDelayMillis: Long = 30_000L
   /** How much of the turn's last prose block is kept for its alert. */
   val ProseChars = 1000
 

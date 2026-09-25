@@ -709,8 +709,9 @@ when a provider rejects the tool, the model continues without it for the session
 
 **Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
 in kitty, iTerm2, WezTerm, Ghostty and foot, a desktop notification on a local machine, the
-bell otherwise), `system`, `terminal`, `bell` or `off`. An alert waits ten seconds for
-input, or comes at once when the terminal reports that it lost focus.
+bell otherwise), `system`, `terminal`, `bell` or `off`. An alert comes only after a wait in
+which the user neither typed nor had the terminal focused: ten seconds for a question or
+permission request, thirty for a finished turn.
 
 ### File rules and command patterns
 
@@ -1106,14 +1107,16 @@ Background process events between turns use `LineReader.printAbove`
 so notifications do not overwrite the user's input.
 
 `Notifier` sends the `notifications` alert when a turn ends, a permission request or
-question opens, or the tool budget runs out. `Alerts.alert` schedules it ten seconds ahead and
-drops it on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
+question opens, or the tool budget runs out. `Alerts` schedules it ten seconds ahead
+(`QuestionDelayMillis`; `TurnDelayMillis`, thirty, for a finished turn) unless the terminal
+is known to be focused, and drops it on focus coming back or on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
 changed buffer) and the end of a pop-up count as input. The terminal's focus reports
 (`ESC[?1004h`) come through JLine's focus widgets at the prompt and through the key reader
 during a turn. Reporting is on only while one of those raw-mode readers runs (`callback-init`
 to `callback-finish` for the line reader, `KeyReader.start` to `KeyReader.stop`): between reads the
-terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends a pending alert at once, and an alert raised while
-unfocused is not delayed. jline-prompt menus do not parse focus reports, so reporting is
+terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends nothing early. Focus is
+known only once the terminal has sent a report, since JLine assumes support for every `xterm*`
+type and such a terminal may send none; until then only keys count. jline-prompt menus do not parse focus reports, so reporting is
 off while a menu reads. There are no alerts for `-p` runs or dumb terminals.
 The alert title is `atc · <directory>`. A turn's alert shows the start of its last prose
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
