@@ -1,7 +1,7 @@
 package atc.commands
 
 import atc.{App, Debug, Models}
-import atc.config.{Config, ModelSpec, Origin}
+import atc.config.{Config, ModelConfig, ModelSpec, ObjectText, Origin}
 import atc.llm.ChatModel
 import atc.platform.PlatformPath
 
@@ -44,14 +44,19 @@ final class ModelCommands(app: App):
         if !tui.menusAvailable then show()
         None
 
-  /** `/model`: pick from the list, or switch to the named one. */
+  /** `/model`: pick from the list, or switch to the named one. The model starts
+    * with its configured effort, and a saved `effort` is removed. */
   def switchModel(arg: String): Unit =
     choose(arg, "model", models.describe(agent.model)): spec =>
-      agent.model = models.client(spec)
+      val model = models.client(spec)
+      model.effort = model.defaultEffort
+      agent.model = model
       Models.rememberLast(spec.ref)
       app.updateStatus()
       app.predictor.start()
-      tui.success(s"model -> ${models.describe(agent.model)}" + remember("model", Some(spec)))
+      val saved = remember("model", Some(ujson.Str(models.catalog.label(spec))))
+      remember("effort", None)
+      tui.success(s"model -> ${models.describe(model)}" + saved)
 
   /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
   def switchClassified(arg: String): Unit =
@@ -59,7 +64,8 @@ final class ModelCommands(app: App):
       agent.classifiedModel = None
       app.predictor.start()
       tui.success(
-        "classified model -> (none): classified data is no longer sent to any model" + remember("classifiedModel", None)
+        "classified model -> (none): classified data is no longer sent to any model" +
+          remember("classifiedModel", Some(ujson.Null))
       )
     else
       val current = agent.classifiedModel.map(models.describe).getOrElse("(none)")
@@ -67,7 +73,8 @@ final class ModelCommands(app: App):
         val m = models.client(spec)
         agent.classifiedModel = Some(m)
         app.predictor.start()
-        tui.success(s"classified model -> ${models.describe(m)}" + remember("classifiedModel", Some(spec)))
+        val saved = remember("classifiedModel", Some(ujson.Str(models.catalog.label(spec))))
+        tui.success(s"classified model -> ${models.describe(m)}" + saved)
 
   /** Shared by the two switches: an argument names a model, no argument opens
     * the picker; the current one is reported when nothing is chosen. */
@@ -82,13 +89,13 @@ final class ModelCommands(app: App):
 
   /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
   def effortChoices: List[String] =
-    if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ ModelCommands.DefaultEffort
+    if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ ModelConfig.DefaultEffort
 
   /** `/effort`: pick the agent model's reasoning effort, or set the named one,
-    * for the rest of the session. */
+    * and save it as the project's `effort`. */
   def switchEffort(arg: String): Unit =
     val model = agent.model
-    val current = model.effort.getOrElse(ModelCommands.DefaultEffort)
+    val current = model.effort.getOrElse(ModelConfig.DefaultEffort)
     val choices = effortChoices
     if choices.isEmpty then tui.info(s"${model.ref} takes no reasoning effort")
     else
@@ -99,9 +106,9 @@ final class ModelCommands(app: App):
         case None => tui.info(s"effort: $current (${choices.mkString(" | ")})")
         case Some(e) if !choices.contains(e) => tui.error(s"${model.ref} takes ${choices.mkString(" | ")}, not '$e'")
         case Some(e) =>
-          model.effort = Option.when(e != ModelCommands.DefaultEffort)(e)
+          model.effort = Option.when(e != ModelConfig.DefaultEffort)(e)
           app.updateStatus()
-          tui.success(s"effort -> $e")
+          tui.success(s"effort -> $e" + remember("effort", Some(ujson.Str(e))))
 
   /** The models the session or the config uses, with the role each plays. */
   def inUse: List[(ModelSpec, String)] =
@@ -133,12 +140,12 @@ final class ModelCommands(app: App):
     next.refresh()
     app.updateStatus()
 
-  /** Keep a model choice in the working directory's own config, so the next run
-    * here starts with it (`None` unsets the role: `"classifiedModel": null`).
-    * Only that file is ever written: a project config found in a parent
-    * directory governs this run but is not touched from a sub-directory.
-    * Returns the note to append to the confirmation. */
-  private def remember(key: String, choice: Option[ModelSpec]): String =
+  /** Keep a choice as the top-level `key` of the working directory's own config,
+    * so the next run here starts with it; `None` removes the key. Only that file
+    * is ever written: a project config found in a parent directory governs this
+    * run but is not touched from a sub-directory. Returns the note to append to
+    * the confirmation. */
+  private def remember(key: String, value: Option[ujson.Value]): String =
     val cwd = app.cwd
     def show(p: Path): String =
       val abs = p.toAbsolutePath.nn.normalize.nn
@@ -146,9 +153,10 @@ final class ModelCommands(app: App):
     Some(Config.projectPath(cwd)).filter(Files.isRegularFile(_)) match
       case None => ""
       case Some(path) =>
-        val value = choice.map(m => ujson.Str(models.catalog.label(m))).getOrElse(ujson.Null)
         try
-          Config.setTopLevel(path, key, value, after = List("model"))
+          value match
+            case Some(v) => Config.setTopLevel(path, key, v, after = List("model"))
+            case None => Config.editFile(path)(ObjectText.withMember(_, List(key), None, path.toString))
           // A `-c` file that sets the same key wins over the project config on the next start.
           val overridden = app.configuration.layers
             .filter(l => l.origin == Origin.Explicit && l.defines(key))
@@ -162,7 +170,3 @@ final class ModelCommands(app: App):
           case e: Exception =>
             tui.error(s"could not save the choice to ${show(path)}: ${Debug.message(e)}")
             ""
-
-object ModelCommands:
-  /** The `/effort` choice that sends no effort, leaving it to the provider. */
-  private val DefaultEffort = "default"

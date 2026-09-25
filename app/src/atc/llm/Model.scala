@@ -135,8 +135,10 @@ trait ChatModel:
   def maxOutputTokens: Option[Int] = None
   /** The efforts [[effort]] may be set to; empty when the model takes none. */
   def efforts: List[String] = Nil
+  /** The effort the model's config sets (`reasoning`); `None` sends none. */
+  def defaultEffort: Option[String] = None
   /** The reasoning effort later requests ask for, one of [[efforts]]; `None`
-    * sends none. Starts as configured (`reasoning`); `/effort` switches it. */
+    * sends none. Starts as [[defaultEffort]]; `/effort` switches it. */
   @volatile var effort: Option[String] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;

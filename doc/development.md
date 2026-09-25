@@ -622,7 +622,8 @@ permissions (`0600`, with a warning at load when group or others can read the fi
 Windows uses the directory's inherited NTFS ACL, which ATC does not rewrite or audit; keep
 the file under the private profile and check it with `icacls` on a shared machine.
 
-`Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings. The
+`Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings, and
+`Config.editFile` leaves a file alone when an edit changes nothing. The
 `ObjectText` scanner operates only after JSON validation. Duplicate keys update the final
 occurrence, matching ujson's lookup. Writes use a temporary file and atomic replacement
 where supported, preserving POSIX permissions and resolving a configured symlink target.
@@ -682,8 +683,11 @@ with ChatGPT*, which replaces the saved sign-in.
 
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
-to `max` for OpenAI). `/effort [level]` switches the agent model's effort for the session,
-and `default` sends none.
+to `max` for OpenAI). `/effort [level]` switches the agent model's effort, and `default`
+sends none. The choice is saved as the top-level `effort` of the working directory's project
+config (when it has one, like `/model`'s `model`), which replaces the starting model's
+`reasoning` in later sessions; an effort that model does not take is ignored with a
+warning. `/model` starts the new model at its configured effort and removes `effort`.
 
 **Web search.** A model's `webSearch` turns on the provider's own search tool; the
 top-level `webSearch` does so for every model that does not set its own. It is best effort:
@@ -754,8 +758,8 @@ that names its file: the session falls back to the last model chosen or the firs
 sends classified data to no model. A `-m` that names no model stops the start. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
 always labelled by their full reference, so fetching a list never changes the labels of
 configured models. `ChatModel.effort` is mutable per client and read at request time;
-`Models` caches one client per reference, so an effort chosen with `/effort` survives
-switching away and back.
+`Models` caches one client per reference, so `/model` sets the chosen client's effort back
+to `ChatModel.defaultEffort` (its `reasoning`).
 
 Web search is best effort. `ModelCatalog` gives every model without its own `webSearch`
 the top-level one, listed models included. `SpecModel.withWebSearchFallback` resends a

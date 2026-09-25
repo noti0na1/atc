@@ -652,6 +652,23 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(Configuration.combine(List(global, project)).settings.autoCompactThreshold, 0.6)
     assertEquals(Configuration.combine(List(global, project, explicit)).settings.autoCompactThreshold, 0.0)
 
+  test("effort accepts a known effort or default"):
+    List("high", "none", "default").foreach: value =>
+      assertEquals(ConfigValidation.validate(Config(effort = Some(value))).effort, Some(value))
+    val error = intercept[IllegalArgumentException](ConfigValidation.validate(Config(effort = Some("turbo"))))
+    assert(error.getMessage.nn.contains("effort"), error.getMessage)
+
+  test("editFile leaves a file alone when the edit changes nothing"):
+    val file = Files.createTempFile("atc-edit", ".json").nn
+    Files.writeString(file, """{ "model": "a" }""")
+    Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(0))
+    Config.editFile(file)(ObjectText.withMember(_, List("effort"), None))
+    assertEquals(Files.getLastModifiedTime(file).toMillis, 0L)
+    Config.editFile(file)(ObjectText.withTopLevel(_, "effort", ujson.Str("high"), after = List("model")))
+    assertEquals(Files.readString(file), """{ "model": "a", "effort": "high" }""")
+    Config.editFile(file)(ObjectText.withMember(_, List("effort"), None))
+    assertEquals(Files.readString(file), """{ "model": "a" }""")
+
   test("notifications accepts the known methods only"):
     assertEquals(upickle.default.read[Config]("{}").notifications, "auto")
     List("auto", "system", "terminal", "bell", "off", "Bell").foreach: value =>

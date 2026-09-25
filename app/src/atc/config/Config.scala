@@ -55,6 +55,9 @@ object ModelConfig:
   /** Every effort a provider api knows, lowest first. */
   val ReasoningEfforts: List[String] = List("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+  /** The effort choice that sends no effort, leaving it to the provider. */
+  val DefaultEffort = "default"
+
 /** One LLM endpoint and the models reachable through it. `api` is the wire
   * protocol: `anthropic`, `openai` (Chat Completions; also any
   * OpenAI-compatible server such as Ollama, vLLM, LM Studio via `url`),
@@ -125,6 +128,10 @@ final case class Config(
   /** The isolated, effect-free model trusted by `classifiedChat`, named the
     * same way. Unset means classified data is never sent to a model. */
   classifiedModel: Option[String] = None,
+  /** The agent model's reasoning effort at start, in place of the model's own
+    * `reasoning`: one of its efforts, or `default` to send none. `/effort` saves
+    * it in the project config and `/model` removes it. */
+  effort: Option[String] = None,
   /** LLM endpoints by name, each with its own models. */
   providers: Map[String, ProviderConfig] = Map.empty,
   files: List[FileRuleConfig] = Nil,
@@ -323,13 +330,15 @@ object Config:
   def setTopLevel(path: Path, key: String, value: ujson.Value, after: List[String] = Nil): Unit =
     editFile(path)(ObjectText.withTopLevel(_, key, value, after, path.toString))
 
-  /** Replace a config file's text with `update(text)`. A symlinked config stays a
-    * symlink: its target is replaced, so a config shared that way stays shared. */
+  /** Replace a config file's text with `update(text)`, unless that leaves it unchanged.
+    * A symlinked config stays a symlink: its target is replaced, so a config shared that
+    * way stays shared. */
   def editFile(path: Path)(update: String => String): Unit =
     val text =
       try Files.readString(path).nn
       catch case e: Exception => throw IllegalArgumentException(s"Cannot read config $path: ${Debug.message(e)}")
-    replaceFile(path.toRealPath().nn, update(text), keepPermissions = true)
+    val updated = update(text)
+    if updated != text then replaceFile(path.toRealPath().nn, updated, keepPermissions = true)
 
   /** The starter global config written by `--init-global`, with every preset provider. */
   def globalTemplate: String = globalTemplateWith(ProviderPreset.all)

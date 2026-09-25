@@ -26,7 +26,8 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   override val contextWindow: Option[Int] = settings.contextWindow.map(_.toInt)
   override val maxOutputTokens: Option[Int] = settings.maxTokens
   override val efforts: List[String] = settings.efforts.getOrElse(knownEfforts).map(_.toLowerCase(Locale.ROOT))
-  effort = settings.reasoning.map(_.toLowerCase(Locale.ROOT))
+  override val defaultEffort: Option[String] = settings.reasoning.map(_.toLowerCase(Locale.ROOT))
+  effort = defaultEffort
 
   /** Every effort the provider's api accepts, for a model whose config lists none. */
   protected def knownEfforts: List[String]

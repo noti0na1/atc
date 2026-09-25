@@ -1,10 +1,11 @@
 package atc
 
-import atc.config.{Config, Configuration, ModelCatalog, ModelListStore, ModelSpec}
+import atc.config.{Config, Configuration, ModelCatalog, ModelConfig, ModelListStore, ModelSpec}
 import atc.llm.ChatModel
 import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
+import java.util.Locale
 import scala.collection.mutable
 import scala.util.Try
 import scala.util.control.NonFatal
@@ -27,12 +28,20 @@ final class Models(args: Cli.Args, start: Configuration):
   def client(reference: String): ChatModel = client(catalog.find(reference))
 
   /** `-m`, else the config's `model`, else the model last chosen with `/model` (while
-    * it still resolves), else the first model. A `-m` that names no model stops
-    * the start; the config's `model` is passed over with a warning. */
+    * it still resolves), else the first model, with the config's `effort`. A `-m`
+    * that names no model stops the start; the config's `model` is passed over with
+    * a warning, and so is an `effort` the model does not take. */
   def initial(warn: String => Unit): ChatModel =
     def last = Models.last.flatMap(ref => Try(catalog.find(ref)).toOption)
-    args.model.map(client).orElse(configured("model", start.settings.model, warn))
+    val model = args.model.map(client).orElse(configured("model", start.settings.model, warn))
       .getOrElse(client(last.getOrElse(catalog.default)))
+    start.settings.effort.map(_.toLowerCase(Locale.ROOT)).foreach: effort =>
+      if effort == ModelConfig.DefaultEffort then model.effort = None
+      else if model.efforts.contains(effort) then model.effort = Some(effort)
+      else
+        val takes = if model.efforts.isEmpty then "no effort" else model.efforts.mkString(" | ")
+        warn(s"Ignoring effort in ${settingFile("effort")}: ${model.ref} takes $takes, not '$effort'")
+    model
 
   /** The client for the model `reference`, the value of a config `setting`
     * (`model`, `classifiedModel`). `None` when it is unset, or names no model:
@@ -42,9 +51,12 @@ final class Models(args: Cli.Args, start: Configuration):
       try Some(client(ref))
       catch
         case e: IllegalArgumentException =>
-          val file = start.layers.findLast(_.defines(setting)).flatMap(_.path).fold("the config")(PlatformPath.display)
-          warn(s"Ignoring $setting in $file: ${Debug.message(e)}")
+          warn(s"Ignoring $setting in ${settingFile(setting)}: ${Debug.message(e)}")
           None
+
+  /** The file whose value of `setting` is in force, for warnings. */
+  private def settingFile(setting: String): String =
+    start.layers.findLast(_.defines(setting)).flatMap(_.path).fold("the config")(PlatformPath.display)
 
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   def describe(m: ChatModel): String = Models.describe(m, catalog.find(m.ref))

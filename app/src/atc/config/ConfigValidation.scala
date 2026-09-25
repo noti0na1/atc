@@ -29,6 +29,7 @@ object ConfigValidation:
     )
     config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
     validateChoice("notifications", config.notifications, NotificationChoices)
+    config.effort.foreach(validateChoice("effort", _, ModelConfig.ReasoningEfforts :+ ModelConfig.DefaultEffort))
     config.mode.foreach: m =>
       try Mode.parse(m)
       catch case e: IllegalArgumentException => invalid(e.getMessage.nn)

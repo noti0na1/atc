@@ -224,6 +224,32 @@ class ModelSuite extends munit.FunSuite:
       _ => ()
     ))
 
+  test("the config's effort replaces the model's reasoning at start, unless the model does not take it"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-effort").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(
+      global,
+      """{ "providers": { "p": { "api": "openai", "url": "http://127.0.0.1:9", "key": "k", "models": {
+        |  "a": { "reasoning": "low", "efforts": ["low", "high"] } } } } }""".stripMargin
+    )
+    def start(project: String): (ChatModel, List[String]) =
+      val cwd = dir.resolve(s"p${project.hashCode.abs}").nn
+      java.nio.file.Files.createDirectories(cwd.resolve(".atc"))
+      java.nio.file.Files.writeString(Config.projectPath(cwd), project)
+      val models = Models(Cli.Args(cwd = cwd), Config.load(cwd, None, global))
+      val warned = List.newBuilder[String]
+      val model = models.initial(warned += _)
+      models.close()
+      (model, warned.result())
+    val (configured, none) = start("{}")
+    assertEquals((configured.effort, configured.defaultEffort, none), (Some("low"), Some("low"), Nil))
+    assertEquals(start("""{ "effort": "high" }""")._1.effort, Some("high"))
+    assertEquals(start("""{ "effort": "default" }""")._1.effort, None)
+    val (kept, warnings) = start("""{ "effort": "max" }""")
+    assertEquals(kept.effort, Some("low"))
+    assertEquals(warnings.size, 1, warnings)
+    assert(warnings.head.contains("p/a takes low | high, not 'max'"), warnings.head)
+
   // ── Anthropic prompt caching ────────────────────────────────────
 
   test("the history cache breakpoint is the last user-role message"):
