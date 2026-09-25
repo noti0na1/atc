@@ -238,11 +238,22 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
       // on), as xterm's modifyOtherKeys, and Alt/Option+Enter as ESC CR.
       keyMap.bind(Reference("atc-newline"), "\u001b[13;2u", "\u001b[27;2;13~", "\u001b\r")
 
+  // Called in raw mode: after `readLine` enters it (and installs its SIGINT
+  // handler, which it restores on leaving), and on Enter before it leaves it.
+  // In raw mode JLine's Unix terminals turn a Ctrl-C byte into both SIGINT and
+  // a key, and each ends a read: one would end the read after it, leaving an
+  // empty prompt line. Only the key remains, as on Windows, where it is the only one.
+  reader.getWidgets.put(
+    LineReader.CALLBACK_INIT,
+    (() =>
+      terminal.handle(Terminal.Signal.INT, _ => ())
+      if alerts.focusSupported then alerts.reportFocus(true)
+      true
+    ): Widget,
+  )
   if alerts.focusSupported then
     reader.getWidgets.put(LineReader.FOCUS_IN, (() => { alerts.focusChanged(true); true }): Widget)
     reader.getWidgets.put(LineReader.FOCUS_OUT, (() => { alerts.focusChanged(false); true }): Widget)
-    // Called in raw mode: after `readLine` enters it, and on Enter before it leaves it.
-    reader.getWidgets.put(LineReader.CALLBACK_INIT, (() => { alerts.reportFocus(true); true }): Widget)
     reader.getWidgets.put(LineReader.CALLBACK_FINISH, (() => { alerts.reportFocus(false); true }): Widget)
 
   /** Read a line with `typed` already in the buffer (the turn's type-ahead). */
