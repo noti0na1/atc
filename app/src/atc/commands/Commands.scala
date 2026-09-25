@@ -25,7 +25,7 @@ final class Commands(app: App):
     case _ :: Nil => SlashCommand.names
     case "/model" :: _ :: Nil => models.catalog.labels
     case "/effort" :: _ :: Nil => modelCommands.effortChoices
-    case "/classifiedmodel" :: _ :: Nil => models.catalog.labels :+ "off"
+    case "/classifiedmodel" :: _ :: Nil => "none" +: models.catalog.labels
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
     case "/perms" :: _ :: Nil => List("revoke")
     case _ => Nil

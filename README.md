@@ -417,7 +417,8 @@ and their models on or off, or adds a provider. `/model` switches the model and 
 its reasoning effort, both remembered in the project config; `webSearch` turns on the
 provider's web search where it has one. **Keys** never go in a config: `"key": "${DEEPSEEK_API_KEY}"` names a variable set
 in `.atc/keys.properties` or in the environment. Set `classifiedModel` only for a model that
-runs in an isolated environment with no outward connection. Every setting is described in
+runs in an isolated environment with no outward connection; without one, the default,
+classified data goes to no model. `/classifiedmodel` chooses one, or `none`. Every setting is described in
 [doc/development.md](doc/development.md#configuration-reference).
 
 **Files, commands and hosts.** A file rule has a gitignore-style `path` pattern (a bare

@@ -33,13 +33,15 @@ final class ModelCommands(app: App):
   /** `/models`. */
   def show(): Unit = models.catalog.models.foreach(m => tui.println("  " + row(m)))
 
-  /** Pick a model from the list. Without a menu (plain mode) the list is
-    * printed instead, so the user can name one with `/model <ref>`. */
-  private def pick(title: String): Option[ModelSpec] =
+  /** Pick a model from the list, after the `none` row when there is one: `Some(None)`
+    * when that was chosen. Without a menu (plain mode) the list is printed instead, so
+    * the user can name one with `/model <ref>`. */
+  private def pick(title: String, none: Option[String]): Option[Option[ModelSpec]] =
     val all = models.catalog.models
     val rows = all.map(row)
-    tui.choose(title, rows) match
-      case Some(chosen) => all.zip(rows).collectFirst { case (m, r) if r == chosen => m }
+    tui.choose(title, none.toList ++ rows) match
+      case Some(chosen) if none.contains(chosen) => Some(None)
+      case Some(chosen) => all.zip(rows).collectFirst { case (m, r) if r == chosen => Some(m) }
       case None =>
         if !tui.menusAvailable then show()
         None
@@ -58,18 +60,22 @@ final class ModelCommands(app: App):
       remember("effort", None)
       tui.success(s"model -> ${models.describe(model)}" + saved)
 
-  /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
+  /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `none` (or
+    * `off`), also the picker's first row, unsets it. */
   def switchClassified(arg: String): Unit =
-    if Set("off", "none").contains(arg.trim.toLowerCase(Locale.ROOT)) then
+    val current = agent.classifiedModel.map(models.describe).getOrElse("(none)")
+    def disable(): Unit =
       agent.classifiedModel = None
       app.predictor.start()
       tui.success(
         "classified model -> (none): classified data is no longer sent to any model" +
           remember("classifiedModel", Some(ujson.Null))
       )
+    val noneRow = "none  classifiedChat off: classified data goes to no model" +
+      (if agent.classifiedModel.isEmpty then "  [classified]" else "")
+    if Set("off", "none").contains(arg.trim.toLowerCase(Locale.ROOT)) then disable()
     else
-      val current = agent.classifiedModel.map(models.describe).getOrElse("(none)")
-      choose(arg, "classified model", current): spec =>
+      choose(arg, "classified model", current, Some(noneRow), disable): spec =>
         val m = models.client(spec)
         agent.classifiedModel = Some(m)
         app.predictor.start()
@@ -77,14 +83,22 @@ final class ModelCommands(app: App):
         tui.success(s"classified model -> ${models.describe(m)}" + saved)
 
   /** Shared by the two switches: an argument names a model, no argument opens
-    * the picker; the current one is reported when nothing is chosen. */
-  private def choose(arg: String, what: String, current: String)(use: ModelSpec => Unit): Unit =
+    * the picker (with a `none` row that runs `disable`, when given); the current
+    * one is reported when nothing is chosen. */
+  private def choose(
+    arg: String,
+    what: String,
+    current: String,
+    none: Option[String] = None,
+    disable: () => Unit = () => (),
+  )(use: ModelSpec => Unit): Unit =
     if arg.nonEmpty then
       try use(models.catalog.find(arg))
       catch case e: IllegalArgumentException => tui.error(Debug.message(e))
     else
-      pick(s"Choose the $what") match
-        case Some(spec) => use(spec)
+      pick(s"Choose the $what", none) match
+        case Some(Some(spec)) => use(spec)
+        case Some(None) => disable()
         case None => tui.info(s"$what: $current")
 
   /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
