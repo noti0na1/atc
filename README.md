@@ -378,8 +378,9 @@ The [project config](app/resources/atc/project-template.json) opens a project, a
 it lives inside the repository it can open *that repository* but nothing beyond it, and
 cannot exceed the limits the global config sets. Review a project's `.atc/config.json`
 before running ATC on code you do not trust: it chooses the models, commands and hosts.
-The exact merge rules are in
-[doc/development.md](doc/development.md#configuration-semantics).
+`/config` changes the settings that leave the sandbox alone (input prediction,
+notifications, web search, compaction) for the session or in either file. The exact merge
+rules are in [doc/development.md](doc/development.md#configuration-semantics).
 
 ```json
 {

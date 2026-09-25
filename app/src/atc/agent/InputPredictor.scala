@@ -16,8 +16,8 @@ final class InputPredictor(
   show: Option[String] => Unit,
   /** Told what every guess cost, so `/cost` includes it. */
   spent: TokenUsage => Unit = _ => (),
-  /** `false` never guesses: [[start]] does nothing. */
-  val enabled: Boolean = true,
+  /** `false` never guesses: [[start]] does nothing. `/config` switches it. */
+  @volatile var enabled: Boolean = true,
 ):
   private val generation = AtomicLong(0)
   private final case class Job(generation: Long, model: ChatModel, history: List[Msg])

@@ -128,6 +128,9 @@ trait ChatModel:
     * when replaying a turn. */
   def providerKey: String
   def webSearch: Boolean
+  /** Turn the provider's web search on or off for later requests, when the
+    * config's setting changes during the session. */
+  def useWebSearch(on: Boolean): Unit = ()
   /** The context window in tokens, when the config states it (`contextWindow`). */
   def contextWindow: Option[Int] = None
   /** Configured maximum output tokens, when the adapter sends one. Context

@@ -32,9 +32,11 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   /** Every effort the provider's api accepts, for a model whose config lists none. */
   protected def knownEfforts: List[String]
 
+  @volatile private var webSearchOn = settings.webSearch.getOrElse(false)
   /** Set once the provider rejected its web search tool for this model. */
   @volatile private var webSearchRejected = false
-  def webSearch: Boolean = settings.webSearch.getOrElse(false) && !webSearchRejected
+  def webSearch: Boolean = webSearchOn && !webSearchRejected
+  override def useWebSearch(on: Boolean): Unit = webSearchOn = on
 
   /** Run one streaming request. Web search is best effort: when the provider
     * rejects the tool before anything was streamed, this model continues

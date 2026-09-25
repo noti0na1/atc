@@ -16,6 +16,8 @@ enum Origin(val label: String):
   case Project extends Origin("project")
   /** A file named with `-c`. */
   case Explicit extends Origin("explicit")
+  /** What `/config` set for the running session, over every file. */
+  case Session extends Origin("session")
 
   /** Whether this layer may grant anything anywhere (the project layer may
     * grant only within its own project, and its scalar settings only narrow). */
@@ -36,8 +38,12 @@ final case class ConfigLayer(
 ):
   def defines(key: String): Boolean = json.value.contains(key)
   def describe: String =
-    val role = if origin.grants then "grants anywhere" else "grants its own project, otherwise narrows"
-    f"  ${origin.label}%-9s ${path.map(_.toString).getOrElse("(bundled)")}%-52s $role"
+    val role =
+      if origin == Origin.Session then "set with /config"
+      else if origin.grants then "grants anywhere"
+      else "grants its own project, otherwise narrows"
+    val source = path.map(_.toString).getOrElse(if origin == Origin.Session then "(this session)" else "(bundled)")
+    f"  ${origin.label}%-9s $source%-52s $role"
 
 object ConfigLayer:
   /** The config file at `path`, in the role `origin`. */
@@ -60,6 +66,10 @@ object ConfigLayer:
     val where = "the bundled starting config"
     val json = ObjectText.parse(Config.globalTemplate, where)
     ConfigLayer(Origin.Global, None, json, settings(json, where), None)
+
+  /** The settings `/config` changed for this session only, as a layer. */
+  def session(json: ujson.Obj): ConfigLayer =
+    ConfigLayer(Origin.Session, None, json, settings(json, "the settings of this session"), None)
 
   private[config] def settings(json: ujson.Obj, where: String): Config =
     try upickle.default.read[Config](json)

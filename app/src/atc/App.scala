@@ -116,8 +116,18 @@ final class App(args: Cli.Args, val tui: Tui):
     () => agent.history,
     tui.suggest,
     agent.recordUsage(Agent.Prediction, _),
-    enabled = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty,
+    enabled = config.predictInput && canPredict,
   )
+  private def canPredict: Boolean = tui.suggestionsAvailable && args.prompt.isEmpty
+
+  /** Apply the settings `/config` may change to the running session. The
+    * models take up `webSearch` when [[Models.reload]] loads it. */
+  def useSettings(settings: Config): Unit =
+    agent.config = agent.config
+      .copy(autoCompactThreshold = settings.autoCompactThreshold, compactKeepRatio = settings.compactKeepRatio)
+    if args.prompt.isEmpty then tui.notifier = Notifier.fromSetting(settings.notifications)
+    predictor.enabled = settings.predictInput && canPredict
+    if !predictor.enabled then predictor.invalidate()
 
   /** Show the model, its effort, the mode and the directory in the status line. */
   def updateStatus(): Unit =

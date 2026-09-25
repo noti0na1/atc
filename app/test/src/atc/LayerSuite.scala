@@ -168,6 +168,21 @@ class LayerSuite extends munit.FunSuite:
     Files.writeString(w.globalPath, """{ "commands": ["ls"] }""")
     assertEquals(Config.load(w.cwd, None, w.globalPath, bundledGlobal = true).layers.head.path, Some(w.globalPath))
 
+  test("what /config sets for the session is a last layer, over every file"):
+    val w = World(
+      global = """{ "predictInput": true, "autoCompactThreshold": 0.9 }""",
+      project = """{ "predictInput": true }""",
+      explicit = """{ "notifications": "bell" }""",
+    )
+    val session = ConfigLayer.session(ujson.Obj("predictInput" -> false, "notifications" -> "off"))
+    val combined = Configuration.combine(w.configuration.layers :+ session, w.configuration.keys)
+    assertEquals(
+      (combined.settings.predictInput, combined.settings.notifications, combined.settings.autoCompactThreshold),
+      (false, "off", 0.9),
+    )
+    assert(session.describe.contains("(this session)"), session.describe)
+    assertEquals(combined.sources, w.configuration.sources) // no file behind it
+
   test("initProject writes the starting project config and its .gitignore once, and never again"):
     val w = World(global = "")
     val config = Config.projectPath(w.cwd)

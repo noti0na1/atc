@@ -17,6 +17,7 @@ final class Commands(app: App):
   private val modelCommands = ModelCommands(app)
   private val statusCommands = StatusCommands(app)
   private val providersMenu = ProvidersMenu(app, modelCommands)
+  private val configCommands = ConfigCommands(app)
   /** Also used at the start and end of an interactive run, to resume and save the session. */
   val sessionCommands: SessionCommands = SessionCommands(app)
 
@@ -28,6 +29,9 @@ final class Commands(app: App):
     case "/classifiedmodel" :: _ :: Nil => "none" +: models.catalog.labels
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
     case "/perms" :: _ :: Nil => List("revoke")
+    case "/config" :: _ :: Nil => "show" :: ConfigCommands.Setting.values.toList.map(_.key)
+    case "/config" :: key :: _ :: Nil => ConfigCommands.Setting.named(key).fold(Nil)(_.choices)
+    case "/config" :: key :: _ :: _ :: Nil if ConfigCommands.Setting.named(key).isDefined => ConfigCommands.ScopeNames
     case _ => Nil
 
   /** Handle a slash command line; returns false to quit. */
@@ -54,7 +58,7 @@ final class Commands(app: App):
     case Cmd.Providers => providersMenu.run()
     case Cmd.Mode => sessionCommands.switchMode(arg)
     case Cmd.Perms => statusCommands.permissions(arg)
-    case Cmd.Config => statusCommands.showConfig()
+    case Cmd.Config => configCommands.run(arg)
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
     case Cmd.Run => sessionCommands.run(arg)
     case Cmd.New => sessionCommands.newSession()

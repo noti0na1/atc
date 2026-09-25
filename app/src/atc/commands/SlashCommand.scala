@@ -15,7 +15,7 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Mode extends SlashCommand("/mode [name]", "change mode and restart the REPL")
   case Perms
       extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
-  case Config extends SlashCommand("/config", "show the active configuration")
+  case Config extends SlashCommand("/config [show|setting value]", "change a setting, or show the configuration")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run extends SlashCommand("/run [code]", "run Scala; omit code for multiline input", "/scala")
   case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")

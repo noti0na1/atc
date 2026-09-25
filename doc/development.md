@@ -610,6 +610,18 @@ Only explicitly defined project settings narrow a value. `executionTimeoutMs` de
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
 
+`/config` (`ConfigCommands`) changes only `predictInput`, `notifications`, `webSearch`,
+`autoCompactThreshold` and `compactKeepRatio`: settings outside `PolicyKeys`, so none can
+loosen the sandbox, and a project config may set them. Every change goes into a `session`
+layer that `Models` keeps in memory and appends after the files on each reload, so a
+`/providers` edit does not drop it. Saving to the project config in force or to the global
+config also writes that file with `Config.setTopLevel`; a failed reload restores the file.
+The note on a saved value names a later file that sets the same key and wins at the next
+start. `App.useSettings` applies the combined settings to the agent, the notifier and the
+predictor, and `Models.reload` switches web search on the cached clients
+(`ChatModel.useWebSearch`); clients are not recreated, since a Claude Code client holds a
+CLI session. The sandbox keeps the policy it started with.
+
 `Configuration.combine` first merges ordinary settings in layer order, then obtains policy
 settings from granting layers and applies project restrictions. Numeric restrictions use
 minimum; enabled safety flags use logical OR. These operations are order-independent for
@@ -947,7 +959,7 @@ after the final answer, where a `-p` run would pay for a summary it never uses. 
 calibrated
 next-request usage with `contextWindow * autoCompactThreshold`. This fraction defaults to
 `0.8`, accepts `[0, 1]`, and uses zero to disable automatic compaction. It is a non-policy
-setting merged with later-layer precedence and shown in `/config`. When the exchange in
+setting merged with later-layer precedence, shown and changed by `/config`. When the exchange in
 progress is itself summarized (nothing fits the retention budget), a
 `Msg.Continuation` (`AgentMessages.compactionContinuation`) closes the request so that the
 model continues from the summary instead of being asked to complete an assistant message.

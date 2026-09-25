@@ -103,6 +103,17 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(m.providerKey, "echo")
     assertEquals(m.webSearch, false)
 
+  test("a model takes up a changed webSearch setting"):
+    val spec = ModelSpec("p", "a", "openai", "a", Some("http://127.0.0.1:9"), Some("k"), ModelConfig())
+    val m = ChatModel.create(spec)
+    try
+      assertEquals(m.webSearch, false)
+      m.useWebSearch(true)
+      assertEquals(m.webSearch, true)
+      m.useWebSearch(false)
+      assertEquals(m.webSearch, false)
+    finally m.close()
+
   // ── ChatModel.create dispatch ───────────────────────────────────
 
   private def spec(api: String, provider: String = "p", alias: String = "e") =

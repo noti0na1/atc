@@ -19,7 +19,8 @@ import scala.util.control.NonFatal
   * resume limits and cancellation bound each turn. Conversation repairs keep
   * provider history valid after interruptions or failures. */
 final class Agent(
-  config: Config,
+  /** The settings the loop reads each turn; `/config` changes the harmless ones. */
+  @volatile var config: Config,
   environment: AgentEnvironment,
   policy: Policy,
   ui: AgentUI,
