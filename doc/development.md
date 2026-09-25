@@ -1045,8 +1045,8 @@ Predictions are reduced to visible single-line text and reported separately in u
 the framing of pop-ups. It composes parts that live in their own files: `Screen` (writes
 that track line boundaries, styles, width, live regions and the spinner; its monitor is the
 TUI's lock), `StatusLine` (the footer and the window title), `ToolBlock` (one tool call's
-block, its live output and the `/output` history), `ThinkingView` and `LiveOutput` (the
-reasoning window and folded tool output), `Dialogs` (what pop-ups show and read, through
+block, its live output, its summary and the `/output` history), `ThinkingView` (the
+reasoning window), `Dialogs` (what pop-ups show and read, through
 the jline-prompt `Menus`), `KeyReader` (the key thread during a turn), `PromptReader` (the
 JLine line reader and its bindings) and `Alerts` (notifications and focus tracking).
 `Format` holds the short number, duration and plural forms of status and summary lines.
@@ -1146,6 +1146,16 @@ when wrapping would leave fewer than 24 cells per column on average; tables whos
 column widths cannot fit use the same fallback. This preserves information without turning
 long identifiers and sentences into narrow strips. Completed output panels remove the
 Ctrl-O hint once that live view is no longer active.
+
+In the compact view (the default on a terminal), a running tool block is one `LiveRegion`:
+the title, up to eight rows of code and the last ten lines of output, both cut further so
+the region stays shorter than the screen and can always be redrawn. When the call ends the
+region becomes its summary: the title with the code's first line, the files changed and the
+verdict, which names how much output it held or, for a failure, the first line of the
+error (`ToolBlock.firstProblem`; a compiler heading gives its code or its message). A
+pop-up, or any line written outside the block, freezes what the region shows and the
+block continues below; Ctrl-O takes the region down and writes the block out in full. The
+expanded view and a plain terminal write every block in full, with the result panel.
 
 `ToolHistory` retains up to 20 results within an eight-million-character budget. Each
 result retains at most two million output characters plus bounded code and file previews;

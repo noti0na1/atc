@@ -24,9 +24,15 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   /** Terminal columns, measured once per resize (`resized`): `getSize` is a system
     * call, and the live views ask for the width for every line of every token. */
   @volatile private var columns = measureColumns()
+  @volatile private var rows = measureRows()
   private def measureColumns(): Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
+  private def measureRows(): Int = { val h = terminal.getSize.getRows; if h <= 0 then 24 else h }
   def width: Int = columns
-  def resized(): Unit = columns = measureColumns()
+  /** Terminal rows, footer included; a live region must stay shorter to be redrawn. */
+  def height: Int = rows
+  def resized(): Unit =
+    columns = measureColumns()
+    rows = measureRows()
 
   // ── writing ───────────────────────────────────────────────────────
 
@@ -107,7 +113,8 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
       var styledText = false
       while i < line.length && w < budget do
         val styleEnd = Screen.sgrEnd(line, i)
-        if styleEnd > 0 then { sb.append(line, i, styleEnd); styledText = true; i = styleEnd } // takes no cells
+        // `underlying`: Scala's `append(line, i, styleEnd)` would append the tuple's text.
+        if styleEnd > 0 then { sb.underlying.append(line, i, styleEnd); styledText = true; i = styleEnd } // no cells
         else
           val cp = line.codePointAt(i)
           val cw = Screen.cellWidth(cp, w)

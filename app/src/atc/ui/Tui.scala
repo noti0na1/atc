@@ -208,6 +208,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   private def renderedLine(s: String): Unit = frame:
     screen.stopSpinner()
+    tool.endOutput() // a running block's live region stays above the line
     ensureNewline()
     val lines = if plain then s.split("\n", -1).toList else TextLayout.wrap(s, width - 1)
     lines.foreach(line => write(line + "\n"))
@@ -352,10 +353,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     // Take down what is live, say what happened, then re-render it in the new view.
     val wasThinking = thinking.active
     thinking.detach()
-    val heldBack = tool.detach()
+    tool.detach()
     info(if expanded then "expanded view (Ctrl-O to collapse)" else "compact view (Ctrl-O to expand)")
     if wasThinking then thinking.render() // the whole reasoning (expanded) or a window over it (compact)
-    tool.reattach(heldBack)
+    tool.reattach()
 
   // ── pop-ups: permission requests and questions from the agent ─────
 
