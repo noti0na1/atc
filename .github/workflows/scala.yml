@@ -19,11 +19,11 @@ jobs:
       matrix:
         include:
         - os: ubuntu-latest
-          mill_version: 1.1.9
+          mill_version: 1.1.10
         - os: macos-latest
-          mill_version: 1.1.9
+          mill_version: 1.1.10
         - os: windows-latest
-          mill_version: 1.1.9
+          mill_version: 1.1.10
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -36,7 +36,7 @@ jobs:
       shell: bash
       run: bash tests/atc_test.sh
     - name: Set up JDK 17
-      uses: actions/setup-java@v5
+      uses: actions/setup-java@v6
       with:
         java-version: '17'
         distribution: 'temurin'
@@ -87,7 +87,7 @@ jobs:
           exit 1
         fi
     - name: Set up JDK 17
-      uses: actions/setup-java@v5
+      uses: actions/setup-java@v6
       with:
         java-version: '17'
         distribution: 'temurin'
