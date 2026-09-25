@@ -167,15 +167,15 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(c.labels, List("stable-alias"))
     assertEquals(model.ref, "p/stable-alias")
     assertEquals(model.modelId, "backend-id")
-    assertEquals(App.describe(model, modelSpec), "p/stable-alias — Friendly Model (web search)")
-    assertEquals(App.modelDetail(modelSpec), "Friendly Model")
+    assertEquals(Models.describe(model, modelSpec), "p/stable-alias — Friendly Model (web search)")
+    assertEquals(Models.detail(modelSpec), "Friendly Model")
     intercept[IllegalArgumentException](c.find("Friendly Model"))
 
   test("model presentation is unchanged without a display name"):
     val modelSpec = spec("echo")
     val model = ChatModel.create(modelSpec)
-    assertEquals(App.describe(model, modelSpec), "p/e — echo")
-    assertEquals(App.modelDetail(modelSpec), "p/ignored")
+    assertEquals(Models.describe(model, modelSpec), "p/e — echo")
+    assertEquals(Models.detail(modelSpec), "p/ignored")
 
   test("a bare alias two providers share is ambiguous; the qualified name is not"):
     val c = catalog(("ollama", "openai", List("llama")), ("vllm", "openai", List("llama")))

@@ -55,8 +55,9 @@ case class ModelConfig(
 /** One LLM endpoint and the models reachable through it. `api` is the wire
   * protocol: `anthropic`, `openai` (Chat Completions; also any
   * OpenAI-compatible server such as Ollama, vLLM, LM Studio via `url`),
-  * `openai-responses` (the Responses API), or `echo` (the key-less test
-  * model). */
+  * `openai-responses` (the Responses API), `chatgpt` (the models of a ChatGPT
+  * plan, signed in through the browser instead of a key), or `echo` (the
+  * key-less test model). */
 case class ProviderConfig(
   /** Optional only so a later layer can add models to a provider an earlier
     * one defined; every provider needs an `api` once the layers are combined. */
@@ -428,7 +429,7 @@ object Config:
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
   private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
   private val ProviderApis =
-    Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "echo")
+    Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "chatgpt", "echo")
   private val AnthropicWebSearchVersions = Set("20250305", "20260209")
 
   private def invalid(message: String): Nothing = throw IllegalArgumentException(s"Invalid config: $message")
@@ -483,7 +484,7 @@ object Config:
     // the fully merged provider must define it.
     requireValid(
       provider.api.exists(_.trim.nonEmpty),
-      s"provider '$name' has no api (expected anthropic | openai | openai-responses | echo)"
+      s"provider '$name' has no api (expected anthropic | openai | openai-responses | chatgpt | echo)"
     )
     provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
     provider.models.foreach((alias, model) => validateModel(name, alias, model))

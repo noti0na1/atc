@@ -55,13 +55,18 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
   private def connection: (OpenAIClient, okhttp3.OkHttpClient) = synchronized {
     openedClient.getOrElse {
       val timeout = com.openai.core.Timeout.builder().request(Providers.RequestTimeout).build()
-      val http = Providers.httpClient(timeout.connect(), timeout.read(), timeout.write(), timeout.request())
+      val plain = Providers.httpClient(timeout.connect(), timeout.read(), timeout.write(), timeout.request())
+      val http = authorization.fold(plain)(plain.newBuilder().addInterceptor(_).build())
       val created = (Providers.openAiClient(spec, com.openai.client.okhttp.OkHttpClient(http)), http)
       openedClient = Some(created)
       created
     }
   }
   protected def client: OpenAIClient = connection._1
+  /** The model's HTTP client, for requests the SDK does not make. */
+  protected def http: okhttp3.OkHttpClient = connection._2
+  /** Authorizes every request when the provider's credential is not a fixed key. */
+  protected def authorization: Option[okhttp3.Interceptor] = None
   protected def knownEfforts: List[String] = Config.ReasoningEfforts
   protected def streamingClient: OpenAIClient =
     val (base, transport) = connection
@@ -137,6 +142,9 @@ private[atc] object Providers:
     * provider header stands for. */
   @volatile private var conversationId: String = newId()
   private def newId(): String = java.util.UUID.randomUUID().toString
+
+  /** The current conversation id. */
+  def conversation: String = conversationId
 
   /** Start a new conversation id (`/new`, `/clear`). */
   def newConversation(): Unit = conversationId = newId()

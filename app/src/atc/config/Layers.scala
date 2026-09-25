@@ -57,6 +57,26 @@ final case class Configuration(
 ):
   def sources: List[Path] = layers.flatMap(_.path)
 
+  /** Whether the bundled starting config stands in for a missing global one. */
+  def bundledGlobal: Boolean = layers.exists(l => l.origin == Origin.Global && l.path.isEmpty)
+
+  /** The configured file rules, in layer order. Nothing is granted here or
+    * anywhere else in the program; a path is reachable only because a config
+    * says so, `~/.atc/config.json` for anything and a project's own
+    * `.atc/config.json` for paths inside that project. */
+  def fileRules(cwd: Path): List[atc.perms.FileRule] =
+    rules.map { r =>
+      atc.perms.FileRule(
+        // A project layer reads its relative patterns against its own folder,
+        // and grants only inside it.
+        atc.perms.PathPattern(r.rule.path, r.base.getOrElse(cwd)),
+        r.rule.access.map(atc.perms.Access.parse),
+        r.rule.classified,
+        r.rule.locked,
+        grantsWithin = r.base,
+      )
+    }
+
   /** Every configured model, resolved, with its provider's key. */
   def catalog: ModelCatalog = ModelCatalog.from(settings, keys)
 

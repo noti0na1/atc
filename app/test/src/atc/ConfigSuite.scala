@@ -329,7 +329,7 @@ class ConfigSuite extends munit.FunSuite:
     val bound = Config.keysTemplate.linesIterator.filter(_.contains("=")).map(_.takeWhile(_ != '=').trim).toSet
     assertEquals(named -- bound, Set.empty[String], "every ${VAR} the config names should have a line to fill in")
 
-  // ── App.fileRules ──────────────────────────────────────────────
+  // ── Configuration.fileRules ──────────────────────────────────────────────
 
   test("fileRules carries each rule's origin and parses its access level"):
     val dir = Files.createTempDirectory("atc-rules").nn
@@ -342,7 +342,7 @@ class ConfigSuite extends munit.FunSuite:
                    { "path": "secrets", "classified": true } ] }
     """
     )
-    val rules = App.fileRules(load(dir, Some(cfg)), dir)
+    val rules = load(dir, Some(cfg)).fileRules(dir)
     val configured = rules
     assertEquals(configured.map(_.access), List(Some(Access.Read), Some(Access.Write), None))
     assert(configured.forall(_.grantsWithin.isEmpty), "an explicit -c file grants wherever it matches")

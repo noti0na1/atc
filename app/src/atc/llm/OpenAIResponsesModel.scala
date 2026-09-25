@@ -13,7 +13,7 @@ import scala.jdk.OptionConverters.*
 
 /** OpenAI Responses API (official Java SDK), streaming, with the built-in
   * `web_search` tool when enabled. */
-final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
+class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   val providerKey: String = "openai-responses"
 
   /** The `reasoning` block for a call: as configured (effort and summary), or
@@ -53,8 +53,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     // for the encrypted reasoning content, or the replayed reasoning items are
     // invalid (backends answer HTTP 400 invalid_encrypted_content).
     b.addInclude(ResponseIncludable.REASONING_ENCRYPTED_CONTENT)
-    cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
-    cfg.temperature.foreach(b.temperature)
+    limits(b)
     reasoning(thinking = true).foreach(b.reasoning)
     thinkingSwitch(thinking = true).foreach(b.putAdditionalBodyProperty("thinking", _))
     tools.foreach(t => b.addTool(functionTool(t)))
@@ -85,6 +84,14 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     }
     b.inputOfResponse(input.result().asJava)
     b.build()
+
+  /** The configured output limit and sampling of a request. */
+  protected def limits(b: ResponseCreateParams.Builder): Unit =
+    cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
+    cfg.temperature.foreach(b.temperature)
+
+  /** Send a one-shot request. */
+  protected def send(params: ResponseCreateParams): Response = client.responses().create(params)
 
   private def extract(r: Response): Completion =
     val text = StringBuilder()
@@ -120,7 +127,7 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
     cancelled: () => Boolean
   ): Completion =
     withWebSearchFallback(sink) { sink =>
-      val acc = ResponseAccumulator.create()
+      val acc = OpenAIResponsesModel.Accumulator()
       val stream = streamingClient.async().responses().createStreaming(params(system, history, tools))
       ModelRequest.awaitStream(() => stream.close()) {
         stream.subscribe { ev =>
@@ -167,13 +174,28 @@ final class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec
       val b = ResponseCreateParams.builder().model(modelId).input(prompt).store(false)
       Providers.headers(spec).foreach((n, v) => b.putAdditionalHeader(n, v))
       system.foreach(b.instructions)
-      cfg.maxTokens.foreach(n => b.maxOutputTokens(n.toLong))
-      cfg.temperature.foreach(b.temperature)
+      limits(b)
       reasoning.foreach(b.reasoning)
       thinkingSwitch(thinking).foreach(b.putAdditionalBodyProperty("thinking", _))
-      client.responses().create(b.build())
+      send(b.build())
     val r = withEffortFallback(thinking, reasoning(thinking))(request)
     val text = r.output().asScala.flatMap(it =>
       if it.isMessage then it.asMessage().content().asScala.flatMap(_.outputText().toScala.map(_.text())) else Nil
     ).mkString
     Reply(text, usageOf(r))
+
+object OpenAIResponsesModel:
+  /** The SDK's accumulator, keeping the finished output items as well: the
+    * ChatGPT backend streams them but ends with a `response.completed` whose
+    * `output` is empty, as Codex expects. */
+  final class Accumulator:
+    private val acc = ResponseAccumulator.create()
+    private val done = scala.collection.mutable.TreeMap[Long, ResponseOutputItem]()
+
+    def accumulate(ev: ResponseStreamEvent): Unit =
+      acc.accumulate(ev)
+      ev.outputItemDone().toScala.foreach(d => done(d.outputIndex()) = d.item())
+
+    def response(): Response =
+      val r = acc.response()
+      if !r.output().isEmpty || done.isEmpty then r else r.toBuilder().output(done.values.toList.asJava).build()

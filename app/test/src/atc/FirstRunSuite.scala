@@ -24,6 +24,8 @@ class FirstRunSuite extends munit.FunSuite:
     def error(text: String): Unit = shown += s"error: $text"
     def done(): Unit = assert(pending.isEmpty, s"unused answers: $pending")
 
+  private val noSignIn: FirstRun.Ui => Boolean = _ => fail("only ChatGPT signs in")
+
   private val presets = ProviderPreset.all
   private def preset(name: String) = presets.find(_.name == name).get
 
@@ -37,7 +39,7 @@ class FirstRunSuite extends munit.FunSuite:
   test("a typed key is checked by listing the models, and a wrong one is asked again"):
     val asked = scala.collection.mutable.ListBuffer[Option[String]]()
     val ui = Script(Some("Anthropic"), Some("wrong"), Some("good"), Some("model-b"))
-    val outcome = FirstRun.run(ui, presets, KeyBindings.empty, listing(asked))
+    val outcome = FirstRun.run(ui, presets, KeyBindings.empty, listing(asked), noSignIn)
     ui.done()
     outcome match
       case Outcome.Ready(provider, key, endpoint, models, model) =>
@@ -56,7 +58,7 @@ class FirstRunSuite extends munit.FunSuite:
     val asked = scala.collection.mutable.ListBuffer[Option[String]]()
     val keys = KeyBindings(List(Path.of("keys.properties") -> Map("OPENAI_API_KEY" -> "good")))
     val ui = Script(Some("OpenAI"), Some("model-a"))
-    val outcome = FirstRun.run(ui, presets, keys, listing(asked))
+    val outcome = FirstRun.run(ui, presets, keys, listing(asked), noSignIn)
     ui.done()
     assert(outcome.isInstanceOf[Outcome.Ready], outcome.toString)
     assertEquals(outcome.asInstanceOf[Outcome.Ready].key, None, "nothing new to save")
@@ -65,21 +67,40 @@ class FirstRunSuite extends munit.FunSuite:
   test("cancelling a key or a model goes back to the providers; the other choices end the run"):
     val asked = scala.collection.mutable.ListBuffer[Option[String]]()
     val back = Script(Some("DeepSeek"), None, Some("OpenRouter"), Some("good"), None, Some(FirstRun.NotNowLabel))
-    assertEquals(FirstRun.run(back, presets, KeyBindings.empty, listing(asked)), Outcome.NotNow)
+    assertEquals(FirstRun.run(back, presets, KeyBindings.empty, listing(asked), noSignIn), Outcome.NotNow)
     back.done()
     val own = Script(Some(FirstRun.ConfigureYourselfLabel))
-    assertEquals(FirstRun.run(own, presets, KeyBindings.empty, listing(asked)), Outcome.ConfigureYourself)
+    assertEquals(FirstRun.run(own, presets, KeyBindings.empty, listing(asked), noSignIn), Outcome.ConfigureYourself)
     val escaped = Script(None)
-    assertEquals(FirstRun.run(escaped, presets, KeyBindings.empty, listing(asked)), Outcome.NotNow)
+    assertEquals(FirstRun.run(escaped, presets, KeyBindings.empty, listing(asked), noSignIn), Outcome.NotNow)
 
   test("a keyless provider that cannot be reached goes back to the providers without asking for a key"):
     val ui = Script(Some(preset("ollama").label), Some(FirstRun.NotNowLabel))
     assertEquals(
-      FirstRun.run(ui, presets, KeyBindings.empty, _ => throw RuntimeException("Connection refused")),
+      FirstRun.run(ui, presets, KeyBindings.empty, _ => throw RuntimeException("Connection refused"), noSignIn),
       Outcome.NotNow
     )
     ui.done()
     assert(!ui.shown.result().exists(_.startsWith("secret:")))
+
+  test("ChatGPT is signed in to instead of asking for a key, and a failed sign-in goes back to the providers"):
+    val label = preset("chatgpt").label
+    val signIns = scala.collection.mutable.ListBuffer[Boolean]()
+    def signIn(results: Boolean*): FirstRun.Ui => Boolean =
+      val pending = scala.collection.mutable.Queue(results*)
+      _ => { signIns += pending.head; pending.dequeue() }
+    val models = (spec: ModelSpec) => List("gpt-a", "gpt-b").map(id => spec.copy(alias = id, modelId = id))
+    val ui = Script(Some(label), Some(label), Some("gpt-b"))
+    FirstRun.run(ui, presets, KeyBindings.empty, models, signIn(false, true)) match
+      case Outcome.Ready(provider, key, endpoint, _, model) =>
+        assertEquals(provider.name, "chatgpt")
+        assertEquals(key, None)
+        assertEquals(endpoint.baseUrl, Some("https://chatgpt.com/backend-api/codex"))
+        assertEquals(model.ref, "chatgpt/gpt-b")
+      case other => fail(s"unexpected $other")
+    ui.done()
+    assertEquals(signIns.toList, List(false, true))
+    assert(!ui.shown.result().exists(_.startsWith("secret:")), ui.shown.result())
 
   // ── what setup writes ───────────────────────────────────────────
 
@@ -104,7 +125,13 @@ class FirstRunSuite extends munit.FunSuite:
     val keys = KeyBindings(List(Path.of("keys.properties") -> Map("OPENCODE_GO_API_KEY" -> "good")))
     val seen = scala.collection.mutable.ListBuffer[ModelSpec]()
     val ui = Script(Some("OpenCode Go"), Some("model-a"))
-    FirstRun.run(ui, presets, keys, spec => { seen += spec; List(spec.copy(alias = "model-a", modelId = "model-a")) })
+    FirstRun.run(
+      ui,
+      presets,
+      keys,
+      spec => { seen += spec; List(spec.copy(alias = "model-a", modelId = "model-a")) },
+      noSignIn
+    )
     assertEquals(seen.map(_.headers).toList, List(Map("x-opencode-session" -> Config.SessionRef)))
 
   test("binding a key keeps the other lines of the keys file and replaces the old binding"):

@@ -15,6 +15,8 @@ final class InputPredictor(
   show: Option[String] => Unit,
   /** Told what every guess cost, so `/cost` includes it. */
   spent: TokenUsage => Unit = _ => (),
+  /** `false` never guesses: [[start]] does nothing. */
+  val enabled: Boolean = true,
 ):
   private val generation = AtomicLong(0)
   private case class Job(generation: Long, model: ChatModel, history: List[Msg])
@@ -32,8 +34,9 @@ final class InputPredictor(
       Option(worker).filter(_.isAlive).foreach(_.interrupt())
       show(None)
 
-  /** Start guessing for the conversation as it stands now. */
-  def start(): Unit =
+  /** Start guessing for the conversation as it stands now, replacing any
+    * guess made from an earlier state. */
+  def start(): Unit = if enabled then
     val gen = lock.synchronized:
       val next = generation.incrementAndGet()
       show(None)

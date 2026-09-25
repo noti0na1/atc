@@ -1,79 +1,44 @@
 package atc
 
 import atc.SlashCommand as Cmd
-import atc.agent.{
-  Agent, AgentEnvironment, InputPredictor, Prompts, ScalaToolRunner, SessionSnapshot, SessionStore, TurnOutcome
-}
-import atc.config.{
-  Config, Configuration, KeyBindings, ModelCatalog, ModelListStore, ModelSpec, Origin, ProviderConfig, ProviderEdits,
-  ProviderPreset
-}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, Prompts, TurnOutcome}
+import atc.config.{Config, Configuration}
 import atc.host.{Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
-import atc.llm.{ChatModel, TokenUsage}
+import atc.llm.ChatModel
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.sandbox.{ReplSession, SandboxConfig}
 import atc.ui.{Ansi, Notifier, Tui}
 
-import java.nio.file.{Files, Path}
-import scala.collection.mutable
+import java.nio.file.Path
 
 /** The running application: wires configuration, models, permission policy,
-  * host, sandbox session, agent loop and terminal UI together, then runs
-  * either one non-interactive turn (`-p`) or the interactive loop with its
-  * slash commands. */
+  * host, sandbox, agent loop and terminal UI together, then runs either one
+  * non-interactive turn (`-p`) or the interactive loop. The slash commands
+  * live in the `*Commands` classes and [[ProvidersMenu]]. */
 final class App(args: Cli.Args, val tui: Tui):
   val cwd: Path = args.cwd
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
-    * first-run offers of [[App.setup]] (which may end the program instead). */
-  val configuration: Configuration = App.setup(args, tui)
+    * first-run offers of [[Setup.load]] (which may end the program instead). */
+  val configuration: Configuration = Setup.load(args, tui)
   /** The effective settings. The *policy* lists live on `configuration`. */
   val config: Config = configuration.settings
 
-  // ── models ────────────────────────────────────────────────────────
+  val models: Models = Models(args, configuration)
+  private val initialModel: ChatModel = models.initial
+  private val initialClassified: Option[ChatModel] = config.classifiedModel.map(models.client)
 
-  /** Every model of every configured provider, resolved with its key; a
-    * provider that configures none is asked for its list after the start. */
-  var catalog: ModelCatalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
-  /** The configuration as `/providers` last left it; the policy keeps the one loaded at start. */
-  private var current: Configuration = configuration
-  private val modelCache = mutable.Map[String, ChatModel]()
-
-  /** The client for one configured model, created once per session. */
-  def modelFor(spec: ModelSpec): ChatModel = modelCache.getOrElseUpdate(spec.ref, ChatModel.create(spec))
-
-  /** The client for a model reference (`alias` or `provider/alias`). */
-  def modelFor(reference: String): ChatModel = modelFor(catalog.find(reference))
-
-  /** `-m`, else the config's `model`, else the model last chosen with `/model` (while
-    * it still resolves), else the first model. */
-  val initialModel: ChatModel =
-    val last = App.lastModel.flatMap(ref => scala.util.Try(catalog.find(ref)).toOption)
-    modelFor(args.model.orElse(config.model).map(catalog.find).orElse(last).getOrElse(catalog.default))
-  val initialClassified: Option[ChatModel] = config.classifiedModel.map(modelFor)
-
-  // ── sandbox session ───────────────────────────────────────────────
-
-  @volatile var session: Option[ReplSession] = None
-
-  /** Exclude user input and operations with their own timeout from the snippet clock. */
-  private def withClockPaused[T](body: => T): T =
-    session.foreach(_.clock.pause())
-    try body
-    finally session.foreach(_.clock.resume())
+  val sandbox: SandboxRepl = SandboxRepl(config, policy, host, tui)
 
   // ── permission policy ─────────────────────────────────────────────
 
-  val prompter: PermissionPrompter =
-    App.permissionPrompter(args, request => withClockPaused(tui.askPermission(request)))
-  val policy =
+  val policy: Policy =
     Policy(
-      App.fileRules(configuration, cwd),
+      configuration.fileRules(cwd),
       config.commands,
       config.hosts,
-      prompter,
+      App.permissionPrompter(args, request => withClockPaused(tui.askPermission(request))),
       config.denyCommands,
       config.denyHosts
     )
@@ -81,10 +46,12 @@ final class App(args: Cli.Args, val tui: Tui):
 
   // ── host (the sandbox API implementation) and its ports ───────────
 
-  val output: HostOutput = new HostOutput:
+  private def withClockPaused[T](body: => T): T = sandbox.withClockPaused(body)
+
+  private val output: HostOutput = new HostOutput:
     override def fileChanged(change: atc.host.FileChange): Unit = tui.fileChanged(change)
     def print(agentText: String, userText: String): Unit =
-      session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
+      sandbox.session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
     override def commandRunning(commandLine: String): Unit = tui.commandRunning(commandLine)
     override def commandOutput(text: String): Unit = tui.commandOutput(text)
@@ -93,7 +60,7 @@ final class App(args: Cli.Args, val tui: Tui):
       tui.processEvent(s"$$ $commandLine  [p$id started]")
     override def processInput(id: Int, text: String): Unit = tui.processEvent(s"p$id > ${text.stripSuffix("\n")}")
     override def processExited(id: Int, exitCode: Int): Unit = tui.processEvent(s"[p$id exited $exitCode]")
-  val llm: HostLlm = new HostLlm:
+  private val llm: HostLlm = new HostLlm:
     def chat(message: String): String =
       val reply = withClockPaused(agent.model.simple(None, message))
       agent.recordUsage(Agent.Chat, reply.usage)
@@ -109,12 +76,12 @@ final class App(args: Cli.Args, val tui: Tui):
         ))
       agent.recordUsage(Agent.ClassifiedChat, reply.usage)
       reply.text
-  val hostUi: HostUi = new HostUi:
+  private val hostUi: HostUi = new HostUi:
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
       withClockPaused(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
-  val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
+  private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
   val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
 
   // ── agent ─────────────────────────────────────────────────────────
@@ -134,101 +101,43 @@ final class App(args: Cli.Args, val tui: Tui):
   tui.queuedInputs = () => agent.queuedInputCount
   tui.onInterrupt = () =>
     agent.interrupt()
-    session.foreach(_.interrupt())
+    sandbox.interrupt()
 
-  private def updateStatusContext(): Unit =
+  /** Guesses the next request after each turn (config `predictInput`), shown as
+    * ghost text at the prompt. Interactive runs on a real terminal only. */
+  val predictor: InputPredictor = InputPredictor(
+    () => agent.model,
+    () => agent.history,
+    tui.suggest,
+    agent.recordUsage(Agent.Prediction, _),
+    enabled = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty,
+  )
+
+  /** Show the model, its effort, the mode and the directory in the status line. */
+  def updateStatus(): Unit =
     val directory = Option(cwd.getFileName).fold(App.pretty(cwd))(_.toString)
     val effort = agent.model.effort.fold("")(e => s" ($e)")
-    tui.setContext(catalog.label(catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
-  updateStatusContext()
+    tui.setContext(models.catalog.label(models.catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
+  updateStatus()
 
-  // ── running ───────────────────────────────────────────────────────
+  // ── commands ──────────────────────────────────────────────────────
 
-  /** A session starting on a background thread (`warmSession`), adopted by `ensureSession`
-    * or dropped by `discardWarming`. Touched by the main thread only. */
-  private var warming: Option[java.util.concurrent.FutureTask[ReplSession]] = None
+  val modelCommands: ModelCommands = ModelCommands(this)
+  private val sessionCommands = SessionCommands(this)
+  private val statusCommands = StatusCommands(this)
+  private val providersMenu = ProvidersMenu(this)
 
-  private def startSession(): ReplSession =
-    ReplSession(SandboxConfig(config.safeMode, policy.mode, config.executionTimeoutMs), host).init()
-
-  /** Start the sandbox on a daemon thread, so that compiling its preamble (about two
-    * seconds) overlaps the user's typing and the model's answer instead of the first
-    * tool call. Nothing happens when a session exists or is already starting. */
-  private def warmSession(): Unit = if session.isEmpty && warming.isEmpty then
-    val task = java.util.concurrent.FutureTask[ReplSession](() => startSession())
-    val thread = Thread(task, "atc-sandbox-warmup")
-    thread.setDaemon(true)
-    thread.start()
-    warming = Some(task)
-
-  /** Drop a session still starting in the background: a daemon thread closes it once it
-    * is ready, so a mode switch does not wait for a compiler it no longer needs. */
-  private def discardWarming(): Unit =
-    warming.foreach { task =>
-      warming = None
-      val closer: Runnable = () =>
-        try task.get().close()
-        catch case _: Exception => ()
-      val thread = Thread(closer, "atc-sandbox-discard")
-      thread.setDaemon(true)
-      thread.start()
-    }
-
-  /** The live session: the one warming in the background once it is ready (the status
-    * line says so only if the wait is real), else one started here and now. */
-  private def ensureSession(): ReplSession = session.getOrElse {
-    val created = warming match
-      case Some(task) =>
-        warming = None
-        if !task.isDone then tui.status(s"starting sandbox (${policy.mode.label} mode)")
-        try task.get()
-        catch case e: java.util.concurrent.ExecutionException => throw e.getCause.nn
-      case None =>
-        tui.status(s"starting sandbox (${policy.mode.label} mode)")
-        startSession()
-    if tui.isInterrupted then
-      created.close()
-      throw atc.llm.CancelledException()
-    session = Some(created)
-    created
+  tui.completions = {
+    case _ :: Nil => SlashCommand.names
+    case "/model" :: _ :: Nil => models.catalog.labels
+    case "/effort" :: _ :: Nil => modelCommands.effortChoices
+    case "/classifiedmodel" :: _ :: Nil => models.catalog.labels :+ "off"
+    case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
+    case "/perms" :: _ :: Nil => List("revoke")
+    case _ => Nil
   }
 
-  /** Discard the REPL (live or still warming) and its processes, and start warming the
-    * next one, so a mode switch or `/new` costs the first tool call nothing either. */
-  private def replaceSession(failure: String): Boolean =
-    try
-      host.killProcesses()
-      discardWarming()
-      session.foreach(_.close())
-      session = None
-      warmSession()
-      true
-    catch
-      case e: Exception =>
-        tui.error(s"$failure: ${e.getMessage}")
-        Debug.trace(e)
-        false
-
-  /** Replace the sandbox session (after `/reset` or a mode switch); the conversation is kept.
-    * `reason` is passed to the agent so it knows its REPL definitions are gone. */
-  private def restartSession(reason: String): Boolean =
-    val ok = replaceSession("could not restart the sandbox")
-    if ok then
-      agent.noteSandboxRestarted(reason)
-      // The restart notice is pending, not in history yet; any prediction now
-      // would still assume that old REPL definitions exist.
-      predictor.invalidate()
-    ok
-
-  /** Clear conversation, task state, output history and grants while retaining configured models and mode. */
-  private def newSession(): Boolean =
-    val replaced = replaceSession("could not clear the sandbox")
-    if replaced then
-      agent.clear()
-      host.clearTodos()
-      tui.clearOutputHistory()
-      policy.resetSession()
-    replaced
+  // ── running ───────────────────────────────────────────────────────
 
   def run(): Int =
     try
@@ -242,99 +151,34 @@ final class App(args: Cli.Args, val tui: Tui):
       args.prompt match
         case Some(p) =>
           tui.askToContinue = false // nobody to ask: the tool budget is a hard stop here
-          warmSession()
+          sandbox.warm()
           // Report a failed turn through the process exit code so scripts can detect it.
           runTurn(p).exitCode
         case None =>
           banner()
-          catalog.refresh()
-          if tui.menusAvailable then offerResume()
-          warmSession() // after the resume offer: restoring would only discard it
+          models.catalog.refresh()
+          if tui.menusAvailable then sessionCommands.offerResume()
+          sandbox.warm() // after the resume offer: restoring would only discard it
           interactive()
-          if tui.menusAvailable then saveOnExit()
+          if tui.menusAvailable then sessionCommands.saveOnExit()
           0
     finally
       predictor.invalidate()
       host.killProcesses()
-      discardWarming()
-      session.foreach(_.close())
-      modelCache.values.foreach { model =>
-        try model.close()
-        catch case scala.util.control.NonFatal(error) => Debug.trace(error)
-      }
-
-  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, cwd)
-
-  private def offerResume(): Unit =
-    try
-      if Files.exists(autoSaveFile) then
-        val saved = SessionStore.read(autoSaveFile)
-        if saved.nonEmpty then
-          saved.userRequests.lastOption.foreach(text =>
-            tui.preview(s"Last request: $text")
-          )
-          tui.choose(
-            "Continue your last session in this directory?",
-            List("Resume last session", "Start a new session")
-          ) match
-            case Some("Resume last session") => restoreSession(saved)
-            case _ => ()
-    catch
-      case scala.util.control.NonFatal(error) =>
-        tui.warn(s"Could not load the previous session: ${Debug.describe(error)}")
-        Debug.trace(error)
-
-  private def saveOnExit(): Unit =
-    val saved = agent.snapshot
-    if saved.nonEmpty then
-      try
-        SessionStore.checkpoint(autoSaveFile, saved)
-        tui.info("Session saved. Start ATC in this directory to resume.")
-      catch
-        case scala.util.control.NonFatal(error) =>
-          tui.error(s"Could not save the session: ${Debug.describe(error)}")
-          Debug.trace(error)
-
-  private def restoreSession(saved: SessionSnapshot): Unit =
-    predictor.invalidate()
-    if newSession() then
-      host.restoreTaskState(saved.task, saved.todos)
-      agent.restore(saved)
-      if saved.model != agent.model.ref then
-        tui.info(s"Using ${agent.model.ref}; the saved session used ${saved.model}.")
-      tui.success(
-        s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
-      )
-
-  /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
-  private def describe(m: ChatModel): String =
-    App.describe(m, catalog.find(m.ref))
+      sandbox.close()
+      models.close()
 
   private def banner(): Unit =
     tui.banner(
       s"atc ${Main.Version}",
       List(
-        "model" -> describe(agent.model),
+        "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> App.pretty(cwd),
-      ) ++ agent.classifiedModel.map(model => "classified model" -> describe(model)),
+      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model)),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
-        ++ Option.when(predicting)("Tab or → accept the suggested next request")).mkString(" · "),
+        ++ Option.when(predictor.enabled)("Tab or → accept the suggested next request")).mkString(" · "),
     )
-
-  // ── next-input prediction ─────────────────────────────────────────
-
-  /** Guesses the next request after each turn (config `predictInput`), shown
-    * as ghost text at the prompt. Interactive runs on a real terminal only. */
-  private val predictor =
-    InputPredictor(() => agent.model, () => agent.history, tui.suggest, agent.recordUsage(Agent.Prediction, _))
-  private val predicting: Boolean = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty
-
-  /** Retire a guess made from stale model/session state and predict again from
-    * the state now in force. */
-  private def refreshPrediction(): Unit =
-    predictor.invalidate()
-    if predicting then predictor.start()
 
   /** Run one turn and retain its outcome for the terminal summary and scripted exit code. */
   private def runTurn(input: String): TurnOutcome =
@@ -344,7 +188,7 @@ final class App(args: Cli.Args, val tui: Tui):
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
     var outcome = TurnOutcome.Failed
     try
-      outcome = agent.turn(ensureSession(), input, () => tui.isInterrupted)
+      outcome = agent.turn(sandbox.ensure(), input, () => tui.isInterrupted)
       outcome
     catch
       case e: Exception =>
@@ -362,7 +206,7 @@ final class App(args: Cli.Args, val tui: Tui):
         context.window,
         outcome,
       )))
-      if predicting then predictor.start()
+      predictor.start()
 
   private def interactive(): Unit =
     var running = true
@@ -380,21 +224,9 @@ final class App(args: Cli.Args, val tui: Tui):
         case Some(line) => runTurn(line)
 
   /** The input prompt names the mode unless it is the full one. */
-  private def prompt: String = policy.mode match
+  def prompt: String = policy.mode match
     case Mode.Full => "> "
     case m => s"${m.label} > "
-
-  // ── slash commands (the table is `SlashCommand`; this is what each one does) ──
-
-  tui.completions = {
-    case _ :: Nil => SlashCommand.names
-    case "/model" :: _ :: Nil => catalog.labels
-    case "/effort" :: _ :: Nil => effortChoices
-    case "/classifiedmodel" :: _ :: Nil => catalog.labels :+ "off"
-    case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
-    case "/perms" :: _ :: Nil => List("revoke")
-    case _ => Nil
-  }
 
   /** Handle a slash command line; returns false to quit. */
   private def command(line: String): Boolean =
@@ -411,504 +243,40 @@ final class App(args: Cli.Args, val tui: Tui):
             Debug.trace(error)
         true
 
+  /** What each command does; the table of commands is [[SlashCommand]]. */
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
     case Cmd.Help => tui.showHelp(SlashCommand.values.toList.map(command => command.usage -> command.help))
-    case Cmd.Model => switchModel(arg)
-    case Cmd.ClassifiedModel => switchClassifiedModel(arg)
-    case Cmd.Models => showModels()
-    case Cmd.Effort => switchEffort(arg)
-    case Cmd.Providers => manageProviders()
-    case Cmd.Mode => switchMode(arg)
-    case Cmd.Perms => permissions(arg)
-    case Cmd.Config => showConfig()
+    case Cmd.Model => modelCommands.switchModel(arg)
+    case Cmd.ClassifiedModel => modelCommands.switchClassified(arg)
+    case Cmd.Models => modelCommands.show()
+    case Cmd.Effort => modelCommands.switchEffort(arg)
+    case Cmd.Providers => providersMenu.run()
+    case Cmd.Mode => sessionCommands.switchMode(arg)
+    case Cmd.Perms => statusCommands.permissions(arg)
+    case Cmd.Config => statusCommands.showConfig()
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
-    case Cmd.Run => runCode(arg)
-    case Cmd.New =>
-      predictor.invalidate()
-      if newSession() then
-        tui.success("new session: conversation, task notes and session grants cleared")
-    case Cmd.Reset =>
-      if restartSession("you asked for /reset") then tui.success("REPL cleared; starts with the next tool call")
-    case Cmd.Clear =>
-      agent.clear()
-      predictor.invalidate()
-      tui.success("conversation cleared")
-    case Cmd.Compact =>
-      predictor.invalidate()
-      tui.beginTurn()
-      try
-        agent.compact(arg, () => tui.isInterrupted) match
-          case Agent.CompactOutcome.Compacted => tui.success("conversation context compacted")
-          case Agent.CompactOutcome.NothingToCompact =>
-            tui.info("Nothing to compact: the conversation fits the retention budget; history unchanged.")
-          case Agent.CompactOutcome.SummaryNotSmaller =>
-            tui.warn("The summary was no smaller than the history it would replace; history unchanged.")
-      catch case _: atc.llm.CancelledException => tui.info("Compaction cancelled; history unchanged.")
-      finally
-        tui.endTurn()
-        if predicting then predictor.start()
+    case Cmd.Run => sessionCommands.run(arg)
+    case Cmd.New => sessionCommands.newSession()
+    case Cmd.Reset => sessionCommands.reset()
+    case Cmd.Clear => sessionCommands.clear()
+    case Cmd.Compact => sessionCommands.compact(arg)
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
     case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
-    case Cmd.Cost => showCost()
+    case Cmd.Cost => statusCommands.showCost()
     case Cmd.Output => tui.showOutput(arg)
-    case Cmd.Task =>
-      val notes = host.currentTaskNotes
-      if notes == atc.lib.TaskNotes() then tui.info("No task notes yet.")
-      else
-        if notes.goal.nonEmpty then tui.println(s"Goal: ${notes.goal}")
-        List("Constraints" -> notes.constraints, "Completed" -> notes.completed, "Remaining" -> notes.remaining)
-          .filter(_._2.nonEmpty).foreach((label, values) =>
-            tui.println(s"$label:")
-            values.foreach(value => tui.println(s"  - $value"))
-          )
-    case Cmd.Save =>
-      val path = if arg.isEmpty then cwd.resolve(s".atc/sessions/session-${System.currentTimeMillis()}.json").nn
-      else sessionPath(arg)
-      try
-        SessionStore.write(path, agent.snapshot)
-        tui.success(s"Saved conversation to ${App.pretty(path)}")
-      catch
-        case _: java.nio.file.FileAlreadyExistsException =>
-          tui.error(s"Save file already exists: ${App.pretty(path)}. Choose another filename.")
-    case Cmd.Resume =>
-      val path = if arg.isEmpty then autoSaveFile else sessionPath(arg)
-      if arg.isEmpty && !Files.exists(path) then tui.info("No saved session for this directory.")
-      else
-        val saved = SessionStore.read(path)
-        restoreSession(saved)
+    case Cmd.Task => statusCommands.showTask()
+    case Cmd.Save => sessionCommands.save(arg)
+    case Cmd.Resume => sessionCommands.resume(arg)
     case Cmd.Quit => () // `command` ends the loop instead
 
-  /** `/run`: the user runs Scala in the sandbox themselves, against the same
-    * API, givens and permissions as the agent, shown as a code block like an
-    * agent tool call and with the same keys (Ctrl-C interrupts, Ctrl-O
-    * expands). The code is on the line (Enter continues it while brackets
-    * are open, see `Continuation`; a pasted block keeps its newlines) or,
-    * with none, typed as a block that an empty line submits. The REPL is
-    * shared, so the agent is told what was run and what came of it on its
-    * next turn. */
-  private def runCode(arg: String): Unit =
-    // `/run` mutates the persistent REPL and queues a note that is not part of
-    // history until the next real user turn. A prediction made before it is stale.
-    predictor.invalidate()
-    val code = if arg.nonEmpty then arg else readCode()
-    if code.trim.isEmpty then return
-    tui.beginTurn()
-    try
-      // The session first: starting it reports progress of its own, and when it fails the
-      // code block would otherwise stay open without its closing verdict line.
-      val s = ensureSession()
-      tui.toolStart(code, "/run")
-      val (result, decisions) = ScalaToolRunner.evaluate(s, policy, tui, code)
-      agent.noteUserRan(code, result, decisions)
-    catch
-      case e: Exception =>
-        tui.error(Debug.describe(e))
-        Debug.trace(e)
-    finally tui.endTurn()
-
-  /** The block of code typed after a bare `/run`; empty when cancelled (Ctrl-C, Ctrl-D). */
-  private def readCode(): String =
-    tui.info("Scala code; Enter on an empty line runs it, Ctrl-C cancels")
-    tui.suggest(None) // no ghost text while typing code
-    tui.readBlock(prompt).getOrElse("")
-
-  private def sessionPath(value: String): Path =
-    val path = java.nio.file.Paths.get(PlatformPath.native(PlatformPath.expandHome(value))).nn
-    (if path.isAbsolute then path else cwd.resolve(path).nn).normalize.nn
-
-  /** Session grant selection and revocation; configured policy is unchanged. */
-  private def permissions(arg: String): Unit =
-    val grants = policy.sessionGrants
-    def list(): Unit =
-      if grants.isEmpty then tui.info("No session grants.")
-      else grants.zipWithIndex.foreach((grant, index) => tui.println(s"  ${index + 1}. ${grant.describe}"))
-    def revoke(grant: SessionGrant): Unit =
-      predictor.invalidate()
-      policy.revoke(grant)
-      agent.notePermissionRevoked(grant.describe)
-      tui.success(s"Revoked ${grant.describe} for future operations.")
-    arg.trim.split("\\s+", 2).toList match
-      case "" :: Nil =>
-        tui.println(policy.summary)
-        list()
-        if grants.nonEmpty then tui.info("Use /perms revoke to remove a session grant; /kill stops existing processes.")
-      case "revoke" :: "all" :: Nil => grants.foreach(revoke)
-      case "revoke" :: number :: Nil =>
-        number.toIntOption.flatMap(n => grants.lift(n - 1)) match
-          case Some(grant) => revoke(grant)
-          case None => tui.error("Unknown grant number. Run /perms to list current grants.")
-      case "revoke" :: Nil =>
-        if !tui.menusAvailable || grants.isEmpty then list()
-        else
-          val rows = grants.zipWithIndex.map((grant, index) => s"${index + 1}. ${grant.describe}")
-          tui.choose("Revoke a session grant", rows).flatMap(row => grants.lift(rows.indexOf(row))).foreach(revoke)
-      case _ => tui.error("Usage: /perms [revoke [number|all]]")
-
-  /** `/config`: the layers, key names and scalar settings. */
-  private def showConfig(): Unit =
-    tui.println("config layers, in order:")
-    configuration.layers.foreach(l => tui.println(l.describe))
-    val keys = configuration.keys
-    if keys.sources.nonEmpty then
-      tui.println(s"key bindings: ${keys.names.mkString(", ")} (from ${keys.sources.mkString(", ")})")
-    tui.println(
-      s"safeMode=${config.safeMode} executionTimeoutMs=${config.executionTimeoutMs.getOrElse("none")} maxToolCalls=${config.maxToolCalls} respectGitignore=${config.respectGitignore} predictInput=${config.predictInput} autoCompactThreshold=${config.autoCompactThreshold} compactKeepRatio=${config.compactKeepRatio} notifications=${config.notifications}"
-    )
-    tui.println(s"open permission scopes: ${policy.openScopeCount}")
-
-  /** `/cost`: token usage in total and, when there is more than one purpose, by purpose. */
-  private def showCost(): Unit =
-    def show(u: TokenUsage) = s"input=${u.input} (cached ${u.cacheRead}) output=${u.output}"
-    tui.println(s"tokens: ${show(agent.usage)}; tool calls: ${agent.toolCalls}")
-    val by = agent.usageByPurpose
-    if by.size > 1 then by.foreach((purpose, u) => tui.println(f"  $purpose%-22s ${show(u)}"))
-    val context = agent.contextUsage
-    val window = context.window.fold(" (no contextWindow configured for this model)")(_ => "")
-    tui.println(s"${Tui.contextUsage(context.tokens, context.window)} estimated for the next request$window")
-
-  /** One line per model: its selectable name, friendly name (or `provider/model-id`
-    * fallback, left out when that is the name already), and the role it currently plays. */
-  private def modelRow(spec: ModelSpec): String =
-    val marks = List(
-      Option.when(agent.model.ref == spec.ref)("agent"),
-      Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
-    ).flatten
-    val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-    val label = catalog.label(spec)
-    val detail = App.modelDetail(spec)
-    if detail == label then label + role else s"${label.padTo(labelWidth, ' ')}  $detail$role"
-
-  /** The name column's width: the configured models' names, as a listed name can be very long. */
-  private def labelWidth: Int = catalog.configured.map(catalog.label(_).length).maxOption.getOrElse(0).max(24)
-
-  private def showModels(): Unit =
-    catalog.models.foreach(m => tui.println("  " + modelRow(m)))
-
-  /** Pick a model from the list. Without a menu (plain mode) the list is
-    * printed instead, so the user can name one with `/model <ref>`. */
-  private def pickModel(title: String): Option[ModelSpec] =
-    val rows = catalog.models.map(modelRow)
-    tui.choose(title, rows) match
-      case Some(row) => catalog.models.zip(rows).collectFirst { case (m, r) if r == row => m }
-      case None =>
-        if !tui.menusAvailable then showModels()
-        None
-
-  /** `/model`: pick from the list, or switch to the named one. */
-  private def switchModel(arg: String): Unit =
-    setModel(arg, "model", describe(agent.model)) { spec =>
-      agent.model = modelFor(spec)
-      App.rememberLastModel(spec.ref)
-      updateStatusContext()
-      refreshPrediction()
-      tui.success(s"model -> ${describe(agent.model)}" + remember("model", Some(spec)))
-    }
-
-  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
-  private def effortChoices: List[String] =
-    if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ App.DefaultEffort
-
-  /** `/effort`: pick the agent model's reasoning effort, or set the named one,
-    * for the rest of the session. */
-  private def switchEffort(arg: String): Unit =
-    val model = agent.model
-    val current = model.effort.getOrElse(App.DefaultEffort)
-    val choices = effortChoices
-    if choices.isEmpty then tui.info(s"${model.ref} takes no reasoning effort")
-    else
-      val chosen =
-        if arg.nonEmpty then Some(arg.toLowerCase(java.util.Locale.ROOT))
-        else tui.choose(s"Choose the reasoning effort of ${model.ref}", choices)
-      chosen match
-        case None => tui.info(s"effort: $current (${choices.mkString(" | ")})")
-        case Some(e) if !choices.contains(e) => tui.error(s"${model.ref} takes ${choices.mkString(" | ")}, not '$e'")
-        case Some(e) =>
-          model.effort = Option.when(e != App.DefaultEffort)(e)
-          updateStatusContext()
-          tui.success(s"effort -> $e")
-
-  // ── providers ─────────────────────────────────────────────────────
-
-  /** `/providers`: the provider list, back to it after each change until the
-    * user leaves it. A provider or model in use cannot be turned off, so the
-    * session and the config never name one that is gone. */
-  private def manageProviders(): Unit =
-    var open = true
-    while open do
-      val settings = current.settings
-      val names = settings.providers.keys.toList.sorted
-      val width = names.map(_.length).maxOption.getOrElse(0)
-      val rows = names.map { name =>
-        val p = settings.providers(name)
-        val models =
-          if p.models.isEmpty then "offers every model it lists"
-          else s"${p.models.count(_._2.enabled)} of ${p.models.size} models on"
-        s"${name.padTo(width, ' ')}  ${if p.enabled then "on " else "off"}  $models"
-      }
-      val addable = ProviderPreset.all.filterNot(p => settings.providers.contains(p.name))
-      val all = rows ++ Option.when(addable.nonEmpty)(App.AddProvider)
-      tui.choose("Providers (Esc when done)", all) match
-        case None =>
-          if !tui.menusAvailable then all.foreach(r => tui.println("  " + r))
-          open = false
-        case Some(App.AddProvider) => addProvider(addable)
-        case Some(row) => providerActions(names(rows.indexOf(row)))
-
-  /** The models the session or the config uses, with the role each plays. */
-  private def modelsInUse: List[(ModelSpec, String)] =
-    def spec(ref: String) = scala.util.Try(catalog.find(ref)).toOption
-    spec(agent.model.ref).map(_ -> "the agent model").toList ++
-      agent.classifiedModel.flatMap(m => spec(m.ref)).map(_ -> "the classified model") ++
-      current.settings.model.flatMap(spec).map(_ -> "the config's model") ++
-      current.settings.classifiedModel.flatMap(spec).map(_ -> "the config's classified model")
-
-  private def providerActions(name: String): Unit =
-    val p = current.settings.providers(name)
-    val toggle = if p.enabled then "Turn off" else "Turn on"
-    val showAll = "Offer every model it lists (drop its model entries)"
-    tui.choose(name, List(toggle, "Choose its models") ++ Option.when(p.models.nonEmpty)(showAll)) match
-      case Some(`toggle`) =>
-        modelsInUse.find(_._1.provider == name) match
-          case Some((m, role)) if p.enabled => tui.error(s"${m.ref} is $role; switch to another model first")
-          case _ =>
-            applyEdits(ProviderEdits.setEnabled(name, !p.enabled), s"$name turned ${if p.enabled then "off" else "on"}")
-      case Some(`showAll`) =>
-        if tui.confirm(s"Drop the ${p.models.size} model entries of $name and their settings?") then
-          applyEdits(ProviderEdits.showAll(name), s"$name offers every model it lists")
-      case Some(_) => chooseModels(name, p)
-      case None => ()
-
-  /** Tick the models to offer. A provider without entries starts with only the
-    * models in use ticked; ticking none keeps offering everything it lists. */
-  private def chooseModels(name: String, p: ProviderConfig): Unit =
-    import ProviderEdits.Choice
-    val endpoint = ModelCatalog
-      .from(Config(providers = Map(name -> p.copy(models = Map.empty, enabled = true))), current.keys)
-      .discoverable.headOption
-    val listed = endpoint.fold(Nil) { spec =>
-      tui.info(s"Fetching the models of $name...")
-      try
-        val models = ChatModel.listModels(spec)
-        ModelListStore.global.save(spec, models)
-        models
-      catch
-        case scala.util.control.NonFatal(e) =>
-          tui.error(s"Could not list the models of $name; showing its configured ones (${e.getMessage})")
-          Nil
-    }
-    val choices = ProviderEdits.choices(p, listed)
-    val used = modelsInUse.filter(_._1.provider == name)
-    def isUsed(c: Choice) = used.exists((m, _) =>
-      c match
-        case Choice.Configured(alias, _) => m.alias == alias
-        case Choice.Listed(spec) => spec.modelId == m.modelId
-    )
-    val labels = choices.map {
-      case Choice.Configured(alias, m) => s"$alias  ${m.displayName.orElse(m.name).getOrElse("")}".trim
-      case Choice.Listed(spec) => spec.displayName.fold(spec.modelId)(n => s"$n  (${spec.modelId})")
-    }
-    val checked = choices.indices.filter(i =>
-      choices(i) match
-        case Choice.Configured(_, m) => m.enabled
-        case c => isUsed(c)
-    ).toSet
-    if choices.isEmpty then tui.error(s"$name has no models to choose from")
-    else
-      tui.chooseMany(s"Models $name offers (type to filter)", labels, checked).foreach { ticked =>
-        val chosen = ticked.map(choices)
-        choices.filterNot(chosen).find(isUsed) match
-          case Some(c) => tui.error(s"${labels(choices.indexOf(c))} is in use; switch to another model first")
-          case None =>
-            val edits = ProviderEdits.shortlist(name, p, choices, chosen)
-            if edits.isEmpty then tui.info("No change.")
-            else applyEdits(edits, s"$name: ${chosen.size} model${if chosen.size == 1 then "" else "s"} on")
-      }
-
-  private def addProvider(addable: List[ProviderPreset]): Unit =
-    tui.choose("Add a provider", addable.map(_.label)).flatMap(l => addable.find(_.label == l)).foreach { preset =>
-      FirstRun.provider(App.firstRunUi(tui), preset, current.keys, ChatModel.listModels) match
-        case Some(FirstRun.Outcome.Ready(provider, key, endpoint, models, model)) =>
-          val keysPath = Config.globalPath.getParent.nn.resolve(Config.KeysFile).nn
-          for name <- provider.keyVariable; value <- key do KeyBindings.bind(keysPath, name, value)
-          ModelListStore.global.save(endpoint, models)
-          val add = ProviderEdits.Edit(List("providers", provider.name), Some(upickle.default.writeJs(provider.config)))
-          if applyEdits(List(add), s"${provider.label} added", into = Some(Config.globalPath)) then
-            switchModel(model.ref)
-        case _ => tui.info("No provider added.")
-    }
-
-  /** Write `edits`, each to the file that owns it (or `into`), and reload the
-    * models. A change that leaves an invalid config is undone. */
-  private def applyEdits(edits: List[ProviderEdits.Edit], done: String, into: Option[Path] = None): Boolean =
-    val global = Config.globalPath
-    val byFile = edits.groupBy(e =>
-      into.orElse(ProviderEdits.owner(current.layers, e.path).flatMap(_.path)).getOrElse(global)
-    )
-    val created = if byFile.contains(global) && !Files.exists(global) then Config.ensureGlobal() else Nil
-    val originals = byFile.keys.filterNot(created.contains).map(p => p -> Files.readString(p).nn).toMap
-    try
-      byFile.foreach((path, es) =>
-        Config.editFile(path)(text => es.foldLeft(text)((t, e) => Config.withMember(t, e.path, e.value, path.toString)))
-      )
-      reloadModels()
-      tui.success(s"$done (saved to ${byFile.keys.map(App.pretty).mkString(", ")})")
-      true
-    catch
-      case scala.util.control.NonFatal(e) =>
-        originals.foreach((p, text) => Files.writeString(p, text))
-        created.foreach(Files.deleteIfExists)
-        tui.error(s"Nothing changed: ${Option(e.getMessage).getOrElse(e.toString)}")
-        false
-
-  /** Load the configuration again and rebuild the catalog. A model in use that
-    * the change renamed (a listed model now an entry) moves to its new name. */
-  private def reloadModels(): Unit =
-    val reloaded = Config.load(cwd, args.config, bundledGlobal = App.bundled(configuration))
-    val next = reloaded.catalog(ChatModel.listModels, ModelListStore.global)
-    current = reloaded
-    catalog = next
-    def moved(m: ChatModel): ChatModel =
-      if scala.util.Try(next.find(m.ref)).isSuccess then m
-      else
-        val provider = m.ref.takeWhile(_ != '/')
-        next.configured.find(s => s.provider == provider && s.modelId == m.modelId).fold(m) { spec =>
-          val renamed = modelFor(spec)
-          renamed.effort = m.effort.filter(renamed.efforts.contains).orElse(renamed.effort)
-          renamed
-        }
-    val agentModel = moved(agent.model)
-    if agentModel ne agent.model then
-      agent.model = agentModel
-      App.rememberLastModel(agentModel.ref)
-    agent.classifiedModel = agent.classifiedModel.map(moved)
-    next.refresh()
-    updateStatusContext()
-
-  /** `/classifiedmodel`: the trusted isolated model used by `classifiedChat`. `off` unsets it. */
-  private def switchClassifiedModel(arg: String): Unit =
-    if Set("off", "none").contains(arg.trim.toLowerCase(java.util.Locale.ROOT)) then
-      agent.classifiedModel = None
-      refreshPrediction()
-      tui.success(
-        "classified model -> (none): classified data is no longer sent to any model" + remember("classifiedModel", None)
-      )
-    else
-      val current = agent.classifiedModel.map(describe).getOrElse("(none)")
-      setModel(arg, "classified model", current) { spec =>
-        val m = modelFor(spec)
-        agent.classifiedModel = Some(m)
-        refreshPrediction()
-        tui.success(s"classified model -> ${describe(m)}" + remember("classifiedModel", Some(spec)))
-      }
-
-  /** Shared by the two switches: an argument names a model, no argument opens
-    * the picker; the current one is reported when nothing is chosen. */
-  private def setModel(arg: String, what: String, current: String)(use: ModelSpec => Unit): Unit =
-    if arg.nonEmpty then
-      try use(catalog.find(arg))
-      catch case e: IllegalArgumentException => tui.error(e.getMessage)
-    else
-      pickModel(s"Choose the $what") match
-        case Some(spec) => use(spec)
-        case None => tui.info(s"$what: $current")
-
-  /** The working directory's own `.atc/config.json`, if it has one. Only that
-    * file is ever written: a project config found in a parent directory
-    * governs this run but is not touched from a sub-directory. */
-  private def projectConfig: Option[Path] =
-    Some(Config.projectPath(cwd)).filter(Files.isRegularFile(_))
-
-  /** Keep a model choice in the working directory's config, so the next run
-    * here starts with it (`None` unsets the role: `"classifiedModel": null`).
-    * Without a config in `cwd` there is nothing to write. Returns the note to
-    * append to the confirmation. */
-  private def remember(key: String, choice: Option[ModelSpec]): String =
-    def show(p: Path): String =
-      val abs = p.toAbsolutePath.nn.normalize.nn
-      if abs.startsWith(cwd) then cwd.relativize(abs).toString else App.pretty(abs)
-    projectConfig match
-      case None => ""
-      case Some(path) =>
-        val value = choice.map(m => ujson.Str(catalog.label(m))).getOrElse(ujson.Null)
-        try
-          Config.setTopLevel(path, key, value, after = List("model"))
-          // A `-c` file that sets the same key wins over the project config on the next start.
-          val overridden = configuration.layers
-            .filter(l => l.origin == Origin.Explicit && l.defines(key))
-            .flatMap(_.path)
-            .filterNot(_.toAbsolutePath.nn.normalize == path.toAbsolutePath.nn.normalize)
-            .headOption
-            .map(p => s"; ${show(p)} also sets $key and wins over it")
-            .getOrElse("")
-          s" (saved to ${show(path)}$overridden)"
-        catch
-          case e: Exception =>
-            tui.error(s"could not save the choice to ${show(path)}: ${e.getMessage}")
-            ""
-
-  /** `/mode`: cycle (no argument) or set the sandbox mode; a new REPL is
-    * started with only that mode's capabilities (definitions are gone, the
-    * conversation stays). */
-  private def switchMode(arg: String): Unit =
-    val target =
-      if arg.isEmpty then Some(policy.mode.next)
-      else
-        try Some(Mode.parse(arg))
-        catch
-          case e: IllegalArgumentException =>
-            tui.error(e.getMessage)
-            None
-    target.foreach { m =>
-      if m == policy.mode then tui.info(s"mode: ${m.describe}")
-      else
-        val previous = policy.mode
-        policy.mode = m
-        if restartSession(s"the sandbox mode changed to ${m.label}") then
-          updateStatusContext()
-          tui.success(s"mode -> ${m.describe} (fresh REPL)")
-        else policy.mode = previous
-    }
-
 object App:
-
-  /** Presentation only: references and provider requests continue to use the
-    * configured alias and backend model id. */
-  private[atc] def describe(model: ChatModel, spec: ModelSpec): String =
-    s"${model.ref} — ${spec.displayName.getOrElse(model.modelId)}" +
-      (if model.webSearch then " (web search)" else "")
-
-  /** The detail column of `/models`, with the historical provider/model-id
-    * form retained when no friendly name is configured. */
-  private[atc] def modelDetail(spec: ModelSpec): String =
-    spec.displayName.getOrElse(s"${spec.provider}/${spec.modelId}")
-
-  private def lastModelPath: Path = PlatformPath.userHome.resolve(".atc").nn.resolve("last-model").nn
-
-  /** The model last chosen with `/model`, the default when nothing names one. */
-  private def lastModel: Option[String] =
-    try Some(Files.readString(lastModelPath).nn.trim).filter(_.nonEmpty)
-    catch case scala.util.control.NonFatal(_) => None
-
-  /** Remember a model choice; losing it only loses a default. */
-  private def rememberLastModel(ref: String): Unit =
-    try
-      Files.createDirectories(lastModelPath.getParent)
-      Files.writeString(lastModelPath, ref + "\n")
-    catch case scala.util.control.NonFatal(_) => ()
-
-  private[atc] val AddProvider = "Add a provider"
-
-  /** Whether `configuration` stands the bundled starting config in for a missing global one. */
-  private def bundled(configuration: Configuration): Boolean =
-    configuration.layers.exists(l => l.origin == Origin.Global && l.path.isEmpty)
-
-  /** The `/effort` choice that sends no effort, leaving it to the provider. */
-  private val DefaultEffort = "default"
-
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
+
+  /** Bare lines that quit like `/quit`: what shells and editors use. */
+  val QuitWords: Set[String] = Set(":q", "exit", "quit")
 
   /** A scripted turn has nobody to answer permission pop-ups. Fail closed
     * without reading stdin unless the caller explicitly chose `--approve-all`. */
@@ -924,113 +292,9 @@ object App:
         )
     else request => interactive(request)
 
-  /** Load the configuration, offering to write what is missing first. No
-    * configuration is written without asking, and nothing is asked in a
-    * scripted (`-p`) run:
-    *
-    *  - no `~/.atc/config.json`: offer to write the starting config and the
-    *    key bindings beside it. Declined (or `-p`), the bundled starting config
-    *    stands in for this run.
-    *  - no config grants the working directory and it has no `.atc/config.json`
-    *    of its own: offer to write the starting project config there (as
-    *    `--init` does), and use it at once.
-    *
-    * When the global config was written the program then stops (via [[Exit]]),
-    * so the user can fill in the keys or export them and start again. */
-  def setup(args: Cli.Args, tui: Tui): Configuration =
-    val interactive = args.prompt.isEmpty
-    val global = Config.globalPath
-    val globalKeys = global.getParent.nn.resolve(Config.KeysFile).nn
-    val globalMissing = !Files.isRegularFile(global)
-    // A `-c` file may define the providers itself, so only a plain start asks.
-    val firstRun =
-      if !globalMissing || !interactive || args.config.nonEmpty then FirstRun.Outcome.NotNow
-      else
-        tui.println(s"Welcome to atc. There is no configuration at ${pretty(global)} yet.")
-        if tui.menusAvailable then
-          val keys = KeyBindings.load(Config.projectRoot(args.cwd).map(Config.keysPath).toList :+ globalKeys)
-          FirstRun.run(firstRunUi(tui), ProviderPreset.all, keys, ChatModel.listModels)
-        else if tui.confirm("Write the starting config and key bindings there?") then
-          FirstRun.Outcome.ConfigureYourself
-        else FirstRun.Outcome.NotNow
-    firstRun match
-      case FirstRun.Outcome.ConfigureYourself =>
-        val written = Config.ensureGlobal()
-        if written.nonEmpty then tui.println(s"Wrote ${written.map(pretty).mkString(" and ")}.")
-        tui.println(
-          s"Add your providers and models to ${pretty(global)} and their API keys to ${pretty(globalKeys)} " +
-            "(or export them in the environment), then start atc again."
-        )
-        throw Exit(0)
-      case FirstRun.Outcome.Ready(provider, key, endpoint, models, model) =>
-        for name <- provider.keyVariable; value <- key do KeyBindings.bind(globalKeys, name, value)
-        Config.writeGlobalConfig(global, List(provider))
-        ModelListStore.global.save(endpoint, models)
-        rememberLastModel(model.ref)
-        tui.success(
-          s"Wrote ${pretty(global)}${if key.isDefined then s" and ${pretty(globalKeys)}" else ""}; " +
-            s"starting with ${model.ref}. /model switches models."
-        )
-      case FirstRun.Outcome.NotNow =>
-        if globalMissing then
-          tui.info(s"Using the built-in starting config for this run (`atc --init-global` writes it).")
-    val bundledGlobal = globalMissing && firstRun == FirstRun.Outcome.NotNow
-
-    def cwdReadable(c: Configuration): Boolean =
-      Policy(fileRules(c, args.cwd), Nil, Nil, _ => Decision.Deny)
-        .effective(ScopeId.Base, PlatformPath.canonical(args.cwd)).canRead
-
-    def offerProjectConfig(current: Configuration): Configuration =
-      val project = Config.projectPath(args.cwd)
-      val shouldOffer = interactive && !cwdReadable(current) && !Files.exists(project)
-      if !shouldOffer then current
-      else
-        tui.println(
-          s"No configuration grants access to ${pretty(args.cwd)}, so the agent would have to ask for every file."
-        )
-        val accepted =
-          tui.confirm(s"Write a starting project config to ${pretty(project)}? (It opens this directory to the agent)")
-        if !accepted then current
-        else
-          val created = Config.initProject(args.cwd).map(pretty).mkString(" and ")
-          tui.println(s"Wrote $created; edit it to change what the agent may touch here.")
-          Config.load(args.cwd, args.config, bundledGlobal)
-
-    // Offered whenever cwd has no `.atc/config.json` of its own and nothing
-    // grants it, whatever an ancestor's project config (or the home `.atc`,
-    // which the walk-up also finds) says: the new file becomes the nearest
-    // project config and takes over from there.
-    offerProjectConfig(Config.load(args.cwd, args.config, bundledGlobal))
-
-  private[atc] def firstRunUi(tui: Tui): FirstRun.Ui = new FirstRun.Ui:
-    def choose(title: String, options: List[String]): Option[String] = tui.choose(title, options)
-    def askSecret(question: String): Option[String] = tui.askSecret(question)
-    def info(text: String): Unit = tui.info(text)
-    def error(text: String): Unit = tui.error(text)
-
-  /** Bare lines that quit like `/quit`: what shells and editors use. */
-  val QuitWords: Set[String] = Set(":q", "exit", "quit")
-
   /** A path for display: under `~` when inside the home directory. */
   def pretty(p: Path): String =
     val home = PlatformPath.userHome
     if p == home then "~"
     else if p.startsWith(home) then "~/" + PlatformPath.portable(home.relativize(p))
     else PlatformPath.portable(p)
-
-  /** The configured file rules, in layer order. Nothing is granted here or
-    * anywhere else in the program; a path is reachable only because a config
-    * says so, `~/.atc/config.json` for anything and a project's own
-    * `.atc/config.json` for paths inside that project. */
-  def fileRules(configuration: Configuration, cwd: Path): List[FileRule] =
-    configuration.rules.map { r =>
-      FileRule(
-        // A project layer reads its relative patterns against its own folder,
-        // and grants only inside it.
-        PathPattern(r.rule.path, r.base.getOrElse(cwd)),
-        r.rule.access.map(Access.parse),
-        r.rule.classified,
-        r.rule.locked,
-        grantsWithin = r.base,
-      )
-    }

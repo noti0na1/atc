@@ -1,15 +1,16 @@
 package atc
 
 import atc.config.{Config, KeyBindings, ModelCatalog, ModelSpec, ProviderPreset}
+import atc.llm.ChatGPTAuth
 
 import java.nio.file.Path
 import scala.annotation.tailrec
 import scala.util.control.NonFatal
 
 /** The first interactive start without a global config: choose one provider,
-  * give its key, and choose a model from the list the provider returns. The
-  * key is checked by fetching that list. This object only asks; `App.setup`
-  * writes what the user chose. */
+  * give its key (or sign in, for ChatGPT), and choose a model from the list
+  * the provider returns. The key is checked by fetching that list. This object
+  * only asks; `Setup.load` writes what the user chose. */
 object FirstRun:
   /** What the first run needs from the terminal. */
   trait Ui:
@@ -39,20 +40,31 @@ object FirstRun:
   val NotNowLabel = "Not now (use the built-in defaults for this run)"
 
   /** Ask until the user sets up a provider or chooses one of the other two ways.
-    * `keys` are the bindings already in force; `list` fetches a provider's models. */
-  @tailrec def run(ui: Ui, presets: List[ProviderPreset], keys: KeyBindings, list: ModelSpec => List[ModelSpec])
-    : Outcome =
+    * `keys` are the bindings already in force; `list` fetches a provider's models;
+    * `signIn` signs in to a provider that takes no key (ChatGPT). */
+  @tailrec def run(
+    ui: Ui,
+    presets: List[ProviderPreset],
+    keys: KeyBindings,
+    list: ModelSpec => List[ModelSpec],
+    signIn: Ui => Boolean,
+  ): Outcome =
     ui.choose("Choose a model provider to set up", presets.map(_.label) :+ ConfigureYourselfLabel :+ NotNowLabel) match
       case None | Some(NotNowLabel) => Outcome.NotNow
       case Some(ConfigureYourselfLabel) => Outcome.ConfigureYourself
       case Some(label) =>
-        provider(ui, presets.find(_.label == label).get, keys, list) match
+        provider(ui, presets.find(_.label == label).get, keys, list, signIn) match
           case Some(ready) => ready
-          case None => run(ui, presets, keys, list)
+          case None => run(ui, presets, keys, list, signIn)
 
-  /** One provider: a key, its model list, a model. `None` when the user gave up on it. */
-  def provider(ui: Ui, preset: ProviderPreset, keys: KeyBindings, list: ModelSpec => List[ModelSpec])
-    : Option[Outcome] =
+  /** One provider: a key or a sign-in, its model list, a model. `None` when the user gave up on it. */
+  def provider(
+    ui: Ui,
+    preset: ProviderPreset,
+    keys: KeyBindings,
+    list: ModelSpec => List[ModelSpec],
+    signIn: Ui => Boolean,
+  ): Option[Outcome] =
     def ask(): Option[String] =
       preset.keyUrl.foreach(url => ui.info(s"Create a key at $url"))
       ui.askSecret(s"Paste your ${preset.label} API key (saved in ~/.atc/keys.properties, readable only by you)")
@@ -86,7 +98,50 @@ object FirstRun:
                   case None => None
                   case Some(key) => attempt(Some(key))
 
-    attempt(None)
+    if preset.api == "chatgpt" && !signIn(ui) then None else attempt(None)
+
+  /** Sign in with a ChatGPT plan in the browser, unless already signed in and not `again`. */
+  def signIn(ui: Ui, auth: ChatGPTAuth, openBrowser: String => Boolean, again: Boolean): Boolean =
+    auth.load().filter(_ => !again) match
+      case Some(saved) =>
+        ui.info(s"Using your ChatGPT sign-in${saved.email.fold("")(e => s" ($e)")}.")
+        true
+      case None =>
+        try
+          scala.util.Using.resource(auth.begin()) { login =>
+            ui.info(
+              if openBrowser(login.url) then "Sign in to ChatGPT in the browser window that opened, or open:"
+              else "Open this address in a browser to sign in to ChatGPT:"
+            )
+            ui.info(login.url)
+            awaitSignIn(ui, login)
+          }
+        catch
+          case NonFatal(e) =>
+            ui.error(s"Could not sign in: ${reasons(e)}")
+            false
+
+  @tailrec private def awaitSignIn(ui: Ui, login: ChatGPTAuth#Login): Boolean =
+    val pasted = ui.askSecret(
+      "Press Enter once the browser says you are signed in (or paste the address it ended on if that page did not load)"
+    )
+    // The browser's callback may still be exchanging its code for tokens.
+    val waited = if pasted.isEmpty && login.callbackReceived then java.time.Duration.ofSeconds(30)
+    else java.time.Duration.ZERO
+    pasted.map(login.paste).orElse(login.await(waited)) match
+      case Some(Right(tokens)) =>
+        ui.info(s"Signed in to ChatGPT${tokens.email.fold("")(e => s" as $e")}.")
+        true
+      case Some(Left(why)) =>
+        ui.error(s"The sign-in failed: $why")
+        false
+      case None =>
+        ui.choose("The browser has not finished signing in", List(KeepWaitingLabel, CancelLabel)) match
+          case Some(KeepWaitingLabel) => awaitSignIn(ui, login)
+          case _ => false
+
+  private val KeepWaitingLabel = "Keep waiting"
+  private val CancelLabel = "Cancel"
 
   private def chooseModel(ui: Ui, models: List[ModelSpec]): Option[ModelSpec] =
     val labels = models.map(m => m.displayName.fold(m.modelId)(name => s"$name  (${m.modelId})"))

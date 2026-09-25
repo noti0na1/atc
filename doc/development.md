@@ -96,6 +96,7 @@ requests are echoed. It needs no API key or network connection.
 |---|---|
 | `lib` | Agent-facing capability types, data types and `Interface`; compiled with capture checking |
 | `app` | Configuration, models, permissions, host operations, REPL and terminal |
+| `app` root package | `App` wires the parts together and runs the loop; `Setup` runs the first start; `Models` holds the catalog and clients; `SandboxRepl` owns the REPL session; `ModelCommands`, `ProvidersMenu`, `SessionCommands` and `StatusCommands` implement the slash commands |
 | `agent/` | Turn loop, completion decisions, history, context estimates, prompts and input prediction |
 | `config/` | Configuration layers, validation, key bindings and model catalog |
 | `host/` | File, process, network and user operations implementing `Interface` |
@@ -365,12 +366,12 @@ ATC's file and HTTP permissions do not constrain the internals of those commands
 
 ## The sandbox
 
-`App.warmSession` starts the REPL on a daemon thread as soon as the program is ready for
+`SandboxRepl.warm` starts the REPL on a daemon thread as soon as the program is ready for
 input (after the resume offer; before the turn of a `-p` run), because compiling the
 preamble takes about two seconds that would otherwise land inside the first tool call.
-`App.ensureSession` adopts that session on the first Scala tool call or `/run`, waiting for
+`SandboxRepl.ensure` adopts that session on the first Scala tool call or `/run`, waiting for
 it (with a "starting sandbox" status) only when it is not ready yet, and starts one on the
-spot if none is warming. `App.replaceSession` (reset, mode change, `/new`) drops the live
+spot if none is warming. `SandboxRepl.replace` (reset, mode change, `/new`) drops the live
 session and a warming one alike (`discardWarming`: a daemon thread closes it once its
 initialization ends, so the switch never waits for a compiler it no longer needs) and
 starts warming the next one. Text-only turns never wait for a compiler. Reset and mode changes discard the previous
@@ -630,8 +631,9 @@ where supported, preserving POSIX permissions and resolving a configured symlink
 The user-facing settings not covered by the README.
 
 **Providers.** `api` is `anthropic`, `openai-responses` (also DeepSeek and other services
-through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …) or `echo`
-(keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
+through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …), `chatgpt` (the
+models of a ChatGPT plan, signed in through the browser; see
+[Models and providers](#models-and-providers)) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
 variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
 then the environment. `headers` are extra HTTP headers for every request; a value may be a
 `${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
@@ -653,8 +655,9 @@ context window. Without `-m` or `model`, a session starts with the model last ch
 
 **First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:
 the user chooses one of the `atc/providers.json` presets, gives its key unless one is
-already bound (read by `Tui.askSecret`, masked and kept out of the prompt history), and
-chooses a model from the provider's list, which also checks the key. `App.setup` then
+already bound (read by `Tui.askSecret`, masked and kept out of the prompt history) or signs
+in (`chatgpt`, see `FirstRun.signIn`), and
+chooses a model from the provider's list, which also checks the key. `Setup.load` then
 writes a global config naming only that provider, binds the key in
 `~/.atc/keys.properties` (`KeyBindings.bind`, owner-only, other lines kept), stores the
 list and records the model as the last one, so the session starts without another fetch.
@@ -673,7 +676,8 @@ longest part of its path (`ProviderEdits.owner`), because layers merge a model e
 whole; a new provider goes to the global config. The configuration is then loaded again
 (an invalid result restores the files) and the catalog rebuilt; a model in use that the
 change renamed moves to its new name. A provider or model in use, by the session or as
-`model`/`classifiedModel`, cannot be turned off.
+`model`/`classifiedModel`, cannot be turned off. A `chatgpt` provider also offers *Sign in
+with ChatGPT*, which replaces the saved sign-in.
 
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
@@ -747,7 +751,7 @@ stored list. Configuration validation never fetches: `ModelCatalog.check` accept
 a list could hold. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
 always labelled by their full reference, so fetching a list never changes the labels of
 configured models. `ChatModel.effort` is mutable per client and read at request time;
-`App` caches one client per reference, so an effort chosen with `/effort` survives
+`Models` caches one client per reference, so an effort chosen with `/effort` survives
 switching away and back.
 
 Web search is best effort. `ModelCatalog` gives every model without its own `webSearch`
@@ -787,6 +791,33 @@ it to the SDK accumulator once, after the choices. It ignores empty chunks witho
 and extra choice chunks after completion. Auxiliary chat calls also apply configured
 `maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
 checks requests and usage accounting against a local HTTP server.
+
+The `chatgpt` api reaches the models of a ChatGPT plan through the backend the Codex CLI
+uses (`https://chatgpt.com/backend-api/codex`), signed in the way Codex signs in.
+`ChatGPTAuth.begin` starts an OAuth authorization-code grant with PKCE and Codex's client id
+at `auth.openai.com`, with a callback server on the loopback interface at port 1455 or 1457,
+the two callbacks registered for that client. `FirstRun.signIn` opens the browser
+(`Platform.openBrowser`) and prints the address. When the browser cannot reach the callback
+(atc runs over SSH), the user pastes the address the browser ended on instead, and
+`Login.paste` reads the code from it. The state must match either way. The tokens go to
+`~/.atc/chatgpt-auth.json`, replaced atomically and readable only by its owner; the default
+policy's locked `.atc` rule keeps the agent out of it. The ChatGPT account id comes from
+the ID token's `https://api.openai.com/auth` claim, and the expiry from the access token's
+`exp`. `ChatGPTModel` is the Responses adapter with an OkHttp interceptor that reads the file
+for every request, so every atc process sees the newest tokens. The interceptor refreshes
+tokens five minutes before they expire, and once more after a 401. A refresh token can be
+used once. When the token endpoint rejects one, another process may have used it already,
+so the saved tokens win if their refresh token differs; otherwise `SignInNeeded` tells the
+user to sign in again from `/providers`. The backend streams only, requires instructions
+and rejects `max_output_tokens` and `temperature`. Its closing `response.completed` carries
+an empty `output`, so `OpenAIResponsesModel.Accumulator` keeps the items of the
+`response.output_item.done` events and uses them when the final response has none. The adapter streams one-shot calls too,
+supplies instructions when a call has none, sends neither setting and sets
+`prompt_cache_key` to the conversation id. Its model list is `GET /models?client_version=`,
+filtered to the models marked `list`, with their context windows and efforts. The backend
+lists the models that Codex release may use, so `ChatGPTModel.ClientVersion` follows Codex
+releases. The preset sends `originator: atc` and `session-id: ${ATC_SESSION}`. `ChatGPTSuite`
+covers the flow against a local server.
 
 Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
 The adapter returns an `Incomplete` completion containing received answer text and usage,

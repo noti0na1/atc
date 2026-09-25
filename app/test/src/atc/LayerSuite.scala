@@ -50,7 +50,7 @@ class LayerSuite extends munit.FunSuite:
     val configuration: Configuration = Config.load(runDir, explicitPath, globalPath)
     def settings: Config = configuration.settings
     val policy: Policy = Policy(
-      App.fileRules(configuration, cwd),
+      configuration.fileRules(cwd),
       settings.commands,
       settings.hosts,
       _ => Decision.Deny,
@@ -512,7 +512,7 @@ class LayerSuite extends munit.FunSuite:
     Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
     // Load the project through the symlink, before the caller canonicalizes it.
     val configuration = Config.load(link, None, linkParent.resolve("no-global.json").nn)
-    val policy = Policy(App.fileRules(configuration, link), Nil, Nil, _ => Decision.Deny)
+    val policy = Policy(configuration.fileRules(link), Nil, Nil, _ => Decision.Deny)
     assertEquals(
       policy.effective(ScopeId.Base, PlatformPath.canonical(real.resolve("src/x.txt").nn)).access,
       Access.Write

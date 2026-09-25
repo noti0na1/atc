@@ -131,7 +131,8 @@ assets of a newer release.
 
 **1. Start it.** Change to the project you want to work on (`cd ~/my-project`) and run
 `atc`. The first start asks you to choose a provider, paste its API key and choose one of
-its models; the key is saved in `~/.atc/keys.properties`, readable only by you. To set up
+its models; the key is saved in `~/.atc/keys.properties`, readable only by you. With a
+ChatGPT plan you can sign in through the browser instead of giving a key. To set up
 providers by hand instead, choose *Configure providers myself*: ATC writes
 `~/.atc/config.json` and exits. On Windows, `~/.atc` is `%USERPROFILE%\.atc`.
 
