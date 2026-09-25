@@ -22,13 +22,18 @@ private[ui] final class Dialogs(
 
   private val menus = Menus(screen, alerts)
 
-  /** A single-choice menu: the index of the chosen label. */
-  def menuIndex(message: String, labels: List[String]): Option[Int] =
-    keys.withPaused(status.withHint(menus.ListHint)(menus.list(message, labels)))
+  /** A single-choice menu: the index of the chosen label. `escape` names where Esc goes. */
+  def menuIndex(message: String, labels: List[String], escape: String = "cancel"): Option[Int] =
+    keys.withPaused(status.withHint(menus.listHint(escape))(menus.list(message, labels)))
 
   /** A multi-choice menu with the `checked` options ticked at first: the ticked indices. */
-  def checkboxIndices(message: String, labels: List[String], checked: Set[Int] = Set.empty): Option[List[Int]] =
-    keys.withPaused(status.withHint(menus.CheckboxHint)(menus.checkbox(message, labels, checked)))
+  def checkboxIndices(
+    message: String,
+    labels: List[String],
+    checked: Set[Int] = Set.empty,
+    escape: String = "cancel",
+  ): Option[List[Int]] =
+    keys.withPaused(status.withHint(menus.checkboxHint(escape))(menus.checkbox(message, labels, checked)))
 
   private def menu(message: String, labels: List[String]): Option[String] =
     menuIndex(message, labels).flatMap(labels.lift)

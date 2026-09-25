@@ -16,8 +16,10 @@ import scala.jdk.CollectionConverters.*
 private[ui] final class Menus(screen: Screen, alerts: Alerts):
   import screen.g
 
-  val ListHint = s"Arrows move ${g.dot} Enter confirm ${g.dot} Ctrl-C cancel"
-  val CheckboxHint = s"Space toggle ${g.dot} Enter confirm ${g.dot} Ctrl-C cancel"
+  /** The footer of a single-choice menu; Esc (like Ctrl-C) closes it, going `escape`:
+    * `back` in a slash command's menus, `cancel` in the agent's pop-ups. */
+  def listHint(escape: String): String = s"Arrows move ${g.dot} Enter confirm ${g.dot} Esc $escape"
+  def checkboxHint(escape: String): String = s"Space toggle ${g.dot} Enter confirm ${g.dot} Esc $escape"
 
   /** A single-choice menu. */
   def list(message: String, labels: List[String]): Option[Int] =
@@ -77,6 +79,10 @@ private[atc] object Menus:
   val AddAnswerLabel = "Add an answer or instructions"
   val YesLabel = "Yes"
   val NoLabel = "No"
+  /** The last row of a menu the user comes back to. */
+  val DoneLabel = "Done"
+  /** The last row of a sub-menu: back to the menu that opened it. */
+  val BackLabel = "Back"
 
   /** Menu ids are the labels where possible; collisions get numeric suffixes
     * that are themselves checked (so `a`, `a (1)`, `a` still stays unique). */

@@ -380,18 +380,43 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
               while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
     finally popupLock.unlock()
 
+  // Slash-command menus follow one pattern. A one-shot picker (`/model`, `/effort`)
+  // acts on the choice and closes; a menu the user comes back to (`/providers`,
+  // `/config`) is a `menuLoop` ending in Done; a menu opened from another is
+  // `chooseOrBack`, ending in Back. Esc goes back one level in each of them.
+
   /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
     * `None` when there is no terminal for menus, no options, or the user
-    * cancelled with Ctrl-C/Ctrl-D. */
-  def choose(title: String, options: List[String]): Option[String] =
+    * left it with Esc, Ctrl-C or Ctrl-D. */
+  def choose(title: String, options: List[String]): Option[String] = chooseIndex(title, options).flatMap(options.lift)
+
+  /** A sub-menu: `options` and a last Back row. The chosen index; `None` for Back,
+    * Esc or no menus, which return to the menu that opened it. */
+  def chooseOrBack(title: String, options: List[String]): Option[Int] =
+    chooseIndex(title, options :+ Menus.BackLabel).filter(_ < options.size)
+
+  /** A menu the user comes back to after each choice: `entries`, labels with what
+    * choosing them does, are built again every time, and the last row, Done, or
+    * Esc leaves it. Without menus it does nothing: see [[menusAvailable]]. */
+  def menuLoop(title: String)(entries: () => List[(String, () => Unit)]): Unit =
+    var open = true
+    while open do
+      val current = entries()
+      chooseIndex(title, current.map(_._1) :+ Menus.DoneLabel).flatMap(current.lift) match
+        case Some((_, act)) => act()
+        case None => open = false
+
+  private def chooseIndex(title: String, options: List[String]): Option[Int] =
     if plain || options.isEmpty then None
-    else popupBlock(dialogs.menuIndex(Ansi.sanitize(title), options.map(Ansi.sanitize))).flatMap(options.lift)
+    else popupBlock(dialogs.menuIndex(Ansi.sanitize(title), options.map(Ansi.sanitize), escape = "back"))
 
   /** A multi-choice pop-up with the `checked` options ticked at first: the
-    * indices ticked when confirmed, `None` when cancelled or without menus. */
+    * indices ticked when confirmed, `None` when left with Esc or without menus. */
   def chooseMany(title: String, options: List[String], checked: Set[Int]): Option[Set[Int]] =
     if plain || options.isEmpty then None
-    else popupBlock(dialogs.checkboxIndices(Ansi.sanitize(title), options.map(Ansi.sanitize), checked)).map(_.toSet)
+    else
+      popupBlock(dialogs.checkboxIndices(Ansi.sanitize(title), options.map(Ansi.sanitize), checked, escape = "back"))
+        .map(_.toSet)
 
   def askPermission(req: PermissionRequest): Decision =
     statusLine.withOperation("waiting for permission")(popupBlock(dialogs.permission(req)))

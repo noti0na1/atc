@@ -1046,6 +1046,16 @@ cancels block input. During a turn, a separate reader collects corrections and u
 draft text and handles escape sequences, stopping on timeout or EOF. Menu reads pause that
 reader.
 
+Slash-command menus share one pattern, through `Tui`. A one-shot picker (`/model`, `/effort`,
+`/perms revoke`) acts on the choice and closes. A menu the user comes back to after each
+change (`/providers`, `/config`) is a `menuLoop`: its rows are rebuilt every time, so they show
+the change, and its last row is Done. A menu opened from another is `chooseOrBack`, whose last
+row is Back; a confirmation inside a command is such a sub-menu, with one action row. Carrying
+out an action returns to the looping menu; Back, or an action that did not go through (a
+refused change, a cancelled checkbox), returns to the menu one level up. Esc goes back one
+level everywhere, and the footer says so (`Esc back`); the agent's questions and permission
+requests say `Esc cancel`.
+
 While the main prompt holds a single word starting with `/`, `PromptReader` lists the matching
 `SlashCommand.table` rows in JLine's `post` area under the buffer, with an exact name
 preselected. It sets `post` in a `redisplay` override, leaves it to other users (completion
