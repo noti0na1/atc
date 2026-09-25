@@ -120,3 +120,16 @@ class ProviderEditsSuite extends munit.FunSuite:
     assertEquals(Tokens.format(Tokens(1000000)), "1m")
     assertEquals(Tokens.format(Tokens(200000)), "200k")
     assertEquals(Tokens.format(Tokens(131072)), "131072")
+
+  test("a provider's row counts its models on out of every model it offers"):
+    val provider = ProviderConfig(
+      api = Some("openai"),
+      models = Map("a" -> ModelConfig(name = Some("model-a")), "big" -> ModelConfig(name = Some("vendor/big"))),
+    )
+    // Chosen from a list of four: the unchosen two are not entries.
+    assertEquals(ProviderEdits.offered(provider, listed("model-a", "vendor/big", "small", "tiny")), "2 of 4 models on")
+    // Without a stored list, the entries are all there is to count.
+    assertEquals(ProviderEdits.offered(provider, Nil), "2 models on")
+    val oneOff =
+      provider.copy(models = provider.models.updated("a", ModelConfig(name = Some("model-a"), enabled = false)))
+    assertEquals(ProviderEdits.offered(oneOff, Nil), "1 of 2 models on")
