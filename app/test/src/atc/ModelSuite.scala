@@ -114,6 +114,16 @@ class ModelSuite extends munit.FunSuite:
       assertEquals(m.webSearch, false)
     finally m.close()
 
+  test("reasoning between tags is told from the answer, even when a tag is split across chunks"):
+    val split = OpenAIChatModel.TagSplitter("<thought>", "</thought>")
+    val parts = List("<tho", "ught>plan", " it</th", "ought>The answer", " is 42.<", "b>").flatMap(split.push) ++
+      split.finish()
+    def joined(thinking: Boolean) = parts.collect { case (`thinking`, text) => text }.mkString
+    assertEquals(joined(true), "plan it")
+    assertEquals(joined(false), "The answer is 42.<b>")
+    assertEquals(OpenAIChatModel.answer("no tags <at all", "<thought>", "</thought>"), "no tags <at all")
+    assertEquals(OpenAIChatModel.answer("<thought>unclosed", "<thought>", "</thought>"), "")
+
   // ── ChatModel.create dispatch ───────────────────────────────────
 
   private def spec(api: String, provider: String = "p", alias: String = "e") =

@@ -657,6 +657,27 @@ gateways that route by session, such as OpenCode
 (`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
 `headers` sets `User-Agent`.
 
+`reasoningStyle` describes a Chat Completions provider (`api: openai`) that asks for
+reasoning and returns it in its own way. `request` is a JSON object merged into the body of a
+call that reasons, in place of `reasoning_effort`; a string `{effort}` in it becomes the
+model's current effort, and with no effort chosen the member holding it is left out.
+`requestOff` is merged into calls that should reason little (next-request prediction).
+`tags` names the opening and closing tag around reasoning written into the answer text:
+what is between them streams as reasoning and stays out of the answer and the history. The
+Gemini preset uses all three:
+
+```json
+"reasoningStyle": {
+  "request": { "extra_body": { "google": { "thinking_config":
+    { "include_thoughts": true, "thinking_level": "{effort}" } } } },
+  "requestOff": { "extra_body": { "google": { "thinking_config": { "thinking_level": "low" } } } },
+  "tags": ["<thought>", "</thought>"]
+}
+```
+
+A model's own `thinking` switch still applies beside it. Reasoning in the `reasoning_content`
+or `reasoning` fields of a delta streams as reasoning whatever the style says.
+
 **Models.** A model is an alias with a provider-specific `name` and its own settings:
 `contextWindow` (the real window, so the conversation is compacted and trimmed to fit),
 `maxTokens`, `temperature`, `reasoning`, `efforts`, `thinking`, `reasoningSummary`,
@@ -813,6 +834,18 @@ it to the SDK accumulator once, after the choices. It ignores empty chunks witho
 and extra choice chunks after completion. Auxiliary chat calls also apply configured
 `maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
 checks requests and usage accounting against a local HTTP server.
+
+Gemini's OpenAI-compatible endpoint streams each tool call whole, without the `index` the
+SDK accumulator needs, so `ChunkFeed` numbers such fragments: one with an id starts the next
+call. Gemini 3 also attaches a thought signature to each call (`extra_content`), requires it
+back with the calls of the exchange in progress, and refuses `null` where it expects text.
+The accumulator drops `extra_content`, so `ChunkFeed` keeps it by call, and
+`OpenAIChatModel.replayable` builds the native turn without null fields and with each call's
+`extra_content`. Native turns are not saved with a session; Gemini accepts earlier exchanges
+without signatures, so a resumed conversation still works. Its thoughts, asked for through the
+preset's `reasoningStyle`, arrive in the answer text between `<thought>` tags;
+`OpenAIChatModel.TagSplitter` splits them off as the stream arrives, holding back a tail that
+could begin a tag, and the stored answer and the replayed turn keep only the answer text.
 
 The `chatgpt` api reaches the models of a ChatGPT plan through the backend the Codex CLI
 uses (`https://chatgpt.com/backend-api/codex`), signed in the way Codex signs in.

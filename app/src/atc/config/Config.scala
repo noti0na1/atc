@@ -82,6 +82,9 @@ final case class ProviderConfig(
     * conversation (renewed by `/new`), which gateways such as
     * OpenCode use for routing and prompt caching. */
   headers: Map[String, String] = Map.empty,
+  /** How this Chat Completions endpoint (`api: openai`) asks for reasoning and returns
+    * it, where that differs from OpenAI's `reasoning_effort`. Unset: OpenAI's way. */
+  reasoningStyle: Option[ReasoningStyle] = None,
   /** The provider's models, by alias. Empty: the models the provider lists
     * (`GET /models`) are fetched the first time they are needed, and each is
     * named `provider/model-id`. */
@@ -89,6 +92,36 @@ final case class ProviderConfig(
   /** `false` turns the provider off: none of its models is offered or fetched. */
   enabled: Boolean = true,
 ) derives ReadWriter
+
+/** A provider's own way to ask for reasoning and to return it. Gemini, for example, takes
+  * a `thinking_config` of its own, refuses it beside `reasoning_effort`, and writes its
+  * thoughts into the answer text between `<thought>` tags. */
+final case class ReasoningStyle(
+  /** Merged into the request body of a call that reasons, in place of `reasoning_effort`.
+    * A string `{effort}` in it is the model's current effort; with no effort chosen, the
+    * member holding it is left out. */
+  request: Option[ujson.Value] = None,
+  /** Merged into the request body of a call that should reason little or not at all
+    * (next-request prediction and other small side calls). */
+  requestOff: Option[ujson.Value] = None,
+  /** The opening and the closing tag around reasoning written into the answer text: what
+    * is between them streams as reasoning and stays out of the answer and the history. */
+  tags: Option[List[String]] = None,
+) derives ReadWriter
+
+object ReasoningStyle:
+  val Effort = "{effort}"
+
+  /** `fragment` with each `{effort}` string replaced by `effort`, or left out when there is none. */
+  def withEffort(fragment: ujson.Value, effort: Option[String]): ujson.Value = fragment match
+    case o: ujson.Obj =>
+      ujson.Obj.from(o.value.flatMap: (key, value) =>
+        if value == ujson.Str(Effort) then effort.map(key -> ujson.Str(_)) else Some(key -> withEffort(value, effort)))
+    case a: ujson.Arr =>
+      ujson.Arr.from(a.value.flatMap(v =>
+        if v == ujson.Str(Effort) then effort.map(ujson.Str(_)) else Some(withEffort(v, effort))
+      ))
+    case other => other
 
 object ProviderConfig:
   /** The placeholder in a provider header for the conversation id, filled in
@@ -106,8 +139,10 @@ final case class ProviderPreset(
   /** Where to create a key, shown when the first run asks for one. */
   keyUrl: Option[String] = None,
   headers: Map[String, String] = Map.empty,
+  reasoningStyle: Option[ReasoningStyle] = None,
 ) derives ReadWriter:
-  def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key, headers = headers)
+  def config: ProviderConfig =
+    ProviderConfig(api = Some(api), url = url, key = key, headers = headers, reasoningStyle = reasoningStyle)
   /** The variable a `${VAR}` key is read from. */
   def keyVariable: Option[String] = key.flatMap(KeyBindings.envRefName)
 

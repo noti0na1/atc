@@ -22,6 +22,8 @@ object ConfigValidation:
     "claude-code",
     "echo",
   )
+  /** The names of the Chat Completions api, the only one a `reasoningStyle` applies to. */
+  private val ChatApis = Set("openai", "openai-chat", "chat")
   private val AnthropicWebSearchVersions = Set("20250305", "20260209")
 
   /** Reject settings that would otherwise fail much later, in output slicing,
@@ -90,6 +92,19 @@ object ConfigValidation:
       s"provider '$name' has no api (expected anthropic | openai | openai-responses | chatgpt | claude-code | echo)"
     )
     provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
+    provider.reasoningStyle.foreach: style =>
+      val where = s"providers.$name.reasoningStyle"
+      requireValid(
+        provider.api.exists(api => ChatApis.contains(api.trim.toLowerCase(Locale.ROOT))),
+        s"$where applies to Chat Completions (api openai) only"
+      )
+      for (field, fragment) <- List("request" -> style.request, "requestOff" -> style.requestOff); f <- fragment do
+        requireValid(f.objOpt.isDefined, s"$where.$field must be a JSON object")
+      style.tags.foreach: tags =>
+        requireValid(
+          tags.size == 2 && tags.forall(_.nonEmpty),
+          s"$where.tags must be two non-empty strings: the opening and the closing tag"
+        )
     provider.models.foreach((alias, model) => validateModel(name, alias, model))
 
   private def validateModel(provider: String, alias: String, model: ModelConfig): Unit =

@@ -28,6 +28,8 @@ final case class ModelSpec(
   settings: ModelConfig,
   /** The provider's extra request headers (`ProviderConfig.headers`, resolved). */
   headers: Map[String, String] = Map.empty,
+  /** The provider's way to ask for and return reasoning (`ProviderConfig.reasoningStyle`). */
+  reasoningStyle: Option[ReasoningStyle] = None,
 ):
   /** The unambiguous name of this model, `provider/alias`. */
   def ref: String = s"$provider/$alias"
@@ -188,7 +190,10 @@ object ModelCatalog:
   ): ModelCatalog =
     val defaults = ModelConfig(webSearch = config.webSearch)
     val providers = config.providers.toList.sortBy(_._1).filter(_._2.enabled).map: (name, p) =>
-      (p, ModelSpec(name, "", p.api.getOrElse(""), "", p.url, keys.apiKey(p), defaults, keys.headers(p)))
+      (
+        p,
+        ModelSpec(name, "", p.api.getOrElse(""), "", p.url, keys.apiKey(p), defaults, keys.headers(p), p.reasoningStyle)
+      )
     val configured = providers.flatMap: (p, endpoint) =>
       p.models.toList.sortBy(_._1).filter(_._2.enabled).map: (alias, m) =>
         endpoint.copy(

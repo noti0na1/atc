@@ -170,6 +170,31 @@ class ConfigSuite extends munit.FunSuite:
     assert(edited.startsWith("\uFEFF{\r\n"), edited)
     assertEquals(ujson.read(edited.stripPrefix("\uFEFF"))("safeMode").bool, false)
 
+  test("a reasoning style fills in the effort, or leaves its member out without one"):
+    val fragment = ujson.read("""{ "extra_body": { "google": { "thinking_config":
+      { "include_thoughts": true, "thinking_level": "{effort}" } } } }""")
+    assertEquals(
+      ReasoningStyle.withEffort(fragment, Some("high"))("extra_body")("google")("thinking_config"),
+      ujson.Obj("include_thoughts" -> true, "thinking_level" -> "high"),
+    )
+    assertEquals(
+      ReasoningStyle.withEffort(fragment, None)("extra_body")("google")("thinking_config"),
+      ujson.Obj("include_thoughts" -> true),
+    )
+    val gemini = upickle.default.read[Config](ujson.read(Config.globalTemplate)).providers("gemini")
+    assertEquals(gemini.reasoningStyle.flatMap(_.tags), Some(List("<thought>", "</thought>")))
+
+  test("a reasoning style is checked: Chat Completions only, JSON objects, two tags"):
+    val dir = Files.createTempDirectory("atc-cfg-style").nn
+    def problem(provider: String) =
+      val file = writeCfg(dir, "config.json", s"""{ "providers": { "p": $provider } }""")
+      intercept[IllegalArgumentException](load(dir, Some(file))).getMessage.nn
+    assert(problem("""{ "api": "anthropic", "reasoningStyle": { "tags": ["<t>", "</t>"] } }""").contains("api openai"))
+    assert(
+      problem("""{ "api": "openai", "reasoningStyle": { "request": [1] } }""").contains("request must be a JSON object")
+    )
+    assert(problem("""{ "api": "openai", "reasoningStyle": { "tags": ["<t>"] } }""").contains("two non-empty strings"))
+
   test("a malformed config file is a clear error"):
     val dir = Files.createTempDirectory("atc-cfg-bad").nn
     val bad = writeCfg(dir, "config.json", "{ not json ]")
