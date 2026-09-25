@@ -4,8 +4,12 @@ import atc.{LauncherEnvironment, ScalaSource}
 import atc.lib.*
 import atc.perms.ScopeId
 
+import java.lang.ProcessBuilder.Redirect
 import java.nio.file.Path
+import java.util.Locale
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 /** Command execution and spawned-process lifecycle supplied by [[Host]].
   *
@@ -48,13 +52,10 @@ private[host] trait HostProcesses:
       )
 
   private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId): Unit =
-    pipeline.stages.foreach { stage =>
-      policy.commandDenied(stage.line).foreach { pattern =>
-        throw SecurityException(
-          s"Access denied: command '${stage.line}' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
-        )
-      }
-    }
+    for stage <- pipeline.stages; pattern <- policy.commandDenied(stage.line) do
+      throw SecurityException(
+        s"Access denied: command '${stage.line}' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
+      )
 
     val missing = pipeline.stages.filterNot(stage => policy.commandAllowed(scope, stage.line))
     if missing.nonEmpty then
@@ -85,15 +86,14 @@ private[host] trait HostProcesses:
     target
 
   private def processBuilders(pipeline: CommandLine.Pipeline, dir: Path): List[ProcessBuilder] =
-    pipeline.stages.map { stage =>
+    pipeline.stages.map: stage =>
       val argv = WindowsExecutable.resolve(stage.argv, dir)
       val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
-      // Windows launchers may carry the original CLI (including a prompt) in
-      // these variables. It belongs to ATC, not commands the agent starts.
+      // Windows launchers may carry the original command line (including a prompt)
+      // in these variables. It belongs to ATC, not to commands the agent starts.
       builder.environment().nn.keySet().nn.removeIf(LauncherEnvironment.isInternal)
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
-    }
 
   private def prepare(command: String, args: Seq[String], options: ExecOptions)(using
     ex: Exec,
@@ -111,11 +111,9 @@ private[host] trait HostProcesses:
     val stdoutFile = pipeline.stdoutFile.map(outputRedirect(_, fs))
     val pbs = processBuilders(pipeline, dir)
     stdinFile.foreach(path => pbs.head.redirectInput(path.toFile))
-    stdoutFile.foreach { path =>
+    stdoutFile.foreach: path =>
       val file = path.toFile
-      pbs.last.redirectOutput(if pipeline.append then ProcessBuilder.Redirect.appendTo(file)
-      else ProcessBuilder.Redirect.to(file))
-    }
+      pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
     Prepared(pbs, pipeline.stages.map(_.line), pipeline.line)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
@@ -138,7 +136,7 @@ private[host] trait HostProcesses:
     )
 
   // The registry is per host; ids are never reused within a session.
-  private val spawned = scala.collection.mutable.LinkedHashMap[Int, ProcessImpl]()
+  private val spawned = mutable.LinkedHashMap[Int, ProcessImpl]()
   private var nextProcessId = 0
 
   def spawn(command: String)(using Exec, FileSystem): Process = spawn(command, ExecOptions())
@@ -179,10 +177,9 @@ private[host] trait HostProcesses:
 
   /** Kill processes owned by a closing one-time permission scope. */
   private[host] def killProcessesInScope(id: ScopeId): Unit = spawned.synchronized:
-    spawned.values.toList.filter(_.scope == id).foreach { process =>
+    spawned.values.toList.filter(_.scope == id).foreach: process =>
       try process.managed.kill()
-      catch case _: Exception => ()
-    }
+      catch case NonFatal(_) => ()
     reapProcesses()
 
   /** Kill every spawned process at session end or for `/kill all`. */
@@ -193,7 +190,7 @@ private[host] trait HostProcesses:
   /** `/kill`: `p3`, `3`, or `all`; returns a user-facing result. */
   private[atc] def killProcess(ref: String): String = spawned.synchronized:
     reapProcesses()
-    ref.trim.toLowerCase(java.util.Locale.ROOT) match
+    ref.trim.toLowerCase(Locale.ROOT) match
       case "" | "all" =>
         val count = spawned.size
         killProcesses()

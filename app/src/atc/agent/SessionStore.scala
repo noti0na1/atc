@@ -1,7 +1,9 @@
 package atc.agent
 
+import atc.host.HostInteraction
 import atc.lib.{TaskNotes, Todo, TodoStatus}
 import atc.llm.{Msg, ToolCall, ToolResult}
+
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets.UTF_8
@@ -55,10 +57,9 @@ private[atc] object SessionStore:
       catch
         case _: UnsupportedOperationException =>
           FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE).nn
-    Using.resource(channel) { out =>
+    Using.resource(channel): out =>
       val buffer = ByteBuffer.wrap(bytes)
       while buffer.hasRemaining do out.write(buffer)
-    }
 
   def read(path: Path): SessionSnapshot =
     val bytes = Using.resource(Files.newInputStream(path).nn)(_.readNBytes(MaxBytes + 1).nn)
@@ -67,23 +68,16 @@ private[atc] object SessionStore:
 
   private[atc] def encode(session: SessionSnapshot): String =
     def strings(values: List[String]): ujson.Arr = ujson.Arr.from(values)
-    val messages = session.history.map {
+    val messages = session.history.map:
       case Msg.User(text) => ujson.Obj("role" -> "user", "text" -> text)
       case Msg.Continuation(text) => ujson.Obj("role" -> "continuation", "text" -> text)
-      case Msg.Assistant(text, calls, _) => ujson.Obj(
-          "role" -> "assistant",
-          "text" -> text,
-          "calls" -> ujson.Arr.from(calls.map(call =>
-            ujson.Obj("id" -> call.id, "name" -> call.name, "arguments" -> call.arguments)
-          ))
-        )
-      case Msg.ToolResults(results) => ujson.Obj(
-          "role" -> "tools",
-          "results" -> ujson.Arr.from(results.map(result =>
-            ujson.Obj("id" -> result.callId, "output" -> result.output, "error" -> result.isError)
-          ))
-        )
-    }
+      case Msg.Assistant(text, calls, _) =>
+        val entries = calls.map(call => ujson.Obj("id" -> call.id, "name" -> call.name, "arguments" -> call.arguments))
+        ujson.Obj("role" -> "assistant", "text" -> text, "calls" -> ujson.Arr.from(entries))
+      case Msg.ToolResults(results) =>
+        val entries =
+          results.map(result => ujson.Obj("id" -> result.callId, "output" -> result.output, "error" -> result.isError))
+        ujson.Obj("role" -> "tools", "results" -> ujson.Arr.from(entries))
     ujson.write(
       ujson.Obj(
         "version" -> 1,
@@ -107,22 +101,19 @@ private[atc] object SessionStore:
     val data = ujson.read(text)
     if data("version").num != 1 then throw IllegalArgumentException("Unsupported saved-session version")
     def strings(value: ujson.Value): List[String] = value.arr.toList.map(_.str)
-    val history = data("history").arr.toList.map { value =>
+    val history = data("history").arr.toList.map: value =>
       value("role").str match
         case "user" => Msg.User(value("text").str)
         case "continuation" => Msg.Continuation(value("text").str)
-        case "assistant" => Msg.Assistant(
-            value("text").str,
-            value("calls").arr.toList.map(c => ToolCall(c("id").str, c("name").str, c("arguments").str)),
-            None
-          )
-        case "tools" => Msg.ToolResults(value("results").arr.toList.map(r =>
-            ToolResult(r("id").str, r("output").str, r("error").bool)
-          ))
+        case "assistant" =>
+          val calls = value("calls").arr.toList.map(c => ToolCall(c("id").str, c("name").str, c("arguments").str))
+          Msg.Assistant(value("text").str, calls, None)
+        case "tools" =>
+          val results = value("results").arr.toList.map(r => ToolResult(r("id").str, r("output").str, r("error").bool))
+          Msg.ToolResults(results)
         case other => throw IllegalArgumentException(s"Unknown saved message role: $other")
-    }
     var pending = Set.empty[String]
-    history.foreach {
+    history.foreach:
       case Msg.ToolResults(results) =>
         if results.map(_.callId).toSet != pending || results.size != pending.size || pending.isEmpty then
           throw IllegalArgumentException("Saved session has mismatched tool results")
@@ -135,15 +126,14 @@ private[atc] object SessionStore:
             if pending.size != calls.size then
               throw IllegalArgumentException("Saved session has duplicate tool call IDs")
           case _ => ()
-    }
     if pending.nonEmpty then throw IllegalArgumentException("Saved session has unanswered tool calls")
     val task = data("task")
     val notes =
       TaskNotes(task("goal").str, strings(task("constraints")), strings(task("completed")), strings(task("remaining")))
-    if (notes.goal :: (notes.constraints ++ notes.completed ++ notes.remaining)).mkString("\n").length > 16000 then
-      throw IllegalArgumentException("Saved task notes exceed 16000 characters")
+    if HostInteraction.length(notes) > HostInteraction.MaxTaskNotesChars then
+      throw IllegalArgumentException(s"Saved task notes exceed ${HostInteraction.MaxTaskNotesChars} characters")
     val requests = strings(data("userRequests"))
-    if requests.size > 9 || requests.exists(_.length > 8000) then
+    if requests.size > Conversation.RecentRequests + 1 || requests.exists(_.length > Conversation.MaxRequestChars) then
       throw IllegalArgumentException("Saved user request history exceeds its limit")
     SessionSnapshot(
       history,

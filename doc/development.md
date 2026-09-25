@@ -96,6 +96,8 @@ requests are echoed. It needs no API key or network connection.
 |---|---|
 | `lib` | Agent-facing capability types, data types and `Interface`; compiled with capture checking |
 | `app` | Configuration, models, permissions, host operations, REPL and terminal |
+| `app` root package | `Main` and `Cli` parse the command line; `App` wires the parts together and runs the loop; `Setup` and `FirstRun` run the first start; `Models` holds the catalog and clients; `SandboxRepl` owns the REPL session |
+| `commands/` | `SlashCommand` is the table of commands; `Commands` parses, dispatches and completes them; `ModelCommands`, `ProvidersMenu`, `SessionCommands` and `StatusCommands` implement them |
 | `agent/` | Turn loop, completion decisions, history, context estimates, prompts and input prediction |
 | `config/` | Configuration layers, validation, key bindings and model catalog |
 | `host/` | File, process, network and user operations implementing `Interface` |
@@ -131,7 +133,7 @@ exit code and the size of each stream only (`toString` in `Interface.scala`), be
 snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
-traits. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
+traits; `HostPaths` holds the path resolution and permission checks they share. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
 The REPL shares library classes with the application, so calls need no serialization layer.
 
 ## Type-system background
@@ -365,12 +367,12 @@ ATC's file and HTTP permissions do not constrain the internals of those commands
 
 ## The sandbox
 
-`App.warmSession` starts the REPL on a daemon thread as soon as the program is ready for
+`SandboxRepl.warm` starts the REPL on a daemon thread as soon as the program is ready for
 input (after the resume offer; before the turn of a `-p` run), because compiling the
 preamble takes about two seconds that would otherwise land inside the first tool call.
-`App.ensureSession` adopts that session on the first Scala tool call or `/run`, waiting for
+`SandboxRepl.ensure` adopts that session on the first Scala tool call or `/run`, waiting for
 it (with a "starting sandbox" status) only when it is not ready yet, and starts one on the
-spot if none is warming. `App.replaceSession` (reset, mode change, `/new`) drops the live
+spot if none is warming. `SandboxRepl.replace` (reset, mode change, `/new`) drops the live
 session and a warming one alike (`discardWarming`: a daemon thread closes it once its
 initialization ends, so the switch never waits for a compiler it no longer needs) and
 starts warming the next one. Text-only turns never wait for a compiler. Reset and mode changes discard the previous
@@ -608,7 +610,7 @@ Only explicitly defined project settings narrow a value. `executionTimeoutMs` de
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
 
-`Config.combine` first merges ordinary settings in layer order, then obtains policy
+`Configuration.combine` first merges ordinary settings in layer order, then obtains policy
 settings from granting layers and applies project restrictions. Numeric restrictions use
 minimum; enabled safety flags use logical OR. These operations are order-independent for
 narrowing layers. A field omitted from a project JSON object is not an explicit request
@@ -620,10 +622,81 @@ permissions (`0600`, with a warning at load when group or others can read the fi
 Windows uses the directory's inherited NTFS ACL, which ATC does not rewrite or audit; keep
 the file under the private profile and check it with `icacls` on a shared machine.
 
-`Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings. The
+`Config.setTopLevel` preserves surrounding JSON formatting, BOMs and line endings, and
+`Config.editFile` leaves a file alone when an edit changes nothing. The
 `ObjectText` scanner operates only after JSON validation. Duplicate keys update the final
 occurrence, matching ujson's lookup. Writes use a temporary file and atomic replacement
 where supported, preserving POSIX permissions and resolving a configured symlink target.
+
+### Configuration reference
+
+The user-facing settings not covered by the README.
+
+**Providers.** `api` is `anthropic`, `openai-responses` (also DeepSeek and other services
+through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …), `chatgpt` (the
+models of a ChatGPT plan, signed in through the browser; see
+[Models and providers](#models-and-providers)) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
+variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
+then the environment. `headers` are extra HTTP headers for every request; a value may be a
+`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
+`/clear`) for gateways that route by session, such as OpenCode
+(`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
+`headers` sets `User-Agent`.
+
+**Models.** A model is an alias with a provider-specific `name` and its own settings:
+`contextWindow` (the real window, so the conversation is compacted and trimmed to fit),
+`maxTokens`, `temperature`, `reasoning`, `efforts`, `thinking`, `reasoningSummary`,
+`webSearch`, `webSearchVersion` and `displayName`. Name a model by its alias, or
+`provider/alias` when two providers share one. A provider whose `models` is empty or absent
+lists its own, each named `provider/model-id`: the last list each provider returned is kept
+in `~/.atc/model-lists.json`, a new one is fetched in the background once a session has
+started, and a provider that cannot be reached, or whose configured key is unset, is
+skipped. Anthropic's list supplies context windows and effort levels, OpenRouter's the
+context window. Without `-m` or `model`, a session starts with the model last chosen with
+`/model`.
+
+**First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:
+the user chooses one of the `atc/providers.json` presets, gives its key unless one is
+already bound (read by `Tui.askSecret`, masked and kept out of the prompt history) or signs
+in (`chatgpt`, see `FirstRun.signIn`), and
+chooses a model from the provider's list, which also checks the key. `Setup.load` then
+writes a global config naming only that provider, binds the key in
+`~/.atc/keys.properties` (`KeyBindings.bind`, owner-only, other lines kept), stores the
+list and records the model as the last one, so the session starts without another fetch.
+*Configure providers myself* writes the starting config with every preset and exits;
+*Not now* or Esc runs on the built-in starting config. `-p` runs and terminals without
+menus never ask.
+
+**Turning providers and models on and off.** `"enabled": false` on a provider or a model
+hides it; a disabled provider is never listed. `/providers` edits these switches and the
+model entries in place (`ObjectText.withMember` keeps the file's formatting). Choosing models
+for a provider that lists its own writes the ticked ones as entries with the context
+window, efforts and display name the list reported, which makes them its shortlist;
+*Offer every model it lists* drops the entries again. A listed id with `/` gets an alias
+without one (`ProviderEdits.aliasFor`). Each edit goes to the last layer holding the
+longest part of its path (`ProviderEdits.owner`), because layers merge a model entry as a
+whole; a new provider goes to the global config. The configuration is then loaded again
+(an invalid result restores the files) and the catalog rebuilt; a model in use that the
+change renamed moves to its new name. A provider or model in use, by the session or as
+`model`/`classifiedModel`, cannot be turned off. A `chatgpt` provider also offers *Sign in
+with ChatGPT*, which replaces the saved sign-in.
+
+**Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
+model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
+to `max` for OpenAI). `/effort [level]` switches the agent model's effort, and `default`
+sends none. The choice is saved as the top-level `effort` of the working directory's project
+config (when it has one, like `/model`'s `model`), which replaces the starting model's
+`reasoning` in later sessions; an effort that model does not take is ignored with a
+warning. `/model` starts the new model at its configured effort and removes `effort`.
+
+**Web search.** A model's `webSearch` turns on the provider's own search tool; the
+top-level `webSearch` does so for every model that does not set its own. It is best effort:
+when a provider rejects the tool, the model continues without it for the session.
+
+**Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
+in kitty, iTerm2, WezTerm, Ghostty and foot, a desktop notification on a local machine, the
+bell otherwise), `system`, `terminal`, `bell` or `off`. An alert waits ten seconds for
+input, or comes at once when the terminal reports that it lost focus.
 
 ### File rules and command patterns
 
@@ -672,7 +745,27 @@ newline and encoding conventions (commonly CRLF, sometimes BOM-marked UTF-16 on 
 ## Models and providers
 
 `ModelCatalog` resolves `provider/alias` or an unambiguous bare alias, ignoring case.
-`displayName` affects presentation only. `ChatModel` has streaming `complete` and one-shot
+`displayName` affects presentation only. A provider without configured models is listed
+through `ChatModel.listModels` (the adapter's own client, with `Providers.ListTimeout`), at
+most once per catalog and in parallel across providers: `App` starts `refresh()` after the
+banner, and `models` waits for it. Lookups never wait: they use this session's list when
+it has arrived, else the one `ModelListStore` kept (`~/.atc/model-lists.json`, reused only
+for the same provider name, api and url), else take `provider/model-id` as given. A model
+taken as given keeps its unknown context window until a later session finds it in the
+stored list. Configuration validation does not check `model` or `classifiedModel`. At the start,
+`Models.configured` resolves them, and one that names no model is ignored with a warning
+that names its file: the session falls back to the last model chosen or the first one, and
+sends classified data to no model. A `-m` that names no model stops the start. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
+always labelled by their full reference, so fetching a list never changes the labels of
+configured models. `ChatModel.effort` is mutable per client and read at request time;
+`Models` caches one client per reference, so `/model` sets the chosen client's effort back
+to `ChatModel.defaultEffort` (its `reasoning`).
+
+Web search is best effort. `ModelCatalog` gives every model without its own `webSearch`
+the top-level one, listed models included. `SpecModel.withWebSearchFallback` resends a
+streaming request without the tool when the provider answers 400 or 422 naming web
+search before anything was streamed, and turns the tool off for that client. A gateway
+that drops the tool silently cannot be detected. `ChatModel` has streaming `complete` and one-shot
 `simple` operations. Provider adapters normalize stop reasons into `CompletionStop`.
 
 `Msg` carries neutral text and tool calls. Assistant messages may also carry a `NativeTurn`
@@ -689,9 +782,9 @@ parameter; unrelated bad requests are not retried by this fallback.
 Provider SDK request construction remains in each adapter. Shared configuration and client
 setup belong in `Providers`; model selection belongs in `ModelCatalog`.
 
-A provider's `headers` are extra HTTP headers for every request to it. `Config.resolveHeaders`
+A provider's `headers` are extra HTTP headers for every request to it. `KeyBindings.headers`
 resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
-keeps the placeholder `${ATC_SESSION}` (`Config.SessionRef`), which `Providers.headers(spec)`
+keeps the placeholder `${ATC_SESSION}` (`ProviderConfig.SessionRef`), which `Providers.headers(spec)`
 replaces per request with the conversation id, a UUID that `Agent.clear()` renews. The same
 call adds `User-Agent: atc/<version>` unless the config sets one, regardless of header-name
 case. Every adapter applies the set to both `complete` and `simple` with the params builder's
@@ -705,6 +798,33 @@ it to the SDK accumulator once, after the choices. It ignores empty chunks witho
 and extra choice chunks after completion. Auxiliary chat calls also apply configured
 `maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
 checks requests and usage accounting against a local HTTP server.
+
+The `chatgpt` api reaches the models of a ChatGPT plan through the backend the Codex CLI
+uses (`https://chatgpt.com/backend-api/codex`), signed in the way Codex signs in.
+`ChatGPTAuth.begin` starts an OAuth authorization-code grant with PKCE and Codex's client id
+at `auth.openai.com`, with a callback server on the loopback interface at port 1455 or 1457,
+the two callbacks registered for that client. `FirstRun.signIn` opens the browser
+(`Platform.openBrowser`) and prints the address. When the browser cannot reach the callback
+(atc runs over SSH), the user pastes the address the browser ended on instead, and
+`Login.paste` reads the code from it. The state must match either way. The tokens go to
+`~/.atc/chatgpt-auth.json`, replaced atomically and readable only by its owner; the default
+policy's locked `.atc` rule keeps the agent out of it. The ChatGPT account id comes from
+the ID token's `https://api.openai.com/auth` claim, and the expiry from the access token's
+`exp`. `ChatGPTModel` is the Responses adapter with an OkHttp interceptor that reads the file
+for every request, so every atc process sees the newest tokens. The interceptor refreshes
+tokens five minutes before they expire, and once more after a 401. A refresh token can be
+used once. When the token endpoint rejects one, another process may have used it already,
+so the saved tokens win if their refresh token differs; otherwise `SignInNeeded` tells the
+user to sign in again from `/providers`. The backend streams only, requires instructions
+and rejects `max_output_tokens` and `temperature`. Its closing `response.completed` carries
+an empty `output`, so `OpenAIResponsesModel.Accumulator` keeps the items of the
+`response.output_item.done` events and uses them when the final response has none. The adapter streams one-shot calls too,
+supplies instructions when a call has none, sends neither setting and sets
+`prompt_cache_key` to the conversation id. Its model list is `GET /models?client_version=`,
+filtered to the models marked `list`, with their context windows and efforts. The backend
+lists the models that Codex release may use, so `ChatGPTModel.ClientVersion` follows Codex
+releases. The preset sends `originator: atc` and `session-id: ${ATC_SESSION}`. `ChatGPTSuite`
+covers the flow against a local server.
 
 Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
 The adapter returns an `Incomplete` completion containing received answer text and usage,
@@ -782,7 +902,7 @@ unchanged; usage is recorded separately. Before the summary request is sent, the
 is estimated against the model's input allowance, using the same output reservation as
 ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
 
-`Agent.autoCompact` runs at the top of every round, after queued input is accepted and
+`autoCompact` in `Agent`'s turn loop runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
 between tool rounds, so a long tool loop can be summarized while it runs. It never runs
 between a tool request and its results, which would make the history invalid, and never
@@ -870,12 +990,15 @@ Predictions are reduced to visible single-line text and reported separately in u
 
 ## The terminal
 
-`Tui` implements `AgentUI` and owns the turn lifecycle, status line, prose, tool blocks,
-pop-ups and TODO panel. It composes parts that live in their own files: `Screen` (writes
+`Tui` implements `AgentUI` and owns the turn lifecycle, prose, the TODO panel, input and
+the framing of pop-ups. It composes parts that live in their own files: `Screen` (writes
 that track line boundaries, styles, width, live regions and the spinner; its monitor is the
-TUI's lock), `ThinkingView` and `LiveOutput` (the reasoning window and folded tool output),
-`KeyReader` (the key thread during a turn), `PromptReader` (the JLine line reader and its
-bindings), `Menus` (jline-prompt menus) and `Alerts` (notifications and focus tracking).
+TUI's lock), `StatusLine` (the footer and the window title), `ToolBlock` (one tool call's
+block, its live output and the `/output` history), `ThinkingView` and `LiveOutput` (the
+reasoning window and folded tool output), `Dialogs` (what pop-ups show and read, through
+the jline-prompt `Menus`), `KeyReader` (the key thread during a turn), `PromptReader` (the
+JLine line reader and its bindings) and `Alerts` (notifications and focus tracking).
+`Format` holds the short number, duration and plural forms of status and summary lines.
 `Ansi` removes terminal controls from external text before display. Keep model-visible
 capture text unchanged; sanitize only at display boundaries. `TextSink` incrementally
 handles UTF-8 and BOM-marked UTF-16 process output.
@@ -895,7 +1018,7 @@ not scroll the banner away. Its activity indicator replaces a separate spinner w
 terminal supports a status line. Idle state shows a short model, mode and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
-Every footer update goes through `Tui.drawStatus`, which flushes the terminal writer after
+Every footer update goes through `StatusLine.draw`, which flushes the terminal writer after
 JLine's `Status.update`: JLine flushes the footer text but leaves the closing
 synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honours mode 2026
 (xterm.js in VS Code, iTerm2, kitty, Ghostty, WezTerm) freezes rendering until it arrives.
@@ -926,7 +1049,7 @@ The alert title is `atc · <directory>`. A turn's alert shows the start of its l
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
 its details, and question alerts show the question.
-`Tui.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
+`StatusLine.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
 the status refreshes, writing only changes. The previous title is pushed on xterm's title
 stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
 stack keep ATC's title until the shell sets its own.
@@ -1050,6 +1173,8 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
   terminal helpers, retained output, rendering, prediction and error reporting.
 - `ReplInterruptionSuite`: cancellation recovery in an isolated compiler process.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
+- `MainSuite`, `FirstRunSuite`, `commands.SlashCommandSuite`: command-line parsing, first-run setup and
+  slash-command parsing.
 
 `TestEnv` supplies temporary directories, scripted permissions and recording host ports.
 `ReplAssertions` checks snippets. Prefer `ProcessFixture` over host shell commands for

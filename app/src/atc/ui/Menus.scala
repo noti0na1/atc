@@ -6,6 +6,8 @@ import org.jline.prompt.{CheckboxResult, ListResult, PromptBuilder, PromptResult
 import org.jline.reader.{EndOfFileException, UserInterruptException}
 import org.jline.utils.AttributedString
 
+import java.util.Locale
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
 /** jline-prompt menus. Each returns indices so duplicate display labels do not
@@ -22,6 +24,8 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
     val byId = Menus.uniqueIds(labels).zip(labels)
     run { b =>
       val lp = b.createListPrompt().name("a").message(message)
+      // A long list (a provider's models) is paged, and typing filters it.
+      if labels.size > Menus.FilterFrom then lp.filterable(true)
       byId.foreach((id, l) => lp.add(id, l))
       lp.addPrompt()
     } {
@@ -30,11 +34,12 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
     }
 
   /** A multi-choice menu; `Some(Nil)` if nothing was ticked. */
-  def checkbox(message: String, labels: List[String]): Option[List[Int]] =
+  def checkbox(message: String, labels: List[String], checked: Set[Int] = Set.empty): Option[List[Int]] =
     val byId = Menus.uniqueIds(labels).zip(labels)
     run { b =>
       val cb = b.createCheckboxPrompt().name("a").message(message)
-      byId.foreach((id, l) => cb.add(id, l))
+      if labels.size > Menus.FilterFrom then cb.filterable(true)
+      byId.zipWithIndex.foreach { case ((id, l), i) => cb.add(id, l, checked.contains(i)) }
       cb.addPrompt()
     } {
       case r: CheckboxResult =>
@@ -61,6 +66,9 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts):
       finally screen.tail = "\n\n"
 
 private[atc] object Menus:
+  /** Lists longer than this can be filtered by typing. */
+  val FilterFrom = 12
+
   val AllowOnce = "Allow once"
   val AllowSession = "Allow for this session"
   val DenyLabel = "Deny this request"
@@ -73,8 +81,8 @@ private[atc] object Menus:
   /** Menu ids are the labels where possible; collisions get numeric suffixes
     * that are themselves checked (so `a`, `a (1)`, `a` still stays unique). */
   def uniqueIds(labels: List[String]): List[String] =
-    val used = collection.mutable.Set[String]()
-    labels.map { l =>
+    val used = mutable.Set[String]()
+    labels.map: l =>
       var n = 0
       var candidate = l
       while used.contains(candidate) do
@@ -82,13 +90,12 @@ private[atc] object Menus:
         candidate = s"$l ($n)"
       used += candidate
       candidate
-    }
 
   /** Plain permission prompts accept exact approvals; every other answer is feedback. */
   private[atc] def permissionReply(answer: Option[String]): Decision =
     answer.map(_.trim).filter(_.nonEmpty) match
       case None => Decision.Deny
-      case Some(text) => text.toLowerCase(java.util.Locale.ROOT) match
+      case Some(text) => text.toLowerCase(Locale.ROOT) match
           case "y" | "yes" => Decision.AllowOnce
           case "s" | "session" => Decision.AllowSession
           case "n" | "no" => Decision.Deny

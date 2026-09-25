@@ -132,6 +132,15 @@ class InputPredictorSuite extends munit.FunSuite:
     Thread.sleep(200)
     assertEquals(shown.synchronized(shown.toList), List(None, None))
 
+  test("a disabled predictor never asks the model"):
+    val m = OneShot("continue")
+    val shown = ListBuffer[Option[String]]()
+    val p = InputPredictor(() => m, () => List(user("hi"), agent("hello")), shown += _, enabled = false)
+    p.start()
+    Thread.sleep(200)
+    assert(m.prompts.isEmpty)
+    assert(shown.isEmpty)
+
   test("rapid starts coalesce behind at most one running prediction"):
     final class SlowFirst extends ChatModel:
       val alias = "slow"; val modelId = "slow"; val providerKey = "slow"; val webSearch = false

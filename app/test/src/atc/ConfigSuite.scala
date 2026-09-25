@@ -89,7 +89,7 @@ class ConfigSuite extends munit.FunSuite:
           s"the starting denyCommands must refuse shell invocation `$command`: ${denied.mkString(", ")}",
         )
 
-  test("a provider may list no models: an endpoint written down, ready to be filled in"):
+  test("a provider may list no models: an endpoint whose models are listed or filled in later"):
     val dir = Files.createTempDirectory("atc-cfg-empty-provider").nn
     val cfg = writeCfg(
       dir,
@@ -98,9 +98,11 @@ class ConfigSuite extends munit.FunSuite:
     )
     val loaded = load(dir, Some(cfg))
     assertEquals(loaded.settings.providers("openrouter").models, Map.empty[String, ModelConfig])
-    assert(ModelCatalog.from(loaded.settings).isEmpty, "it contributes no model until one is added")
+    val catalog = ModelCatalog.from(loaded.settings)
+    assertEquals(catalog.configured, Nil, "it configures no model")
+    assertEquals(catalog.discoverable.map(_.provider), List("openrouter"), "it lists its own")
     // and a later layer can add one without repeating the endpoint
-    val withModel = upickle.default.read[Config](Config.mergeJson(
+    val withModel = upickle.default.read[Config](Configuration.mergeJson(
       ujson.read(Files.readString(cfg)).obj,
       ujson.read(
         """{ "providers": { "openrouter": { "models": { "sonnet": { "name": "anthropic/claude-sonnet-4.5" } } } } }"""
@@ -114,13 +116,9 @@ class ConfigSuite extends munit.FunSuite:
     val start = upickle.default.read[Config](ujson.read(Config.globalTemplate))
     assert(start.providers.nonEmpty)
     assert(start.providers.forall((_, p) => p.api.exists(_.nonEmpty)), start.toString)
-    assert(start.providers.exists((_, p) => p.models.nonEmpty), "at least one provider must be usable as it stands")
-    val catalog = ModelCatalog.from(start)
-    assert(catalog.models.forall(_.modelId.nonEmpty))
-    assert(catalog.labels.distinct == catalog.labels, s"ambiguous aliases: ${catalog.labels}")
-    // the roles it names have to resolve
-    start.model.foreach(catalog.find)
-    start.classifiedModel.foreach(catalog.find)
+    assert(start.providers.forall((_, p) => p.models.isEmpty), "each provider lists its own models")
+    assertEquals(start.model, None, "no model is named before one is listed")
+    assertEquals(start.classifiedModel, None, "a classified model is chosen deliberately")
 
   // ── parsing a single file ───────────────────────────────────────
 
@@ -240,8 +238,8 @@ class ConfigSuite extends munit.FunSuite:
         "providers": { "openai": { "api": "openai-responses", "models": { "b": { "name": "m2" } } } } }
     """
     )
-    // load merges global(a) ← project ← explicit(b); we drive it directly via mergeJson too.
-    val merged = Config.mergeJson(ujson.read(Files.readString(base)).obj, ujson.read(Files.readString(over)).obj)
+    // load merges global(a) ← project ← explicit(b); this drives mergeJson directly.
+    val merged = Configuration.mergeJson(ujson.read(Files.readString(base)).obj, ujson.read(Files.readString(over)).obj)
     val c = upickle.default.read[Config](merged)
     assertEquals(c.model, Some("b")) // scalar overridden
     assertEquals(c.safeMode, false) // scalar overridden
@@ -253,7 +251,7 @@ class ConfigSuite extends munit.FunSuite:
   test("deny lists extend across layers, so a later layer cannot drop a deny pattern"):
     val a = ujson.read("""{ "commands": ["ls"], "denyCommands": ["rm *"], "denyHosts": ["*.internal"] }""").obj
     val b = ujson.read("""{ "commands": ["cat"], "denyCommands": ["curl *"] }""").obj
-    val c = upickle.default.read[Config](Config.mergeJson(a, b))
+    val c = upickle.default.read[Config](Configuration.mergeJson(a, b))
     assertEquals(c.commands, List("ls", "cat"))
     assertEquals(c.denyCommands, List("rm *", "curl *"))
     assertEquals(c.denyHosts, List("*.internal"))
@@ -266,13 +264,12 @@ class ConfigSuite extends munit.FunSuite:
     val b = ujson.read("""{ "providers": {
         "openai": { "api": "openai", "url": "http://new",
           "models": { "old": { "name": "v2" }, "fresh": { "name": "v3" } } } } }""").obj
-    val c = upickle.default.read[Config](Config.mergeJson(a, b))
+    val c = upickle.default.read[Config](Configuration.mergeJson(a, b))
     val p = c.providers("openai")
     assertEquals(p.url, Some("http://new")) // provider scalar overridden
-    assertEquals(p.url, Some("http://new")) // provider scalars still override
     assertEquals(p.models.keySet, Set("old", "fresh")) // model added, not replaced wholesale
     assertEquals(p.models("old").name, Some("v2")) // redefined alias replaced entirely
-    assertEquals(p.models("old").webSearch, false) // ... including its dropped settings
+    assertEquals(p.models("old").webSearch, None) // ... including its dropped settings
     assertEquals(c.providers("anthropic").models.keySet, Set("claude")) // other providers untouched
 
   // ── API-key resolution ──────────────────────────────────────────
@@ -327,11 +324,11 @@ class ConfigSuite extends munit.FunSuite:
 
   test("the starting keys file binds the variables the starting config names"):
     val named = "\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}".r
-      .findAllMatchIn(Config.globalTemplate).map(_.group(1).nn).toSet
+      .findAllMatchIn(Config.globalTemplate).map(_.group(1).nn).toSet - "ATC_SESSION" // filled in per conversation
     val bound = Config.keysTemplate.linesIterator.filter(_.contains("=")).map(_.takeWhile(_ != '=').trim).toSet
     assertEquals(named -- bound, Set.empty[String], "every ${VAR} the config names should have a line to fill in")
 
-  // ── App.fileRules ──────────────────────────────────────────────
+  // ── Configuration.fileRules ──────────────────────────────────────────────
 
   test("fileRules carries each rule's origin and parses its access level"):
     val dir = Files.createTempDirectory("atc-rules").nn
@@ -344,7 +341,7 @@ class ConfigSuite extends munit.FunSuite:
                    { "path": "secrets", "classified": true } ] }
     """
     )
-    val rules = App.fileRules(load(dir, Some(cfg)), dir)
+    val rules = load(dir, Some(cfg)).fileRules(dir)
     val configured = rules
     assertEquals(configured.map(_.access), List(Some(Access.Read), Some(Access.Write), None))
     assert(configured.forall(_.grantsWithin.isEmpty), "an explicit -c file grants wherever it matches")
@@ -366,8 +363,15 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(parsed("""{ "contextWindow": "1.5m" }"""), Some(1500000))
     assertEquals(parsed("""{ "contextWindow": " 128 K " }"""), Some(128000))
     assertEquals(parsed("""{}"""), None)
-    for bad <- List("\"abc\"", "\"-5k\"", "\"\"", "0", "\"0k\"", "1.5", "true", "\"1g\"") do
+    for bad <- List("\"abc\"", "\"-5k\"", "\"\"", "0", "-1", "\"0k\"", "1.5", "3e9", "true", "\"1g\"") do
       intercept[Exception](parsed(s"""{ "contextWindow": $bad }"""))
+    // every Tokens is a positive count, however it is made
+    intercept[IllegalArgumentException](Tokens(0))
+    intercept[IllegalArgumentException](Tokens(-5))
+    assertEquals(Tokens(1).toInt, 1)
+    assertEquals(Tokens.from(200000L).map(_.toInt), Some(200000))
+    assertEquals(Tokens.from(0L), None)
+    assertEquals(Tokens.from(Int.MaxValue.toLong + 1), None)
     // Tokens.parse is the same reader, for anything that wants to accept the notation
     assertEquals(Tokens.parse("64k").toInt, 64000)
     intercept[IllegalArgumentException](Tokens.parse("lots"))
@@ -383,7 +387,10 @@ class ConfigSuite extends munit.FunSuite:
   test("predictInput is on by default and a later layer can turn it off"):
     assertEquals(upickle.default.read[Config](ujson.read("{}")).predictInput, true)
     val merged =
-      Config.mergeJson(ujson.read("""{ "predictInput": true }""").obj, ujson.read("""{ "predictInput": false }""").obj)
+      Configuration.mergeJson(
+        ujson.read("""{ "predictInput": true }""").obj,
+        ujson.read("""{ "predictInput": false }""").obj
+      )
     assertEquals(upickle.default.read[Config](merged).predictInput, false)
 
   // ── template ────────────────────────────────────────────────────
@@ -392,11 +399,6 @@ class ConfigSuite extends munit.FunSuite:
     val json = Config.globalTemplate
     val c = upickle.default.read[Config](ujson.read(json))
     assert(c.providers.nonEmpty, "template should define providers")
-    val catalog = ModelCatalog.from(c)
-    assert(catalog.models.size >= 4, catalog.labels.toString)
-    // the roles the template names must resolve
-    c.model.foreach(catalog.find)
-    c.classifiedModel.foreach(catalog.find)
     assert(c.files.nonEmpty, "template should define file rules")
 
   // ── editing a config in place (`/model` remembers the choice) ───
@@ -404,54 +406,58 @@ class ConfigSuite extends munit.FunSuite:
   test("withTopLevel replaces an existing key's value and leaves the rest of the text alone"):
     val text =
       "{\n  \"model\": \"chat\",\n  \"classifiedModel\": \"local\",\n\n  \"commands\": [\"git status\", \"git log\"]\n}\n"
-    val out = Config.withTopLevel(text, "model", ujson.Str("anthropic/sonnet"))
+    val out = ObjectText.withTopLevel(text, "model", ujson.Str("anthropic/sonnet"))
     assertEquals(out, text.replace("\"model\": \"chat\"", "\"model\": \"anthropic/sonnet\""))
     // a value that is not a string, e.g. unsetting the classified model
-    val off = Config.withTopLevel(text, "classifiedModel", ujson.Null)
+    val off = ObjectText.withTopLevel(text, "classifiedModel", ujson.Null)
     assertEquals(off, text.replace("\"classifiedModel\": \"local\"", "\"classifiedModel\": null"))
     assertEquals(ujson.read(off)("classifiedModel"), ujson.Null)
 
   test("withTopLevel adds a missing key first, or after the named key, matching the file's indentation"):
     val text = "{\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
-    val first = Config.withTopLevel(text, "model", ujson.Str("gpt"))
+    val first = ObjectText.withTopLevel(text, "model", ujson.Str("gpt"))
     assertEquals(
       first,
       "{\n    \"model\": \"gpt\",\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
     )
-    val after = Config.withTopLevel(first, "classifiedModel", ujson.Str("local"), after = List("model"))
+    val after = ObjectText.withTopLevel(first, "classifiedModel", ujson.Str("local"), after = List("model"))
     assertEquals(
       after,
       "{\n    \"model\": \"gpt\",\n    \"classifiedModel\": \"local\",\n    \"files\": [ { \"path\": \".\" } ],\n    \"safeMode\": true\n}\n"
     )
     // after a key that is the last member (no trailing comma to reuse)
-    val last = Config.withTopLevel("{\n  \"model\": \"a\"\n}", "classifiedModel", ujson.Str("b"), after = List("model"))
+    val last =
+      ObjectText.withTopLevel("{\n  \"model\": \"a\"\n}", "classifiedModel", ujson.Str("b"), after = List("model"))
     assertEquals(last, "{\n  \"model\": \"a\",\n  \"classifiedModel\": \"b\"\n}")
     // one-line and empty objects
     assertEquals(
-      Config.withTopLevel("""{ "safeMode": true }""", "model", ujson.Str("x")),
+      ObjectText.withTopLevel("""{ "safeMode": true }""", "model", ujson.Str("x")),
       """{ "model": "x", "safeMode": true }"""
     )
-    assertEquals(Config.withTopLevel("{}", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
-    assertEquals(Config.withTopLevel("{ }", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
+    assertEquals(ObjectText.withTopLevel("{}", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
+    assertEquals(ObjectText.withTopLevel("{ }", "model", ujson.Str("x")), "{\n  \"model\": \"x\"\n}")
 
   test("withTopLevel preserves CRLF when it inserts a key"):
     val text = "{\r\n    \"files\": [],\r\n    \"safeMode\": true\r\n}\r\n"
-    val after = Config.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
+    val after = ObjectText.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
     assertEquals(
       after,
       "{\r\n    \"files\": [],\r\n    \"model\": \"gpt\",\r\n    \"safeMode\": true\r\n}\r\n",
     )
-    val empty = Config.withTopLevel("{\r\n}\r\n", "model", ujson.Str("gpt"))
+    val empty = ObjectText.withTopLevel("{\r\n}\r\n", "model", ujson.Str("gpt"))
     assertEquals(empty, "{\r\n  \"model\": \"gpt\"\r\n}\r\n")
 
   test("withTopLevel preserves bare CR and a BOM when it inserts a key"):
     val text = "\uFEFF{\r    \"files\": [],\r    \"safeMode\": true\r}\r"
-    val after = Config.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
+    val after = ObjectText.withTopLevel(text, "model", ujson.Str("gpt"), after = List("files"))
     assertEquals(
       after,
       "\uFEFF{\r    \"files\": [],\r    \"model\": \"gpt\",\r    \"safeMode\": true\r}\r",
     )
-    assertEquals(Config.withTopLevel("\uFEFF{\r}\r", "model", ujson.Str("gpt")), "\uFEFF{\r  \"model\": \"gpt\"\r}\r")
+    assertEquals(
+      ObjectText.withTopLevel("\uFEFF{\r}\r", "model", ujson.Str("gpt")),
+      "\uFEFF{\r  \"model\": \"gpt\"\r}\r"
+    )
 
   test("withTopLevel only touches the top level: nested keys, strings and brackets do not confuse it"):
     val text =
@@ -461,22 +467,22 @@ class ConfigSuite extends munit.FunSuite:
         |  "instructions": "no \"model\" here, {and} [there]",
         |  "model": "old"
         |}""".stripMargin
-    val out = Config.withTopLevel(text, "model", ujson.Str("new"))
+    val out = ObjectText.withTopLevel(text, "model", ujson.Str("new"))
     assertEquals(out, text.replace("\"model\": \"old\"", "\"model\": \"new\""))
     assertEquals(ujson.read(out)("providers")("p")("models")("model")("name").str, "m }, \" { [")
     // the whole template survives a round trip with only the value changed
     val template = Config.projectTemplate
-    val edited = Config.withTopLevel(template, "model", ujson.Str("gpt"))
-    assertEquals(edited, template.replace("\"model\": \"chat\"", "\"model\": \"gpt\""))
-    assertEquals(upickle.default.read[Config](ujson.read(edited)).model, Some("gpt"))
+    val edited = ObjectText.withTopLevel(template, "safeMode", ujson.False)
+    assertEquals(edited, template.replace("\"safeMode\": true", "\"safeMode\": false"))
+    assertEquals(upickle.default.read[Config](ujson.read(edited)).safeMode, false)
 
   test("withTopLevel rejects text that is not a JSON object"):
-    intercept[IllegalArgumentException](Config.withTopLevel("[1, 2]", "model", ujson.Str("x")))
-    intercept[IllegalArgumentException](Config.withTopLevel("{ oops", "model", ujson.Str("x")))
+    intercept[IllegalArgumentException](ObjectText.withTopLevel("[1, 2]", "model", ujson.Str("x")))
+    intercept[IllegalArgumentException](ObjectText.withTopLevel("{ oops", "model", ujson.Str("x")))
 
   test("withTopLevel edits the LAST of duplicated keys (the one the JSON reader honors)"):
     val text = "{\n  \"model\": \"a\",\n  \"model\": \"b\"\n}\n"
-    val out = Config.withTopLevel(text, "model", ujson.Str("c"))
+    val out = ObjectText.withTopLevel(text, "model", ujson.Str("c"))
     assertEquals(out, "{\n  \"model\": \"a\",\n  \"model\": \"c\"\n}\n")
     assertEquals(ujson.read(out)("model").str, "c") // the effective value actually changed
 
@@ -629,14 +635,12 @@ class ConfigSuite extends munit.FunSuite:
 
   test("autoCompactThreshold defaults to 80 percent and validates fractions including off"):
     assertEquals(upickle.default.read[Config]("{}").autoCompactThreshold, 0.8)
-    List(0.0, 0.7, 1.0).foreach { value =>
+    List(0.0, 0.7, 1.0).foreach: value =>
       val parsed = upickle.default.read[Config](s"""{"autoCompactThreshold": $value}""")
-      assertEquals(Config.validate(parsed).autoCompactThreshold, value)
-    }
-    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach { value =>
-      val error = intercept[IllegalArgumentException](Config.validate(Config(autoCompactThreshold = value)))
+      assertEquals(ConfigValidation.validate(parsed).autoCompactThreshold, value)
+    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach: value =>
+      val error = intercept[IllegalArgumentException](ConfigValidation.validate(Config(autoCompactThreshold = value)))
       assert(error.getMessage.nn.contains("autoCompactThreshold"))
-    }
 
   test("autoCompactThreshold follows normal global, project and explicit precedence"):
     def layer(origin: Origin, json: String): ConfigLayer =
@@ -645,41 +649,55 @@ class ConfigSuite extends munit.FunSuite:
     val global = layer(Origin.Global, """{"autoCompactThreshold": 0.9}""")
     val project = layer(Origin.Project, """{"autoCompactThreshold": 0.6}""")
     val explicit = layer(Origin.Explicit, """{"autoCompactThreshold": 0}""")
-    assertEquals(Config.combine(List(global, project)).settings.autoCompactThreshold, 0.6)
-    assertEquals(Config.combine(List(global, project, explicit)).settings.autoCompactThreshold, 0.0)
+    assertEquals(Configuration.combine(List(global, project)).settings.autoCompactThreshold, 0.6)
+    assertEquals(Configuration.combine(List(global, project, explicit)).settings.autoCompactThreshold, 0.0)
+
+  test("effort accepts a known effort or default"):
+    List("high", "none", "default").foreach: value =>
+      assertEquals(ConfigValidation.validate(Config(effort = Some(value))).effort, Some(value))
+    val error = intercept[IllegalArgumentException](ConfigValidation.validate(Config(effort = Some("turbo"))))
+    assert(error.getMessage.nn.contains("effort"), error.getMessage)
+
+  test("editFile leaves a file alone when the edit changes nothing"):
+    val file = Files.createTempFile("atc-edit", ".json").nn
+    Files.writeString(file, """{ "model": "a" }""")
+    Files.setLastModifiedTime(file, java.nio.file.attribute.FileTime.fromMillis(0))
+    Config.editFile(file)(ObjectText.withMember(_, List("effort"), None))
+    assertEquals(Files.getLastModifiedTime(file).toMillis, 0L)
+    Config.editFile(file)(ObjectText.withTopLevel(_, "effort", ujson.Str("high"), after = List("model")))
+    assertEquals(Files.readString(file), """{ "model": "a", "effort": "high" }""")
+    Config.editFile(file)(ObjectText.withMember(_, List("effort"), None))
+    assertEquals(Files.readString(file), """{ "model": "a" }""")
 
   test("notifications accepts the known methods only"):
     assertEquals(upickle.default.read[Config]("{}").notifications, "auto")
-    List("auto", "system", "terminal", "bell", "off", "Bell").foreach { value =>
-      assertEquals(Config.validate(Config(notifications = value)).notifications, value)
-    }
-    val error = intercept[IllegalArgumentException](Config.validate(Config(notifications = "popup")))
+    List("auto", "system", "terminal", "bell", "off", "Bell").foreach: value =>
+      assertEquals(ConfigValidation.validate(Config(notifications = value)).notifications, value)
+    val error = intercept[IllegalArgumentException](ConfigValidation.validate(Config(notifications = "popup")))
     assert(error.getMessage.nn.contains("notifications"), error.getMessage)
 
   test("compactKeepRatio validates fractions and follows layer precedence"):
     assertEquals(upickle.default.read[Config]("{}").compactKeepRatio, 0.2)
-    List(0.0, 0.3, 1.0).foreach { ratio =>
+    List(0.0, 0.3, 1.0).foreach: ratio =>
       val parsed = upickle.default.read[Config](s"""{"compactKeepRatio": $ratio}""")
-      assertEquals(Config.validate(parsed).compactKeepRatio, ratio)
-    }
-    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach { ratio =>
-      intercept[IllegalArgumentException](Config.validate(Config(compactKeepRatio = ratio)))
-    }
+      assertEquals(ConfigValidation.validate(parsed).compactKeepRatio, ratio)
+    List(-0.1, 1.01, Double.NaN, Double.PositiveInfinity).foreach: ratio =>
+      intercept[IllegalArgumentException](ConfigValidation.validate(Config(compactKeepRatio = ratio)))
     def layer(origin: Origin, ratio: Double): ConfigLayer =
       val json = ujson.Obj("compactKeepRatio" -> ratio)
       ConfigLayer(origin, None, json, upickle.default.read[Config](json), None)
     val global = layer(Origin.Global, 0.3)
     val project = layer(Origin.Project, 0.4)
     val explicit = layer(Origin.Explicit, 0.1)
-    assertEquals(Config.combine(List(global, project)).settings.compactKeepRatio, 0.4)
-    assertEquals(Config.combine(List(global, project, explicit)).settings.compactKeepRatio, 0.1)
+    assertEquals(Configuration.combine(List(global, project)).settings.compactKeepRatio, 0.4)
+    assertEquals(Configuration.combine(List(global, project, explicit)).settings.compactKeepRatio, 0.1)
 
   test("an empty literal key is not a binding"):
-    assertEquals(Config.resolveEnvRef(""), None)
-    assertEquals(Config.resolveEnvRef("sk-1"), Some("sk-1"))
+    assertEquals(KeyBindings.empty.resolve(""), None)
+    assertEquals(KeyBindings.empty.resolve("sk-1"), Some("sk-1"))
     val p = ProviderConfig(api = Some("anthropic"), key = Some(""), keyEnv = Some("K"))
     assertEquals(
-      Config.resolveApiKey(p, KeyBindings(List((java.nio.file.Path.of("k"), Map("K" -> "from-env"))))),
+      KeyBindings(List((java.nio.file.Path.of("k"), Map("K" -> "from-env")))).apiKey(p),
       Some("from-env")
     )
 
@@ -690,12 +708,119 @@ class ConfigSuite extends munit.FunSuite:
         "x-literal" -> "plain",
         "x-secret" -> "${HDR}",
         "x-unset" -> "${NO_SUCH_HEADER_VAR_XYZ}",
-        "x-session" -> Config.SessionRef,
+        "x-session" -> ProviderConfig.SessionRef,
       ),
     )
     val bindings = KeyBindings(List((java.nio.file.Path.of("k"), Map("HDR" -> "from-file"))))
     assertEquals(
-      Config.resolveHeaders(p, bindings),
+      bindings.headers(p),
       Map("x-literal" -> "plain", "x-secret" -> "from-file", "x-session" -> "${ATC_SESSION}"),
     )
-    assertEquals(Config.resolveHeaders(ProviderConfig(api = Some("openai"))), Map.empty)
+    assertEquals(KeyBindings.empty.headers(ProviderConfig(api = Some("openai"))), Map.empty)
+
+  // ── efforts and listed models ───────────────────────────────────
+
+  private def withModel(model: String): Config =
+    upickle.default.read[Config](
+      s"""{ "providers": { "p": { "api": "anthropic", "models": { "m": $model } } } }"""
+    )
+
+  test("efforts must be known efforts and include the starting one"):
+    ConfigValidation.validate(withModel("""{ "reasoning": "high", "efforts": ["low", "high"] }"""))
+    val unknown =
+      intercept[IllegalArgumentException](ConfigValidation.validate(withModel("""{ "efforts": ["low", "huge"] }""")))
+    assert(unknown.getMessage.contains("providers.p.models.m.efforts"), unknown.getMessage)
+    val outside =
+      intercept[IllegalArgumentException](
+        ConfigValidation.validate(withModel("""{ "reasoning": "max", "efforts": ["low"] }"""))
+      )
+    assert(outside.getMessage.contains("not one of its efforts"), outside.getMessage)
+
+  private def listing = upickle.default.read[Config](
+    """{ "providers": {
+      "fixed": { "api": "openai", "models": { "a": { "name": "model-a" } } },
+      "open":  { "api": "openai", "url": "http://localhost:1" },
+      "keyed": { "api": "openai", "key": "${ATC_TEST_UNSET_KEY}" },
+      "echo":  { "api": "echo" }
+    } }"""
+  )
+
+  private def listingCatalog(list: ModelSpec => List[ModelSpec]): (ModelCatalog, () => List[String]) =
+    val asked = java.util.concurrent.ConcurrentLinkedQueue[String]()
+    val catalog = ModelCatalog.from(
+      listing,
+      discover = Some: p =>
+        asked.add(p.provider)
+        list(p)
+    )
+    (catalog, () => scala.jdk.CollectionConverters.IterableHasAsScala(asked).asScala.toList)
+
+  private def listed(p: ModelSpec, ids: String*) = ids.toList.map(id => p.copy(alias = id, modelId = id))
+
+  test("a provider without models is listed once, when needed, and its models are named by reference"):
+    val (catalog, asked) = listingCatalog(p => listed(p, "vendor/big", "small"))
+    assertEquals(catalog.find("a").modelId, "model-a")
+    assertEquals(asked(), Nil, "a configured model needs no listing")
+    assertEquals(
+      catalog.discoverable.map(_.provider),
+      List("open"),
+      "echo and a provider with an unset key are not asked"
+    )
+    assertEquals(catalog.labels, List("a", "open/vendor/big", "open/small"))
+    assertEquals(catalog.find("open/vendor/big").modelId, "vendor/big")
+    assertEquals(catalog.find("SMALL").ref, "open/small")
+    assertEquals(catalog.find("open/small").baseUrl, Some("http://localhost:1"))
+    val missing = intercept[IllegalArgumentException](catalog.find("open/typo"))
+    assert(missing.getMessage.contains("open list their own"), missing.getMessage)
+    assertEquals(asked(), List("open"))
+
+  test("a failed listing is ignored and a provider/model-id reference is taken as given"):
+    val (catalog, _) = listingCatalog(_ => throw RuntimeException("connection refused"))
+    assertEquals(catalog.find("open/anything").modelId, "anything")
+    assertEquals(catalog.labels, List("a"))
+    intercept[IllegalArgumentException](catalog.find("anything"))
+
+  test("validation leaves model names to the start, which warns about one that names no model"):
+    ConfigValidation.validate(listing.copy(model = Some("open/gpt-x"), classifiedModel = Some("gpt-y")))
+    val noListing = listing.copy(providers = listing.providers - "open")
+    ConfigValidation.validate(noListing.copy(model = Some("gpt-y"), classifiedModel = Some("typo")))
+
+  test("the top-level webSearch applies to every model that does not set its own"):
+    val c = upickle.default.read[Config](
+      """{ "webSearch": true, "providers": {
+        "p": { "api": "openai", "models": { "on": {}, "off": { "webSearch": false } } },
+        "q": { "api": "openai", "url": "http://localhost:1" } } }"""
+    )
+    val catalog = ModelCatalog.from(c, discover = Some(p => List(p.copy(alias = "listed", modelId = "listed"))))
+    assertEquals(catalog.find("on").settings.webSearch, Some(true))
+    assertEquals(catalog.find("off").settings.webSearch, Some(false))
+    assertEquals(catalog.find("q/listed").settings.webSearch, Some(true))
+    assertEquals(ModelCatalog.from(c.copy(webSearch = None)).find("on").settings.webSearch, None)
+
+  test("a stored list names models without fetching, and a refresh replaces it in the background"):
+    val store = ModelListStore(Files.createTempDirectory("atc-lists").nn.resolve("model-lists.json").nn)
+    val open = ModelCatalog.from(listing).discoverable.head
+    store.save(
+      open,
+      List(open.copy(alias = "old", modelId = "old", settings = ModelConfig(efforts = Some(List("high")))))
+    )
+    val release = java.util.concurrent.CountDownLatch(1)
+    val catalog = ModelCatalog.from(
+      listing.copy(webSearch = Some(true)),
+      discover = Some { p =>
+        release.await()
+        listed(p, "new")
+      },
+      store = Some(store),
+    )
+    val old = catalog.find("open/old")
+    assertEquals(old.settings.efforts, Some(List("high")), "found without waiting for a fetch")
+    assertEquals(old.settings.webSearch, Some(true), "the current defaults apply to a stored list")
+    assertEquals(catalog.find("open/unlisted").modelId, "unlisted", "an unknown id is taken as given before a fetch")
+    catalog.refresh() // returns at once, the fetch is still blocked
+    assertEquals(catalog.find("old").ref, "open/old")
+    release.countDown()
+    assertEquals(catalog.labels, List("a", "open/new"))
+    intercept[IllegalArgumentException](catalog.find("open/old"))
+    assertEquals(store.load(open).map(_.map(_.modelId)), Some(List("new")), "the fetched list is stored")
+    assertEquals(store.load(open.copy(baseUrl = Some("http://elsewhere"))), None, "only for the same endpoint")

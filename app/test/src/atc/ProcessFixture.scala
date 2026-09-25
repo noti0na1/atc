@@ -3,13 +3,14 @@ package atc
 import atc.host.CommandLine
 import atc.platform.Platform
 
+import java.io.InputStream
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 import java.util.Locale
 
-/** A tiny child JVM used by process tests. Unlike `echo`, `cat`, `sort`,
-  * `sleep`, and friends, it exists on every platform that can run the tests and
-  * has a fixed UTF-8/LF contract. */
+/** A small child JVM used by process tests. Unlike `echo`, `cat`, `sort` and
+  * `sleep`, it exists on every platform that can run the tests, and it reads and
+  * writes UTF-8 with LF line endings. */
 object TestProcess:
   private def write(text: String): Unit =
     System.out.write(text.getBytes(UTF_8))
@@ -19,7 +20,7 @@ object TestProcess:
     System.err.write(text.getBytes(UTF_8))
     System.err.flush()
 
-  private def copy(in: java.io.InputStream): Unit =
+  private def copy(in: InputStream): Unit =
     val buffer = new Array[Byte](8192)
     var count = in.read(buffer)
     while count >= 0 do

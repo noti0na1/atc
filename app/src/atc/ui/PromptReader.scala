@@ -6,11 +6,14 @@ import org.jline.reader.{
   Candidate,
   Completer,
   EOFError,
+  EndOfFileException,
   LineReader,
   LineReaderBuilder,
+  MaskingCallback,
   ParsedLine,
   Parser,
   Reference,
+  UserInterruptException,
   Widget,
 }
 import org.jline.reader.impl.{DefaultHighlighter, DefaultParser, LineReaderImpl}
@@ -169,11 +172,19 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
   /** Read a line with `typed` already in the buffer (the turn's type-ahead). */
   def read(prompt: String, typed: String): String =
     ghostHighlighter.seen = typed
-    try reader.readLine(prompt, null: String | Null, null: org.jline.reader.MaskingCallback | Null, typed)
+    try reader.readLine(prompt, null: String | Null, null: MaskingCallback | Null, typed)
     finally alerts.reportFocus(false) // Ctrl-C and Ctrl-D leave without `callback-finish`
 
   /** Read a typed answer; `None` when it is empty or cancelled. */
   def readAnswer(prompt: String): Option[String] = PromptReader.readAnswer(read(prompt, ""))
+
+  /** Read a secret: echoed as `*` and kept out of the history. */
+  def readSecret(prompt: String): Option[String] =
+    reader.setVariable(LineReader.DISABLE_HISTORY, true)
+    try PromptReader.readAnswer(reader.readLine(prompt, Character.valueOf('*')))
+    finally
+      reader.setVariable(LineReader.DISABLE_HISTORY, false)
+      alerts.reportFocus(false)
 
   /** Redraw the prompt (new ghost text), under the reader's lock and only while it is reading. */
   def redisplay(): Unit =
@@ -193,10 +204,10 @@ private[atc] object PromptReader:
   private[atc] def readAnswer(read: => String): Option[String] =
     try Some(read).map(_.trim).filter(_.nonEmpty)
     catch
-      case _: org.jline.reader.UserInterruptException =>
+      case _: UserInterruptException =>
         Thread.interrupted()
         None
-      case _: org.jline.reader.EndOfFileException => None
+      case _: EndOfFileException => None
 
   /** Prepare the prompt-history file without following a final symlink and
     * make it owner-only on POSIX systems: user prompts can contain secrets.

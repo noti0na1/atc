@@ -14,9 +14,10 @@ private[host] trait HostInteraction:
   @volatile private var notes = TaskNotes()
 
   def setTaskNotes(value: TaskNotes)(using UserIO): Unit =
-    val text = (value.goal :: (value.constraints ++ value.completed ++ value.remaining)).mkString("\n")
-    if text.length > 16000 then
-      throw IllegalArgumentException("Task notes exceed 16000 characters; summarize completed work.")
+    if HostInteraction.length(value) > HostInteraction.MaxTaskNotesChars then
+      throw IllegalArgumentException(
+        s"Task notes exceed ${HostInteraction.MaxTaskNotesChars} characters; summarize completed work."
+      )
     notes = value
 
   def taskNotes(using UserIO): TaskNotes = notes
@@ -27,7 +28,7 @@ private[host] trait HostInteraction:
 
   /** Report a classified computation failure only through the user channel;
     * exposing the failure bit to the agent could reveal classified data. */
-  private[atc] def classifiedSinkFailed(operation: String): Unit =
+  private[host] def classifiedSinkFailed(operation: String): Unit =
     output.print(
       "",
       s"<$operation failed: the classified value is the result of a failed computation; its error is confidential>\n"
@@ -100,3 +101,10 @@ private[host] trait HostInteraction:
   def chat(message: String)(using UserIO): String = llm.chat(message)
   def classifiedChat(message: String): String = llm.classifiedChat(message)
   def classifiedChat(message: Classified[String]): Classified[String] = message.map(classifiedChat)
+
+private[atc] object HostInteraction:
+  /** The most characters task notes may hold, counted over all their entries. */
+  val MaxTaskNotesChars = 16000
+
+  def length(notes: TaskNotes): Int =
+    (notes.goal :: (notes.constraints ++ notes.completed ++ notes.remaining)).mkString("\n").length

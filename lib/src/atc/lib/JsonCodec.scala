@@ -88,6 +88,8 @@ private[atc] object JsonCodec:
   /** Deeper input would overflow the stack, which agent code cannot catch (a fatal error). */
   private val MaxDepth = 512
 
+  private val HexDigits = "0123456789abcdefABCDEF"
+
   private final class Parser(s: String):
     var i: Int = 0
     private var depth = 0
@@ -177,13 +179,7 @@ private[atc] object JsonCodec:
             case 'u' =>
               if i + 4 > s.length then fail("bad \\u escape")
               val hex = s.slice(i, i + 4)
-              if !hex.forall(c =>
-                  (c >= '0' && c <= '9') ||
-                    (c >= 'a' && c <= 'f') ||
-                    (c >= 'A' && c <= 'F')
-                )
-              then
-                fail(s"bad \\u escape '$hex'")
+              if !hex.forall(HexDigits.contains(_)) then fail(s"bad \\u escape '$hex'")
               sb.append(Integer.parseInt(hex, 16).toChar)
               i += 4
             case other => fail(s"bad escape '\\$other'")

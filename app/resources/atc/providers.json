@@ -1,0 +1,21 @@
+[
+  { "name": "anthropic", "label": "Anthropic", "api": "anthropic",
+    "key": "${ANTHROPIC_API_KEY}", "keyUrl": "https://console.anthropic.com/settings/keys" },
+  { "name": "openai", "label": "OpenAI", "api": "openai-responses",
+    "key": "${OPENAI_API_KEY}", "keyUrl": "https://platform.openai.com/api-keys" },
+  { "name": "chatgpt", "label": "ChatGPT (sign in with a ChatGPT plan)", "api": "chatgpt",
+    "url": "https://chatgpt.com/backend-api/codex",
+    "headers": { "originator": "atc", "session-id": "${ATC_SESSION}" } },
+  { "name": "gemini", "label": "Google Gemini", "api": "openai",
+    "url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "key": "${GEMINI_API_KEY}", "keyUrl": "https://aistudio.google.com/apikey" },
+  { "name": "deepseek", "label": "DeepSeek", "api": "openai-responses", "url": "https://api.deepseek.com",
+    "key": "${DEEPSEEK_API_KEY}", "keyUrl": "https://platform.deepseek.com/api_keys" },
+  { "name": "openrouter", "label": "OpenRouter", "api": "openai", "url": "https://openrouter.ai/api/v1",
+    "key": "${OPENROUTER_API_KEY}", "keyUrl": "https://openrouter.ai/keys" },
+  { "name": "opencode-go", "label": "OpenCode Go", "api": "openai", "url": "https://opencode.ai/zen/go/v1",
+    "key": "${OPENCODE_GO_API_KEY}", "keyUrl": "https://opencode.ai/auth",
+    "headers": { "x-opencode-session": "${ATC_SESSION}" } },
+  { "name": "ollama", "label": "Ollama (local models, no key)", "api": "openai", "url": "http://localhost:11434/v1",
+    "key": "ollama" }
+]

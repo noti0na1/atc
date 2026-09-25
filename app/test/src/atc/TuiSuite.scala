@@ -1,6 +1,6 @@
 package atc
 
-import atc.ui.{Ansi, Glyphs, KeyReader, Menus, PromptReader, Screen, TailBuffer, Tui}
+import atc.ui.{Ansi, Format, Glyphs, KeyReader, Menus, PromptReader, Screen, StatusLine, TailBuffer, ToolBlock, Tui}
 import atc.perms.Decision
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -116,7 +116,7 @@ class TuiSuite extends munit.FunSuite:
       assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
     finally terminal.close()
 
-  test("drawStatus leaves the terminal outside a synchronized update (JLine buffers the closer)"):
+  test("the footer draw leaves the terminal outside a synchronized update (JLine buffers the closer)"):
     val output = ByteArrayOutputStream()
     val terminal = org.jline.terminal.impl.ExternalTerminal(
       "test",
@@ -129,8 +129,8 @@ class TuiSuite extends munit.FunSuite:
       terminal.setSize(org.jline.terminal.Size.of(80, 24): org.jline.terminal.Sized)
       val status = org.jline.utils.Status.getStatus(terminal)
       assert(status != null)
-      Tui.drawStatus(terminal, status, "ready")
-      Tui.drawStatus(terminal, status, "reasoning 1.0 s")
+      StatusLine.draw(terminal, status, "ready")
+      StatusLine.draw(terminal, status, "reasoning 1.0 s")
       val written = output.toString(StandardCharsets.UTF_8)
       def count(sub: String): Int = written.sliding(sub.length).count(_ == sub)
       val begins = count("\u001b[?2026h")
@@ -144,17 +144,17 @@ class TuiSuite extends munit.FunSuite:
   test("withoutPrinted removes the live-shown prints and keeps diagnostics and echoes"):
     val printed = "  leading spaces\nstaged:\nA  file\n"
     val body = "-- Warning: something\n  leading spaces\nstaged:\nA  file\nval r: Int = 1"
-    assertEquals(Tui.withoutPrinted(body, printed), "-- Warning: something\nval r: Int = 1")
+    assertEquals(ToolBlock.withoutPrinted(body, printed), "-- Warning: something\nval r: Int = 1")
 
   test("withoutPrinted handles prints at the start, at the end, and nothing else"):
-    assertEquals(Tui.withoutPrinted("hello\nval x: Int = 1", "hello\n"), "val x: Int = 1")
-    assertEquals(Tui.withoutPrinted("1 warning found\nhello", "hello\n"), "1 warning found")
-    assertEquals(Tui.withoutPrinted("hello", "hello\n"), "")
-    assertEquals(Tui.withoutPrinted("only echo", ""), "only echo")
+    assertEquals(ToolBlock.withoutPrinted("hello\nval x: Int = 1", "hello\n"), "val x: Int = 1")
+    assertEquals(ToolBlock.withoutPrinted("1 warning found\nhello", "hello\n"), "1 warning found")
+    assertEquals(ToolBlock.withoutPrinted("hello", "hello\n"), "")
+    assertEquals(ToolBlock.withoutPrinted("only echo", ""), "only echo")
 
   test("withoutPrinted leaves the body alone when the prints are not found verbatim"):
     val body = "hel...[truncated]"
-    assertEquals(Tui.withoutPrinted(body, "hello world\n"), body)
+    assertEquals(ToolBlock.withoutPrinted(body, "hello world\n"), body)
 
   // ── row arithmetic behind the output fold ───────────────────────
 
@@ -176,16 +176,16 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Screen.place(76, "abcd", 80, 4), (rows = 0, column = 80)) // exactly fills the row
 
   test("count: short forms, without a pointless .0"):
-    assertEquals(Tui.count(999), "999")
-    assertEquals(Tui.count(1234), "1.2k")
-    assertEquals(Tui.count(200_000), "200k")
-    assertEquals(Tui.count(1_000_000), "1M")
-    assertEquals(Tui.count(1_234_567), "1.2M")
+    assertEquals(Format.count(999), "999")
+    assertEquals(Format.count(1234), "1.2k")
+    assertEquals(Format.count(200_000), "200k")
+    assertEquals(Format.count(1_000_000), "1M")
+    assertEquals(Format.count(1_234_567), "1.2M")
 
   test("contextUsage: against the window when known, an estimate otherwise"):
-    assertEquals(Tui.contextUsage(45_200, Some(200_000)), "context 45.2k/200k (23%)")
-    assertEquals(Tui.contextUsage(199_000, Some(200_000)), "context 199k/200k (100%)")
-    assertEquals(Tui.contextUsage(45_200, None), "context ~45.2k")
+    assertEquals(Format.contextUsage(45_200, Some(200_000)), "context 45.2k/200k (23%)")
+    assertEquals(Format.contextUsage(199_000, Some(200_000)), "context 199k/200k (100%)")
+    assertEquals(Format.contextUsage(45_200, None), "context ~45.2k")
 
   test("uniqueIds keeps labels and disambiguates duplicates"):
     assertEquals(Menus.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
@@ -233,9 +233,9 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Ansi.sanitize(""), "")
 
   test("duration never prints 60 seconds"):
-    assertEquals(Tui.duration(119.6), "2 min 0 s") // was "1 min 60 s"
-    assertEquals(Tui.duration(65.4), "1 min 5 s")
-    assertEquals(Tui.duration(60.0), "1 min 0 s")
+    assertEquals(Format.duration(119.6), "2 min 0 s") // was "1 min 60 s"
+    assertEquals(Format.duration(65.4), "1 min 5 s")
+    assertEquals(Format.duration(60.0), "1 min 0 s")
 
   test("place counts wide (CJK) characters as two columns"):
     assertEquals(Screen.displayWidth("abc"), 3)

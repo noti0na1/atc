@@ -4,8 +4,9 @@ import atc.lib.*
 import atc.perms.ScopeId
 import atc.platform.PlatformPath
 
+import java.io.{InputStream, InputStreamReader}
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, NoSuchFileException, Path}
 import scala.util.{Try, Using}
 
 /** Runtime capabilities carry a permission scope ID. The host checks scope,
@@ -36,11 +37,11 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
 
   /** Run `op` (a read of classified content) as a `Classified` result: the
     * permission check and any failure stay inside the classified value. */
-  private def asClassified[T](what: String)(op: => T): Classified[T] =
-    ClassifiedImpl.fromTry(Try {
-      host.requireRead(scope, p, what)
+  private def asClassified[T](operation: String)(op: => T): Classified[T] =
+    val result = Try:
+      host.requireRead(scope, p, operation)
       op
-    })
+    ClassifiedImpl.fromTry(result)
 
   def path: String = PlatformPath.portable(p)
 
@@ -96,8 +97,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   )(op: (String, Long, Int) => Boolean): Boolean =
     if maxChars < 0 then throw IllegalArgumentException(s"maxChars must be non-negative (got $maxChars)")
     requireReadable(operation, "readClassified()")
-    val reader = java.io.InputStreamReader(Files.newInputStream(p).nn, UTF_8)
-    Using.resource(reader) { r =>
+    Using.resource(InputStreamReader(Files.newInputStream(p).nn, UTF_8)): reader =>
       val input = new Array[Char](8192)
       val prefix = StringBuilder(math.min(maxChars, input.length))
       var lineChars = 0L
@@ -113,12 +113,12 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
         prefix.clear()
         lineChars = 0L
 
-      var read = r.read(input)
+      var read = reader.read(input)
       var index = 0
       while continue && !truncated && read >= 0 do
         if index >= read then
           // Refilling past the budget is how a file ending on it is told from a cut one.
-          read = r.read(input)
+          read = reader.read(input)
           index = 0
         else if consumed >= maxReadChars then truncated = true
         else
@@ -138,30 +138,28 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
 
       if continue && lineChars > 0 then emit()
       truncated
-    }
 
   /** Open this file for streaming reads; checked like `read`. The caller must
     * close the returned stream. */
-  private[host] def openRead(): java.io.InputStream =
+  private[host] def openRead(): InputStream =
     requireReadable("read", "readClassified()")
     Files.newInputStream(p).nn
 
   /** Stream `in` into this file; checked like `writeBytes`. When source and
     * target are two names for the same inode, all permission checks still run
     * but opening the truncating output stream is skipped. */
-  private[host] def writeFrom(source: FileEntryImpl, in: java.io.InputStream): Unit =
+  private[host] def writeFrom(source: FileEntryImpl, in: InputStream): Unit =
     host.requireWritable(scope, p, "writeBytes")
     val sameFile =
       if p == source.canonicalPath then true
       else if !Files.exists(p) then false
       else
         try Files.isSameFile(source.canonicalPath, p)
-        catch case _: java.nio.file.NoSuchFileException => false
+        catch case _: NoSuchFileException => false
     if !sameFile then
-      host.withFileChange(p, "copied") {
+      host.withFileChange(p, "copied"):
         host.ensureParent(p)
         Using.resource(Files.newOutputStream(p).nn)(out => in.transferTo(out))
-      }
 
   def write(content: String): Unit =
     host.writeFile(scope, p, content, append = false)
@@ -205,7 +203,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(PlatformPath.portable))
 
   def writeClassified(content: Classified[String]): Unit =
-    // Hand the raw `Try` to the host: it runs the permission/target checks before
-    // it branches on success/failure, so neither the thrown exception nor the
-    // target's existence can become a per-bit oracle over the classified value.
+    // Hand the raw `Try` to the host: it runs the permission and target checks before
+    // it branches on success or failure, so neither the thrown exception nor the
+    // target's existence can reveal a bit of the classified value.
     host.writeClassifiedFile(scope, p, ClassifiedImpl.unwrap(content))

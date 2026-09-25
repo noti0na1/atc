@@ -97,9 +97,9 @@ class ToolOutputSuite extends munit.FunSuite:
     val ambiguous = hintFor("Ambiguous given instances: both fs and fs2 match type FileSystem ...")
     assert(ambiguous.contains("requestFiles"), ambiguous)
 
-    List("... cannot subsume a read-only capture set ...", "... Cannot call update method ...").foreach(output =>
-      assert(hintFor(output).contains("/mode"), output)
-    )
-    List("No given instance of type atc.lib.Network ...", "No given instance of type atc.lib.Exec ...").foreach(
-      output => assert(hintFor(output).contains("/mode"), output)
-    )
+    List(
+      "... cannot subsume a read-only capture set ...",
+      "... Cannot call update method ...",
+      "No given instance of type atc.lib.Network ...",
+      "No given instance of type atc.lib.Exec ...",
+    ).foreach(output => assert(hintFor(output).contains("/mode"), output))

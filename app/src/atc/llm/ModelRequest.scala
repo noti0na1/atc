@@ -39,12 +39,11 @@ private[atc] final class ModelRequest:
     val thread = Thread(work, "atc-model-request")
     thread.setDaemon(true)
     val active = Pending(cancelled, thread, scope, done)
-    synchronized {
+    synchronized:
       if pending != null && pending.nn.thread.isAlive then
         throw IllegalStateException("The previous model request is still stopping; try again shortly.")
       pending = active
       thread.start()
-    }
     def stopped(e: CancelledException): Nothing =
       stop(active)
       thread.join(250)
@@ -53,7 +52,7 @@ private[atc] final class ModelRequest:
       if cancelled() then throw CancelledException()
       val result = done.get()
       // The operation has finished, even if its worker has not exited yet.
-      synchronized { if pending eq active then pending = null }
+      release(active)
       if cancelled() then throw CancelledException()
       result.asInstanceOf[A]
     catch
@@ -61,7 +60,7 @@ private[atc] final class ModelRequest:
         e.getCause.nn match
           case c: CancelledException => stopped(c)
           case c =>
-            synchronized { if pending eq active then pending = null }
+            release(active)
             throw c
       case e: CancelledException => stopped(e)
       case _: InterruptedException =>
@@ -76,6 +75,9 @@ private[atc] final class ModelRequest:
     val active = synchronized(pending)
     if active != null && active.cancelled() then stop(active)
 
+  private def release(active: Pending): Unit = synchronized:
+    if pending eq active then pending = null
+
   private def stop(active: Pending): Unit =
     active.done.completeExceptionally(CancelledException())
     active.thread.interrupt()
@@ -85,14 +87,13 @@ private[atc] object ModelRequest:
   private val current = ThreadLocal[Scope]()
 
   /** SDK async streams can be cancelled even before response headers arrive. */
-  def awaitStream(closeStream: () => Unit)(completion: => java.util.concurrent.CompletableFuture[?]): Unit =
-    withResource(new AutoCloseable:
-      def close(): Unit = closeStream()) { _ =>
+  def awaitStream(closeStream: () => Unit)(completion: => CompletableFuture[?]): Unit =
+    val stream: AutoCloseable = () => closeStream()
+    withResource(stream): _ =>
       try
         completion.get()
         ()
       catch case error: ExecutionException => throw error.getCause.nn
-    }
 
   private final class Scope:
     private val stopped = AtomicBoolean(false)
@@ -118,11 +119,10 @@ private[atc] object ModelRequest:
     def cancel(): Unit =
       stopped.set(true)
       // Cancel the HTTP call before closing the SDK reader, whose lock may be held by a blocked read.
-      List(transport.getAndSet(null), resource.getAndSet(null)).foreach { value =>
+      List(transport.getAndSet(null), resource.getAndSet(null)).foreach: value =>
         if value != null then
           try value.close()
           catch case NonFatal(_) => ()
-      }
 
   /** Bind cancellation to OkHttp calls, including retries and reads already in progress. */
   def scopedHttpClient(base: okhttp3.OkHttpClient): okhttp3.OkHttpClient =
@@ -157,10 +157,9 @@ private[atc] object ModelRequest:
 
   /** Register a provider stream while it is open, including streams created after cancellation. */
   def withResource[R <: AutoCloseable, A](open: => R)(operation: R => A): A =
-    Using.resource(open) { resource =>
+    Using.resource(open): resource =>
       val scope = Option(current.get())
       try
         scope.foreach(_.attach(resource))
         operation(resource)
       finally scope.foreach(_.detach(resource))
-    }

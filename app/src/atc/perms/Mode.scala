@@ -1,5 +1,7 @@
 package atc.perms
 
+import java.util.Locale
+
 /** The sandbox mode: which capabilities the REPL preamble hands to the agent
   * (type level, `ReplSession.preambleChunks`) and, as defence in depth, what the
   * policy lets through at run time. Ordered from least to most permissive. */
@@ -20,7 +22,7 @@ enum Mode(val label: String, val description: String):
   def next: Mode = Mode.fromOrdinal((ordinal + 1) % Mode.values.length)
 
 object Mode:
-  def parse(s: String): Mode = s.trim.toLowerCase(java.util.Locale.ROOT) match
+  def parse(s: String): Mode = s.trim.toLowerCase(Locale.ROOT) match
     case "readonly" | "read-only" | "ro" | "read" => ReadOnly
     case "local" | "rw" => Local
     case "full" | "all" => Full

@@ -48,12 +48,11 @@ private[atc] object CommandLine:
     case Pipe, In, Out, Append, MergeErr
 
   private def renderArg(arg: String): String =
-    val plain = arg.nonEmpty && arg.forall { char =>
+    val plain = arg.nonEmpty && arg.forall: char =>
       (char >= 'a' && char <= 'z') ||
-      (char >= 'A' && char <= 'Z') ||
-      (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char) ||
-      (Platform.isWindows && char == '\\')
-    }
+        (char >= 'A' && char <= 'Z') ||
+        (char >= '0' && char <= '9') || "_@%+=:,./-".contains(char) ||
+        (Platform.isWindows && char == '\\')
     if plain then arg
     else
       val escaped = StringBuilder()
@@ -179,7 +178,7 @@ private[atc] object CommandLine:
   def parsePipeline(line: String): Pipeline =
     val tokens = tokenize(line)
     val stages = List.newBuilder[Stage]
-    var arguments = List.newBuilder[String]
+    val arguments = List.newBuilder[String]
     var wordCount = 0
     var mergeErr = false
     var stdinFile: Option[String] = None
@@ -191,7 +190,7 @@ private[atc] object CommandLine:
       if wordCount == 0 then throw IllegalArgumentException(s"exec: empty command $why in: $line")
       stages += Stage(arguments.result(), mergeErr)
       stageCount += 1
-      arguments = List.newBuilder[String]
+      arguments.clear()
       wordCount = 0
       mergeErr = false
 
@@ -229,7 +228,7 @@ private[atc] object CommandLine:
         parse(remaining)
 
     parse(tokens)
-    if wordCount == 0 && stages.result().isEmpty then throw IllegalArgumentException("exec: empty command line")
+    if wordCount == 0 && stageCount == 0 then throw IllegalArgumentException("exec: empty command line")
     endStage("after '|'")
     val parsedStages = stages.result()
     if parsedStages.lengthIs > MaxPipelineStages then

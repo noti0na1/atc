@@ -1,8 +1,10 @@
 package atc
 
 import atc.host.*
+import atc.lib.Todo
 import atc.perms.*
 import atc.sandbox.*
+
 import java.nio.file.{Files, Path}
 
 /** Dev helper: run each `// ---`-separated snippet of a file in a fresh
@@ -22,14 +24,15 @@ object Scratch:
     var session: Option[ReplSession] = None
     val output = new HostOutput:
       def print(agentText: String, userText: String): Unit =
-        agentOut.append(agentText); session.foreach(_.printStream.print(agentText))
+        agentOut.append(agentText)
+        session.foreach(_.printStream.print(agentText))
         userOut.append(if agentText == userText then userText else s"[C]$userText")
     val llm = new HostLlm:
       def chat(m: String) = s"echo:$m"
       def classifiedChat(m: String) = s"safe:$m"
     val hostUi = new HostUi:
       def askUser(question: String, options: List[String], multiple: Boolean): Option[String] = Some("yes")
-      def showTodos(items: List[atc.lib.Todo]): Unit = println(s"[todos] $items")
+      def showTodos(items: List[Todo]): Unit = println(s"[todos] $items")
     val host = Host(policy, root, output, llm, hostUi)
     val safe = args.length < 2 || args(1) != "nosafe"
     val third = if args.length >= 3 then Some(args(2)) else None
@@ -49,5 +52,9 @@ object Scratch:
       println(s"success=${r.success}")
       println(r.output)
       r.error.foreach(e => println(s"ERROR: $e"))
-      if agentOut.nonEmpty then { println(s"[agent-visible prints] $agentOut"); agentOut.clear() }
-      if userOut.nonEmpty then { println(s"[user-visible prints] $userOut"); userOut.clear() }
+      if agentOut.nonEmpty then
+        println(s"[agent-visible prints] $agentOut")
+        agentOut.clear()
+      if userOut.nonEmpty then
+        println(s"[user-visible prints] $userOut")
+        userOut.clear()

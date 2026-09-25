@@ -1,5 +1,6 @@
 package atc.platform
 
+import java.io.IOException
 import java.nio.file.{Files, Path, Paths}
 import java.util.Locale
 
@@ -13,6 +14,12 @@ private[atc] object PlatformPath:
   def portable(path: Path): String =
     val native = path.toString
     if Platform.isWindows then native.replace('\\', '/') else native
+
+  /** [[portable]] text for messages to the user: under `~` when inside the home directory. */
+  def display(path: Path): String =
+    if path == userHome then "~"
+    else if path.startsWith(userHome) then "~/" + portable(userHome.relativize(path).nn)
+    else portable(path)
 
   /** Convert slash-based path text to the current filesystem's spelling. */
   def native(value: String): String =
@@ -65,10 +72,8 @@ private[atc] object PlatformPath:
     else if isDriveRelative(normalized) then Some(DriveRelativeError)
     else
       normalized.split("\\\\+", -1).iterator
-        .filterNot(component =>
-          component.isEmpty || component == "." || component == ".." || component.matches("(?i)[a-z]:")
-        )
-        .flatMap { component =>
+        .filterNot(c => c.isEmpty || c == "." || c == ".." || c.matches("(?i)[a-z]:")) // not file names
+        .flatMap: component =>
           if component.contains(':') then Some("alternate data streams are not allowed")
           else if component.endsWith(".") || component.endsWith(" ") then
             Some("path components ending in a dot or space are not allowed")
@@ -79,7 +84,6 @@ private[atc] object PlatformPath:
               Set("CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$").contains(stem) ||
                 stem.matches("COM[1-9¹²³]") || stem.matches("LPT[1-9¹²³]")
             Option.when(reserved)(s"'$component' is a reserved Windows device name")
-        }
         .nextOption()
 
   private val DriveRelativeError = "drive-relative paths such as 'C:work' are ambiguous; use 'C:/work'"
@@ -103,10 +107,10 @@ private[atc] object PlatformPath:
         val target = Files.readSymbolicLink(path).nn
         val resolved = if target.isAbsolute then target else path.getParent.resolve(target).nn
         realPathOfNearestAncestor(resolved.toAbsolutePath.normalize, depth - 1)
-      catch case _: java.io.IOException => path
+      catch case _: IOException => path
     else if Files.exists(path) then
       try path.toRealPath()
-      catch case _: java.io.IOException => path
+      catch case _: IOException => path
     else
       val parent = path.getParent
       val name = path.getFileName

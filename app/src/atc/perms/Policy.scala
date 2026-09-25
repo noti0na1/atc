@@ -3,8 +3,11 @@ package atc.perms
 import atc.platform.PlatformPath
 
 import java.nio.file.Path
+import java.util.LinkedHashMap
+import java.util.Map as JMap
 import java.util.concurrent.atomic.AtomicLong
 import scala.collection.concurrent.TrieMap
+import scala.collection.mutable
 
 /** The identity of a permission scope. [[ScopeId.Base]] is the session-wide
   * base scope; every `request*` block opens a child of the scope its capability
@@ -19,10 +22,10 @@ object ScopeId:
 /** One configured file rule. Missing fields mean "no constraint from this rule".
   *
   * `grantsWithin` marks a rule from a project config and names the folder its
-  * `.atc` sits in: such a rule *grants* only inside that folder (the project
+  * `.atc` sits in: such a rule grants only inside that folder (the project
   * you opened) while its ceiling applies wherever it matches. A rule without
   * it comes from a granting layer and grants wherever it matches. */
-case class FileRule(
+final case class FileRule(
   pattern: PathPattern,
   access: Option[Access],
   classified: Option[Boolean],
@@ -34,6 +37,7 @@ case class FileRule(
 
   /** A rule that only marks paths classified; the summary folds these. */
   def classifiedOnly: Boolean = classified.contains(true) && access.isEmpty && !locked
+
   def describe: String =
     val parts = List(
       access.map(a => s"access=${a.label}"),
@@ -43,36 +47,7 @@ case class FileRule(
     val note = grantsWithin.map(root => s"from the project config, granting only inside ${PlatformPath.portable(root)}")
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(n => s" ($n)")}"
 
-/** What the user answers to a permission prompt. */
-enum Decision:
-  case AllowOnce, AllowSession, Deny
-  /** Do not grant the request; return the user's instructions to the agent. */
-  case Revise(instructions: String)
-
-/** One pop-up put to the user. Subclasses supply the `label -> value` rows;
-  * [[details]] aligns them (and appends the reason) for the UI. */
-sealed trait PermissionRequest:
-  def title: String
-  def reason: String
-  protected def fields: List[(String, String)]
-
-  final def details: List[String] =
-    val rows = fields ++ Option.when(reason.nonEmpty)("reason" -> reason)
-    val width = rows.map(_._1.length).maxOption.getOrElse(0) + 1
-    rows.map((label, value) => s"${(label + ":").padTo(width, ' ')} $value")
-
-case class FileRequest(path: Path, access: Access, current: Perm, reason: String) extends PermissionRequest:
-  def title = s"File access: ${access.label}"
-  protected def fields = List("path" -> path.toString, "current" -> current.describe)
-
-case class ExecRequest(commands: List[String], reason: String) extends PermissionRequest:
-  def title = "Run commands"
-  protected def fields = commands.zipWithIndex.map((command, index) => s"command ${index + 1}" -> command)
-
-case class NetRequest(hosts: List[String], reason: String) extends PermissionRequest:
-  def title = "Network access"
-  protected def fields = hosts.zipWithIndex.map((host, index) => s"host ${index + 1}" -> host)
-
+/** A grant the user made for the session, as `/perms` lists it and `/perms revoke` removes it. */
 enum SessionGrant:
   case File(path: Path, access: Access)
   case Command(pattern: String)
@@ -83,13 +58,9 @@ enum SessionGrant:
     case Command(pattern) => s"commands: $pattern"
     case Host(pattern) => s"hosts: $pattern"
 
-/** Shows the permission pop-up to the user. */
-trait PermissionPrompter:
-  def ask(request: PermissionRequest): Decision
-
 /** A permission scope opened by a `request*` call. Its grants add to those
   * of its ancestors; the base scope holds the session grants. */
-final class Scope(val id: ScopeId, val parent: Option[Scope]):
+private[perms] final class Scope(val id: ScopeId, val parent: Option[Scope]):
   @volatile var fileGrants: List[(Path, Access)] = Nil
   @volatile var commands: List[String] = Nil
   @volatile var hosts: List[String] = Nil
@@ -99,16 +70,16 @@ final class Scope(val id: ScopeId, val parent: Option[Scope]):
   *
   * Effective file permission of a path `p` in scope `s`:
   *
-  *  - configuration: a path's access is what some rule *grants* it, clamped by
+  *  - configuration: a path's access is what some rule grants it, clamped by
   *    every rule that matches. A rule matching `p` or an ancestor of `p` grants
   *    `p` its `access` (except a project rule outside its own project, which
-  *    only clamps) and the *minimum* over all matching rules is the ceiling
-  *    (unmatched: no grant at all, and no ceiling). So a sub-folder inherits
+  *    only clamps) and the minimum over all matching rules is the ceiling
+  *    (unmatched: no grant at all, and no ceiling). So a subfolder inherits
   *    its parent's permission and can only be made stricter by a more specific
   *    rule; a project config can open its own tree but never reach outside it,
   *    and never past a limit a granting layer set. `classified` and `locked`
   *    hold if any matching rule says so, from any layer.
-  *  - grants (from `request*`, once or for the session) can only *widen*
+  *  - grants (from `request*`, once or for the session) can only widen
   *    access, never remove classification, and are ignored for locked paths.
   *
   * `denyCommands` / `denyHosts` are the other direction: patterns that are
@@ -118,13 +89,13 @@ final class Scope(val id: ScopeId, val parent: Option[Scope]):
   */
 final class Policy(
   val rules: List[FileRule],
-  val baseCommands: List[String],
-  val baseHosts: List[String],
+  baseCommands: List[String],
+  baseHosts: List[String],
   prompter: PermissionPrompter,
-  val denyCommands: List[String] = Nil,
-  val denyHosts: List[String] = Nil,
+  denyCommands: List[String] = Nil,
+  denyHosts: List[String] = Nil,
 ):
-  val base: Scope = Scope(ScopeId.Base, None)
+  private val base = Scope(ScopeId.Base, None)
   private val scopes = TrieMap[ScopeId, Scope](ScopeId.Base -> base)
   private val nextId = AtomicLong(1L)
   /** The sandbox mode. The type system already denies what the mode forbids
@@ -159,12 +130,12 @@ final class Policy(
   /** `matchingRules`' memo is bounded so a huge walk cannot keep an unbounded
     * number of entries alive; eviction only costs recomputation, never a
     * wrong answer, because the rules themselves are immutable. */
-  private val ConfigPermCacheSize = 16384
+  private val MatchingRulesCacheSize = 16384
 
   private val matchingRulesCache =
-    new java.util.LinkedHashMap[Path, List[FileRule]](256, 0.75f, true):
-      override def removeEldestEntry(eldest: java.util.Map.Entry[Path, List[FileRule]]): Boolean =
-        size > ConfigPermCacheSize
+    new LinkedHashMap[Path, List[FileRule]](256, 0.75f, true):
+      override def removeEldestEntry(eldest: JMap.Entry[Path, List[FileRule]]): Boolean =
+        size > MatchingRulesCacheSize
 
   /** The configured rules matching a canonical path (itself or an ancestor).
     *
@@ -176,7 +147,7 @@ final class Policy(
     * the scan per directory instead of per entry. [[configPerm]]'s aggregation
     * is order-independent, so the parent-first ordering changes nothing.
     */
-  private def matchingRules(p: Path): List[FileRule] = matchingRulesCache.synchronized {
+  private def matchingRules(p: Path): List[FileRule] = matchingRulesCache.synchronized:
     matchingRulesCache.get(p) match
       case null =>
         val computed = Option(p.getParent) match
@@ -188,7 +159,6 @@ final class Policy(
         matchingRulesCache.put(p, computed)
         computed
       case found => found
-  }
 
   /** Permission from the configuration only. `p` must be canonical. */
   def configPerm(p: Path): Perm =
@@ -204,14 +174,16 @@ final class Policy(
     )
 
   private def grantedAccess(s: Scope, p: Path): Access =
-    s.chain.flatMap(_.fileGrants).collect { case (g, a) if p == g || p.startsWith(g) => a }
+    s.chain.flatMap(_.fileGrants).collect { case (granted, access) if p == granted || p.startsWith(granted) => access }
       .reduceOption(_.max(_)).getOrElse(Access.None)
 
   /** Effective permission in `scopeId`. `p` must be canonical. */
   def effective(scopeId: ScopeId, p: Path): Perm =
     val currentScope = scope(scopeId)
-    val cfg = configPerm(p)
-    val perm = if cfg.locked then cfg else cfg.copy(access = cfg.access.max(grantedAccess(currentScope, p)))
+    val configured = configPerm(p)
+    val perm =
+      if configured.locked then configured
+      else configured.copy(access = configured.access.max(grantedAccess(currentScope, p)))
     if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
@@ -226,7 +198,7 @@ final class Policy(
       if current.locked then
         throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
       decide(FileRequest(p, access, current, reason), s"${access.label} on '$shown'") {
-        base.synchronized { base.fileGrants ::= (p -> access) }
+        base.synchronized(base.fileGrants ::= (p -> access))
       }
     openScope(parent, fileGrants = List(p -> access))
 
@@ -252,7 +224,7 @@ final class Policy(
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
       decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") {
-        base.synchronized { base.commands ++= missing }
+        base.synchronized(base.commands ++= missing)
       }
     openScope(parent, commands = commands)
 
@@ -278,7 +250,7 @@ final class Policy(
     val missing = hosts.filterNot(host => hostPatterns(parent).exists(GlobMatcher.matchesHost(host, _)))
     if missing.nonEmpty then
       decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") {
-        base.synchronized { base.hosts ++= missing }
+        base.synchronized(base.hosts ++= missing)
       }
     openScope(parent, hosts = hosts)
 
@@ -331,7 +303,7 @@ final class Policy(
     * take an "allow once" for a standing grant, or a later "no" for a
     * revocation. The prompt itself never changes with a decision, so every
     * request keeps its prefix. */
-  private val decisionLog = scala.collection.mutable.ListBuffer[(Decision, String)]()
+  private val decisionLog = mutable.ListBuffer[(Decision, String)]()
   def decisionCount: Int = decisionLog.synchronized:
     decisionLog.length
 
@@ -376,12 +348,11 @@ final class Policy(
       base.commands.distinct.map(SessionGrant.Command(_)) ++ base.hosts.distinct.map(SessionGrant.Host(_))
 
   /** Remove a session grant from future permission checks. Existing processes are managed by /kill. */
-  def revoke(grant: SessionGrant): Unit = base.synchronized {
+  def revoke(grant: SessionGrant): Unit = base.synchronized:
     grant match
       case SessionGrant.File(path, access) => base.fileGrants = base.fileGrants.filterNot(_ == (path -> access))
       case SessionGrant.Command(pattern) => base.commands = base.commands.filterNot(_ == pattern)
       case SessionGrant.Host(pattern) => base.hosts = base.hosts.filterNot(_ == pattern)
-  }
 
   /** Number of canonical paths currently memoized (tests and diagnostics). */
   private[atc] def matchingRulesCacheSize: Int = matchingRulesCache.synchronized(matchingRulesCache.size)

@@ -50,7 +50,7 @@ class LayerSuite extends munit.FunSuite:
     val configuration: Configuration = Config.load(runDir, explicitPath, globalPath)
     def settings: Config = configuration.settings
     val policy: Policy = Policy(
-      App.fileRules(configuration, cwd),
+      configuration.fileRules(cwd),
       settings.commands,
       settings.hosts,
       _ => Decision.Deny,
@@ -69,7 +69,7 @@ class LayerSuite extends munit.FunSuite:
     assertEquals(w.access("src/A.scala"), Access.None)
     assertEquals(w.outside(Path.of("/etc/passwd")), Access.None)
     assert(!w.policy.commandAllowed(ScopeId.Base, "ls"))
-    assert(ModelCatalog.from(w.settings).isEmpty)
+    assert(ModelCatalog.from(w.settings).models.isEmpty)
 
   test("a project config grants its own tree"):
     val w = World(global = "", project = """{ "files": [ { "path": ".", "access": "write" } ] }""")
@@ -115,7 +115,7 @@ class LayerSuite extends munit.FunSuite:
     assert(alone.perm(".env").classified) // but its protections are in force
     assertEquals(alone.settings.mode, Some("full"))
     assert(alone.settings.safeMode && alone.settings.respectGitignore)
-    assert(ModelCatalog.from(alone.settings).models.nonEmpty)
+    assert(ModelCatalog.from(alone.settings).discoverable.nonEmpty, "its providers list their models")
     // add the starting project config and the project becomes workable
     // (what that config contains is the next test)
     val opened = World(global = Config.globalTemplate, project = Config.projectTemplate)
@@ -512,7 +512,7 @@ class LayerSuite extends munit.FunSuite:
     Files.writeString(real.resolve(".atc/config.json"), """{ "files": [ { "path": ".", "access": "write" } ] }""")
     // Load the project through the symlink, before the caller canonicalizes it.
     val configuration = Config.load(link, None, linkParent.resolve("no-global.json").nn)
-    val policy = Policy(App.fileRules(configuration, link), Nil, Nil, _ => Decision.Deny)
+    val policy = Policy(configuration.fileRules(link), Nil, Nil, _ => Decision.Deny)
     assertEquals(
       policy.effective(ScopeId.Base, PlatformPath.canonical(real.resolve("src/x.txt").nn)).access,
       Access.Write

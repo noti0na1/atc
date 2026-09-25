@@ -1,9 +1,11 @@
 package atc.sandbox
 
+import scala.annotation.tailrec
+import scala.collection.mutable
 import scala.util.matching.Regex
 
 /** A violation found by the code validator. */
-case class Violation(ruleId: String, description: String, lineNumber: Int, snippet: String)
+final case class Violation(ruleId: String, description: String, lineNumber: Int, snippet: String)
 
 /** Regex-based preflight for agent code before it reaches the compiler.
   *
@@ -18,12 +20,30 @@ case class Violation(ruleId: String, description: String, lineNumber: Int, snipp
   */
 object CodeValidator:
 
-  private case class Forbidden(id: String, regex: Regex, description: String)
+  private final case class Forbidden(id: String, regex: Regex, description: String)
+
+  /** Throwable and the fatal error types. */
+  private val FatalClasses =
+    List("Throwable", "ControlThrowable", "Error", "VirtualMachineError", "StackOverflowError", "OutOfMemoryError")
+
+  /** Supertypes of Throwable: a catch of one catches every throwable. */
+  private val TopTypes = List("Any", "AnyRef", "Object", "Serializable", "Matchable")
+
+  /** The interruption signals: the thread interrupt and the sandbox's stop signal. */
+  private val StopSignals = List("InterruptedException", "ThreadDeath")
+
+  /** Every type name whose catch could swallow a fatal error or a stop signal. Renaming one on
+    * import (`import java.lang.Throwable as Fatal`) would defeat the catch rules, in every mode. */
+  private val FatalTypeNames = FatalClasses ++ TopTypes ++ StopSignals
+
+  /** A regex alternative of `names`, each optionally qualified by a package or object path. */
+  private def typeNameAlternatives(names: List[String]): String = raw"(?:[\w.]+\.)?(?:${names.mkString("|")})\b"
 
   /** The `catch-fatal` rule, shared by the per-line scan and the catch-arm
     * scanner (which reports an ascription the per-line regex cannot see). */
   private val CatchFatalRe: Regex =
-    raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable)\b".r
+    (raw"\bcase\s+(?!class\b|object\b)[^=]*:(?:(?!=>|\bif\b)[^=])*\b" +
+      typeNameAlternatives(FatalClasses ++ TopTypes)).r
   private val CatchFatalDescription: String =
     "Catching Throwable/Error/a fatal error is forbidden; catch a specific non-fatal type instead, e.g. case _: Exception (or a RuntimeException subtype)"
 
@@ -119,7 +139,7 @@ object CodeValidator:
     // bound, and this rule targets an explicit fatal upper bound.
     Forbidden(
       "catch-fatal-bound",
-      raw"<:\s*(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|InterruptedException|ThreadDeath)\b".r,
+      (raw"<:\s*" + typeNameAlternatives(FatalClasses ++ StopSignals)).r,
       "A type parameter bounded by Throwable/Error/a fatal type is forbidden; `case _: T` would then catch fatal throwables"
     ),
     Forbidden(
@@ -135,7 +155,7 @@ object CodeValidator:
     // not cross a `[`.
     Forbidden(
       "catch-fatal-alias",
-      raw"\btype\s+\w+(?:\[[^\]\n]*\])?\s*=\s*(?:[^\[=\n|&]*[|&]\s*)*(?:[\w.]+\.)?(?:Throwable|ControlThrowable|Error|VirtualMachineError|StackOverflowError|OutOfMemoryError|Any|AnyRef|Object|Serializable|Matchable|InterruptedException|ThreadDeath)\b".r,
+      (raw"\btype\s+\w+(?:\[[^\]\n]*\])?\s*=\s*(?:[^\[=\n|&]*[|&]\s*)*" + typeNameAlternatives(FatalTypeNames)).r,
       "Aliasing Throwable/Error/a fatal error type is forbidden; it would defeat the ban on catching fatal throwables"
     ),
     Forbidden(
@@ -160,6 +180,7 @@ object CodeValidator:
 
   private inline def isIdentChar(c: Char): Boolean = Character.isLetterOrDigit(c) || c == '_'
   private inline def isIdentStart(c: Char): Boolean = Character.isLetter(c) || c == '_'
+  private inline def isSpace(c: Char): Boolean = c == ' ' || c == '\t' || c == '\n' || c == '\r'
 
   private def charLiteralLength(code: String, i: Int, len: Int): Int =
     if code.charAt(i) != '\'' then 0
@@ -179,96 +200,97 @@ object CodeValidator:
   def stripStringLiteralsOnly(code: String): String = strip(code, blankComments = false)
 
   private def strip(code: String, blankComments: Boolean): String =
-    val sb = StringBuilder(code.length)
+    val out = StringBuilder(code.length)
     val len = code.length
     final class Frame(val isString: Boolean, val triple: Boolean, val interp: Boolean, val fromInterp: Boolean):
       var brace: Int = 0
-    val stack = scala.collection.mutable.Stack[Frame](Frame(false, false, false, false))
+    val stack = mutable.Stack[Frame](Frame(false, false, false, false))
 
-    inline def emit(c: Char): Unit = sb.append(c)
-    inline def blank(c: Char): Unit = sb.append(if c == '\n' then '\n' else ' ')
+    inline def emit(c: Char): Unit = out.append(c)
+    inline def blank(c: Char): Unit = out.append(if c == '\n' then '\n' else ' ')
     /** A character of a comment: blanked or kept, according to `blankComments`. */
     inline def comment(c: Char): Unit = if blankComments then blank(c) else emit(c)
-    inline def comment2(a: Char, b: Char): Unit = { comment(a); comment(b) }
+    /** Whether the `"` at `k` starts `"""`. */
+    def tripleQuoteAt(k: Int): Boolean = k + 2 < len && code.charAt(k + 1) == '"' && code.charAt(k + 2) == '"'
 
     var i = 0
     while i < len do
       val f = stack.top
       val c = code.charAt(i)
       if f.isString then
-        val isClose =
-          if f.triple then c == '"' && i + 2 < len && code.charAt(i + 1) == '"' && code.charAt(i + 2) == '"'
-          else c == '"'
         if !f.triple && c == '\\' && i + 1 < len then
-          blank(c); blank(code.charAt(i + 1)); i += 2
+          blank(c)
+          blank(code.charAt(i + 1))
+          i += 2
         else if f.interp && c == '$' && i + 1 < len && code.charAt(i + 1) == '{' then
-          emit('$'); emit('{'); i += 2
+          emit('$')
+          emit('{')
+          i += 2
           stack.push(Frame(false, false, false, true))
         else if f.interp && c == '$' && i + 1 < len && isIdentStart(code.charAt(i + 1)) then
-          emit('$'); i += 1
-          while i < len && isIdentChar(code.charAt(i)) do { emit(code.charAt(i)); i += 1 }
-        else if isClose then
-          if f.triple then { blank('"'); blank('"'); blank('"'); i += 3 }
-          else { blank('"'); i += 1 }
+          emit('$')
+          i += 1
+          while i < len && isIdentChar(code.charAt(i)) do
+            emit(code.charAt(i))
+            i += 1
+        else if c == '"' && (!f.triple || tripleQuoteAt(i)) then
+          val width = if f.triple then 3 else 1
+          for _ <- 0 until width do blank('"')
+          i += width
           stack.pop()
         else
-          blank(c); i += 1
+          blank(c)
+          i += 1
       else
-        val charLit = if c == '\'' then charLiteralLength(code, i, len) else 0
-        if charLit > 0 then
-          var k = 0
-          while k < charLit do { blank(code.charAt(i + k)); k += 1 }
-          i += charLit
+        val charLiteral = if c == '\'' then charLiteralLength(code, i, len) else 0
+        if charLiteral > 0 then
+          val end = i + charLiteral
+          while i < end do
+            blank(code.charAt(i))
+            i += 1
         else if c == '"' then
-          val triple = i + 2 < len && code.charAt(i + 1) == '"' && code.charAt(i + 2) == '"'
+          val triple = tripleQuoteAt(i)
           val interp = i > 0 && isIdentChar(code.charAt(i - 1))
-          if triple then { blank('"'); blank('"'); blank('"'); i += 3 }
-          else { blank('"'); i += 1 }
+          val width = if triple then 3 else 1
+          for _ <- 0 until width do blank('"')
+          i += width
           stack.push(Frame(true, triple, interp, false))
         else if c == '/' && i + 1 < len && code.charAt(i + 1) == '/' then
           while i < len && code.charAt(i) != '\n' do
             comment(code.charAt(i))
             i += 1
         else if c == '/' && i + 1 < len && code.charAt(i + 1) == '*' then
-          comment2('/', '*')
+          comment('/')
+          comment('*')
           i += 2
-          var depth = 1
+          var depth = 1 // Scala block comments nest
           while i < len && depth > 0 do
-            if code.startsWith("/*", i) then { comment2('/', '*'); i += 2; depth += 1 }
-            else if code.startsWith("*/", i) then { comment2('*', '/'); i += 2; depth -= 1 }
+            if code.startsWith("/*", i) || code.startsWith("*/", i) then
+              depth += (if code.charAt(i) == '/' then 1 else -1)
+              comment(code.charAt(i))
+              comment(code.charAt(i + 1))
+              i += 2
             else
               comment(code.charAt(i))
               i += 1
         else if c == '{' then
-          emit('{'); f.brace += 1; i += 1
+          emit('{')
+          f.brace += 1
+          i += 1
         else if c == '}' then
-          if f.fromInterp && f.brace == 0 then { emit('}'); i += 1; stack.pop() }
-          else { emit('}'); if f.brace > 0 then f.brace -= 1; i += 1 }
+          emit('}')
+          if f.fromInterp && f.brace == 0 then stack.pop()
+          else if f.brace > 0 then f.brace -= 1
+          i += 1
         else
-          emit(c); i += 1
-    sb.toString
+          emit(c)
+          i += 1
+    out.toString
 
   private val CatchAllDescription: String =
     "A bare catch-all also catches fatal errors and the sandbox stop signal; catch a specific non-fatal type instead, e.g. case _: Exception"
 
-  /** The names `catch-fatal` rejects in an ascription: renaming one on import (`import
-    * java.lang.Throwable as Fatal`) would otherwise defeat it, in every mode. */
-  private val FatalTypeNames: Set[String] = Set(
-    "Throwable",
-    "ControlThrowable",
-    "Error",
-    "VirtualMachineError",
-    "StackOverflowError",
-    "OutOfMemoryError",
-    "Any",
-    "AnyRef",
-    "Object",
-    "Serializable",
-    "Matchable",
-    "InterruptedException",
-    "ThreadDeath",
-  )
-  private val FatalTypeRe = raw"\b(?:[\w.]+\.)?(?:${FatalTypeNames.mkString("|")})\b".r
+  private val FatalTypeRe = (raw"\b" + typeNameAlternatives(FatalTypeNames)).r
   private val FatalImportAliasDescription: String =
     "Renaming Throwable/Error/a fatal type on import is forbidden; it would defeat the ban on catching fatal throwables"
   private val CatchHandlerDescription: String =
@@ -288,8 +310,8 @@ object CodeValidator:
     * regex is not sufficient. */
   private final case class ImportAliases(all: List[Int], fatal: List[Int])
   private def importAliasOffsets(code: String): ImportAliases =
-    val hits = scala.collection.mutable.ListBuffer[Int]()
-    val fatal = scala.collection.mutable.ListBuffer[Int]()
+    val hits = mutable.ListBuffer[Int]()
+    val fatal = mutable.ListBuffer[Int]()
     val len = code.length
     var i = 0
     while i < len do
@@ -324,7 +346,8 @@ object CodeValidator:
               while after < len && (code.charAt(after) == ' ' || code.charAt(after) == '\t') do after += 1
               val continues = (before >= 0 && (code.charAt(before) == '.' || code.charAt(before) == ',')) ||
                 (after < len && code.charAt(after) == '.')
-              if continues then k += 1 else { stop = true; k += 1 }
+              if !continues then stop = true
+              k += 1
             case _ => k += 1
         i = k
       else i += 1
@@ -351,12 +374,12 @@ object CodeValidator:
   private def scanCatches(code: String): CatchScan =
     if !code.contains("catch") then return CatchScan(Nil, Nil, Nil) // no catch, no scan
     val len = code.length
-    val hits = scala.collection.mutable.ListBuffer[Int]()
-    val typedArms = scala.collection.mutable.ListBuffer[(Int, String)]()
-    val handlers = scala.collection.mutable.ListBuffer[Int]()
+    val hits = mutable.ListBuffer[Int]()
+    val typedArms = mutable.ListBuffer[(Int, String)]()
+    val handlers = mutable.ListBuffer[Int]()
     def skipWs(from: Int): Int =
       var k = from
-      while k < len && { val c = code.charAt(k); c == ' ' || c == '\t' || c == '\n' || c == '\r' } do k += 1
+      while k < len && isSpace(code.charAt(k)) do k += 1
       k
     def identEnd(from: Int): Int =
       var k = from
@@ -393,31 +416,29 @@ object CodeValidator:
       * parentheses (`case (e) =>`, `case e @ _ =>`), with no type ascription
       * (a `:` is left to `catch-fatal`), extractor (upper-case name) or literal. */
     def isBareCatchAll(i0: Int): Boolean =
-      var k = skipWs(i0)
-      var sawBinder = false
-      var result = false
-      var done = false
-      while !done do
-        if k >= len then done = true
+      @tailrec def from(k: Int, sawBinder: Boolean): Boolean =
+        if k >= len then false
         else
           val c = code.charAt(k)
-          if c == '=' && k + 1 < len && code.charAt(k + 1) == '>' then { result = sawBinder; done = true }
-          else if c == ':' then done = true // a type ascription: left to `catch-fatal`
-          else if keywordAt(code, k, "if") then { result = sawBinder; done = true }
-          else if c == '(' || c == ')' || c == '@' || c == '|' || c == ' ' || c == '\t' || c == '\n' || c == '\r'
-          then k += 1
-          else if c == '_' then { sawBinder = true; k += 1 }
-          else if isIdentStart(c) && c.isLower then { sawBinder = true; k = identEnd(k) }
-          else done = true // upper-case extractor, a `.`-path, or a literal: not a bare catch-all
-      result
+          if (c == '=' && k + 1 < len && code.charAt(k + 1) == '>') || keywordAt(code, k, "if") then sawBinder
+          else if c == ':' then false // a type ascription: left to `catch-fatal`
+          else if c == '(' || c == ')' || c == '@' || c == '|' || isSpace(c) then from(k + 1, sawBinder)
+          else if c == '_' then from(k + 1, true)
+          else if isIdentStart(c) && c.isLower then from(identEnd(k), true)
+          else false // upper-case extractor, a `.`-path, or a literal: not a bare catch-all
+      from(skipWs(i0), false)
     /** Braced form: arms are the depth-1 `case`s inside `catch { ... }`. */
     def scanBraced(open: Int): Unit =
       var k = open + 1
       var depth = 1
       while k < len && depth > 0 do
         val c = code.charAt(k)
-        if c == '{' then { depth += 1; k += 1 }
-        else if c == '}' then { depth -= 1; k += 1 }
+        if c == '{' then
+          depth += 1
+          k += 1
+        else if c == '}' then
+          depth -= 1
+          k += 1
         else if depth == 1 && isIdentStart(c) then
           val end = identEnd(k)
           if keywordAt(code, k, "case") then checkArm(k, end)
@@ -430,8 +451,12 @@ object CodeValidator:
       var stop = false
       while k < len && !stop do
         val c = code.charAt(k)
-        if c == '{' then { depth += 1; k += 1 }
-        else if c == '}' then { if depth == 0 then stop = true else depth -= 1; k += 1 }
+        if c == '{' then
+          depth += 1
+          k += 1
+        else if c == '}' then
+          if depth == 0 then stop = true else depth -= 1
+          k += 1
         else if c == '\n' then
           // The next line: a `case` is a further arm; a blank line is skipped.
           var tok = k + 1
@@ -469,7 +494,8 @@ object CodeValidator:
             while s > 0 && code.charAt(s - 1) != '\n' do s -= 1
             var ind = 0
             while s < len && (code.charAt(s) == ' ' || code.charAt(s) == '\t') do
-              ind += (if code.charAt(s) == '\t' then 8 else 1); s += 1
+              ind += (if code.charAt(s) == '\t' then 8 else 1)
+              s += 1
             scanBraceless(j, ind)
         i = end
       else i += 1
@@ -493,7 +519,7 @@ object CodeValidator:
   /** Split a type-parameter list on its top-level commas (a comma inside a nested
     * `[...]`/`(...)`, as in `[T <: Map[K, V]]`, does not separate parameters). */
   private def splitTopLevel(inner: String): List[String] =
-    val segs = scala.collection.mutable.ListBuffer[String]()
+    val segs = mutable.ListBuffer[String]()
     var depth = 0
     var start = 0
     var i = 0
@@ -525,13 +551,17 @@ object CodeValidator:
     * `case _: T` arm tests at run time. Names inside type arguments are skipped:
     * `case _: List[T]` erases to a test of List, not of T. */
   private def topLevelTypeNames(ascription: String): Set[String] =
-    val names = scala.collection.mutable.Set[String]()
+    val names = mutable.Set[String]()
     var depth = 0
     var i = 0
     while i < ascription.length do
       val c = ascription.charAt(i)
-      if c == '[' then { depth += 1; i += 1 }
-      else if c == ']' then { depth -= 1; i += 1 }
+      if c == '[' then
+        depth += 1
+        i += 1
+      else if c == ']' then
+        depth -= 1
+        i += 1
       else if isIdentStart(c) then
         val start = i
         while i < ascription.length && isIdentChar(ascription.charAt(i)) do i += 1
@@ -547,7 +577,7 @@ object CodeValidator:
   /** Join physical lines connected by member-access dots so `java.\n io` is
     * seen as `java.io`. Returns `(line, startIndex)`. */
   private def logicalLines(strippedLines: Array[String]): List[(String, Int)] =
-    val result = scala.collection.mutable.ListBuffer[(String, Int)]()
+    val result = mutable.ListBuffer[(String, Int)]()
     var i = 0
     while i < strippedLines.length do
       val start = i

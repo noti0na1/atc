@@ -2,6 +2,7 @@ package atc
 
 import atc.config.{Config, ModelCatalog, ModelConfig, ModelSpec, ProviderConfig}
 import atc.llm.*
+import atc.platform.PlatformPath
 
 /** The model layer: stop-reason normalization, provider settings, the echo
   * model, adapter dispatch and the model catalog. */
@@ -151,7 +152,7 @@ class ModelSuite extends munit.FunSuite:
           models = Map(
             "stable-alias" -> ModelConfig(
               name = Some("backend-id"),
-              webSearch = true,
+              webSearch = Some(true),
               displayName = Some("Friendly Model"),
             )
           ),
@@ -167,15 +168,15 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(c.labels, List("stable-alias"))
     assertEquals(model.ref, "p/stable-alias")
     assertEquals(model.modelId, "backend-id")
-    assertEquals(App.describe(model, modelSpec), "p/stable-alias — Friendly Model (web search)")
-    assertEquals(App.modelDetail(modelSpec), "Friendly Model")
+    assertEquals(Models.describe(model, modelSpec), "p/stable-alias — Friendly Model (web search)")
+    assertEquals(Models.detail(modelSpec), "Friendly Model")
     intercept[IllegalArgumentException](c.find("Friendly Model"))
 
   test("model presentation is unchanged without a display name"):
     val modelSpec = spec("echo")
     val model = ChatModel.create(modelSpec)
-    assertEquals(App.describe(model, modelSpec), "p/e — echo")
-    assertEquals(App.modelDetail(modelSpec), "p/ignored")
+    assertEquals(Models.describe(model, modelSpec), "p/e — echo")
+    assertEquals(Models.detail(modelSpec), "p/ignored")
 
   test("a bare alias two providers share is ambiguous; the qualified name is not"):
     val c = catalog(("ollama", "openai", List("llama")), ("vllm", "openai", List("llama")))
@@ -190,6 +191,64 @@ class ModelSuite extends munit.FunSuite:
     val e = intercept[IllegalArgumentException](catalog(("p", "openai", List("a", "b"))).find("nope"))
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
+
+  test("a config model that names no model is ignored with a warning naming its file; -m is not"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-models").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(global, """{ "providers": { "p": { "api": "echo", "models": { "a": {} } } } }""")
+    val project = dir.resolve("project").nn
+    java.nio.file.Files.createDirectories(project.resolve(".atc"))
+    java.nio.file.Files.writeString(
+      Config.projectPath(project),
+      """{ "model": "typo", "classifiedModel": "p/a" }"""
+    )
+    val configuration = Config.load(project, None, global)
+    val models = Models(Cli.Args(cwd = project), configuration)
+    val warned = List.newBuilder[String]
+    assertEquals(models.configured("model", configuration.settings.model, warned += _), None)
+    assertEquals(
+      models.configured("classifiedModel", configuration.settings.classifiedModel, warned += _).map(_.ref),
+      Some("p/a")
+    )
+    assertEquals(models.configured("model", None, warned += _), None)
+    val warnings = warned.result()
+    assertEquals(warnings.size, 1, warnings)
+    assert(
+      warnings.head.startsWith(
+        s"Ignoring model in ${PlatformPath.display(Config.projectPath(project))}: Unknown model 'typo'"
+      ),
+      warnings.head
+    )
+    assertEquals(models.initial(_ => ()).ref, "p/a", "the only model stands in")
+    intercept[IllegalArgumentException](Models(Cli.Args(cwd = project, model = Some("typo")), configuration).initial(
+      _ => ()
+    ))
+
+  test("the config's effort replaces the model's reasoning at start, unless the model does not take it"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-effort").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(
+      global,
+      """{ "providers": { "p": { "api": "openai", "url": "http://127.0.0.1:9", "key": "k", "models": {
+        |  "a": { "reasoning": "low", "efforts": ["low", "high"] } } } } }""".stripMargin
+    )
+    def start(project: String): (ChatModel, List[String]) =
+      val cwd = dir.resolve(s"p${project.hashCode.abs}").nn
+      java.nio.file.Files.createDirectories(cwd.resolve(".atc"))
+      java.nio.file.Files.writeString(Config.projectPath(cwd), project)
+      val models = Models(Cli.Args(cwd = cwd), Config.load(cwd, None, global))
+      val warned = List.newBuilder[String]
+      val model = models.initial(warned += _)
+      models.close()
+      (model, warned.result())
+    val (configured, none) = start("{}")
+    assertEquals((configured.effort, configured.defaultEffort, none), (Some("low"), Some("low"), Nil))
+    assertEquals(start("""{ "effort": "high" }""")._1.effort, Some("high"))
+    assertEquals(start("""{ "effort": "default" }""")._1.effort, None)
+    val (kept, warnings) = start("""{ "effort": "max" }""")
+    assertEquals(kept.effort, Some("low"))
+    assertEquals(warnings.size, 1, warnings)
+    assert(warnings.head.contains("p/a takes low | high, not 'max'"), warnings.head)
 
   // ── Anthropic prompt caching ────────────────────────────────────
 
@@ -212,7 +271,7 @@ class ModelSuite extends munit.FunSuite:
     assert(Providers.UserAgent.startsWith("atc/"))
     assertEquals(Providers.headers(spec(Map("User-Agent" -> "mine/1")))("User-Agent"), "mine/1")
     assertEquals(Providers.headers(spec(Map("user-agent" -> "mine/1"))), Map("user-agent" -> "mine/1"))
-    val withSession = spec(Map("x-session" -> Config.SessionRef, "x-plain" -> "v"))
+    val withSession = spec(Map("x-session" -> ProviderConfig.SessionRef, "x-plain" -> "v"))
     val first = Providers.headers(withSession)
     assertEquals(first("x-plain"), "v")
     assert(first("x-session").matches("[0-9a-f-]{36}"), first("x-session"))

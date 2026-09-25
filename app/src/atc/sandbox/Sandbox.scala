@@ -1,7 +1,7 @@
 package atc.sandbox
 
 import atc.{LauncherEnvironment, ProcessEnvironment}
-import atc.lib.{Interface, Runtime, Derivations}
+import atc.lib.{Derivations, Interface, Runtime}
 import atc.platform.Platform
 
 import java.nio.file.{Files, Path, Paths}
@@ -11,11 +11,10 @@ import java.nio.file.{Files, Path, Paths}
   * classes with the application and delegates other classes to the JDK platform
   * loader. Sharing the API classes allows direct calls to the host implementation. */
 object Sandbox:
-
-  val ClasspathProperty = "atc.lib.classpath"
+  private val ClasspathProperty = "atc.lib.classpath"
   private val ClasspathEnvironment = LauncherEnvironment.LibraryClasspath
 
-  /** The compile classpath for agent code. Development/Unix launchers use the
+  /** The compile classpath for agent code. Development and Unix launchers use the
     * system property; the Windows batch launcher uses the environment because
     * java.exe cannot carry every Unicode path through its legacy argv encoding. */
   lazy val libraryClasspath: Seq[Path] =
@@ -35,6 +34,7 @@ object Sandbox:
         )
 
   private val sharedPrefixes = List("scala.", "atc.lib.")
+
   /** Compiler-internal packages that live under `scala.` in the app loader. */
   private val hiddenPrefixes = List("scala.quoted.runtime.impl.", "scala.tools.")
 
@@ -44,7 +44,7 @@ object Sandbox:
   /** Delegates the shared packages to the application loader and everything
     * else to the platform loader, which offers the JDK only.
     *
-    * Class *resources* (`*.class`) are hidden: with interrupt instrumentation
+    * Class resources (`*.class`) are hidden: with interrupt instrumentation
     * enabled, the REPL loader would otherwise read the bytecode of every
     * non-JDK class through its parent and re-define an instrumented copy of it,
     * `atc.lib.Interface` included, whose static state holds the installed host.
@@ -57,6 +57,7 @@ object Sandbox:
         if resolve then resolveClass(c)
         c
       else super.loadClass(name, resolve).nn
+
     override def getResource(name: String): java.net.URL | Null =
       if name.endsWith(".class") then null else super.getResource(name)
 

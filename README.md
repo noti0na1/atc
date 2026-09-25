@@ -105,12 +105,9 @@ chmod +x atc
 ./atc setup      # installs ~/.local/bin/atc, puts it on PATH, downloads the latest release
 ```
 
-From then on `atc` runs ATC in the current directory. `atc update` fetches a newer release,
-`atc self update` replaces the wrapper, `atc self uninstall` removes the wrapper, the jars
-and the PATH snippet while keeping `~/.atc/config.json` and `keys.properties`, and
-`atc help` lists every wrapper command. When a newer release or wrapper is available, an
-interactive start offers to upgrade first: answer `y`, or press Enter to skip. 
-To run from a checkout instead, see
+From then on `atc` runs ATC in the current directory, and offers to upgrade when a newer
+release is out. `atc help` lists the wrapper's commands (update, uninstall, …). To run from
+a checkout instead, see
 [doc/development.md](doc/development.md#building-and-running).
 
 <details>
@@ -133,18 +130,19 @@ assets of a newer release.
 </details>
 
 **1. Start it.** Change to the project you want to work on (`cd ~/my-project`) and run
-`atc`. If the first run finds no `~/.atc/config.json`, it offers to create a starter file
-with the providers and machine-wide permissions, plus `~/.atc/keys.properties` for your API
-keys, one `NAME=value` per line, then exits so you can fill them in. On Windows, `~/.atc` is
-`%USERPROFILE%\.atc`. You can also export the variables in your shell, or use a local model
-that needs no key.
+`atc`. The first start asks you to choose a provider, paste its API key and choose one of
+its models; the key is saved in `~/.atc/keys.properties`, readable only by you. With a
+ChatGPT plan you can sign in through the browser instead of giving a key. To set up
+providers by hand instead, choose *Configure providers myself*: ATC writes
+`~/.atc/config.json` and exits. On Windows, `~/.atc` is `%USERPROFILE%\.atc`.
 
-**2. Start it again.** If no configuration grants access to the current directory and the
-directory has no `.atc/config.json` of its own, ATC offers to create a starter one there and
-applies it immediately. That file
-is what opens the project to the agent: its own tree, the read-only git commands and a set
-of documentation hosts. Review it to choose which **models** to use and which **files,
-commands and hosts** the agent may use without asking; see [Configuration](#configuration).
+**2. Open the project.** If no configuration grants access to the current directory and
+the directory has no `.atc/config.json` of its own, ATC offers to create a starter one there
+and applies it immediately. That file is what opens the project to the agent: its own tree,
+the read-only git commands and a set of documentation hosts. Review it to choose which
+**files, commands and hosts** the agent may use without asking; see
+[Configuration](#configuration). `/models` lists the models your providers offer, and
+`/model` picks one.
 
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
 Scala in the sandbox, and asks before touching anything the config does not grant. `/help`
@@ -412,22 +410,14 @@ The exact merge rules are in
 }
 ```
 
-**Providers and models.** A provider defines one endpoint (`api`, an optional `url`, a key,
-optional `headers`) and its `models`; a model is an alias with a provider-specific `name` and its own settings
-(`contextWindow`, `reasoning`, `webSearch`, `maxTokens`, …). The `api` values are
-`anthropic`, `openai-responses` (also DeepSeek and other services through `url`), `openai`
-(Chat Completions: Ollama, vLLM, OpenRouter, …) and `echo` (keyless, for smoke tests). Name
-a model by its alias, or `provider/alias` when two providers share one; `/models` lists
-them. Set `contextWindow` to the model's real window so the conversation is compacted and
-trimmed to fit. **Keys** never go in a config: a provider names a variable
-(`"key": "${DEEPSEEK_API_KEY}"`) whose value comes from `.atc/keys.properties` (project,
-then `~/.atc`, then the environment). `headers` are extra HTTP headers sent with every
-request to the provider; a value may be a `${VAR}` resolved the same way, or `${ATC_SESSION}`,
-a random id of the current conversation (renewed by `/new` and `/clear`) for gateways that
-route by session, such as OpenCode (`"headers": { "x-opencode-session": "${ATC_SESSION}" }`).
-Every request identifies ATC as `atc/<version>` unless `headers` sets `User-Agent`. A second role, `classifiedModel`, may answer
-`classifiedChat` inside classified computations; set it only for a model that runs in an
-isolated environment with no outward connection.
+**Models.** A provider is one endpoint (`api`, an optional `url`, a key) with its
+`models`; leave `models` out and ATC lists the provider's own. `/providers` turns providers
+and their models on or off, or adds a provider. `/model` switches the model and `/effort`
+its reasoning effort, both remembered in the project config; `webSearch` turns on the
+provider's web search where it has one. **Keys** never go in a config: `"key": "${DEEPSEEK_API_KEY}"` names a variable set
+in `.atc/keys.properties` or in the environment. Set `classifiedModel` only for a model that
+runs in an isolated environment with no outward connection. Every setting is described in
+[doc/development.md](doc/development.md#configuration-reference).
 
 **Files, commands and hosts.** A file rule has a gitignore-style `path` pattern (a bare
 name matches that component anywhere; a pattern with `/` is relative to the working
@@ -504,38 +494,14 @@ and the configured permissions.
 
 ## The terminal
 
-`/help` lists the slash commands: `/model` and `/mode` switch for the session, `/cost`
-shows tokens and how full the context is, `/run <code>` runs Scala in the sandbox yourself,
-`/output` inspects recent tool results, `/perms` lists and revokes session grants,
-`/compact [focus]` summarizes the older conversation, `/clear` forgets it, `/new` starts
-over (REPL, conversation and grants), `/quit` leaves. Ctrl-C interrupts the turn, Ctrl-O
-shows folded output and reasoning in full, Shift-Tab cycles the mode, Tab completes
-commands and accepts the ghost-text suggestion for your next request, and Shift+Enter (or
-`\` then Enter) adds a line.
+`/help` lists the slash commands. Ctrl-C interrupts the turn, Ctrl-O shows folded output
+and reasoning in full, Shift-Tab cycles the mode, and Shift+Enter adds a line. While the
+agent is working, type a correction and press Enter: it reaches the agent before its next
+tool call. Sessions are saved when you leave, and the next start in the same directory
+offers to resume. ATC notifies you when a turn ends or the agent waits for you.
 
-While the agent is working, type a correction and press Enter: it reaches the agent before
-its next tool call. Questions from the agent always offer **Write a different answer** so
-you can correct an assumption it did not list. Interactive sessions are saved when you
-leave, and the next start in the same directory offers to resume. Long conversations are
-compacted automatically before they outgrow the model's context window.
-
-When a turn ends or the agent waits for a permission or an answer, ATC sends a notification
-unless you start typing within ten seconds. If the terminal reports focus and is not focused,
-the notification comes at once. It shows the start of the agent's reply, the permission it
-needs or its question. `"notifications"` in the config chooses how: `auto`
-(the default) uses the terminal's own notifications in kitty, iTerm2, WezTerm, Ghostty and
-foot, a desktop notification on a local machine (`osascript` on macOS, a toast on
-Windows, `notify-send` on Linux) and the terminal bell otherwise, for example over SSH.
-`system`, `terminal`, `bell` and `off` select one method.
-
-The terminal title shows `atc · <directory>`, with `●` while a turn runs and `?` while a
-question or permission waits, so a tab that needs you stands out; the previous title comes
-back on exit.
-
-Without a terminal (`-p` in a pipe) everything is printed plainly and nothing asks: an
-unconfigured permission request fails rather than waits for input, so use `--approve-all`
-only in a trusted setup. The content shapes, keys, sessions and compaction settings are in
-[doc/development.md](doc/development.md#the-terminal).
+Without a terminal (`-p` in a pipe) nothing asks: a permission the configuration does not
+grant fails instead of waiting, so use `--approve-all` only in a trusted setup.
 
 ## License
 

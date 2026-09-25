@@ -6,7 +6,7 @@ import atc.sandbox.ExecutionResult
 /** Renders one sandbox evaluation as the text returned to the model. */
 object ToolOutput:
   /** A hint appended to tool output for a common capture-checking or safe-mode error. */
-  private case class Hint(applies: String => Boolean, text: String)
+  private final case class Hint(applies: String => Boolean, text: String)
   private val hints = List(
     Hint(
       out => out.contains("Cannot refer to object StringBuilder") && out.contains("from safe code"),
@@ -41,36 +41,31 @@ object ToolOutput:
       "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write, run commands or use the network. Say so and let the user switch modes (/mode) instead of working around it."
     ),
     Hint(
-      out =>
-        out.contains("No given instance of type atc.lib.Network") || out.contains(
-          "No given instance of type atc.lib.Exec"
-        ),
+      out => List("Network", "Exec").exists(name => out.contains(s"No given instance of type atc.lib.$name")),
       "that capability does not exist in the current sandbox mode (local: no network; read-only: no commands, no network); tell the user which mode the task needs (/mode local, /mode full)."
     ),
   )
 
-  /** Tool output as the model sees it: hint-annotated and bounded (cut in the
-    * middle so both the first diagnostics and the tail survive). */
-  def renderForModel(r: ExecutionResult, maxChars: Int): String = renderForModel(r, maxChars, Nil)
-
   /** The result as the model sees it: the rendered output with a hint for common
-    * errors, cut in the middle beyond `maxChars`, then a note for every
-    * decision the user made at a permission prompt during the run. The note
-    * comes last and uncut. The model cannot see the pop-ups and the system
-    * prompt never changes with a grant, so this note is how it learns whether a
-    * grant was for this call or for the session. */
-  def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)]): String =
-    renderForModel(r, maxChars, decisions, "")
-
-  /** As above, plus a hint keyed on the snippet itself (`codeHint`) after the cut, since it
-    * concerns what the snippet wrote rather than what it printed. */
-  def renderForModel(r: ExecutionResult, maxChars: Int, decisions: List[(Decision, String)], code: String): String =
-    val base = r.render
+    * errors, cut in the middle beyond `maxChars` so both the first diagnostics and
+    * the tail survive. After the cut come a hint keyed on the snippet `code` itself
+    * ([[codeHint]]), since it concerns what the snippet wrote rather than what it
+    * printed, and a note for every decision the user made at a permission prompt
+    * during the run. The model cannot see the prompts and the system prompt never
+    * changes with a grant, so this note is how it learns whether a grant was for
+    * this call or for the session. */
+  def renderForModel(
+    result: ExecutionResult,
+    maxChars: Int,
+    decisions: List[(Decision, String)] = Nil,
+    code: String = "",
+  ): String =
+    val base = result.render
     // Hints key on diagnostics, which only a failed run carries. A successful run's
     // output is data the model asked for, and a file that quotes a compiler message
     // (this project's own docs do) must not earn the hint for that message.
     val hinted =
-      if r.success then base else hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
+      if result.success then base else hints.find(_.applies(base)).fold(base)(h => s"$base\nHint: ${h.text}")
     val bounded =
       if hinted.length <= maxChars then hinted
       else
@@ -81,7 +76,7 @@ object ToolOutput:
     if decisions.isEmpty then withCodeHint else s"$withCodeHint\n${decisionNote(decisions)}"
 
   /** Warn when an escaped quote would be written literally from a plain triple-quoted string. */
-  def codeHint(code: String): Option[String] =
+  private def codeHint(code: String): Option[String] =
     Option.when(hasEscapedQuoteInRawLiteral(code))(
       "inside a plain triple-quoted literal `\\\"` is two characters, a backslash and a quote, so the text " +
         "you wrote contains backslashes; to put `\"\"\"` in text, prefix the literal with `s` (`s\"\"\"...\"\"\"` " +
@@ -109,8 +104,8 @@ object ToolOutput:
     * `[permissions: the user allowed commands npm * once (this call only; a
     * later call must ask again); the user allowed read on '/x' for the rest of
     * this session (no request needed from now on)]`. */
-  def decisionNote(decisions: List[(Decision, String)]): String =
-    val parts = decisions.map {
+  private def decisionNote(decisions: List[(Decision, String)]): String =
+    val parts = decisions.map:
       case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
       case (Decision.AllowSession, what) =>
         s"the user allowed $what for the rest of this session (no request needed from now on)"
@@ -119,5 +114,4 @@ object ToolOutput:
       case (Decision.Revise(instructions), what) =>
         s"the user requested changes to $what (no permission granted). User instructions: ${ujson.write(instructions)}. " +
           "Revise the plan to follow these instructions and request only the permissions still needed; this is not a blanket denial"
-    }
     s"[permissions: ${parts.mkString("; ")}]"

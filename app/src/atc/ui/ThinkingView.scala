@@ -59,7 +59,7 @@ private[ui] final class ThinkingView(screen: Screen, expanded: () => Boolean, be
 
   private def summary(): String =
     val secs = (System.nanoTime() - started) / 1e9
-    styled(s"${g.bullet} reasoning ${g.dot} ${Tui.duration(secs)}", Dim) + "\n"
+    styled(s"${g.bullet} reasoning ${g.dot} ${Format.duration(secs)}", Dim) + "\n"
 
   /** Header + the last few lines of the reasoning so far. */
   private def window(): List[String] =

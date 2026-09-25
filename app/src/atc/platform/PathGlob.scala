@@ -1,9 +1,11 @@
 package atc.platform
 
-import java.util.regex.Pattern
+import java.util.regex.{Pattern, PatternSyntaxException}
 import scala.util.matching.Regex
 
-/** Slash-based path globs shared by configuration rules and host searches. */
+/** Slash-based path globs shared by configuration rules and host searches: `*` and `?` stay within
+  * one component, `**` crosses components, `[…]`/`[!…]` are character classes and `{a,b}` are
+  * alternatives. Matching is case-insensitive on Windows. */
 private[atc] object PathGlob:
   def pattern(glob: String): Pattern = checked(glob)(Pattern.compile(source(glob), Platform.pathRegexFlags))
 
@@ -13,7 +15,7 @@ private[atc] object PathGlob:
   private def checked[A](glob: String)(compile: => A): A =
     try compile
     catch
-      case e: java.util.regex.PatternSyntaxException =>
+      case e: PatternSyntaxException =>
         throw IllegalArgumentException(s"bad glob '$glob': ${e.getDescription}")
 
   private def source(glob: String): String =

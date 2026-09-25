@@ -4,7 +4,7 @@ import atc.{Debug, ProcessEnvironment}
 import atc.platform.Platform
 
 import java.nio.charset.StandardCharsets
-import java.util.Base64
+import java.util.{Base64, Locale}
 
 /** Desktop notifications for moments when atc waits for the user. `terminal`
   * writes an escape sequence (or a bell) to the terminal; system notifications
@@ -30,7 +30,7 @@ enum Notifier:
         val show: Runnable = () =>
           try
             ProcessBuilder(command*)
-              .redirectInput(ProcessBuilder.Redirect.from(Notifier.NullFile))
+              .redirectInput(ProcessBuilder.Redirect.from(Platform.nullDevice))
               .redirectOutput(ProcessBuilder.Redirect.DISCARD)
               .redirectError(ProcessBuilder.Redirect.DISCARD)
               .start()
@@ -61,49 +61,43 @@ object Notifier:
 
   private val BellChar = "\u0007"
   private val MaxChars = 200
-  private val NullFile = java.io.File(if Platform.isWindows then "NUL" else "/dev/null")
 
   /** The notifier a `notifications` setting (validated by the config) selects. `auto` prefers the
     * terminal's own notifications, since they work over SSH and focus the
     * right tab when clicked; then a system notification on a local machine;
     * then the bell. */
   def fromSetting(setting: String, env: String => Option[String] = ProcessEnvironment.get): Notifier =
-    setting.toLowerCase(java.util.Locale.ROOT) match
+    setting.toLowerCase(Locale.ROOT) match
       case "off" => Off
       case "bell" => Bell
       case "terminal" => terminalOsc(env).fold(Bell)(Terminal(_))
       case "system" => System
       case _ =>
-        terminalOsc(env).map(Terminal(_)).getOrElse {
+        terminalOsc(env).map(Terminal(_)).getOrElse:
           val remote = env("SSH_CONNECTION").orElse(env("SSH_TTY")).isDefined
-          val desktop = isMac || Platform.isWindows || env("DISPLAY").orElse(env("WAYLAND_DISPLAY")).isDefined
+          val desktop = Platform.isMac || Platform.isWindows || env("DISPLAY").orElse(env("WAYLAND_DISPLAY")).isDefined
           if !remote && desktop then System else Bell
-        }
 
   /** The OSC sequence the running terminal is known to display, from the
     * variables terminals set. Inside tmux these name the outer terminal only
     * when the session was started from it, which is the common case. */
   private[atc] def terminalOsc(env: String => Option[String]): Option[Osc] =
-    val program = env("TERM_PROGRAM").getOrElse("").toLowerCase(java.util.Locale.ROOT)
+    val program = env("TERM_PROGRAM").getOrElse("").toLowerCase(Locale.ROOT)
     val term = env("TERM").getOrElse("")
     if env("KITTY_WINDOW_ID").isDefined || term == "xterm-kitty" then Some(Osc.Kitty)
     else if program == "iterm.app" || program == "wezterm" || program == "ghostty" then Some(Osc.Nine)
     else if term.startsWith("foot") || term.startsWith("rxvt") then Some(Osc.Notify)
     else None
 
-  private def isMac: Boolean =
-    java.lang.System.getProperty("os.name", "").nn.toLowerCase(java.util.Locale.ROOT).startsWith("mac")
-
   /** Markdown as plain prose for a notification: code blocks, heading and
     * list markers, emphasis and backticks removed, lines joined. */
   private[atc] def plainText(markdown: String): String =
     var inFence = false
     markdown.linesIterator
-      .filter { line =>
+      .filter: line =>
         val fence = line.trim.startsWith("```") || line.trim.startsWith("~~~")
         if fence then inFence = !inFence
         !fence && !inFence
-      }
       .map(_.trim.replaceFirst("^(#{1,6}|>|[-*+]|\\d+[.)])\\s+", "").nn)
       .map(_.replace("**", "").replace("__", "").replace("`", ""))
       .filter(_.nonEmpty)
@@ -124,7 +118,7 @@ object Notifier:
     * arguments (macOS, Linux) or inside a Base64-encoded script (Windows), so
     * nothing is interpreted by a shell. */
   private[atc] def systemCommand(title: String, body: String): List[String] =
-    if isMac then
+    if Platform.isMac then
       List(
         "osascript",
         "-e",

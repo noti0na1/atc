@@ -5,6 +5,7 @@ import atc.lib.{Classified, FileEntry, FileSystem}
 import atc.perms.*
 
 import java.nio.file.{Files, Path}
+import scala.util.Try
 
 /** `Classified` semantics: the host implementation as a value, and the file
   * system / output / LLM sinks that enforce the classified boundary
@@ -83,14 +84,13 @@ class ClassifiedSuite extends munit.FunSuite:
   test("map on a failed value short-circuits without running the function"):
     val failed = ClassifiedImpl.wrap("secret").map(_ => throw RuntimeException("boom"))
     var executed = false
-    val r = failed.map { _ =>
+    val r = failed.map: _ =>
       executed = true; "should not run"
-    }
     assert(!executed)
     assert(ClassifiedImpl.unwrap(r).isFailure)
 
   test("fromTry classifies a failed effect"):
-    val c = ClassifiedImpl.fromTry(scala.util.Try(throw IllegalArgumentException("nope")))
+    val c = ClassifiedImpl.fromTry(Try(throw IllegalArgumentException("nope")))
     assert(ClassifiedImpl.unwrap(c).isFailure)
     assertEquals(c.toString, "Classified(***)")
 

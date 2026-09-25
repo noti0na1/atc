@@ -1,7 +1,6 @@
 package atc
 
 import atc.config.Config
-import atc.platform.PlatformPath
 import atc.ui.{Ansi, Tui}
 
 import java.nio.file.Path
@@ -37,7 +36,7 @@ object Main:
         Cli.validate(Cli.parse(launched))
       catch
         case e: IllegalArgumentException =>
-          System.err.println(Ansi.sanitize(Option(e.getMessage).getOrElse(e.getClass.getSimpleName)))
+          System.err.println(Ansi.sanitize(Debug.message(e)))
           sys.exit(2)
     val exitCode =
       if args.help then
@@ -56,13 +55,12 @@ object Main:
   private def run(args: Cli.Args): Int =
     // Opened here so it is closed even when App's constructor fails (a bad config, an
     // unknown model): the terminal has a status footer and signal handlers by then.
-    val tui = Tui(PlatformPath.userHome.resolve(".atc").nn.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
+    val tui = Tui(Config.globalDir.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
     try App(args, tui).run()
     catch
       case App.Exit(code) => code
       case e: Throwable =>
-        val message = Option(e.getMessage).filter(_.nonEmpty).getOrElse(e.getClass.getSimpleName)
-        System.err.println(Ansi.sanitize(s"atc: $message"))
+        System.err.println(Ansi.sanitize(s"atc: ${Debug.message(e)}"))
         Debug.trace(e)
         1
     finally tui.close()

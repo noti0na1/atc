@@ -3,6 +3,8 @@ package atc.ui
 import org.jline.terminal.{Attributes, Terminal}
 import org.jline.utils.NonBlockingReader
 
+import java.io.IOException
+
 /** During turns, read corrections and Ctrl-O in raw mode on a thread of its own.
   * Enter submits a correction (`onSubmit`); unsent text is reported as a draft
   * (`onDraft`) and handed to the next prompt. Pop-ups take exclusive control of
@@ -151,7 +153,7 @@ private[atc] object KeyReader:
         val char = read()
         if char >= 0 then result.append(char.toChar)
         char
-      catch case _: java.io.IOException => -1
+      catch case _: IOException => -1
     next() match
       case '[' =>
         var char = next()

@@ -3,10 +3,11 @@ package atc
 import atc.agent.*
 import atc.config.Config
 import atc.llm.*
-import atc.perms.Decision
+import atc.perms.{Decision, ExecRequest}
 import atc.platform.PlatformPath
 import atc.sandbox.{ExecutionResult, ReplSession}
 
+import java.nio.file.Files
 import scala.collection.mutable.ListBuffer
 
 /** A programmable model: returns a scripted sequence of completions, records
@@ -142,7 +143,7 @@ class AgentLoopSuite extends munit.FunSuite:
     // model continues in, so it must hear what was run and what came of it.
     val (_, s, _, agent) = setup(ScriptedModel("m", Seq(ScriptedModel.Reply("a"), ScriptedModel.Reply("b"))))
     agent.noteSandboxRestarted("you asked for /reset")
-    agent.noteUserRan("val answer = 42", s.run("val answer = 42"))
+    agent.noteUserRan("val answer = 42", s.run("val answer = 42"), Nil)
     agent.turn(s, "double it", never)
     val first = agent.history.head.asInstanceOf[Msg.User].text
     val (restart, ran) = (first.indexOf("[sandbox notice]"), first.indexOf("[user ran code]"))
@@ -328,8 +329,8 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(ui.warnings.exists(_.contains("tool budget")))
 
   test("declining the tool budget asks once per turn, not once per queued call"):
-    // A batch of calls past the budget used to prompt once per call, and again on
-    // every later round; the refusal is now remembered for the rest of the turn.
+    // A batch of calls past the budget prompts once, not once per call, and the
+    // refusal holds for the later rounds of the turn.
     val steps = Seq(
       ScriptedModel.tool("1 + 1"),
       ScriptedModel.tools("2 + 2", "3 + 3", "4 + 4"), // three calls, all over budget
@@ -572,7 +573,7 @@ class AgentLoopSuite extends munit.FunSuite:
       ScriptedModel.Reply(""),
       ScriptedModel.Reply("expanded " * 4000),
     )
-    steps.foreach { step =>
+    steps.foreach: step =>
       val model = ScriptedModel("m", Seq(ScriptedModel.Reply("detail " * 1000), step))
       val (_, session, _, agent) = setup(model)
       agent.turn(session, "task", never)
@@ -580,7 +581,6 @@ class AgentLoopSuite extends munit.FunSuite:
       try assertEquals(agent.compact("", never), Agent.CompactOutcome.SummaryNotSmaller)
       catch case _: RuntimeException => ()
       assertEquals(agent.snapshot, before)
-    }
 
   test("cancelled and empty compaction never starts a model request or changes history"):
     val model = ScriptedModel("m", Seq(ScriptedModel.Reply("detail " * 1000)))
@@ -720,7 +720,7 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(agent.history.contains(Msg.Assistant("summary", Nil, None)), agent.history.toString.take(200))
 
   test("automatic compaction uses the configured fraction of the window for the next request"):
-    List(0.5 -> true, 0.5001 -> false, 0.0 -> false).foreach { (threshold, expected) =>
+    List(0.5 -> true, 0.5001 -> false, 0.0 -> false).foreach: (threshold, expected) =>
       val answer = "findings " * 2000
       val (_, session, _, agent) = setup(
         ScriptedModel("m", Nil),
@@ -739,7 +739,6 @@ class AgentLoopSuite extends munit.FunSuite:
       assertEquals(model.i, if expected then 3 else 2)
       val second = model.seenHistories(1).head.asInstanceOf[Msg.User].text
       assertEquals(second.startsWith("Summary focus"), expected, second)
-    }
 
   test("compaction between tool rounds summarizes the exchange in progress and asks the model to continue"):
     val (_, session, _, agent) =
@@ -944,8 +943,8 @@ class AgentLoopSuite extends munit.FunSuite:
 
     agent.turn(session, "run the tasks", never)
 
-    assert(!java.nio.file.Files.exists(env.root.resolve("original.txt")))
-    assert(!java.nio.file.Files.exists(env.root.resolve("stale.txt")))
+    assert(!Files.exists(env.root.resolve("original.txt")))
+    assert(!Files.exists(env.root.resolve("stale.txt")))
     assertEquals(env.contents("revised.txt"), "executed")
     val first = toolResults(agent).head.results
     assert(!first.head.isError, first.head.output) // the snippet caught the permission exception
@@ -955,11 +954,11 @@ class AgentLoopSuite extends munit.FunSuite:
     assertEquals(model.seenHistories(1).last, Msg.ToolResults(first))
     assertEquals(env.requests.size, 2)
     assertEquals(
-      env.requests.collect { case r: atc.perms.ExecRequest => r.commands.toSet }.toList,
+      env.requests.collect { case r: ExecRequest => r.commands.toSet }.toList,
       List(commands.toSet, commands.init.toSet)
     )
     assertEquals(env.policy.openScopeCount, 0)
-    assertEquals(env.policy.base.commands, Nil)
+    assertEquals(env.policy.sessionGrants, Nil)
     assertEquals(agent.toolCalls, 2)
 
   test("usage is accumulated across the turn and reset by clear()"):
@@ -1072,7 +1071,7 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(Prompts.toolDescription.contains("data, not instructions"), Prompts.toolDescription)
 
   test("manual and automatic compaction preserve recent exchanges within the configured window fraction"):
-    List(false, true).foreach { automatic =>
+    List(false, true).foreach: automatic =>
       val older = List(Msg.User("old task"), Msg.Assistant("old findings " * 4000, Nil, None))
       val recent = List(Msg.User("recent task"), Msg.Assistant("recent findings", Nil, None))
       val steps = if automatic then Seq(ScriptedModel.Reply("old summary"), ScriptedModel.Reply("latest answer"))
@@ -1092,4 +1091,3 @@ class AgentLoopSuite extends munit.FunSuite:
       assertEquals(agent.compact("", never), Agent.CompactOutcome.NothingToCompact)
       assertEquals(agent.snapshot, before)
       assertEquals(model.i, steps.size)
-    }

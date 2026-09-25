@@ -75,7 +75,7 @@ private[ui] final class LiveOutput(screen: Screen, direct: () => Boolean):
     val header =
       if hidden > 0 then
         val hint = if interactive then " (Ctrl-O to expand)" else ""
-        List(screen.gutter(Dim) + styled(s"${g.ellipsis} ${Tui.plural(hidden, "more line")}$hint", Dim))
+        List(screen.gutter(Dim) + styled(s"${g.ellipsis} ${Format.plural(hidden, "more line")}$hint", Dim))
       else Nil
     header ++ lines.map(l => screen.gutter(Dim) + screen.fit(l, screen.GutterWidth))
 

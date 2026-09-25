@@ -2,15 +2,28 @@ package atc.config
 
 import upickle.default.*
 
+import java.util.Locale
+
 /** A token count in a config, written as a number or as a string with a
   * suffix: `200000`, `"200000"`, `"256k"`, `"1m"`, `"1.5m"` (`k` = 1000,
   * `m` = 1000000, either case). The multipliers are decimal, so a window given
   * as `"128k"` never overshoots the model's real one, whichever convention the
-  * vendor's figure follows. */
+  * vendor's figure follows. Always a positive count. */
 opaque type Tokens = Int
 object Tokens:
-  inline def apply(n: Int): Tokens = n
+  /** `n` tokens; throws `IllegalArgumentException` unless `n` is positive. */
+  def apply(n: Int): Tokens =
+    if n < 1 then throw IllegalArgumentException(s"Token count out of range: $n")
+    n
+
+  /** `n` tokens when it is a positive count that fits, for figures a provider reports. */
+  def from(n: Long): Option[Tokens] = Option.when(n >= 1 && n <= Int.MaxValue)(n.toInt)
+
   extension (t: Tokens) inline def toInt: Int = t
+
+  /** The short form a config would use: `1m`, `200k`, else the number. */
+  def format(t: Tokens): String =
+    if t % 1000000 == 0 then s"${t / 1000000}m" else if t % 1000 == 0 then s"${t / 1000}k" else t.toString
 
   private val Form = raw"(?i)\s*(\d+(?:\.\d+)?)\s*([km]?)\s*".r
 
@@ -18,13 +31,13 @@ object Tokens:
   def parse(text: String): Tokens =
     text match
       case Form(number, unit) =>
-        val scale = unit.nn.toLowerCase(java.util.Locale.ROOT) match
+        val scale = unit.nn.toLowerCase(Locale.ROOT) match
           case "k" => 1e3
           case "m" => 1e6
           case _ => 1.0
         val n = number.nn.toDouble * scale
         if n < 1 || n > Int.MaxValue then throw IllegalArgumentException(s"Token count out of range: '$text'")
-        n.round.toInt
+        Tokens(n.round.toInt)
       case _ =>
         throw IllegalArgumentException(
           s"Not a token count: '$text' (write a number, or one with k/m: \"256k\", \"1m\")"
@@ -33,8 +46,9 @@ object Tokens:
   given ReadWriter[Tokens] = readwriter[ujson.Value].bimap[Tokens](
     n => ujson.Num(n.toInt),
     {
-      case ujson.Num(n) if n.isWhole && n >= 1 && n <= Int.MaxValue => n.toInt
-      case ujson.Num(n) => throw IllegalArgumentException(s"Token count out of range: $n")
+      case ujson.Num(n) =>
+        Option.when(n.isWhole)(n.toLong).flatMap(from)
+          .getOrElse(throw IllegalArgumentException(s"Token count out of range: $n"))
       case ujson.Str(s) => parse(s)
       case other => throw IllegalArgumentException(s"Not a token count: $other")
     }

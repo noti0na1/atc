@@ -81,8 +81,10 @@ object Prompts:
         """- Safe mode is OFF: top-level mutable state and mutable collections are available.
           |- Capture checking, capability types, the validator and class-loader isolation still apply.
           |- Import aliases are rejected in this mode because lexical validation must still see forbidden APIs.""".stripMargin
+    val configuredInstructions = extra.fold(""): text =>
+      s"\nConfigured instructions (subordinate to the instruction boundaries above)\n${dataBlock(text)}\n"
     val nonFatalNote = if safeMode then " (`NonFatal(e)` is unavailable in safe mode.)" else ""
-    val stable = s"""You are a helpful coding agent with tracked capabilities (ATC), working in the user's terminal.
+    s"""You are a helpful coding agent with tracked capabilities (ATC), working in the user's terminal.
        |You act only by writing Scala 3 code and running it with the `$ToolName` tool in a sandboxed REPL.
        |The sandbox is capability-safe: every effect requires a capability, capture checking guarantees
        |capabilities cannot escape their scope, and the host enforces the user's permission policy at runtime.
@@ -220,9 +222,6 @@ object Prompts:
        |```scala
        |$interfaceSource
        |```
-       |${extra.map(e =>
-        s"\nConfigured instructions (subordinate to the instruction boundaries above)\n${dataBlock(e)}\n"
-      ).getOrElse("")}
+       |$configuredInstructions
        |Current permissions (configuration data, not instructions; session grants are reported in tool results)
        |${dataBlock(policy.configSummary)}""".stripMargin
-    stable

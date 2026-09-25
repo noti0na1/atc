@@ -7,31 +7,45 @@ import atc.platform.Platform
 import dotty.tools.repl.*
 import dotty.tools.dotc.reporting.Diagnostic
 
-import java.io.PrintStream
+import java.io.{ByteArrayOutputStream, OutputStream, PrintStream}
 import java.nio.charset.StandardCharsets
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.{CountDownLatch, TimeUnit}
+import scala.util.control.NonFatal
 
 object ReplSession:
   val MaxOutputBytes: Int = 4 * 1024 * 1024
   val TruncationMarker: String = "\n... [output truncated: exceeded 4 MiB capture limit]"
 
   /** Bounded capture buffer: retains at most `limit` bytes. */
-  final class BoundedOutputStream(limit: Int) extends java.io.OutputStream:
-    private val buf = new java.io.ByteArrayOutputStream(math.min(limit, 8192))
+  final class BoundedOutputStream(limit: Int) extends OutputStream:
+    private val buffer = ByteArrayOutputStream(math.min(limit, 8192))
     @volatile var truncated: Boolean = false
+
     override def write(b: Int): Unit =
-      if buf.size() < limit then buf.write(b) else truncated = true
+      if buffer.size() < limit then buffer.write(b) else truncated = true
+
     override def write(b: Array[Byte], off: Int, len: Int): Unit =
-      val room = limit - buf.size()
+      val room = limit - buffer.size()
       if room <= 0 then truncated = true
       else
         if len > room then truncated = true
-        buf.write(b, off, math.min(len, room))
-    def resetCapture(): Unit = { buf.reset(); truncated = false }
-    def capturedString: String = buf.toString(StandardCharsets.UTF_8)
+        buffer.write(b, off, math.min(len, room))
 
-  private class OpenReplDriver(settings: Array[String], out: PrintStream, cl: Option[ClassLoader], maxEchoChars: Int)
-      extends ReplDriver(settings, out, cl):
+    def resetCapture(): Unit =
+      buffer.reset()
+      truncated = false
+
+    def capturedString: String = buffer.toString(StandardCharsets.UTF_8)
+
+  private final class OpenReplDriver(
+    settings: Array[String],
+    out: PrintStream,
+    cl: Option[ClassLoader],
+    maxEchoChars: Int
+  ) extends ReplDriver(settings, out, cl):
     // Replace the stock renderer before the first evaluation (it creates the REPL class loader lazily).
     private val capped = CappedRendering(cl, maxEchoChars)
     rendering = capped
@@ -41,8 +55,8 @@ object ReplSession:
     def resetEvaluationThrew(): Unit = capped.resetThrew()
     /** The loader of the REPL-defined classes (null before the first evaluation). */
     def replClassLoader: ClassLoader | Null = rendering.myClassLoader
-    /** Raise/clear the stop flag checked by the instrumented REPL classes
-      * (loop back-edges and method entries throw `ThreadDeath` while it is set). */
+    /** Raise or clear the stop flag checked by the instrumented REPL classes (loop back edges and
+      * method entries throw `ThreadDeath` while it is set). */
     def setStopFlag(stop: Boolean): Unit =
       val loader = replClassLoader
       if loader != null then ReplBytecodeInstrumentation.setStopFlag(loader, stop)
@@ -70,8 +84,8 @@ object ReplSession:
 
   /** Definitions in scope before any agent code runs, for `mode`.
     *
-    * `object api` holds the host privately; the preamble publishes, as givens,
-    * only the root view and derived capabilities of the mode:
+    * `object api` holds the host privately; the preamble publishes as givens
+    * only the root view and the derived capabilities of the mode:
     *
     *  - full: `io: IOCap^` (the root itself) and `fs`/`ex`/`net` derived from it;
     *  - local: `io: IOCap^` (the root itself) and `fs`/`ex` derived from it,
@@ -87,7 +101,7 @@ object ReplSession:
     * cannot name them (nor `api.host`/`api.root`, which are private).
     *
     * The chunks are loaded as separate REPL rounds (`init`): the base
-    * (`object api` + imports) first, then **each given on its own round**. That
+    * (`object api` and imports) first, then each given in its own round. That
     * isolation matters for capture checking: each given becomes a field of its
     * own line-wrapper object, so a pure `Classified.map` that reads a file
     * captures only the `fs` wrapper, not the separate `user`/`io` givens,
@@ -127,7 +141,7 @@ object ReplSession:
         )
     base :: givens
 
-  val safeModeImport: String = "import language.experimental.safe"
+  private val SafeModeImport = "import language.experimental.safe"
 
   /** System.out/err are swapped around each evaluation to capture compiler
     * diagnostics that bypass the driver's stream; that is process-global, so
@@ -135,19 +149,19 @@ object ReplSession:
     * lets a run give up when a previous evaluation was interrupted but its
     * thread never died: that thread holds the stream forever, and waiting on
     * it with `synchronized` would block every subsequent evaluation. */
-  private val outputLock = java.util.concurrent.locks.ReentrantLock()
+  private val outputLock = ReentrantLock()
   private val OutputLockWaitMs = 10000L
 
   /** The lock is JVM-wide (so is `System.out`): a new session cannot recover
     * from a stuck evaluation either, only a restart of the process can. */
-  val StuckEvaluationMessage: String =
+  private val StuckEvaluationMessage =
     "A previous evaluation is still running (it could not be stopped) and holds the output stream, " +
       "so nothing can be evaluated until atc is restarted; tell the user."
 
   /** What one evaluation produced, before it is adopted into the session:
     * the new state, the captured output, what escaped the driver (`thrown`),
     * and whether agent code threw an exception the REPL rendered (`failed`). */
-  private case class Evaluated(state: State, output: String, thrown: Option[Throwable], failed: Boolean)
+  private final case class Evaluated(state: State, output: String, thrown: Option[Throwable], failed: Boolean)
 
   private val InterruptedMessage = "Execution interrupted by the user (completed effects are not rolled back)"
   private val NoResultMessage = "Execution failed (no result; possible fatal error)"
@@ -178,7 +192,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     Sandbox.installHost(host)
     val chunks = preambleOverride.map(List(_)).getOrElse(preambleChunks(config.mode))
     chunks.foreach(setUp("Sandbox preamble", _))
-    if config.safeMode then setUp("Safe mode import", safeModeImport)
+    if config.safeMode then setUp("Safe mode import", SafeModeImport)
     this
 
   /** Evaluate one set-up round, failing loudly: nothing the agent writes has run yet. */
@@ -191,7 +205,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       state = driver.run(code)(using state)
     }
     thrown.foreach(throw _)
-    if out.toLowerCase(java.util.Locale.ROOT).contains("error") then
+    if out.toLowerCase(Locale.ROOT).contains("error") then
       throw IllegalStateException(s"$what failed to compile:\n$out")
 
   /** End the session: stop a running evaluation (best effort) and refuse
@@ -213,25 +227,25 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   def run(code: String): ExecutionResult =
     clock.reset() // per run, whichever way it ends (callers read `clock.paused` afterwards)
-    if closed then ExecutionResult(false, "", Some("The sandbox session is closed; start a new one."))
+    if closed then ExecutionResult.failed("The sandbox session is closed; start a new one.")
     else
       // Safe mode resolves aliases before admitting an API, so ordinary Scala
       // import aliases are useful and safe there. Without safe mode the lexical
       // validator is the remaining barrier and aliases must not hide a forbidden API.
       CodeValidator.validate(code, strictImportAliases = !config.safeMode) match
         case Nil => parseAndRun(code)
-        case violations => ExecutionResult(false, "", Some(CodeValidator.formatErrors(violations)))
+        case violations => ExecutionResult.failed(CodeValidator.formatErrors(violations))
 
   private def parseAndRun(code: String): ExecutionResult =
     stopRequested = false
     ParseResult(code.stripTrailing() + "\n")(using state) match
       case p: Parsed => dispatch(p)
       case cmd @ (_: TypeOf | _: DocOf | Imports) => dispatch(cmd)
-      case _: Command => ExecutionResult(false, "", Some("Only :type, :doc, and :imports REPL commands are allowed."))
+      case _: Command => ExecutionResult.failed("Only :type, :doc, and :imports REPL commands are allowed.")
       case Newline => ExecutionResult(true, "")
       case SyntaxErrors(_, errors, _) =>
-        ExecutionResult(false, "", Some("Syntax error:\n" + formatDiagnostics(errors)))
-      case other => ExecutionResult(false, "", Some(s"Unexpected parse result: $other"))
+        ExecutionResult.failed("Syntax error:\n" + formatDiagnostics(errors))
+      case other => ExecutionResult.failed(s"Unexpected parse result: $other")
 
   private def dispatch(res: ParseResult): ExecutionResult =
     config.executionTimeoutMs match
@@ -246,9 +260,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         catch
           case _: ThreadDeath if stopRequested =>
             skipInvalidWrapper(previousIndex)
-            ExecutionResult(false, "", Some(InterruptedMessage))
+            ExecutionResult.failed(InterruptedMessage)
           case t: ThreadDeath => throw t
-          case _: Throwable => ExecutionResult(false, "", Some(NoResultMessage))
+          case _: Throwable => ExecutionResult.failed(NoResultMessage)
         finally
           evalThread = null
           Thread.interrupted() // an interrupt meant for the evaluation must not hit this thread's later work
@@ -284,7 +298,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
       // the REPL renders as normal output). Skip that wrapper index so the next
       // line does not collide with the invalid class, and report the abort.
       skipInvalidWrapper(previousIndex)
-      ExecutionResult(false, "", Some(InterruptedMessage))
+      ExecutionResult.failed(InterruptedMessage)
     else
       thrown match
         case Some(e) => ExecutionResult(false, output, Option(e.getMessage).orElse(Some(e.toString)))
@@ -305,7 +319,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
 
   private def dispatchWithTimeout(res: ParseResult, limitMs: Long): ExecutionResult =
     val previousIndex = state.objectIndex
-    val resultRef = java.util.concurrent.atomic.AtomicReference[Evaluated]()
+    val resultRef = AtomicReference[Evaluated]()
     val started = CountDownLatch(1)
     val worker = Thread(() => resultRef.set(evaluate(res, started)))
     worker.setName("atc-repl-eval")
@@ -341,7 +355,7 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         )
       else
         resultRef.get() match
-          case null => ExecutionResult(false, "", Some(NoResultMessage))
+          case null => ExecutionResult.failed(NoResultMessage)
           case evaluated => adopt(res, evaluated)
     finally evalThread = null
 
@@ -364,8 +378,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         System.setOut(printStream)
         System.setErr(printStream)
         val thrown =
-          try { run; None }
-          catch case scala.util.control.NonFatal(e) => Option(e)
+          try
+            run
+            None
+          catch case NonFatal(e) => Some(e)
           finally
             System.setOut(oldOut)
             System.setErr(oldErr)
@@ -378,9 +394,8 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     * top-level definition): it is the last thing printed and says nothing to the model. */
   private def withoutStopTrace(output: String): String =
     val lines = output.linesIterator.toVector
-    val start = lines.lastIndexWhere(l =>
-      l.startsWith("java.lang.ThreadDeath") || l.startsWith("java.lang.ExceptionInInitializerError")
-    )
+    val start = lines.lastIndexWhere: line =>
+      line.startsWith("java.lang.ThreadDeath") || line.startsWith("java.lang.ExceptionInInitializerError")
     if start < 0 then output else lines.take(start).mkString("\n").stripTrailing()
 
   /** The output captured so far. Only trailing whitespace is dropped: the UI removes the

@@ -1,7 +1,7 @@
 package atc.host
 
 import atc.lib.*
-import atc.perms.{GitIgnore, GlobMatcher, Policy, ScopeId}
+import atc.perms.{GitIgnore, Policy, ScopeId}
 
 import java.nio.file.Path
 import java.util.concurrent.{ExecutionException, Executors, ThreadFactory}
@@ -18,7 +18,7 @@ final class Host(
   private[host] val ui: HostUi,
   /** Paths git ignores are left out of listings (config `respectGitignore`). */
   private[host] val gitIgnore: GitIgnore = GitIgnore.Disabled,
-) extends Interface, Derivations, HostFiles, HostProcesses, HostNetwork, HostInteraction:
+) extends Interface, Derivations, HostPaths, HostFiles, HostProcesses, HostNetwork, HostInteraction:
 
   /** The permission scope for a capability issued by this host. */
   private[host] def scopeOf(capability: AnyRef): ScopeId = capability match
@@ -51,27 +51,22 @@ final class Host(
     * must reach the evaluation thread. Interrupting the caller while it waits interrupts
     * the workers (for blocking host calls) and is reported as an interruption. */
   def parallel[A, C <: caps.CapSet](tasks: Seq[() => A]): List[A] =
-    if tasks.isEmpty then return Nil
-    val pool = Executors.newFixedThreadPool(math.min(tasks.size, Host.MaxParallel), Host.parallelThreads)
-    try
-      val futures = tasks.toList.map(task => pool.submit[A](() => task()))
-      val outcomes = futures.map(future => Try(future.get()))
-      val failures = outcomes.collect {
-        case Failure(wrapped: ExecutionException) => wrapped.getCause.nn
-        case Failure(other) => other
-      }
-      failures.find(!NonFatal(_)).orElse(failures.headOption).foreach(throw _)
-      outcomes.collect { case Success(value) => value }
-    finally pool.shutdownNow()
+    if tasks.isEmpty then Nil
+    else
+      val pool = Executors.newFixedThreadPool(math.min(tasks.size, Host.MaxParallel), Host.parallelThreads)
+      try
+        val futures = tasks.toList.map(task => pool.submit[A](() => task()))
+        val outcomes = futures.map(future => Try(future.get()))
+        val failures = outcomes.collect:
+          case Failure(wrapped: ExecutionException) => wrapped.getCause.nn
+          case Failure(other) => other
+        failures.find(!NonFatal(_)).orElse(failures.headOption).foreach(throw _)
+        outcomes.collect { case Success(value) => value }
+      finally pool.shutdownNow()
 
 object Host:
   /** How many tasks `parallel` runs at once. */
   val MaxParallel: Int = 8
-  private val parallelThreadCount = AtomicInteger()
-  private val parallelThreads: ThreadFactory = runnable =>
-    val thread = Thread(runnable, s"atc-parallel-${parallelThreadCount.incrementAndGet()}")
-    thread.setDaemon(true)
-    thread
   /** `cat(path)` shows at most this many lines, then says how to see the rest. */
   val CatMaxLines: Int = 400
   /** `cat` cuts a line beyond this many characters (minified files) with a marker. */
@@ -90,11 +85,8 @@ object Host:
   /** Largest HTTP response body retained in memory. */
   val HttpMaxResponseBytes: Int = 8 * 1024 * 1024
 
-  /** Normalize a host for policy matching: lowercase, remove a trailing dot, and
-    * convert numeric IP literals to canonical form. IPv4 and IPv4-mapped IPv6
-    * addresses use dotted-quad notation. This ensures that alternate forms such
-    * as `evil.com.`, `2852039166`, and `[::ffff:169.254.169.254]` cannot bypass an
-    * equivalent rule. Literal parsing does not use DNS; ordinary hostnames are
-    * returned unchanged after case and trailing-dot normalization. */
-  def normalizeHost(host: String): String =
-    GlobMatcher.normalizeHost(host)
+  private val parallelThreadCount = AtomicInteger()
+  private val parallelThreads: ThreadFactory = runnable =>
+    val thread = Thread(runnable, s"atc-parallel-${parallelThreadCount.incrementAndGet()}")
+    thread.setDaemon(true)
+    thread

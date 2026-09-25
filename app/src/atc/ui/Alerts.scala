@@ -80,7 +80,9 @@ private[ui] final class Alerts(terminal: Terminal, plain: Boolean, emit: String 
   private val prose = StringBuilder()
   private var error = ""
 
-  def beginTurn(): Unit = synchronized { prose.clear(); error = "" }
+  def beginTurn(): Unit = synchronized:
+    prose.clear()
+    error = ""
 
   /** Streamed prose; `newBlock` starts the block the alert quotes. */
   def proseDelta(text: String, newBlock: Boolean): Unit = synchronized:
@@ -110,6 +112,6 @@ private[atc] object Alerts:
     stats.outcome match
       case TurnOutcome.Finished if reply.nonEmpty => reply
       case TurnOutcome.Failed | TurnOutcome.Blocked if error.nonEmpty => s"$outcome: $error"
-      case TurnOutcome.Interrupted => s"$outcome after ${Tui.duration(stats.seconds)}"
+      case TurnOutcome.Interrupted => s"$outcome after ${Format.duration(stats.seconds)}"
       case _ if reply.nonEmpty => s"$outcome: $reply"
-      case _ => s"$outcome in ${Tui.duration(stats.seconds)}"
+      case _ => s"$outcome in ${Format.duration(stats.seconds)}"

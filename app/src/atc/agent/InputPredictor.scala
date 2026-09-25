@@ -4,6 +4,7 @@ import atc.Debug
 import atc.llm.{ChatModel, Msg, TokenUsage}
 
 import java.util.concurrent.atomic.AtomicLong
+import scala.annotation.tailrec
 
 /** Predicts the next user input on one background worker using the agent model.
   * A generation counter discards stale results. Repeated starts replace the
@@ -15,9 +16,11 @@ final class InputPredictor(
   show: Option[String] => Unit,
   /** Told what every guess cost, so `/cost` includes it. */
   spent: TokenUsage => Unit = _ => (),
+  /** `false` never guesses: [[start]] does nothing. */
+  val enabled: Boolean = true,
 ):
   private val generation = AtomicLong(0)
-  private case class Job(generation: Long, model: ChatModel, history: List[Msg])
+  private final case class Job(generation: Long, model: ChatModel, history: List[Msg])
   private val lock = Object()
   private var pending: Option[Job] = None
   private var worker: Thread | Null = null
@@ -32,8 +35,9 @@ final class InputPredictor(
       Option(worker).filter(_.isAlive).foreach(_.interrupt())
       show(None)
 
-  /** Start guessing for the conversation as it stands now. */
-  def start(): Unit =
+  /** Start guessing for the conversation as it stands now, replacing any
+    * guess made from an earlier state. */
+  def start(): Unit = if enabled then
     val gen = lock.synchronized:
       val next = generation.incrementAndGet()
       show(None)
@@ -54,36 +58,42 @@ final class InputPredictor(
             worker = next
             next.start()
 
-  private def work(): Unit =
-    var again = true
-    while again do
-      val job = lock.synchronized:
-        pending match
-          case some @ Some(_) => pending = None; some
-          case None => worker = null; again = false; None
-      job.foreach { j =>
-        // Clear a previous job's interrupt before starting the next request.
-        Thread.interrupted()
-        val guess =
-          if generation.get != j.generation then None
-          else
-            try InputPredictor.predict(j.model, j.history, spent)
-            catch
-              case _: InterruptedException => None
-              case e: Exception =>
-                Debug.log(s"input prediction failed: $e")
-                Debug.trace(e)
-                None
-        // Serialize the final generation check with invalidate/start's clear,
-        // so stale text cannot win a check-then-publish race.
-        lock.synchronized:
-          if generation.get == j.generation then
-            try show(guess)
-            catch
-              case e: Exception =>
-                Debug.log(s"displaying input prediction failed: $e")
-                Debug.trace(e)
-      }
+  /** Take the pending job and run it, until none is left. The worker clears its own
+    * slot under the lock, so [[start]] either hands it a job or starts a new worker. */
+  @tailrec private def work(): Unit =
+    val job = lock.synchronized:
+      val next = pending
+      pending = None
+      if next.isEmpty then worker = null
+      next
+    job match
+      case Some(next) =>
+        run(next)
+        work()
+      case None => ()
+
+  private def run(job: Job): Unit =
+    // Clear a previous job's interrupt before starting the next request.
+    Thread.interrupted()
+    val guess =
+      if generation.get != job.generation then None
+      else
+        try InputPredictor.predict(job.model, job.history, spent)
+        catch
+          case _: InterruptedException => None
+          case e: Exception =>
+            Debug.log(s"input prediction failed: $e")
+            Debug.trace(e)
+            None
+    // Serialize the final generation check with invalidate/start's clear,
+    // so stale text cannot win a check-then-publish race.
+    lock.synchronized:
+      if generation.get == job.generation then
+        try show(guess)
+        catch
+          case e: Exception =>
+            Debug.log(s"displaying input prediction failed: $e")
+            Debug.trace(e)
 
 object InputPredictor:
   /** Exchanges (user message + the assistant's final answer) sent to the model. */
@@ -104,7 +114,7 @@ object InputPredictor:
       "performing destructive or unrelated work."
 
   /** One synchronous guess. `None` when the model has nothing to offer. */
-  def predict(model: ChatModel, history: List[Msg], spent: TokenUsage => Unit = _ => ()): Option[String] =
+  def predict(model: ChatModel, history: List[Msg], spent: TokenUsage => Unit): Option[String] =
     val transcript = render(history)
     if transcript.isEmpty then None
     else

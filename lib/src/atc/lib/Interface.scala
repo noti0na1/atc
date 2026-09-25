@@ -8,13 +8,13 @@ import caps.*
 // This is the whole API you can call. Read these capture-checking types like
 // permission bits:
 //
-//   • `^` is the full view of a capability. The bare type `IOCap` is the
-//     read-only view of the machine-effect root; same for
-//     `FileSystem^` (can write) vs `FileSystem` (read only). A full capability
-//     can be passed where a read-only one is wanted, never the other way round.
-//     `x.rd` names the read-only view of `x`: `val ro: FileSystem^{fs.rd} = fs` is a
-//     file system that provably cannot write (hand it to a helper, or read files
-//     with it inside `Classified.map`, where a full `fs` may not be captured).
+//   • `T^` is the full view of a capability and the bare `T` its read-only view:
+//     `FileSystem^` can write, `FileSystem` can only read, and `IOCap` is the
+//     read-only view of the machine-effect root. A full capability can be passed
+//     where a read-only one is wanted, never the other way round. `x.rd` names
+//     the read-only view of `x`: `val ro: FileSystem^{fs.rd} = fs` is a file
+//     system that provably cannot write (hand it to a helper, or read files with
+//     it inside `Classified.map`, where a full `fs` may not be captured).
 //
 //   • `update def` marks a mutating operation (write, delete, …). It compiles
 //     only through a *full* capability; on a read-only one you get
@@ -31,18 +31,18 @@ import caps.*
  *  `map` and `flatMap` accept functions that may capture only **read-only**
  *  capabilities. Within them, you can compute freely, use local `var`s and
  *  arrays, and read files where your `fs` is itself read-only. You can never
- *  write, run a command, use the network, `println`, normal-model `chat` or `ask`, because
- *  each of those needs a full capability. Whatever you compute stays
- *  classified; `toString` shows `Classified(***)`.
+ *  write, run a command, use the network, `println`, normal-model `chat` or
+ *  `ask`, because each of those needs a full capability. Whatever you compute
+ *  stays classified; `toString` shows `Classified(***)`.
  *
  *  Do not make nontermination, timeouts, timing or resource consumption depend
  *  on a secret; those side channels are not prevented.
  *
  *  The only supported destinations are `println` (the user sees the value while
  *  you still see `Classified(***)`), `writeClassified` (to a classified file),
- *  `classifiedChat` with the classified model, and `httpPostClassified` or `secretHeaders`
- *  to an allowed host. Calls carrying classified input return a `Classified`
- *  response.
+ *  `classifiedChat` with the classified model, and `httpPostClassified` or
+ *  `secretHeaders` to an allowed host. Calls carrying classified input return a
+ *  `Classified` response.
  *
  *  {{{
  *  val secret = readClassified(".env")          // Classified[String]
@@ -92,8 +92,8 @@ abstract class FileSystem private[atc] () extends Cap:
   def access(path: String): FileEntry^{this}
 
 /** A handle to a file or directory. Read operations work on any handle; the
- *  `update def`s (`write`, `append`, `delete`, `mkdir`, and `writeClassified`) require one from
- *  a full `FileSystem^`. */
+ *  `update def`s (`write`, `writeBytes`, `append`, `delete`, `mkdir` and
+ *  `writeClassified`) require one from a full `FileSystem^`. */
 @assumeSafe
 abstract class FileEntry private[atc] () extends Cap:
   /** Absolute, normalized path. Windows separators are rendered as `/`; pass
@@ -143,13 +143,13 @@ abstract class Exec private[atc] () extends caps.ExclusiveCapability
 @assumeSafe
 abstract class Network private[atc] () extends caps.ExclusiveCapability
 
-/** A process started with `spawn` that you can interact with while it runs (a REPL, a
- *  dev server, a watcher). It captures the `ex` used to start it, so it cannot
- *  be used inside `Classified.map`. It lives until it exits,
- *  you `kill()` it, or the session ends; `runningProcesses` finds the live ones
- *  again. One spawned inside a `requestExec` block is also killed when that block
- *  ends. Start long-lived processes from a standing grant rather than a one-time
- *  grant. `readUntil` throws `RuntimeException` on timeout and keeps the output
+/** A process started with `spawn` that you can interact with while it runs (a
+ *  REPL, a dev server, a watcher). It captures the `ex` used to start it, so it
+ *  cannot be used inside `Classified.map`. It lives until it exits, you `kill()`
+ *  it, or the session ends; `runningProcesses` finds the live ones again. One
+ *  spawned inside a `requestExec` block is also killed when that block ends, so
+ *  start long-lived processes from a standing grant rather than a one-time grant.
+ *  `readUntil` throws `RuntimeException` on timeout and keeps the output
  *  available for a later `read()`. `waitFor` returns `None` on timeout.
  *
  *  {{{
@@ -376,16 +376,15 @@ trait Interface:
    *  Scanning stops after two million characters and reports that limit if reached. */
   def readRange(path: String, from: Int, to: Int)(using FileSystem): String
 
-  /** Print a file with 1-based line numbers, like `cat -n` (`     1\tline`); the
-   *  first form stops after 400 lines with a note saying which `cat(path, from, to)`
-   *  shows the rest, the second prints lines `from` to `to` inclusive, like
-   *  `sed -n 'from,to'`. This is the way to look at a file (`read`/`readLines`
-   *  give the raw text to code with). The numbers are not in the file: never copy
-   *  them into a `sed` pattern. `to` may run past the end (`[end of file: N lines]`
-   *  marks it). Both forms show at most 400 lines and suggest a continuation when
-   *  more remain. The range form scans at most two million characters and reports
-   *  when that limit prevents completing the range. Lines longer than 2000 characters
-   *  are cut with a `[+N chars]` marker. */
+  /** Print a file with 1-based line numbers, like `cat -n` (`     1\tline`). This is
+   *  the way to look at a file (`read`/`readLines` give the raw text to code with).
+   *  The first form prints the file, the second lines `from` to `to` inclusive, like
+   *  `sed -n 'from,to'`; `to` may run past the end (`[end of file: N lines]` marks
+   *  it). Both show at most 400 lines, then name the `cat(path, from, to)` call that
+   *  shows the rest. The range form scans at most two million characters and
+   *  reports when that limit prevents completing the range. Lines longer than 2000
+   *  characters are cut with a `[+N chars]` marker. The numbers are not in the
+   *  file: never copy them into a `sed` pattern. */
   def cat(path: String)(using FileSystem, UserIO^): Unit
   def cat(path: String, from: Int, to: Int)(using FileSystem, UserIO^): Unit
 
@@ -589,9 +588,9 @@ trait Interface:
    *  returned list afterwards (output printed from inside tasks interleaves).
    *  Anything else is a race with unpredictable outcomes.
    *
-   *  A task can do what its captured capabilities allow (the same rules as
-   *  anywhere else; inside `Classified.map` only read-only captures compile,
-   *  as usual). At most eight tasks run at once. When a task throws,
+   *  A task can do what its captured capabilities allow, under the same rules as
+   *  anywhere else (inside `Classified.map`, only read-only captures compile).
+   *  At most eight tasks run at once. When a task throws,
    *  `parallel` waits for the rest and rethrows the first failure in task
    *  order; catch inside the task to keep the other results. Prompts raised by
    *  several tasks are put to the user one at a time. `C` (what the tasks

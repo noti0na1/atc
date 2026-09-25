@@ -9,6 +9,7 @@ import atc.sandbox.ReplSession
 import com.sun.net.httpserver.{HttpExchange, HttpHandler, HttpServer}
 import java.net.InetSocketAddress
 import java.nio.file.{Files, Path}
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Exec and network permission enforcement, at the host level and end-to-end
   * through a sandbox REPL (migrated from TACIT's ProcessPermissionSuite,
@@ -20,7 +21,7 @@ class PermissionSuite extends munit.FunSuite:
   var server: HttpServer = scala.compiletime.uninitialized
   var port: Int = 0
   var host: String = ""
-  val echoRequests = java.util.concurrent.atomic.AtomicInteger(0)
+  val echoRequests = AtomicInteger(0)
 
   override def beforeAll(): Unit =
     server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn
@@ -669,14 +670,14 @@ class PermissionSuite extends munit.FunSuite:
     assert(e2.getMessage.nn.contains("denyHosts"), e2.getMessage)
 
   test("normalizeHost: case, trailing dot, numeric IP literals; hostnames untouched"):
-    assertEquals(Host.normalizeHost("Example.COM"), "example.com")
-    assertEquals(Host.normalizeHost("evil.com."), "evil.com")
-    assertEquals(Host.normalizeHost("2852039166"), "169.254.169.254")
-    assertEquals(Host.normalizeHost("127.1"), "127.0.0.1")
-    assertEquals(Host.normalizeHost("127.0.0.1"), "127.0.0.1")
-    assertEquals(Host.normalizeHost("example.com"), "example.com")
-    assertEquals(Host.normalizeHost("999.1.2.3"), "999.1.2.3") // out of range: not a literal
-    assertEquals(Host.normalizeHost(""), "")
+    assertEquals(GlobMatcher.normalizeHost("Example.COM"), "example.com")
+    assertEquals(GlobMatcher.normalizeHost("evil.com."), "evil.com")
+    assertEquals(GlobMatcher.normalizeHost("2852039166"), "169.254.169.254")
+    assertEquals(GlobMatcher.normalizeHost("127.1"), "127.0.0.1")
+    assertEquals(GlobMatcher.normalizeHost("127.0.0.1"), "127.0.0.1")
+    assertEquals(GlobMatcher.normalizeHost("example.com"), "example.com")
+    assertEquals(GlobMatcher.normalizeHost("999.1.2.3"), "999.1.2.3") // out of range: not a literal
+    assertEquals(GlobMatcher.normalizeHost(""), "")
 
   test("exact IPv6 host rules are canonicalized on both sides"):
     val env = TestEnv(hosts = List("::1"), denyHosts = List("2001:db8::1"))
@@ -707,7 +708,7 @@ class PermissionSuite extends munit.FunSuite:
     val echo = fixture("echo")
     val pwd = fixture("pwd")
     val pwdPattern = ProcessFixture.pattern("pwd")
-    withSession(commands = permits("echo")) { (env, s) =>
+    withSession(commands = permits("echo")): (env, s) =>
       val ok = s.run(s"""println(exec(${ujson.write(echo)}, List("from-repl")).stdout.trim)""")
       assert(ok.success, ok.error.toString)
       assert(env.agentOut.toString.contains("from-repl"))
@@ -719,21 +720,19 @@ class PermissionSuite extends munit.FunSuite:
         s"""requestExec(Set(${ujson.write(pwdPattern)}), "inspect cwd") { exec(${ujson.write(pwd)}).exitCode }"""
       )
       assert(granted.success, granted.error.toString)
-    }
 
   test("REPL: a rejected command inside a granted scope still throws at runtime"):
     val echoPattern = ProcessFixture.pattern("echo")
-    withSession(commands = permits("echo")) { (env, s) =>
+    withSession(commands = permits("echo")): (env, s) =>
       env.decisions = List(Decision.AllowOnce)
       val r = s.run(
         s"""requestExec(Set(${ujson.write(echoPattern)})) { exec("rm", List("-rf", "/tmp/none")) }"""
       )
       assert(!r.success)
       assert((r.output + r.error.getOrElse("")).contains("no permitted pattern"), r.toString)
-    }
 
   test("REPL: network host is enforced and requestNetwork opens a scope"):
-    withSession(hosts = Nil) { (env, s) =>
+    withSession(hosts = Nil): (env, s) =>
       val denied = s.run(s"""httpGet("${url("/ok")}")""")
       assert(!denied.success)
       assert((denied.output + denied.error.getOrElse("")).contains("requestNetwork"), denied.toString)
@@ -741,10 +740,9 @@ class PermissionSuite extends munit.FunSuite:
       val ok = s.run(s"""requestNetwork(Set("$host"), "fetch") { httpGet("${url("/ok")}") }""")
       assert(ok.success, ok.error.toString)
       assert(ok.output.contains("hello"), ok.output)
-    }
 
   test("REPL: a server cannot launder a classified request header through its response"):
-    withSession(hosts = List(host)) { (env, s) =>
+    withSession(hosts = List(host)): (env, s) =>
       env.clearOutput()
       val result = s.run(
         s"""println(httpGet("${url("/header")}", Map.empty, Map("X-Token" -> classify("REFLECTED-SECRET"))))"""
@@ -754,19 +752,16 @@ class PermissionSuite extends munit.FunSuite:
       assert(!result.render.contains("REFLECTED-SECRET"), result.render)
       assert(!env.agentOut.toString.contains("REFLECTED-SECRET"), env.agentOut.toString)
       assert(env.userOut.toString.contains("REFLECTED-SECRET"), env.userOut.toString)
-    }
 
   test("REPL: exec capability cannot leak out of requestExec"):
     val echoPattern = ProcessFixture.pattern("echo")
-    withSession(commands = permits("echo")) { (_, s) =>
+    withSession(commands = permits("echo")): (_, s) =>
       val r = s.run(s"""val leaked = requestExec(Set(${ujson.write(echoPattern)})) { summon[Exec] }""")
       assert(!r.success)
       assert((r.output + r.error.getOrElse("")).toLowerCase.contains("leak"), r.toString)
-    }
 
   test("REPL: network capability cannot leak out of requestNetwork"):
-    withSession(hosts = Nil) { (_, s) =>
+    withSession(hosts = Nil): (_, s) =>
       val r = s.run("""val leaked = requestNetwork(Set("example.com")) { summon[Network] }""")
       assert(!r.success)
       assert((r.output + r.error.getOrElse("")).toLowerCase.contains("leak"), r.toString)
-    }

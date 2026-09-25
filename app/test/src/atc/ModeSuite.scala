@@ -245,9 +245,9 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     val cfg = upickle.default.read[atc.config.Config]("""{ "mode": "readonly" }""")
     assertEquals(cfg.mode, Some("readonly"))
     assertEquals(cfg.mode.map(Mode.parse), Some(Mode.ReadOnly))
-    atc.config.Config.validate(cfg) // accepted
+    atc.config.ConfigValidation.validate(cfg) // accepted
     val bad = upickle.default.read[atc.config.Config]("""{ "mode": "sideways" }""")
-    val e = intercept[IllegalArgumentException](atc.config.Config.validate(bad))
+    val e = intercept[IllegalArgumentException](atc.config.ConfigValidation.validate(bad))
     assert(e.getMessage.nn.contains("sideways"), e.getMessage)
 
   test("--mode selects the sandbox mode on the command line"):

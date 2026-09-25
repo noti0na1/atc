@@ -1,7 +1,7 @@
 package atc.ui
 
 import org.jline.terminal.Terminal
-import org.jline.utils.InfoCmp
+import org.jline.utils.{InfoCmp, WCWidth}
 
 import Ansi.{ClearLine, Dim, Reset}
 
@@ -69,20 +69,20 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   def writeGuttered(text: String, gutter: String): Unit =
     if !text.contains('\n') then
       if atLineStart && text.nonEmpty then write(gutter + text) else write(text)
-      return
-    val parts = text.split("\n", -1)
-    val rendered = StringBuilder()
-    var lineStart = atLineStart
-    var i = 0
-    while i < parts.length do
-      val seg = parts(i)
-      val last = i == parts.length - 1
-      if lineStart && (seg.nonEmpty || (!last && !gutter.isBlank)) then rendered.append(gutter)
-      rendered.append(seg)
-      if !last then rendered.append('\n')
-      lineStart = !last
-      i += 1
-    write(rendered.toString)
+    else
+      val parts = text.split("\n", -1)
+      val rendered = StringBuilder()
+      var lineStart = atLineStart
+      var i = 0
+      while i < parts.length do
+        val seg = parts(i)
+        val last = i == parts.length - 1
+        if lineStart && (seg.nonEmpty || (!last && !gutter.isBlank)) then rendered.append(gutter)
+        rendered.append(seg)
+        if !last then rendered.append('\n')
+        lineStart = !last
+        i += 1
+      write(rendered.toString)
 
   def gutter(code: Int): String = Indent + styled(g.bar, code) + " "
   /** Visible width of `gutter`: the indent plus the bar and its space. */
@@ -95,13 +95,12 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   /** Cut a plain line so it fits on one terminal row (region lines must not wrap). */
   def fit(line: String, used: Int): String =
     val room = width - used - 1
-    val ell = EllipsisWidth
     if room <= 0 then ""
     else if Screen.displayWidth(line) <= room then line
-    else if room <= ell then g.ellipsis.take(room)
+    else if room <= EllipsisWidth then g.ellipsis.take(room)
     else
       // Whole code points until the width budget (minus the ellipsis) is spent.
-      val budget = room - ell
+      val budget = room - EllipsisWidth
       val sb = StringBuilder()
       var w = 0
       var i = 0
@@ -124,14 +123,14 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
     /** The rows this region owns, and what is on them. */
     private var previousLines = List.empty[String]
     def redraw(lines: List[String], force: Boolean = false): Unit =
-      if !force && lines == previousLines then return
-      if previousLines.isEmpty then { ensureNewline(); tailBefore = tail }
-      write(Screen.replaceRows(previousLines, lines, force))
-      tail = lines.lastOption match
-        case Some("") => "\n\n"
-        case Some(last) => last.takeRight(1) + "\n"
-        case None => tailBefore
-      previousLines = lines
+      if force || lines != previousLines then
+        if previousLines.isEmpty then { ensureNewline(); tailBefore = tail }
+        write(Screen.replaceRows(previousLines, lines, force))
+        tail = lines.lastOption match
+          case Some("") => "\n\n"
+          case Some(last) => last.takeRight(1) + "\n"
+          case None => tailBefore
+        previousLines = lines
     def clear(): Unit = redraw(Nil)
     /** Keep what is drawn as ordinary output. */
     def freeze(): Unit = previousLines = Nil
@@ -143,7 +142,6 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   /** An animated "the agent is working" line (`prefix ⠋ text… 12 s`) that
     * lives on the current (empty) line until something else is written. */
   private final class Spinner(prefix: String, text: String) extends Thread("atc-spinner"):
-    setDaemon(true)
     @volatile var running = true
     private val started = System.nanoTime()
     override def run(): Unit =
@@ -167,6 +165,7 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
 
   def spin(prefix: String, text: String): Unit =
     val s = Spinner(prefix, text)
+    s.setDaemon(true)
     spinner = Some(s)
     s.start()
 
@@ -208,7 +207,7 @@ object Screen:
     * controls 0. `String.length` counts UTF-16 units and undercounts all of these,
     * which would let "one row" lines wrap and corrupt the live regions. */
   private[ui] def cellWidth(cp: Int, col: Int): Int =
-    if cp == '\t' then 8 - (col % 8) else math.max(0, org.jline.utils.WCWidth.wcwidth(cp))
+    if cp == '\t' then 8 - (col % 8) else math.max(0, WCWidth.wcwidth(cp))
 
   /** Display width in terminal cells of `s` starting at column 0; SGR sequences take none. */
   def displayWidth(s: String): Int =

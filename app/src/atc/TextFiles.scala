@@ -1,5 +1,7 @@
 package atc
 
+import scala.collection.mutable
+
 /** Small, platform-independent text-file conventions used at file-format
   * boundaries. Line splitting accepts LF, CRLF, and bare CR; rewriting uses
   * the first ending found so mixed files have a stable convention. */
@@ -14,7 +16,7 @@ private[atc] object TextFiles:
   def stripBom(text: String): String = text.substring(bomLength(text))
 
   /** One line ending and its position in the containing string. */
-  case class LineEnding(index: Int, text: String)
+  final case class LineEnding(index: Int, text: String)
 
   def firstLineEnding(text: String): Option[LineEnding] =
     text.indices.iterator.flatMap(lineEndingAt(text, _)).nextOption()
@@ -27,13 +29,14 @@ private[atc] object TextFiles:
 
   /** Lines plus enough source formatting to join them again. A mixed-ending
     * input is normalized to its first ending when joined. */
-  case class LineSplit(lines: List[String], lineEnding: String, trailingLineEnding: Boolean):
-    def join: String = joinLines(lines, lineEnding, trailingLineEnding)
+  final case class LineSplit(lines: List[String], lineEnding: String, trailingLineEnding: Boolean):
+    def join: String =
+      if lines.isEmpty then "" else lines.mkString(lineEnding) + (if trailingLineEnding then lineEnding else "")
 
   def splitLines(text: String): LineSplit =
     if text.isEmpty then LineSplit(Nil, DefaultLineEnding, trailingLineEnding = true)
     else
-      val lines = collection.mutable.ListBuffer[String]()
+      val lines = mutable.ListBuffer[String]()
       var firstEnding: Option[String] = None
       var start = 0
       var index = 0
@@ -48,10 +51,6 @@ private[atc] object TextFiles:
       val trailing = start == text.length
       if !trailing then lines += text.substring(start)
       LineSplit(lines.toList, firstEnding.getOrElse(DefaultLineEnding), trailing)
-
-  def joinLines(lines: List[String], lineEnding: String, trailingLineEnding: Boolean): String =
-    if lines.isEmpty then ""
-    else lines.mkString(lineEnding) + (if trailingLineEnding then lineEnding else "")
 
   /** Append one logical line, preserving the existing text and its first line
     * ending. A missing final ending is supplied; an existing one is replaced
