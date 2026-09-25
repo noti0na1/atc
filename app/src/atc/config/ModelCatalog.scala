@@ -130,12 +130,6 @@ final class ModelCatalog(
             case many => throw ambiguous(reference, many)
     }
 
-  /** Check `reference` without fetching anything: it must name a configured
-    * model unless a provider's list could hold it. */
-  def check(reference: String): Unit =
-    if reference.trim.isEmpty then throw IllegalArgumentException("No model given")
-    if findConfigured(reference).isEmpty && discoverable.isEmpty then throw unknown(reference)
-
   private def findConfigured(reference: String): Option[ModelSpec] =
     val wanted = lower(reference.trim)
     configured.find(m => lower(m.ref) == wanted).orElse {

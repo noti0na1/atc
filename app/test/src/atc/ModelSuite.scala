@@ -191,6 +191,36 @@ class ModelSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
 
+  test("a config model that names no model is ignored with a warning naming its file; -m is not"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-models").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(global, """{ "providers": { "p": { "api": "echo", "models": { "a": {} } } } }""")
+    val project = dir.resolve("project").nn
+    java.nio.file.Files.createDirectories(project.resolve(".atc"))
+    java.nio.file.Files.writeString(
+      Config.projectPath(project),
+      """{ "model": "typo", "classifiedModel": "p/a" }"""
+    )
+    val configuration = Config.load(project, None, global)
+    val models = Models(Cli.Args(cwd = project), configuration)
+    val warned = List.newBuilder[String]
+    assertEquals(models.configured("model", configuration.settings.model, warned += _), None)
+    assertEquals(
+      models.configured("classifiedModel", configuration.settings.classifiedModel, warned += _).map(_.ref),
+      Some("p/a")
+    )
+    assertEquals(models.configured("model", None, warned += _), None)
+    val warnings = warned.result()
+    assertEquals(warnings.size, 1, warnings)
+    assert(
+      warnings.head.startsWith(s"Ignoring model in ${App.pretty(Config.projectPath(project))}: Unknown model 'typo'"),
+      warnings.head
+    )
+    assertEquals(models.initial(_ => ()).ref, "p/a", "the only model stands in")
+    intercept[IllegalArgumentException](Models(Cli.Args(cwd = project, model = Some("typo")), configuration).initial(
+      _ => ()
+    ))
+
   // ── Anthropic prompt caching ────────────────────────────────────
 
   test("the history cache breakpoint is the last user-role message"):

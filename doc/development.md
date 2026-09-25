@@ -747,8 +747,10 @@ banner, and `models` waits for it. Lookups never wait: they use this session's l
 it has arrived, else the one `ModelListStore` kept (`~/.atc/model-lists.json`, reused only
 for the same provider name, api and url), else take `provider/model-id` as given. A model
 taken as given keeps its unknown context window until a later session finds it in the
-stored list. Configuration validation never fetches: `ModelCatalog.check` accepts any name
-a list could hold. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
+stored list. Configuration validation does not check `model` or `classifiedModel`. At the start,
+`Models.configured` resolves them, and one that names no model is ignored with a warning
+that names its file: the session falls back to the last model chosen or the first one, and
+sends classified data to no model. A `-m` that names no model stops the start. A failed fetch is not reported (only logged with `ATC_DEBUG`) and leaves the stored list in use. Listed models are
 always labelled by their full reference, so fetching a list never changes the labels of
 configured models. `ChatModel.effort` is mutable per client and read at request time;
 `Models` caches one client per reference, so an effort chosen with `/effort` survives

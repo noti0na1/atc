@@ -26,8 +26,13 @@ final class App(args: Cli.Args, val tui: Tui):
   val config: Config = configuration.settings
 
   val models: Models = Models(args, configuration)
-  private val initialModel: ChatModel = models.initial
-  private val initialClassified: Option[ChatModel] = config.classifiedModel.map(models.client)
+  private val initialModel: ChatModel = models.initial(tui.warn)
+  private val initialClassified: Option[ChatModel] = models.configured(
+    "classifiedModel",
+    config.classifiedModel,
+    message =>
+      tui.warn(s"$message. Classified data is not sent to any model until /classifiedmodel chooses one.")
+  )
 
   val sandbox: SandboxRepl = SandboxRepl(config, policy, host, tui)
 

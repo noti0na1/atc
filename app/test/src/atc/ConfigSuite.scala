@@ -760,10 +760,10 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(catalog.labels, List("a"))
     intercept[IllegalArgumentException](catalog.find("anything"))
 
-  test("validation accepts a model a provider may list without fetching the list"):
+  test("validation leaves model names to the start, which warns about one that names no model"):
     Config.validate(listing.copy(model = Some("open/gpt-x"), classifiedModel = Some("gpt-y")))
     val noListing = listing.copy(providers = listing.providers - "open")
-    intercept[IllegalArgumentException](Config.validate(noListing.copy(model = Some("gpt-y"))))
+    Config.validate(noListing.copy(model = Some("gpt-y"), classifiedModel = Some("typo")))
 
   test("the top-level webSearch applies to every model that does not set its own"):
     val c = upickle.default.read[Config](

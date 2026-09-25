@@ -509,8 +509,9 @@ object Config:
       catch case e: IllegalArgumentException => invalid(e.getMessage.nn)
     }
     config.providers.foreach(validateProvider)
-    // Fail here rather than at the first request: a typo in `model` is a
-    // config error, and the catalog message lists what is configured.
+    // `model` and `classifiedModel` are not checked here: a model a provider
+    // lists may be named before the list is fetched, and the start warns
+    // about a name that resolves to nothing instead of refusing to run.
     val catalog = ModelCatalog.from(config)
     val duplicateRefs =
       catalog.configured.groupBy(_.ref.toLowerCase(java.util.Locale.ROOT)).values.filter(_.size > 1).toList
@@ -518,8 +519,6 @@ object Config:
       duplicateRefs.isEmpty,
       s"model references must be unique ignoring case: ${duplicateRefs.flatten.map(_.ref).sorted.mkString(", ")}"
     )
-    config.model.foreach(catalog.check)
-    config.classifiedModel.foreach(catalog.check)
     config
 
   /** List settings extend rather than replace (a later layer can add a deny

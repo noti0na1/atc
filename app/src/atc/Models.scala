@@ -25,10 +25,25 @@ final class Models(args: Cli.Args, start: Configuration):
   def client(reference: String): ChatModel = client(catalog.find(reference))
 
   /** `-m`, else the config's `model`, else the model last chosen with `/model` (while
-    * it still resolves), else the first model. */
-  def initial: ChatModel =
-    val last = Models.last.flatMap(ref => scala.util.Try(catalog.find(ref)).toOption)
-    client(args.model.orElse(start.settings.model).map(catalog.find).orElse(last).getOrElse(catalog.default))
+    * it still resolves), else the first model. A `-m` that names no model stops
+    * the start; the config's `model` is passed over with a warning. */
+  def initial(warn: String => Unit): ChatModel =
+    def last = Models.last.flatMap(ref => scala.util.Try(catalog.find(ref)).toOption)
+    args.model.map(client).orElse(configured("model", start.settings.model, warn))
+      .getOrElse(client(last.getOrElse(catalog.default)))
+
+  /** The client for the model `reference`, the value of a config `setting`
+    * (`model`, `classifiedModel`). `None` when it is unset, or names no model:
+    * then `warn` says so. */
+  def configured(setting: String, reference: Option[String], warn: String => Unit): Option[ChatModel] =
+    reference.flatMap { ref =>
+      try Some(client(ref))
+      catch
+        case e: IllegalArgumentException =>
+          val file = start.layers.findLast(_.defines(setting)).flatMap(_.path).fold("the config")(App.pretty)
+          warn(s"Ignoring $setting in $file: ${e.getMessage}")
+          None
+    }
 
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   def describe(m: ChatModel): String = Models.describe(m, catalog.find(m.ref))
