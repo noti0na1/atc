@@ -194,7 +194,7 @@ final class Agent(
         throw IllegalStateException(
           s"the transcript to summarize (about ${Format.count(needed)} tokens) exceeds the ${current.alias} " +
             s"input allowance (${Format.count(allowance)}); run /compact with a model that has a larger context " +
-            "window, or /clear"
+            "window, or start over with /new"
         )
     val retained = retainedContext
     ui.status("Compacting context…")

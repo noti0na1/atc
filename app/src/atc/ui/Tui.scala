@@ -94,6 +94,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def fileChanged(change: FileChange): Unit = screen.synchronized(tool.fileChanged(change))
 
+  /** Clear the window and its scrollback (`/new`): what follows starts at the top,
+    * above a footer drawn again. A plain terminal has nothing to clear. */
+  def clearScreen(): Unit = if !plain then
+    frame:
+      screen.writeStyle(s"${Ansi.Esc}[H${Ansi.Esc}[2J${Ansi.Esc}[3J")
+      screen.tail = "\n\n"
+      statusLine.redraw()
+
   def clearOutputHistory(): Unit = screen.synchronized(tool.history.clear())
 
   /** `/output`: list the retained results, or show one from a line on, 200 lines at a time. */

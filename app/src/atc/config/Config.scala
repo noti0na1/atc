@@ -79,7 +79,7 @@ final case class ProviderConfig(
   /** Extra HTTP headers sent with every request to this provider. A value is a
     * literal, a `${VAR}` resolved like [[key]] (a header whose variable is unset
     * is not sent), or `${ATC_SESSION}`, a random id of the current
-    * conversation (renewed by `/new` and `/clear`), which gateways such as
+    * conversation (renewed by `/new`), which gateways such as
     * OpenCode use for routing and prompt caching. */
   headers: Map[String, String] = Map.empty,
   /** The provider's models, by alias. Empty: the models the provider lists

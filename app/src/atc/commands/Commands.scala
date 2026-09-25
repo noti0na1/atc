@@ -63,7 +63,6 @@ final class Commands(app: App):
     case Cmd.Run => sessionCommands.run(arg)
     case Cmd.New => sessionCommands.newSession()
     case Cmd.Reset => sessionCommands.reset()
-    case Cmd.Clear => sessionCommands.clear()
     case Cmd.Compact => sessionCommands.compact(arg)
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.

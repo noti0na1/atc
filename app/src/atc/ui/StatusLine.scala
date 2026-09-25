@@ -103,6 +103,13 @@ private[ui] final class StatusLine(
           StatusLine.draw(terminal, status, text)
           lastFooter = text
 
+  /** Draw the footer again from nothing, after the screen was cleared under it. */
+  def redraw(): Unit =
+    footer.foreach(_.reset())
+    footerSize = (0, 0)
+    lastFooter = ""
+    refresh()
+
   private def label: String =
     val elapsed = if busy() then s" ${Format.duration((System.nanoTime() - turnStarted) / 1e9)}" else ""
     val queued = queuedInputs()

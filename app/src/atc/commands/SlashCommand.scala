@@ -20,7 +20,6 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Run extends SlashCommand("/run [code]", "run Scala; omit code for multiline input", "/scala")
   case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")
   case Reset extends SlashCommand("/reset", "restart the REPL; keep the conversation")
-  case Clear extends SlashCommand("/clear", "clear the conversation; keep the REPL")
   case Compact extends SlashCommand("/compact [focus]", "summarize conversation context; keep the REPL")
   case Todos extends SlashCommand("/todos", "show tasks and progress", "/todo")
   case Ps extends SlashCommand("/ps", "list background processes", "/processes")

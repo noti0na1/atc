@@ -153,7 +153,7 @@ private[atc] object Providers:
   /** The current conversation id. */
   def conversation: String = conversationId
 
-  /** Start a new conversation id (`/new`, `/clear`). */
+  /** Start a new conversation id (`/new`, or a resumed session). */
   def newConversation(): Unit = conversationId = newId()
 
   /** The headers of one request to `spec`'s provider: the user agent, then the

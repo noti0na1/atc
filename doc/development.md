@@ -413,9 +413,10 @@ separate character limit. User-visible prints also enter the REPL capture; the T
 a bounded prefix to subtract already-displayed output from result panels. Preserve leading
 whitespace in capture because subtraction uses exact text.
 
-`/clear` resets the conversation, queued notes and usage accounting. `/reset` and `/mode`
-reset the REPL and its spawned processes, `/mode` with the newly selected capabilities.
-`/new` resets all of that plus task notes, TODOs, retained output and session grants.
+`/reset` and `/mode` reset the REPL and its spawned processes, `/mode` with the newly
+selected capabilities. `/new` resets that and the conversation, queued notes, usage
+accounting, task notes, TODOs, retained output and session grants, and clears the window
+and its scrollback; the footer is drawn again from nothing.
 REPL restarts queue a notice for the model's next turn. `/run` queues the user's code and
 its result because definitions are shared with the agent. Closed sessions reject further
 runs. Input predictions are invalidated after state changes and before shutdown.
@@ -651,8 +652,8 @@ models of a ChatGPT plan, signed in through the browser; see
 through the user's signed-in Claude Code CLI; same section) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
 variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
 then the environment. `headers` are extra HTTP headers for every request; a value may be a
-`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
-`/clear`) for gateways that route by session, such as OpenCode
+`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new`) for
+gateways that route by session, such as OpenCode
 (`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
 `headers` sets `User-Agent`.
 
@@ -949,7 +950,7 @@ complete, nonempty summaries smaller than the older prefix they replace; the res
 can say which. Pending notes, user request tracking, task state and REPL definitions are
 unchanged; usage is recorded separately. Before the summary request is sent, the transcript
 is estimated against the model's input allowance, using the same output reservation as
-ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
+ordinary requests. If it cannot fit, the error suggests a larger model or `/new`.
 
 `autoCompact` in `Agent`'s turn loop runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
@@ -1216,12 +1217,12 @@ complete exchanges verbatim, as many as fit within `compactKeepRatio` of the con
 rest, keeping tool calls with their exchange. When everything fits there is nothing to
 compact and no request is made; a summary that is not smaller is discarded; a transcript
 larger than the model's input allowance is refused with a suggestion to use a larger model
-or `/clear`. Automatic compaction runs immediately before a request when its estimated size
+or `/new`. Automatic compaction runs immediately before a request when its estimated size
 reaches `autoCompactThreshold` times the model's `contextWindow` (default `0.8`; `0`
 disables), before the first request of a turn and between tool rounds, never after a final
 answer, and never without a configured window. A failed or not-smaller attempt is reported
 and not retried until the conversation has grown by a tenth of the window; a new conversation
-(`/new`, `/clear`) lifts that mark. Compaction is lossy; essential details belong in task notes or files.
+(`/new`) lifts that mark. Compaction is lossy; essential details belong in task notes or files.
 
 ## Testing and conventions
 

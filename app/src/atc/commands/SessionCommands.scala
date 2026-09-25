@@ -39,19 +39,15 @@ final class SessionCommands(app: App):
       predictor.invalidate()
     ok
 
-  /** `/new`. */
+  /** `/new`: also clears the window, so the new session starts on an empty screen. */
   def newSession(): Unit =
-    if startOver() then tui.success("new session: conversation, task notes and session grants cleared")
+    if startOver() then
+      tui.clearScreen()
+      tui.success("new session: conversation, task notes and session grants cleared")
 
   /** `/reset`. */
   def reset(): Unit =
     if restartRepl("you asked for /reset") then tui.success("REPL cleared; starts with the next tool call")
-
-  /** `/clear`. */
-  def clear(): Unit =
-    agent.clear()
-    predictor.invalidate()
-    tui.success("conversation cleared")
 
   /** `/compact`. */
   def compact(instructions: String): Unit =
