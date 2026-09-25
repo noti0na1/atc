@@ -245,6 +245,7 @@ class ChatGPTSuite extends munit.FunSuite:
         assertEquals(body("instructions").str, "be brief")
         assertEquals(body("prompt_cache_key").str, Providers.conversation)
         assert(!body.contains("max_output_tokens") && !body.contains("temperature"), body.keys.toString)
+        assertEquals(body("reasoning")("summary").str, "auto", "a summary is asked for unless configured")
         assertEquals(model.maxOutputTokens, Some(1000), "the configured limit still reserves room")
         assertEquals(auth(file).refresh, "refresh-2")
       finally model.close()
@@ -275,6 +276,7 @@ class ChatGPTSuite extends munit.FunSuite:
         val body = requests().single.json.obj
         assertEquals(body("stream"), ujson.Bool(true))
         assert(body("instructions").str.nonEmpty)
+        assert(!body.get("reasoning").exists(_.obj.contains("summary")), "a call that does not think asks for none")
       finally model.close()
 
   test("without a sign-in a request fails before reaching the backend and says how to sign in"):

@@ -685,7 +685,7 @@ with ChatGPT*, which replaces the saved sign-in.
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
 to `max` for OpenAI). `/effort [level]` switches the agent model's effort, and `default`
-sends none. The choice is saved as the top-level `effort` of the working directory's project
+sends no effort. The choice is saved as the top-level `effort` of the working directory's project
 config (when it has one, like `/model`'s `model`), which replaces the starting model's
 `reasoning` in later sessions; an effort that model does not take is ignored with a
 warning. `/model` starts the new model at its configured effort and removes `effort`.
@@ -821,7 +821,9 @@ and rejects `max_output_tokens` and `temperature`. Its closing `response.complet
 an empty `output`, so `OpenAIResponsesModel.Accumulator` keeps the items of the
 `response.output_item.done` events and uses them when the final response has none. The adapter streams one-shot calls too,
 supplies instructions when a call has none, sends neither setting and sets
-`prompt_cache_key` to the conversation id. Its model list is `GET /models?client_version=`,
+`prompt_cache_key` to the conversation id. The backend never returns the reasoning itself,
+so a model without `reasoningSummary` asks for `auto` summaries, as Codex does, and shows
+them as thinking. Its model list is `GET /models?client_version=`,
 filtered to the models marked `list`, with their context windows and efforts. The backend
 lists the models that Codex release may use, so `ChatGPTModel.ClientVersion` follows Codex
 releases. The preset sends `originator: atc` and `session-id: ${ATC_SESSION}`. `ChatGPTSuite`

@@ -23,7 +23,7 @@ final case class ModelConfig(
   webSearch: Option[Boolean] = None,
   /** Reasoning effort: OpenAI `none|minimal|low|medium|high|xhigh|max`,
     * Anthropic `low|medium|high|xhigh|max` (`output_config.effort`). The effort
-    * a session starts with; `/effort` switches it. */
+    * a session starts with; `/effort` switches it. Unset: no effort is sent. */
   reasoning: Option[String] = None,
   /** The efforts the model accepts, offered by `/effort`. Unset: every effort
     * its provider's api knows. `[]`: the model takes no effort setting. */

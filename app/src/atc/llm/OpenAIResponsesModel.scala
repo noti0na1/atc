@@ -19,11 +19,14 @@ import scala.util.Try
 class OpenAIResponsesModel(spec: ModelSpec) extends OpenAIShapedModel(spec):
   val providerKey: String = "openai-responses"
 
-  /** The `reasoning` block for a call: the effort, and the configured summary
-    * when the call thinks. */
+  /** The reasoning summary asked for when a model configures none. */
+  protected def defaultReasoningSummary: Option[String] = None
+
+  /** The `reasoning` block for a call: the effort, and the summary when the
+    * call thinks. */
   private def reasoning(thinking: Boolean): Option[Reasoning] =
     val effort = requestEffort(thinking)
-    val summary = settings.reasoningSummary.filter(_ => thinking)
+    val summary = settings.reasoningSummary.orElse(defaultReasoningSummary).filter(_ => thinking)
     Option.when(effort.isDefined || summary.isDefined):
       val r = Reasoning.builder()
       effort.foreach(e => r.effort(ReasoningEffort.of(e)))

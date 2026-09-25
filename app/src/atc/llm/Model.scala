@@ -133,12 +133,12 @@ trait ChatModel:
   /** Configured maximum output tokens, when the adapter sends one. Context
     * fitting reserves at least this much room for the answer. */
   def maxOutputTokens: Option[Int] = None
-  /** The efforts [[effort]] may be set to; empty when the model takes none. */
+  /** The efforts [[effort]] may be set to; empty when the model takes no effort parameter. */
   def efforts: List[String] = Nil
-  /** The effort the model's config sets (`reasoning`); `None` sends none. */
+  /** The effort the model's config sets (`reasoning`); `None` sends no effort. */
   def defaultEffort: Option[String] = None
   /** The reasoning effort later requests ask for, one of [[efforts]]; `None`
-    * sends none. Starts as [[defaultEffort]]; `/effort` switches it. */
+    * sends no effort. Starts as [[defaultEffort]]; `/effort` switches it. */
   @volatile var effort: Option[String] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;

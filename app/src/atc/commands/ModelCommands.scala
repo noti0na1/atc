@@ -99,7 +99,7 @@ final class ModelCommands(app: App):
         case Some(None) => disable()
         case None => tui.info(s"$what: $current")
 
-  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
+  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends no effort. */
   def effortChoices: List[String] =
     if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ ModelConfig.DefaultEffort
 

@@ -26,6 +26,9 @@ final class ChatGPTModel(spec: ModelSpec, auth: ChatGPTAuth) extends OpenAIRespo
       response.close()
       chain.proceed(authorized(auth.renewed(tokens)))
 
+  /** Codex asks for summaries, the only reasoning text the backend shows. */
+  override protected def defaultReasoningSummary: Option[String] = Some("auto")
+
   override protected def limits(b: ResponseCreateParams.Builder): Unit =
     b.promptCacheKey(Providers.conversation)
 
