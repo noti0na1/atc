@@ -62,8 +62,9 @@ object ModelConfig:
   * protocol: `anthropic`, `openai` (Chat Completions; also any
   * OpenAI-compatible server such as Ollama, vLLM, LM Studio via `url`),
   * `openai-responses` (the Responses API), `chatgpt` (the models of a ChatGPT
-  * plan, signed in through the browser instead of a key), or `echo` (the
-  * key-less test model). */
+  * plan, signed in through the browser instead of a key), `claude-code` (the
+  * models of a Claude plan, through the user's signed-in Claude Code CLI), or
+  * `echo` (the key-less test model). */
 final case class ProviderConfig(
   /** Optional only so a later layer can add models to a provider an earlier
     * one defined; every provider needs an `api` once the layers are combined. */

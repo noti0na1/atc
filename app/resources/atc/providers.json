@@ -6,6 +6,7 @@
   { "name": "chatgpt", "label": "ChatGPT (sign in with a ChatGPT plan)", "api": "chatgpt",
     "url": "https://chatgpt.com/backend-api/codex",
     "headers": { "originator": "atc", "session-id": "${ATC_SESSION}" } },
+  { "name": "claude-code", "label": "Claude (through your Claude Code)", "api": "claude-code" },
   { "name": "gemini", "label": "Google Gemini", "api": "openai",
     "url": "https://generativelanguage.googleapis.com/v1beta/openai",
     "key": "${GEMINI_API_KEY}", "keyUrl": "https://aistudio.google.com/apikey" },

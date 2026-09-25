@@ -10,8 +10,18 @@ import java.util.Locale
 object ConfigValidation:
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
   private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
-  private val ProviderApis =
-    Set("anthropic", "claude", "openai-responses", "responses", "openai", "openai-chat", "chat", "chatgpt", "echo")
+  private val ProviderApis = Set(
+    "anthropic",
+    "claude",
+    "openai-responses",
+    "responses",
+    "openai",
+    "openai-chat",
+    "chat",
+    "chatgpt",
+    "claude-code",
+    "echo",
+  )
   private val AnthropicWebSearchVersions = Set("20250305", "20260209")
 
   /** Reject settings that would otherwise fail much later, in output slicing,
@@ -77,7 +87,7 @@ object ConfigValidation:
     // the fully merged provider must define it.
     requireValid(
       provider.api.exists(_.trim.nonEmpty),
-      s"provider '$name' has no api (expected anthropic | openai | openai-responses | chatgpt | echo)"
+      s"provider '$name' has no api (expected anthropic | openai | openai-responses | chatgpt | claude-code | echo)"
     )
     provider.api.foreach(api => validateChoice(s"providers.$name.api", api, ProviderApis))
     provider.models.foreach((alias, model) => validateModel(name, alias, model))

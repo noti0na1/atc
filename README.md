@@ -132,7 +132,8 @@ assets of a newer release.
 **1. Start it.** Change to the project you want to work on (`cd ~/my-project`) and run
 `atc`. The first start asks you to choose a provider, paste its API key and choose one of
 its models; the key is saved in `~/.atc/keys.properties`, readable only by you. With a
-ChatGPT plan you can sign in through the browser instead of giving a key. To set up
+ChatGPT plan you can sign in through the browser instead of giving a key, and with a
+Claude plan ATC can use your signed-in [Claude Code](https://claude.com/claude-code) CLI. To set up
 providers by hand instead, choose *Configure providers myself*: ATC writes
 `~/.atc/config.json` and exits. On Windows, `~/.atc` is `%USERPROFILE%\.atc`.
 
@@ -416,7 +417,8 @@ and their models on or off, or adds a provider. `/model` switches the model and 
 its reasoning effort, both remembered in the project config; `webSearch` turns on the
 provider's web search where it has one. **Keys** never go in a config: `"key": "${DEEPSEEK_API_KEY}"` names a variable set
 in `.atc/keys.properties` or in the environment. Set `classifiedModel` only for a model that
-runs in an isolated environment with no outward connection. Every setting is described in
+runs in an isolated environment with no outward connection; without one, the default,
+classified data goes to no model. `/classifiedmodel` chooses one, or `none`. Every setting is described in
 [doc/development.md](doc/development.md#configuration-reference).
 
 **Files, commands and hosts.** A file rule has a gitignore-style `path` pattern (a bare

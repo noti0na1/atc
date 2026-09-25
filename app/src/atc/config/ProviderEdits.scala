@@ -27,6 +27,13 @@ object ProviderEdits:
     val named = configured.map((alias, m) => m.name.getOrElse(alias)).toSet
     configured.map(Choice.Configured(_, _)) ++ listed.filterNot(s => named.contains(s.modelId)).map(Choice.Listed(_))
 
+  /** What a provider with entries offers, for the `/providers` row: how many of its
+    * choices (entries, and the `listed` models no entry names) are on. */
+  def offered(provider: ProviderConfig, listed: List[ModelSpec]): String =
+    val on = provider.models.count(_._2.enabled)
+    val all = choices(provider, listed).size
+    if on == all then s"$on model${if on == 1 then "" else "s"} on" else s"$on of $all models on"
+
   /** The edits that leave exactly `chosen` enabled: a configured entry is
     * switched, a listed model becomes an entry with what the list reported. */
   def shortlist(providerName: String, provider: ProviderConfig, choices: List[Choice], chosen: Set[Choice])

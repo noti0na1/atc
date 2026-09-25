@@ -1,7 +1,9 @@
 package atc.commands
 
 import atc.{App, Debug, FirstRun, Setup}
-import atc.config.{Config, ModelCatalog, ModelListStore, ObjectText, ProviderConfig, ProviderEdits, ProviderPreset}
+import atc.config.{
+  Config, ModelCatalog, ModelListStore, ModelSpec, ObjectText, ProviderConfig, ProviderEdits, ProviderPreset
+}
 import atc.llm.ChatModel
 import atc.platform.PlatformPath
 
@@ -26,14 +28,15 @@ final class ProvidersMenu(app: App, modelCommands: ModelCommands):
         val p = settings.providers(name)
         val offered =
           if p.models.isEmpty then "offers every model it lists"
-          else s"${p.models.count(_._2.enabled)} of ${p.models.size} models on"
+          else ProviderEdits.offered(p, endpoint(name, p).flatMap(ModelListStore.global.load).getOrElse(Nil))
         s"${name.padTo(width, ' ')}  ${if p.enabled then "on " else "off"}  $offered"
       val addable = ProviderPreset.all.filterNot(p => settings.providers.contains(p.name))
       val all = rows ++ Option.when(addable.nonEmpty)(ProvidersMenu.AddProvider)
-      tui.choose("Providers (Esc when done)", all) match
+      tui.choose("Providers", all :+ ProvidersMenu.Done) match
         case None =>
           if !tui.menusAvailable then all.foreach(r => tui.println("  " + r))
           open = false
+        case Some(ProvidersMenu.Done) => open = false
         case Some(ProvidersMenu.AddProvider) => add(addable)
         case Some(row) => actions(names(rows.indexOf(row)))
 
@@ -61,10 +64,7 @@ final class ProvidersMenu(app: App, modelCommands: ModelCommands):
     * models in use ticked; ticking none keeps offering everything it lists. */
   private def chooseModels(name: String, p: ProviderConfig): Unit =
     import ProviderEdits.Choice
-    val endpoint = ModelCatalog
-      .from(Config(providers = Map(name -> p.copy(models = Map.empty, enabled = true))), models.configuration.keys)
-      .discoverable.headOption
-    val listed = endpoint.fold(Nil): spec =>
+    val listed = endpoint(name, p).fold(Nil): spec =>
       tui.info(s"Fetching the models of $name...")
       try
         val fetched = ChatModel.listModels(spec)
@@ -99,6 +99,12 @@ final class ProvidersMenu(app: App, modelCommands: ModelCommands):
             val edits = ProviderEdits.shortlist(name, p, choices, chosen)
             if edits.isEmpty then tui.info("No change.")
             else applyEdits(edits, s"$name: ${chosen.size} model${if chosen.size == 1 then "" else "s"} on")
+
+  /** The provider as an endpoint whose models can be listed; `None` when its key is not bound. */
+  private def endpoint(name: String, p: ProviderConfig): Option[ModelSpec] =
+    ModelCatalog
+      .from(Config(providers = Map(name -> p.copy(models = Map.empty, enabled = true))), models.configuration.keys)
+      .discoverable.headOption
 
   private def add(addable: List[ProviderPreset]): Unit =
     tui.choose("Add a provider", addable.map(_.label)).flatMap(l => addable.find(_.label == l)).foreach: preset =>
@@ -135,3 +141,4 @@ final class ProvidersMenu(app: App, modelCommands: ModelCommands):
 
 object ProvidersMenu:
   private val AddProvider = "Add a provider"
+  private val Done = "Done"

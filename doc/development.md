@@ -635,7 +635,8 @@ The user-facing settings not covered by the README.
 **Providers.** `api` is `anthropic`, `openai-responses` (also DeepSeek and other services
 through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …), `chatgpt` (the
 models of a ChatGPT plan, signed in through the browser; see
-[Models and providers](#models-and-providers)) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
+[Models and providers](#models-and-providers)), `claude-code` (the models of a Claude plan,
+through the user's signed-in Claude Code CLI; same section) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
 variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
 then the environment. `headers` are extra HTTP headers for every request; a value may be a
 `${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
@@ -658,7 +659,7 @@ context window. Without `-m` or `model`, a session starts with the model last ch
 **First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:
 the user chooses one of the `atc/providers.json` presets, gives its key unless one is
 already bound (read by `Tui.askSecret`, masked and kept out of the prompt history) or signs
-in (`chatgpt`, see `FirstRun.signIn`), and
+in (`chatgpt`, see `FirstRun.signIn`; `claude-code` needs `claude auth login` beforehand), and
 chooses a model from the provider's list, which also checks the key. `Setup.load` then
 writes a global config naming only that provider, binds the key in
 `~/.atc/keys.properties` (`KeyBindings.bind`, owner-only, other lines kept), stores the
@@ -825,6 +826,40 @@ filtered to the models marked `list`, with their context windows and efforts. Th
 lists the models that Codex release may use, so `ChatGPTModel.ClientVersion` follows Codex
 releases. The preset sends `originator: atc` and `session-id: ${ATC_SESSION}`. `ChatGPTSuite`
 covers the flow against a local server.
+
+The `claude-code` api reaches the models of a Claude plan through the `claude` CLI the user
+installed and signed in to; ATC never reads its credentials. `ClaudeCli` starts `claude -p`
+in the stream-json protocol of the Claude Agent SDK, in an empty temporary directory, with
+everything that would act or load context outside ATC turned off: `--tools=` (no built-in
+tools; `WebSearch` alone when `webSearch` is on), `--setting-sources=` (no settings files,
+hooks, plugins or skills), `--strict-mcp-config`, `--disable-slash-commands`,
+`--no-session-persistence`, and `--permission-mode=dontAsk --permission-prompts=none` with
+only ATC's MCP server allowed. The environment disables CLAUDE.md files, auto memory,
+claude.ai connectors, auto-compaction (ATC compacts) and updates, and drops
+`ANTHROPIC_API_KEY`, which would replace the subscription. The system prompt goes in the
+`initialize` control request, since it exceeds Windows' command-line limit. The CLI asks the
+API to omit thinking text by default; the hidden `--thinking-display=summarized` flag brings
+back a summary, or the full text from models that give it (Haiku 4.5). The
+`showThinkingSummaries` setting does not do this for newer models. ATC's tools are
+an in-process MCP server (`"type": "sdk"`): the CLI sends JSON-RPC as `mcp_message` control
+requests and every one, notifications included, needs a response.
+
+The CLI runs its own agent loop, and `ClaudeCodeModel` keeps ATC's loop in charge. A
+response that calls tools ends at its `message_stop` and is returned as a completion; the
+CLI's `tools/call` requests, matched by `_meta.claudecode/toolUseId`, stay unanswered until
+the next `complete` brings the agent's results. The CLI may call the first tool before later
+`tool_use` blocks have streamed, and runs the calls one after another, so a result that
+arrives first waits for its call. A completion carries a `NativeTurn` marker, so the next
+request can tell whether its history extends what the session has seen: the results of the
+pending calls, or user messages after a finished answer. Any other history (compaction, a
+context cut, an interrupt, a model switch, a restored session), or a changed system prompt,
+tool list or effort, ends the process and starts one that gets the history as a transcript.
+A cancelled request stops its process. One-shot calls run in their own process without
+tools. The model list comes from the `initialize` answer, and each model's context
+window from `set_model` followed by `get_context_usage` (`rawMaxTokens`); none of these
+makes a model request. A configured model without `contextWindow` learns its window the
+same way when its first session starts. `ClaudeCodeSuite` covers the
+protocol against a scripted CLI.
 
 Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
 The adapter returns an `Incomplete` completion containing received answer text and usage,
