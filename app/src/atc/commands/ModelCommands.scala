@@ -14,34 +14,32 @@ import scala.util.Try
 final class ModelCommands(app: App):
   import app.{agent, models, tui}
 
-  /** One line per model: its selectable name, its friendly name (else `provider/model-id`,
-    * left out when that is the name already) and the role it plays now. */
-  private def row(spec: ModelSpec): String =
+  /** One line per model: its `provider/alias` name, its display name when it has one,
+    * and the role it plays now. `width` aligns the display names of a whole list. */
+  private def row(spec: ModelSpec, width: Int): String =
     val marks = List(
       Option.when(agent.model.ref == spec.ref)("agent"),
       Option.when(agent.classifiedModel.exists(_.ref == spec.ref))("classified"),
     ).flatten
     val role = if marks.isEmpty then "" else s"  [${marks.mkString(", ")}]"
-    val label = models.catalog.label(spec)
-    val detail = Models.detail(spec)
-    if detail == label then label + role else s"${label.padTo(labelWidth, ' ')}  $detail$role"
+    spec.displayName.fold(spec.ref)(n => s"${spec.ref.padTo(width, ' ')}  $n") + role
 
-  /** The name column's width: the configured models' names, as a listed name can be very long. */
-  private def labelWidth: Int =
-    models.catalog.configured.map(models.catalog.label(_).length).maxOption.getOrElse(0).max(24)
+  private def rows(all: List[ModelSpec]): List[String] =
+    val width = all.map(_.ref.length).maxOption.getOrElse(0)
+    all.map(row(_, width))
 
   /** `/models`. */
-  def show(): Unit = models.catalog.models.foreach(m => tui.println("  " + row(m)))
+  def show(): Unit = rows(models.catalog.models).foreach(r => tui.println("  " + r))
 
   /** Pick a model from the list, after the `none` row when there is one: `Some(None)`
     * when that was chosen. Without a menu (plain mode) the list is printed instead, so
     * the user can name one with `/model <ref>`. */
   private def pick(title: String, none: Option[String]): Option[Option[ModelSpec]] =
     val all = models.catalog.models
-    val rows = all.map(row)
-    tui.choose(title, none.toList ++ rows) match
+    val listed = rows(all)
+    tui.choose(title, none.toList ++ listed) match
       case Some(chosen) if none.contains(chosen) => Some(None)
-      case Some(chosen) => all.zip(rows).collectFirst { case (m, r) if r == chosen => Some(m) }
+      case Some(chosen) => all.zip(listed).collectFirst { case (m, r) if r == chosen => Some(m) }
       case None =>
         if !tui.menusAvailable then show()
         None

@@ -78,10 +78,6 @@ object Models:
     s"${model.ref} — ${spec.displayName.getOrElse(model.modelId)}" +
       (if model.webSearch then " (web search)" else "")
 
-  /** The detail column of `/models`: the friendly name, else `provider/model-id`. */
-  private[atc] def detail(spec: ModelSpec): String =
-    spec.displayName.getOrElse(s"${spec.provider}/${spec.modelId}")
-
   private def lastPath: Path = Config.globalDir.resolve("last-model").nn
 
   /** The model last chosen with `/model`, the default when nothing names one. */
