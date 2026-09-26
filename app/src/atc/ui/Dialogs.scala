@@ -20,11 +20,12 @@ private[ui] final class Dialogs(
 ):
   import screen.{Indent, g, plain, styled, width, write}
 
-  private val menus = Menus(screen, alerts)
+  private val menus = Menus(screen, alerts, status)
 
-  /** A single-choice menu: the index of the chosen label. `escape` names where Esc goes. */
-  def menuIndex(message: String, labels: List[String], escape: String = "cancel"): Option[Int] =
-    keys.withPaused(status.withHint(menus.listHint(escape))(menus.list(message, labels)))
+  /** A single-choice menu, its cursor on `initial` at first: the index of the chosen label.
+    * `escape` names where Esc goes. */
+  def menuIndex(message: String, labels: List[String], escape: String = "cancel", initial: Int = 0): Option[Int] =
+    keys.withPaused(menus.list(message, labels, escape, initial))
 
   /** A multi-choice menu with the `checked` options ticked at first: the ticked indices. */
   def checkboxIndices(
@@ -33,7 +34,7 @@ private[ui] final class Dialogs(
     checked: Set[Int] = Set.empty,
     escape: String = "cancel",
   ): Option[List[Int]] =
-    keys.withPaused(status.withHint(menus.checkboxHint(escape))(menus.checkbox(message, labels, checked)))
+    keys.withPaused(menus.checkbox(message, labels, checked, escape))
 
   private def menu(message: String, labels: List[String]): Option[String] =
     menuIndex(message, labels).flatMap(labels.lift)

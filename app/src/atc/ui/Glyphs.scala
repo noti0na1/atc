@@ -28,6 +28,12 @@ final case class Glyphs(
   dot: String,
   /** Table header/rule crossing. */
   junction: String,
+  /** A menu's cursor, its ticked and unticked boxes, and its rows out of view above and below. */
+  pointer: String,
+  ticked: String,
+  unticked: String,
+  above: String,
+  below: String,
   spinner: IndexedSeq[String]
 )
 object Glyphs:
@@ -49,6 +55,11 @@ object Glyphs:
     ellipsis = "…",
     dot = "·",
     junction = "┼",
+    pointer = "❯",
+    ticked = "◉",
+    unticked = "◯",
+    above = "▲",
+    below = "▼",
     spinner = IndexedSeq("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"),
   )
   val ascii: Glyphs = Glyphs(
@@ -69,5 +80,10 @@ object Glyphs:
     ellipsis = "...",
     dot = "-",
     junction = "+",
+    pointer = ">",
+    ticked = "[x]",
+    unticked = "[ ]",
+    above = "^",
+    below = "v",
     spinner = IndexedSeq("|", "/", "-", "\\"),
   )

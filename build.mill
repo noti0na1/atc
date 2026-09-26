@@ -53,7 +53,7 @@ object app extends AtcScalaModule:
   def mvnDeps = Seq(
     mvn"org.scala-lang::scala3-compiler:${Versions.scala}",
     mvn"org.scala-lang::scala3-repl:${Versions.scala}",
-    mvn"org.jline:jline-prompt:${Versions.jline}",
+    mvn"org.jline:jline-reader:${Versions.jline}",
     mvn"org.jline:jline-terminal-jni:${Versions.jline}",
     mvn"com.lihaoyi::upickle:${Versions.upickle}",
     mvn"com.openai:openai-java:${Versions.openai}",

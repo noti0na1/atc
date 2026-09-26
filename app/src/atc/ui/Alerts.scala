@@ -79,15 +79,12 @@ private[ui] final class Alerts(
     reporting = on
     terminal.trackFocus(on)
 
-  /** Run `body` with focus reports off (a jline-prompt menu, which does not parse them). */
-  def withoutFocusReports[T](body: => T): T =
+  /** Run `body` with focus reports on (a menu, which reads them), as they were after it. */
+  def withFocusReports[T](body: => T): T =
     val was = reporting
-    reportFocus(false)
+    reportFocus(true)
     try body
-    finally
-      if was then
-        focused = true // the user just answered the menu
-        reportFocus(true)
+    finally reportFocus(was)
 
   // ── the turn's text ───────────────────────────────────────────────
 

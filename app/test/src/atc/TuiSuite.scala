@@ -187,11 +187,6 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Format.contextUsage(199_000, Some(200_000)), "context 199k/200k (100%)")
     assertEquals(Format.contextUsage(45_200, None), "context ~45.2k")
 
-  test("uniqueIds keeps labels and disambiguates duplicates"):
-    assertEquals(Menus.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
-    assertEquals(Menus.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
-    assertEquals(Menus.uniqueIds(Nil), Nil)
-
   test("history is an owner-only regular file where POSIX permissions exist"):
     val dir = Files.createTempDirectory("atc-history").nn
     val history = dir.resolve("nested/history").nn

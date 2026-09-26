@@ -1081,7 +1081,7 @@ that track line boundaries, styles, width, live regions and the spinner; its mon
 TUI's lock), `StatusLine` (the footer and the window title), `ToolBlock` (one tool call's
 block, its live output, its summary and the `/output` history), `ThinkingView` (the
 reasoning window), `Dialogs` (what pop-ups show and read, through
-the jline-prompt `Menus`), `KeyReader` (the key thread during a turn), `PromptReader` (the
+`Menus` and `ListMenu`), `KeyReader` (the key thread during a turn), `PromptReader` (the
 JLine line reader and its bindings) and `Alerts` (notifications and focus tracking).
 `Format` holds the short number, duration and plural forms of status and summary lines.
 `Ansi` removes terminal controls from external text before display. Keep model-visible
@@ -1104,6 +1104,19 @@ refused change, a cancelled checkbox), returns to the menu one level up. Esc goe
 level everywhere, and the footer says so (`Esc back`); the agent's questions and permission
 requests say `Esc cancel`.
 
+Every menu is a `ListMenu`, drawn in a live region and read in raw mode; `MenuState` holds
+what it shows apart from the terminal, and `MenuKey` decodes keys with `KeyReader`'s escape
+parsing. A menu shows its title, then at most twelve rows, fewer when the screen is short, so
+the whole menu stays shorter than the screen; the window scrolls with the cursor and says how
+many rows are out of view above and below. A longer list is filtered by typing, every word
+matching, with the filter and the number of matches on a line of its own; Backspace edits it
+and Esc clears it before it leaves the menu. Ticks belong to items, so they survive a change
+of filter, the ticked items open first, and the title counts them. PgUp, PgDn, Home and End
+move by a page or to the ends. A menu opens on the value in use (`/model`, `/effort`,
+`/classifiedmodel`) or, in a `menuLoop`, on the row last chosen. When it ends, one line says
+what was chosen; leaving it leaves nothing. The footer shows its keys, or the menu's last row
+when there is no footer. Menus read focus reports, and a resize redraws them at the new size.
+
 While the main prompt holds a single word starting with `/`, `PromptReader` lists the matching
 `SlashCommand.table` rows in JLine's `post` area under the buffer, with an exact name
 preselected. It sets `post` in a `redisplay` override, leaves it to other users (completion
@@ -1124,7 +1137,7 @@ terminal supports a status line. Idle state shows a short model, mode and direct
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
 `Screen` measures the terminal once per resize, since the views ask for the width for every
-line. JLine's line reader and the jline-prompt menus take the resize signal while they read,
+line. JLine's line reader takes the resize signal while it reads,
 so `Tui` measures again when a prompt or pop-up returns and redraws what depends on the size
 if it changed; otherwise output after a resize at the prompt would keep the old width. A live
 region redraws in place at the new width. Terminals that reflow on a narrower width (most
@@ -1157,8 +1170,7 @@ during a turn. Reporting is on only while one of those raw-mode readers runs (`c
 to `callback-finish` for the line reader, `KeyReader.start` to `KeyReader.stop`): between reads the
 terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends nothing early. Focus is
 known only once the terminal has sent a report, since JLine assumes support for every `xterm*`
-type and such a terminal may send none; until then only keys count. jline-prompt menus do not parse focus reports, so reporting is
-off while a menu reads. There are no alerts for `-p` runs or dumb terminals.
+type and such a terminal may send none; until then only keys count. Menus read focus reports as well. There are no alerts for `-p` runs or dumb terminals.
 The alert title is `atc · <directory>`. A turn's alert shows the start of its last prose
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and

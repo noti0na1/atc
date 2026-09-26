@@ -160,8 +160,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     screen.resized()
     redrawSized()
 
-  /** JLine's reader and the jline-prompt menus take the terminal's resize signal while
-    * they read, so a size changed meanwhile is caught up with when they return. */
+  /** JLine's line reader takes the terminal's resize signal while it reads, so a size
+    * changed meanwhile is caught up with when a prompt or pop-up returns. */
   private def catchUpOnResize(): Unit = if screen.resized() then frame(redrawSized())
 
   /** Redraw what depends on the terminal's size. */
@@ -406,7 +406,11 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** A single-choice pop-up for a slash command (`/model`, `/classifiedmodel`).
     * `None` when there is no terminal for menus, no options, or the user
     * left it with Esc, Ctrl-C or Ctrl-D. */
-  def choose(title: String, options: List[String]): Option[String] = chooseIndex(title, options).flatMap(options.lift)
+  def choose(title: String, options: List[String]): Option[String] = choose(title, options, 0)
+
+  /** As [[choose]], the menu opening on the option at `initial` (the value in use). */
+  def choose(title: String, options: List[String], initial: Int): Option[String] =
+    chooseIndex(title, options, initial).flatMap(options.lift)
 
   /** A sub-menu: `options` and a last Back row. The chosen index; `None` for Back,
     * Esc or no menus, which return to the menu that opened it. */
@@ -415,18 +419,22 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   /** A menu the user comes back to after each choice: `entries`, labels with what
     * choosing them does, are built again every time, and the last row, Done, or
-    * Esc leaves it. Without menus it does nothing: see [[menusAvailable]]. */
+    * Esc leaves it. It comes back with the cursor on the row last chosen. Without
+    * menus it does nothing: see [[menusAvailable]]. */
   def menuLoop(title: String)(entries: () => List[(String, () => Unit)]): Unit =
     var open = true
+    var last = 0
     while open do
       val current = entries()
-      chooseIndex(title, current.map(_._1) :+ Menus.DoneLabel).flatMap(current.lift) match
-        case Some((_, act)) => act()
+      chooseIndex(title, current.map(_._1) :+ Menus.DoneLabel, last).flatMap(i => current.lift(i).map(i -> _)) match
+        case Some((i, (_, act))) =>
+          last = i
+          act()
         case None => open = false
 
-  private def chooseIndex(title: String, options: List[String]): Option[Int] =
+  private def chooseIndex(title: String, options: List[String], initial: Int = 0): Option[Int] =
     if plain || options.isEmpty then None
-    else popupBlock(dialogs.menuIndex(Ansi.sanitize(title), options.map(Ansi.sanitize), escape = "back"))
+    else popupBlock(dialogs.menuIndex(Ansi.sanitize(title), options.map(Ansi.sanitize), escape = "back", initial))
 
   /** A multi-choice pop-up with the `checked` options ticked at first: the
     * indices ticked when confirmed, `None` when left with Esc or without menus. */

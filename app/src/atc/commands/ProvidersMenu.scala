@@ -108,7 +108,7 @@ final class ProvidersMenu(app: App, modelCommands: ModelCommands):
       tui.error(s"$name has no models to choose from")
       false
     else
-      tui.chooseMany(s"Models $name offers (type to filter)", labels, checked).exists: ticked =>
+      tui.chooseMany(s"Models $name offers", labels, checked).exists: ticked =>
         val chosen = ticked.map(choices)
         choices.filterNot(chosen).find(isUsed) match
           case Some(c) =>
