@@ -38,6 +38,17 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(render("---\n"), s"${D}${"─" * 40}${R}\n")
     assertEquals(plain(render("- **bold** item\n")), "• bold item\n")
 
+  test("long lines wrap at word boundaries, list items and quotes under their text"):
+    def wrapped(text: String, columns: Int) =
+      val m = MarkdownStream(glyphs, MarkdownStream.verbatim, () => columns)
+      plain(text.grouped(3).map(m.push).mkString + m.finish()) // words split across chunks
+    assertEquals(wrapped("one two three four five six\n", 14), "one two three\nfour five six\n")
+    assertEquals(wrapped("- alpha beta gamma delta\n", 14), "• alpha beta\n  gamma delta\n")
+    assertEquals(wrapped("> alpha beta gamma delta\n", 14), "▎ alpha beta\n▎ gamma delta\n")
+    assertEquals(wrapped("keep **bold words** apart\n", 12), "keep bold\nwords apart\n")
+    // a word longer than a row stays whole, on a row of its own
+    assertEquals(wrapped("a verylongwordthatcannotfit b\n", 10), "a\nverylongwordthatcannotfit\nb\n")
+
   test("the start of a line waits until it cannot be a marker any more"):
     val m = md()
     assertEquals(m.push("#"), "")

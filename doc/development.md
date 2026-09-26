@@ -1311,7 +1311,11 @@ answers retain their display order and custom text is appended. User input is re
 the host's `ask` call; only its terminal display is sanitized.
 
 `MarkdownStream` incrementally renders supported Markdown and buffers tables until column
-widths are known. `Highlight` uses the compiler's Scala scanner. A fenced Scala line is
+widths are known. It wraps paragraph, heading, list and quote text at word boundaries to the
+width, a list item or quote continuing under its text: left to the terminal, the rest of a long
+line continued at column 0, outside the prose gutter, and broke inside words. The word being
+written, and the spaces before it, are held until the word ends, since only then is it known
+whether it fits; without a column limit (tests) text passes through at once. `Highlight` uses the compiler's Scala scanner. A fenced Scala line is
 highlighted with earlier lines as context: the last eight, or, while `Continuation.unclosed`
 finds a comment or triple-quoted string open, up to 200 lines back (the compiler's colours
 cannot tell what is open, since it resets them after the last coloured character). Layout calculations use
