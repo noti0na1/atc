@@ -145,7 +145,7 @@ object ConfigValidation:
   private def requirePositive(name: String, value: Long): Unit =
     requireValid(value > 0, s"$name must be greater than zero (was $value)")
 
-  private def requireValid(condition: Boolean, message: => String): Unit =
+  private inline def requireValid(condition: Boolean, inline message: String): Unit =
     if !condition then invalid(message)
 
   private def invalid(message: String): Nothing = throw IllegalArgumentException(s"Invalid config: $message")

@@ -41,7 +41,7 @@ private[atc] object PlatformPath:
   def stripTrailingSeparators(value: String): String =
     value.reverse.dropWhile(isSeparator).reverse
 
-  private def isSeparator(char: Char): Boolean =
+  private inline def isSeparator(char: Char): Boolean =
     char == '/' || (Platform.isWindows && char == '\\')
 
   /** Resolve `~` and `~/...` using the process home directory. Both slash
