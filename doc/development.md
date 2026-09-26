@@ -1205,10 +1205,10 @@ During a turn, Enter submits a correction and unsent text is shown in the status
 Bracketed pastes are collected without submitting individual lines, and the footer shows the
 pasted text once, when the paste ends. The status line uses
 JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
-operation, elapsed time and model/mode/directory context. Spinner writes and status updates
+operation, elapsed time and mode/model/directory context. Spinner writes and status updates
 share the TUI lock. The footer is reserved before the first content line, so adding it does
 not scroll the banner away. Its activity indicator replaces a separate spinner when the
-terminal supports a status line. Idle state shows a short model, mode and directory label;
+terminal supports a status line. Idle state shows a short mode, model and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
 `Screen` measures the terminal once per resize, since the views ask for the width for every
