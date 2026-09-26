@@ -1,6 +1,6 @@
 package atc.ui
 
-import org.jline.terminal.{Size, Terminal}
+import org.jline.terminal.{Size, Sized, Terminal}
 import org.jline.terminal.impl.DumbTerminal
 
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
@@ -18,6 +18,10 @@ class ListMenuSuite extends munit.FunSuite:
     while it.hasNext do decoded += MenuKey.decode(it.next().toInt, () => next())
     decoded.result()
 
+  private val models =
+    Vector("gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-pro-preview-tts", "gemma-4", "gemini-3.8-flash") ++
+      (1 to 20).map(i => s"other-$i")
+
   test("keys: arrows, pages and ends in their usual encodings; a lone Esc; text"):
     assertEquals(
       keys("\u001b[A\u001bOB\u001b[5~\u001b[6~\u001b[H\u001b[F"),
@@ -25,11 +29,8 @@ class ListMenuSuite extends munit.FunSuite:
     )
     assertEquals(keys("\u001b"), List(Escape))
     assertEquals(keys("\u001b[I\u001b[O"), List(FocusIn, FocusOut))
+    assertEquals(keys("\u001b[200~\r\u001b[201~"), List(PasteStart, Enter, PasteEnd))
     assertEquals(keys("a \r\u007f\u0003"), List(Text("a"), Space, Enter, Backspace, Cancel))
-
-  private val models =
-    Vector("gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-pro-preview-tts", "gemma-4", "gemini-3.8-flash") ++
-      (1 to 20).map(i => s"other-$i")
 
   test("a tick belongs to its item, whatever the filter shows"):
     val menu = MenuState(models, multi = true, 0, Set(4))
@@ -80,8 +81,10 @@ class ListMenuSuite extends munit.FunSuite:
     (terminal: Terminal).setSize(Size(50, 16))
     val screen = Screen(terminal, plain = false, Glyphs.unicode)
     val menu = MenuState(models :+ ("x" * 80), multi = true, 0, Set(4))
-    def plain(lines: List[String]) = lines.map(org.jline.utils.AttributedString.fromAnsi(_).nn.toString)
-    val (lines, rows) = ListMenu.render(menu, "Models gemini offers", "keys", keysInMenu = false, 50, 16, screen)
+    // As the menu's live region draws them: cut to one row.
+    def plain(lines: List[String]) =
+      lines.map(line => org.jline.utils.AttributedString.fromAnsi(screen.fit(line, 0)).nn.toString)
+    val (lines, rows) = ListMenu.render(menu, "Models gemini offers", "keys", keysInMenu = false, 16, screen)
     val shown = plain(lines)
     assert(lines.size < 16 - 1, shown)
     assert(shown.forall(Screen.displayWidth(_) < 50), shown)
@@ -90,6 +93,32 @@ class ListMenuSuite extends munit.FunSuite:
     assertEquals(shown(3), "❯ ◉ gemini-3.8-flash")
     assertEquals(shown.last, s"  ▼ ${26 - rows} more")
     menu(End, rows)
-    val end = plain(ListMenu.render(menu, "Models gemini offers", "keys", keysInMenu = true, 50, 16, screen)._1)
+    val end = plain(ListMenu.render(menu, "Models gemini offers", "keys", keysInMenu = true, 16, screen)._1)
     assert(end.exists(_.startsWith("❯ ◯ xxxx")) && end.exists(_.endsWith("…")), end)
     assertEquals(end.last, "  keys")
+
+  /** Run a two-row menu on a terminal that sends `input` after `delayMillis`, then ends. */
+  private def choose(input: String, delayMillis: Long = 0): Option[List[Int]] =
+    val bytes = ByteArrayInputStream(input.getBytes(UTF_8))
+    val source = new java.io.InputStream:
+      private var waited = false
+      override def read(): Int =
+        if !waited then { Thread.sleep(delayMillis); waited = true }
+        bytes.read()
+    val terminal = DumbTerminal("test", "xterm-256color", source, ByteArrayOutputStream(), UTF_8)
+    terminal.setSize(Size.of(80, 24): Sized)
+    val screen = Screen(terminal, plain = false, Glyphs.unicode)
+    val alerts = Alerts(terminal, plain = false, _ => ())
+    val status = StatusLine(screen, () => true, () => true, () => 0)
+    ListMenu(screen, status, alerts).run("Allow?", List("Allow once", "Deny"), multi = false, 0, Set.empty, "deny")
+
+  test("a newline that arrives as the menu opens, or inside a paste, chooses nothing"):
+    assertEquals(choose("\r"), None)
+    assertEquals(choose("\n\r\n"), None)
+    assertEquals(choose("\u001b[200~yes\r\u001b[201~", delayMillis = 500), None)
+    assertEquals(
+      choose("\u001b[200~x\u001b[201~\u001b[B\r", delayMillis = 500),
+      Some(List(1)),
+      "keys after a paste count"
+    )
+    assertEquals(choose("\r", delayMillis = 500), Some(List(0)))

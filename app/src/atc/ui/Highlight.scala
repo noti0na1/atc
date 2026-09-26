@@ -20,9 +20,12 @@ object Highlight:
   def scala(code: String): List[String] = splitCarrying(paint(code))
 
   /** The last line of `code` coloured with the earlier lines as context, and whether a
-    * comment or string is still open after it (the next line then needs these lines as
-    * context too). Only the last line is built: a streamed block asks once per line. */
+    * comment or triple-quoted string is still open after it (the next line then needs these
+    * lines as context too). Only the last line is built: a streamed block asks once per line.
+    * [[Continuation.unclosed]] says what is open; the colours cannot, as the compiler
+    * resets them after the last coloured character. */
   def scalaTail(code: String): (String, Boolean) =
+    val open = Continuation.unclosed(code).headOption.exists(c => c == "*/" || c == "\"\"\"")
     val ansi = paint(code)
     var active = ""
     var prefix = ""
@@ -38,7 +41,7 @@ object Highlight:
           prefix = active
           start = i + 1
         i += 1
-    (prefix + ansi.substring(start) + (if active.nonEmpty then Reset else ""), active.nonEmpty)
+    (prefix + ansi.substring(start) + (if active.nonEmpty then Reset else ""), open)
 
   private def paint(code: String): String =
     val ansi =

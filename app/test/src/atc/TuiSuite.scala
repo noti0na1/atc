@@ -116,6 +116,25 @@ class TuiSuite extends munit.FunSuite:
       assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
     finally terminal.close()
 
+  test("a process event during streaming prose waits for the end of the turn, on a line of its own"):
+    val out = ByteArrayOutputStream()
+    val saved = System.out
+    // The non-interactive terminal writes to the `System.out` of when it is built.
+    System.setOut(java.io.PrintStream(out, true, StandardCharsets.UTF_8))
+    val tui =
+      try Tui(Files.createTempDirectory("atc-tui").nn.resolve("history").nn, nonInteractive = true)
+      finally System.setOut(saved)
+    try
+      tui.beginTurn()
+      tui.assistantDelta("Hello ")
+      tui.processEvent("[p1 exited 0]")
+      tui.assistantDelta("world")
+      tui.endTurn()
+      val lines = out.toString(StandardCharsets.UTF_8).linesIterator.toList
+      assert(lines.exists(_.endsWith(" Hello world")), lines)
+      assert(lines.contains("[p1 exited 0]"), lines)
+    finally tui.close()
+
   test("the footer draw leaves the terminal outside a synchronized update (JLine buffers the closer)"):
     val output = ByteArrayOutputStream()
     val terminal = org.jline.terminal.impl.ExternalTerminal(
@@ -249,12 +268,40 @@ class TuiSuite extends munit.FunSuite:
     b.append("f\n")
     assertEquals(b.tail(10), List("a", "b", "cd", "e", "f"))
 
-  test("TailBuffer: past the cap the front goes, the counts stay exact"):
+  test("TailBuffer: past half again the cap the front goes, the counts stay exact"):
     val b = TailBuffer(10)
     b.append("01234\n67890\n")
-    assertEquals(b.text, "67890\n")
-    assertEquals(b.lineCount, 2L) // the dropped line still counts
-    assertEquals(b.tail(5), List("67890"))
+    assertEquals(b.text, "01234\n67890\n", "cut only once it grows past 15")
+    b.append("abcd\n")
+    assertEquals(b.text, "abcd\n")
+    assertEquals(b.lineCount, 3L) // the dropped lines still count
+    assertEquals(b.tail(5), List("abcd"))
+    assertEquals(b.tail(0), Nil)
+    b.append("unfinished")
+    assertEquals(b.tail(0), Nil)
+
+  test("TailBuffer: cutting in batches keeps the tails the live views show"):
+    // The buffer as it was: cut back to the cap on every append.
+    final class EveryAppend(cap: Int):
+      val sb = StringBuilder()
+      def append(text: String): Unit =
+        sb.append(text)
+        if sb.length > cap then
+          val nl = sb.indexOf("\n", sb.length - cap)
+          sb.delete(0, if nl >= 0 then nl + 1 else sb.length - cap)
+      def tail(n: Int): List[String] = sb.toString.split("\n", -1).toList match
+        case init :+ "" => init.takeRight(n)
+        case ls => ls.takeRight(n)
+    // Both keep the whole lines of about the last `cap` characters, so the last ten short lines agree.
+    val random = scala.util.Random(7)
+    val batched = TailBuffer(1000)
+    val reference = EveryAppend(1000)
+    for _ <- 1 to 20000 do
+      val chunk = random.alphanumeric.take(random.nextInt(12)).mkString + (if random.nextInt(3) == 0 then "\n" else "")
+      batched.append(chunk)
+      reference.append(chunk)
+      assert(batched.text.length <= 1500)
+      for n <- 1 to 10 do assertEquals(batched.tail(n), reference.tail(n))
 
   // ── multi-line input (Continuation) ───────────────────────────────
 

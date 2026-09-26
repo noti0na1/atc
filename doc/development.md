@@ -46,7 +46,7 @@ Environment files contain literal `KEY=value` entries; shell expansion is not pe
 | `ATC_JAVA_OPTS` | Additional JVM flags for every launcher, applied after the defaults and before the command line's `-Xmx`/`-Xms` |
 | `-Xmx<size>`, `-Xms<size>` (launcher arguments) | JVM heap flags that `atc`, `start.sh`, `start.ps1` and `atc.ps1` take out of the arguments (the value of an option such as `-p` is never taken for one) and pass to `java` after the defaults and `ATC_JAVA_OPTS`, so they win; ATC never sees them |
 | `ATC_STARTUP_CACHE=0` | Run without the JVM startup cache (`atc`, `start.sh`) |
-| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
+| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set; logged text has terminal controls removed |
 | `ATC_ASCII` | Select ASCII terminal glyphs when set |
 
 ### JVM settings
@@ -1157,8 +1157,8 @@ the change, and its last row is Done. A menu opened from another is `chooseOrBac
 row is Back; a confirmation inside a command is such a sub-menu, with one action row. Carrying
 out an action returns to the looping menu; Back, or an action that did not go through (a
 refused change, a cancelled checkbox), returns to the menu one level up. Esc goes back one
-level everywhere, and the footer says so (`Esc back`); the agent's questions and permission
-requests say `Esc cancel`.
+level everywhere, and the footer says so (`Esc back`); the agent's questions say `Esc cancel`,
+and permission requests, which Esc denies, say `Esc deny`.
 
 Every menu is a `ListMenu`, drawn in a live region and read in raw mode; `MenuState` holds
 what it shows apart from the terminal, and `MenuKey` decodes keys with `KeyReader`'s escape
@@ -1172,6 +1172,9 @@ move by a page or to the ends. A menu opens on the value in use (`/model`, `/eff
 `/classifiedmodel`) or, in a `menuLoop`, on the row last chosen. When it ends, one line says
 what was chosen; leaving it leaves nothing. The footer shows its keys, or the menu's last row
 when there is no footer. Menus read focus reports, and a resize redraws them at the new size.
+Nothing inside a bracketed paste is taken as a key, and Enter counts only 300 ms after a menu
+opens (`ListMenu.EnterDelayNanos`): a newline typed or pasted just before a permission request
+must not choose its first row, Allow once.
 
 While the main prompt holds a single word starting with `/`, `PromptReader` lists the matching
 `SlashCommand.table` rows in JLine's `post` area under the buffer, with an exact name
@@ -1184,7 +1187,8 @@ input and dumb terminals get no list. Enter runs the selection, so no alias may 
 of another command's name.
 
 During a turn, Enter submits a correction and unsent text is shown in the status line.
-Bracketed pastes are collected without submitting individual lines. The status line uses
+Bracketed pastes are collected without submitting individual lines, and the footer shows the
+pasted text once, when the paste ends. The status line uses
 JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
 operation, elapsed time and model/mode/directory context. Spinner writes and status updates
 share the TUI lock. The footer is reserved before the first content line, so adding it does
@@ -1193,7 +1197,7 @@ terminal supports a status line. Idle state shows a short model, mode and direct
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
 `Screen` measures the terminal once per resize, since the views ask for the width for every
-line. JLine's line reader takes the resize signal while it reads,
+line; the footer is resized to that measurement as well. JLine's line reader takes the resize signal while it reads,
 so `Tui` measures again when a prompt or pop-up returns and redraws what depends on the size
 if it changed; otherwise output after a resize at the prompt would keep the old width. A live
 region redraws in place at the new width. Terminals that reflow on a narrower width (most
@@ -1208,13 +1212,19 @@ a poll interval per repaint (`TuiSuite` checks the closer is written).
 ASCII mode also selects ASCII menu markers and control separators.
 Streaming text is flushed at the end of each incoming update. Nested rendering helpers share
 that flush instead of flushing every gutter and style fragment. Live previews compare their
-rows with the previous view and immediately repaint only changed rows. They use line erasure,
+rows with the previous view and immediately repaint only changed rows. `LiveRegion.redraw` cuts
+every row to one terminal row, measured from column 0 with its gutter and tab stops, with
+newlines shown as spaces: a row that wrapped would take two terminal rows and shift every later
+redraw. `Screen.fit` stops scanning once the row is full, so a very long output line costs no
+more than a short one. They use line erasure,
 not erase-to-end-of-screen, so updating a preview cannot erase the footer. Footer work runs on
 state changes and the existing input-loop clock; writing text does not trigger a footer redraw.
 There is no frame-rate cap or deferred stream queue. `TuiSuite` checks preview growth,
 replacement, shrinkage and clearing while preserving a footer outside the owned rows.
-Background process events between turns use `LineReader.printAbove`
-so notifications do not overwrite the user's input.
+Process events wait while a pop-up is open, and during a turn until a tool block opens, where
+they join its output, or the turn ends; written into streaming prose they would land mid-line.
+Between turns they use `LineReader.printAbove` while the prompt reads, so they do not overwrite
+the user's input.
 
 `Notifier` sends the `notifications` alert when a turn ends, a permission request or
 question opens, or the tool budget runs out. `Alerts` schedules it ten seconds ahead
@@ -1232,14 +1242,14 @@ block as plain text (`Notifier.plainText`), or the outcome with the error or dur
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
 its details, and question alerts show the question.
 `StatusLine.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
-the status refreshes, writing only changes. The previous title is pushed on xterm's title
+the status refreshes, on one line, writing only changes. The previous title is pushed on xterm's title
 stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
 stack keep ATC's title until the shell sets its own.
 Terminal alerts are OSC 9, 99 (kitty) or 777 sequences, chosen from `TERM` and
 `TERM_PROGRAM` and wrapped for tmux passthrough; they are written as style text so they
 leave the line tracking alone. System alerts start `osascript`, a Base64-encoded PowerShell
-toast script or `notify-send` on a daemon thread, passing the text as arguments or quoted
-script data, and ring the bell if the command cannot start. Alert text is sanitized, put
+toast script or `notify-send` on a daemon thread, passing the text as arguments (after `--` for `notify-send`, so a body starting with `-` is
+not an option) or quoted script data, and ring the bell if the command cannot start. Alert text is sanitized, put
 on one line and capped at 200 characters.
 
 `TextLayout` wraps complete lines by terminal cell width, preserving ANSI styles and whole
@@ -1263,12 +1273,15 @@ region becomes its summary: the title with the code's first line, the files chan
 verdict, which names how much output it held or, for a failure, the first line of the
 error (`ToolBlock.firstProblem`; a compiler heading gives its code or its message). A
 pop-up, or any line written outside the block, freezes what the region shows and the
-block continues below; Ctrl-O takes the region down and writes the block out in full. The
+block continues below. Output that `parallel` tasks write while a pop-up is open is held, up to
+its last million characters, and written when the pop-up closes; Ctrl-O takes the region down and writes the block out in full. The
 expanded view and a plain terminal write every block in full, with the result panel.
 
 `ToolHistory` retains up to 20 results within an eight-million-character budget. Each
 result retains at most two million output characters plus bounded code and file previews;
-live command output is capped separately at one million characters. `/output` displays
+live command output is capped separately at one million characters. A live view keeps its
+text in a `TailBuffer`, which grows to half again its cap before cutting back, so small appends
+do not move the whole text. `/output` displays
 200-line windows without evaluating code again. Classified terminal-only output is never
 added to the history, and `/new` clears it. These records are for inspection and are not
 part of saved conversations.
@@ -1281,12 +1294,16 @@ Plain prompts accept exact `y`/`yes` or
 `Decision.Revise`. A qualified answer starting with “yes” or “skip” must not become an
 approval by prefix matching. EOF and empty plain replies deny the request.
 
-Question menus always include a custom-answer option. For multiple selections, chosen
+Question menus always include a custom-answer option. Questions wrap with their continuation
+lines under the question text, like permission details. For multiple selections, chosen
 answers retain their display order and custom text is appended. User input is returned to
 the host's `ask` call; only its terminal display is sanitized.
 
 `MarkdownStream` incrementally renders supported Markdown and buffers tables until column
-widths are known. `Highlight` uses the compiler's Scala scanner. Layout calculations use
+widths are known. `Highlight` uses the compiler's Scala scanner. A fenced Scala line is
+highlighted with earlier lines as context: the last eight, or, while `Continuation.unclosed`
+finds a comment or triple-quoted string open, up to 200 lines back (the compiler's colours
+cannot tell what is open, since it resets them after the last coloured character). Layout calculations use
 terminal cell widths. History is owner-only on POSIX systems and rejects final symlinks.
 Non-interactive runs use a dumb UTF-8 terminal and do not prompt for permission unless
 explicitly configured to auto-approve requests.

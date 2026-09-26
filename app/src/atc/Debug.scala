@@ -1,5 +1,7 @@
 package atc
 
+import atc.ui.Ansi
+
 import java.util.IdentityHashMap
 
 /** `ATC_DEBUG=1`: stack traces and terminal/stream diagnostics on stderr. */
@@ -25,5 +27,12 @@ object Debug:
     * a line logged then from another thread would land in its output, where a set-up
     * round reads "error" in it as a compile failure. */
   private val stderr = java.io.PrintStream(java.io.FileOutputStream(java.io.FileDescriptor.err), true)
-  inline def log(inline message: String): Unit = if enabled then stderr.println(s"[atc] $message")
-  def trace(e: Throwable): Unit = if enabled then e.printStackTrace(stderr)
+  inline def log(inline message: String): Unit = if enabled then stderr.println(line(message))
+  def trace(e: Throwable): Unit = if enabled then
+    val text = java.io.StringWriter()
+    e.printStackTrace(java.io.PrintWriter(text))
+    stderr.print(Ansi.sanitize(text.toString))
+
+  /** A logged line without terminal controls: messages carry provider and exception
+    * text, and stderr is usually the terminal. */
+  private[atc] def line(message: String): String = "[atc] " + Ansi.sanitize(message)

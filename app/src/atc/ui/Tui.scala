@@ -189,6 +189,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       closeProse()
       tool.endTurn()
       flushTodos()
+      flushProcessEvents()
       stats.foreach: s =>
         ensureNewline()
         val calls = Format.plural(s.toolCalls, "tool call")
@@ -322,6 +323,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     statusLine.setOperation("running Scala")
     beginBlock()
     tool.start(code, title)
+    flushProcessEvents()
     if !plain && !statusLine.shown then screen.spin(Indent, "running")
 
   /** Live output of the agent's `println` (see `HostOutput.print`); `userText` differs
@@ -337,18 +339,22 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   def commandOutput(text: String): Unit = frame(tool.commandOutput(text))
 
-  /** Process notifications preserve the current prompt and wait until any menu closes. */
+  /** Process notifications wait while a menu is open, and during a turn until a tool
+    * block opens or the turn ends: written into streaming prose they would break its
+    * lines. A tool block shows them in its output, and the prompt keeps its input. */
   def processEvent(text: String): Unit = frame:
-    if closed then ()
-    else if popupDepth > 0 then
+    if !closed then
       if pendingProcessEvents.size >= 100 then pendingProcessEvents.dequeue()
       pendingProcessEvents.enqueue(text.take(2000))
-    else displayProcessEvent(text)
+      flushProcessEvents()
 
-  private def displayProcessEvent(text: String): Unit =
-    val line = styled(Ansi.sanitize(text), Cyan)
-    if tool.isOpen then tool.emit(line + "\n")
-    else prompt.reader.printAbove(line)
+  private def flushProcessEvents(): Unit =
+    if popupDepth == 0 && (!busy || tool.isOpen) then
+      while pendingProcessEvents.nonEmpty do
+        val line = styled(Ansi.sanitize(pendingProcessEvents.dequeue()), Cyan)
+        if tool.isOpen then tool.emit(line + "\n")
+        else if prompt.reader.isReading then prompt.reader.printAbove(line)
+        else renderedLine(line)
 
   def toolEnd(r: ExecutionResult, millis: Long): Unit = frame:
     statusLine.setOperation(if r.success then "tool completed" else "tool failed")
@@ -385,6 +391,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           popupDepth += 1
           statusLine.refreshTitle()
           tool.endOutput()
+          tool.hold()
           flushTodos()
           beginBlock()
         try body
@@ -395,7 +402,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
             popupDepth -= 1
             statusLine.refreshTitle()
             if popupDepth == 0 then
-              while pendingProcessEvents.nonEmpty do displayProcessEvent(pendingProcessEvents.dequeue())
+              tool.release()
+              flushProcessEvents()
     finally popupLock.unlock()
 
   // Slash-command menus follow one pattern. A one-shot picker (`/model`, `/effort`)

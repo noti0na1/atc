@@ -102,46 +102,51 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
     * single column would let a truncated ASCII line overflow and wrap. */
   private val EllipsisWidth = math.max(1, Screen.displayWidth(g.ellipsis))
 
-  /** Cut a plain line so it fits on one terminal row (region lines must not wrap). */
+  /** Cut a line that starts at column `used` so it fits on one terminal row (region lines
+    * must not wrap). A newline becomes a space. The scan stops once the row is full, so
+    * a very long line costs no more than a short one. */
   def fit(line: String, used: Int): String =
     val room = width - used - 1
     if room <= 0 then ""
-    else if Screen.displayWidth(line) <= room then line
-    else if room <= EllipsisWidth then g.ellipsis.take(room)
     else
-      // Whole code points until the width budget (minus the ellipsis) is spent.
+      // A cut keeps the text before `cut`, the first code point that leaves no room for the ellipsis.
       val budget = room - EllipsisWidth
-      val sb = StringBuilder()
+      var cut = -1
       var w = 0
       var i = 0
-      var styledText = false
-      while i < line.length && w < budget do
+      while i < line.length && w <= room do
         val styleEnd = Screen.sgrEnd(line, i)
-        // `underlying`: Scala's `append(line, i, styleEnd)` would append the tuple's text.
-        if styleEnd > 0 then { sb.underlying.append(line, i, styleEnd); styledText = true; i = styleEnd } // no cells
+        if styleEnd > 0 then i = styleEnd // no cells
         else
           val cp = line.codePointAt(i)
-          val cw = Screen.cellWidth(cp, w)
-          if w + cw > budget then i = line.length
-          else { sb.underlying.appendCodePoint(cp); w += cw; i += Character.charCount(cp) }
-      // A cut may have dropped the line's own reset: never let its style leak into the next row.
-      sb.toString + (if styledText then Reset else "") + g.ellipsis
+          w += (if cp == '\n' then 1 else Screen.cellWidth(cp, used + w))
+          if w > budget && cut < 0 then cut = i
+          i += Character.charCount(cp)
+      if w <= room then line.replace('\n', ' ')
+      else if room <= EllipsisWidth then g.ellipsis.take(room)
+      else
+        val text = line.substring(0, cut).replace('\n', ' ')
+        // A cut may have dropped the line's own reset: never let its style leak into the next row.
+        text + (if text.contains('\u001b') then Reset else "") + g.ellipsis
 
   /** Update only changed rows in a live preview. Clearing the rest of the screen would
-    * also erase the footer, forcing unrelated output to be repainted on every token. */
+    * also erase the footer, forcing unrelated output to be repainted on every token.
+    * Each line is cut to one row here, measured from column 0 with its gutter: the next
+    * redraw moves the cursor up one row per line, so a line that wrapped would shift it. */
   final class LiveRegion:
     private var tailBefore = tail
     /** The rows this region owns, and what is on them. */
     private var previousLines = List.empty[String]
     def redraw(lines: List[String], force: Boolean = false): Unit =
-      if force || lines != previousLines then
+      val rows = lines.map(fit(_, 0))
+      if force || rows != previousLines then
         if previousLines.isEmpty then { ensureNewline(); tailBefore = tail }
-        write(Screen.replaceRows(previousLines, lines, force))
-        tail = lines.lastOption match
+        write(Screen.replaceRows(previousLines, rows, force))
+        tail = rows.lastOption match
           case Some("") => "\n\n"
           case Some(last) => last.takeRight(1) + "\n"
           case None => tailBefore
-        previousLines = lines
+        previousLines = rows
     def clear(): Unit = redraw(Nil)
     /** Keep what is drawn as ordinary output. */
     def freeze(): Unit = previousLines = Nil

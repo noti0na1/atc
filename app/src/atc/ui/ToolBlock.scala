@@ -96,7 +96,11 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
     val room = ReplSession.MaxOutputBytes - printed.length
     if room > 0 then printed.append(agentText.take(room))
     if agentText == userText then emit(Ansi.sanitize(userText))
-    else emit(styled("[classified] ", Yellow, Bold) + styled(Ansi.sanitize(userText), Yellow))
+    else
+      // Every line is marked: the gutter at each line start resets the style.
+      val marked = Ansi.sanitize(userText).split("\n", -1).map: line =>
+        if line.isEmpty then line else styled("[classified] ", Yellow, Bold) + styled(line, Yellow)
+      emit(marked.mkString("\n"))
 
   /** What a command the agent runs writes, kept for `/output` but not part of the tool result. */
   def commandOutput(text: String): Unit =
@@ -105,19 +109,36 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
     if text.length > room then liveTruncated = true
     emit(Ansi.sanitize(text))
 
-  /** Display-ready text in the output section, which the first output opens. */
+  /** Display-ready text in the output section, which the first output opens. While a
+    * pop-up reads (`hold`), the text waits in `held` for `release`. */
   def emit(text: String): Unit =
-    screen.stopSpinner()
-    output.append(text)
-    if compact then
-      outputStarted = true
-      redraw()
+    if holding then held.append(text)
     else
-      if open && !outputStarted then
-        ensureNewline()
-        write(section("output", Dim))
+      screen.stopSpinner()
+      output.append(text)
+      if compact then
         outputStarted = true
-      screen.writeGuttered(text, gutter(Dim))
+        redraw()
+      else
+        if open && !outputStarted then
+          ensureNewline()
+          write(section("output", Dim))
+          outputStarted = true
+        screen.writeGuttered(text, gutter(Dim))
+
+  /** Output of `parallel` tasks that arrives while a pop-up is drawn, which writing it
+    * would break; the last [[TailBuffer.MaxChars]] characters are kept. */
+  private val held = TailBuffer(TailBuffer.MaxChars)
+  private var holding = false
+
+  def hold(): Unit = holding = true
+
+  /** The pop-up closed: write what arrived meanwhile. */
+  def release(): Unit =
+    holding = false
+    val text = held.text
+    held.clear()
+    if text.nonEmpty then emit(text)
 
   private def section(label: String, code: Int): String =
     Indent + styled(s"${g.tee} $label", code) + "\n"
@@ -130,23 +151,25 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
 
   /** The running block: the title and the start of the code, then the tail of the
     * output. Code gives way first when the screen is short: the rows must fit
-    * above the footer, or the region could not be redrawn. */
+    * above the footer, or the region could not be redrawn. The output's tail is
+    * read and cut to the width once; a line can be as long as the whole buffer. */
   private def liveRows(): List[String] =
     val room = (screen.height - 3).max(4)
     val code = codeRows
     val lines = output.lineCount - shownFrom
+    val lastLines =
+      output.tail(ToolBlock.OutputTailRows.toLong.min(lines).toInt).map(l => gutter(Dim) + screen.fit(l, GutterWidth))
     def codePart(max: Int): List[String] =
       if code.size <= max then code
       else
         code.take(max - 1) :+
           (gutter(Magenta) + styled(s"${g.ellipsis} ${Format.plural(code.size - max + 1, "more line")}", Dim))
     def outputPart(max: Int): List[String] =
-      val tail = output.tail(max.toLong.min(lines).toInt)
+      val tail = lastLines.takeRight(max)
       val hidden = lines - tail.size
       val header =
         Option.when(hidden > 0)(gutter(Dim) + styled(s"${g.ellipsis} ${Format.plural(hidden, "more line")}", Dim))
-      Indent + styled(s"${g.tee} output", Dim) ::
-        header.toList ++ tail.map(l => gutter(Dim) + screen.fit(l, GutterWidth))
+      Indent + styled(s"${g.tee} output", Dim) :: header.toList ++ tail
     def rows(codeMax: Int, tailMax: Int): List[String] =
       (if headed then titleRow :: codePart(codeMax) else Nil) ++ (if outputStarted then outputPart(tailMax) else Nil)
     var codeMax = ToolBlock.CodePreviewRows
@@ -156,13 +179,13 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
     rows(codeMax, tailMax)
 
   /** The finished block: the title with the code's first line, the files changed and
-    * the verdict. Rows are cut to the width, as a region's rows must not wrap. */
+    * the verdict, each cut to one row by the region. */
   private def summaryRows(r: ExecutionResult, millis: Long, id: Int): List[String] =
     val first = Ansi.sanitize(currentCode).linesIterator.map(_.trim).find(_.nonEmpty).getOrElse("")
     val more = if currentCode.trim.linesIterator.size > 1 then s" ${g.ellipsis}" else ""
-    val head = Option.when(headed)(screen.fit(titleRow + "  " + styled(first + more, Dim), 0))
+    val head = Option.when(headed)(titleRow + "  " + styled(first + more, Dim))
     val changes = fileChanges.toList.map: change =>
-      screen.fit(Indent + styled(Ansi.sanitize(s"${change.path}: ${change.summary}"), Cyan), 0)
+      Indent + styled(Ansi.sanitize(s"${change.path}: ${change.summary}"), Cyan)
     val link = styled(s" ${g.dot} /output $id", Dim)
     val verdict =
       if r.success then

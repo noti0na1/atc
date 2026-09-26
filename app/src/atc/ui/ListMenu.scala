@@ -10,6 +10,8 @@ import Ansi.{Bold, Cyan, Dim}
 /** A key a menu acts on, decoded from the terminal's bytes. */
 private[ui] enum MenuKey:
   case Up, Down, PageUp, PageDown, Home, End, Enter, Space, Backspace, Escape, Cancel, FocusIn, FocusOut, Ignore
+  /** The start and end of a bracketed paste. */
+  case PasteStart, PasteEnd
   case Text(text: String)
 
 private[ui] object MenuKey:
@@ -33,6 +35,8 @@ private[ui] object MenuKey:
         case "[F" | "OF" | "[4~" | "[8~" => End
         case "[I" => FocusIn
         case "[O" => FocusOut
+        case "[200~" => PasteStart
+        case "[201~" => PasteEnd
         case _ => Ignore
     case c if c >= 32 => Text(String(Character.toChars(c)))
     case _ => Ignore
@@ -97,7 +101,7 @@ private[ui] final class MenuState(
           refilter("")
           Continue
       case Cancel => Cancelled
-      case FocusIn | FocusOut | Ignore => Continue
+      case FocusIn | FocusOut | Ignore | PasteStart | PasteEnd => Continue
 
   /** Show the items whose label holds every word of `text`, keeping the cursor on its item. */
   private def refilter(text: String): Unit =
@@ -152,7 +156,7 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
         screen.LiveRegion()
       var page = MenuState.MaxRows
       def draw(force: Boolean = false): Unit = screen.frame:
-        val (lines, rows) = ListMenu.render(state, title, keys, !status.shown, screen.width, screen.height, screen)
+        val (lines, rows) = ListMenu.render(state, title, keys, !status.shown, screen.height, screen)
         page = rows
         region.redraw(lines, force)
       val outcome = status.withHint(keys):
@@ -171,19 +175,24 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
             val answer =
               if multi then Format.plural(items.size, "item") + " ticked" else items.headOption.fold("")(labels(_))
             val line = styled("? ", Cyan, Bold) + Ansi.sanitize(title) + styled(s" › ${Ansi.sanitize(answer)}", Cyan)
-            region.redraw(List(screen.fit(line, 0)), force = true)
+            region.redraw(List(line), force = true)
             region.freeze()
           case _ => region.clear()
       outcome match
         case MenuState.Outcome.Chosen(items) => Some(items)
         case _ => None
 
-  /** Read keys until the menu ends. A resize while it waits is redrawn at the new size. */
+  /** Read keys until the menu ends. A resize while it waits is redrawn at the new size.
+    * Nothing pasted is a key, and Enter counts only [[ListMenu.EnterDelayNanos]] after
+    * the menu opened: a newline typed or pasted just before must not choose the first
+    * row, which in a permission request allows it. */
   private def read(state: MenuState, page: () => Int, draw: Boolean => Unit): MenuState.Outcome =
     val in = screen.terminal.reader()
     def next(timeout: Long) =
       try in.read(timeout)
       catch case _: IOException => -1
+    val opened = System.nanoTime()
+    var pasting = false
     var size = (screen.width, screen.height)
     var outcome: MenuState.Outcome = MenuState.Outcome.Continue
     while outcome == MenuState.Outcome.Continue do
@@ -195,6 +204,10 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
         case c if c < 0 => outcome = MenuState.Outcome.Cancelled
         case c =>
           MenuKey.decode(c, () => next(30L)) match
+            case MenuKey.PasteStart => pasting = true
+            case MenuKey.PasteEnd => pasting = false
+            case _ if pasting => ()
+            case MenuKey.Enter if System.nanoTime() - opened < ListMenu.EnterDelayNanos => ()
             case MenuKey.FocusIn => alerts.focusChanged(true)
             case MenuKey.FocusOut => alerts.focusChanged(false)
             case key =>
@@ -203,31 +216,27 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
     outcome
 
 private[ui] object ListMenu:
+  /** How long after a menu opens Enter is ignored. */
+  val EnterDelayNanos: Long = 300_000_000L
+
   /** The keys a menu takes, for the footer. */
   def hint(state: MenuState, escape: String): String =
     val choose = if state.multi then "Space tick · Enter save" else "Enter choose"
     val filter = if state.filterable then " · type to filter" else ""
     s"Arrows move · $choose$filter · Esc $escape"
 
-  /** The menu's lines for a `width` by `height` terminal, and how many item rows are in view.
-    * Every line fits one row. The window leaves room for the title, the filter line, the
-    * rows out of view and the footer, so the whole menu stays shorter than the screen. */
+  /** The menu's lines for a terminal of `height` rows, and how many item rows are in view.
+    * The region cuts each line to one row. The window leaves room for the title, the filter
+    * line, the rows out of view and the footer, so the whole menu stays shorter than the screen. */
   def render(
     state: MenuState,
     title: String,
     keys: String,
     keysInMenu: Boolean,
-    width: Int,
     height: Int,
     screen: Screen,
   ): (List[String], Int) =
     import screen.{g, styled}
-    def fit(line: String): String =
-      val room = (width - 1).max(1)
-      if Screen.displayWidth(line) <= room then line
-      else
-        val plain = org.jline.utils.AttributedString.fromAnsi(line).nn
-        plain.columnSubSequence(0, room - 1).nn.toAnsi().nn + g.ellipsis
     val total = state.labels.size
     val shown = state.matches
     val counter =
@@ -262,4 +271,4 @@ private[ui] object ListMenu:
     val lines =
       head :: filterLine.toList ++ above.toList ++ items ++ below.toList ++
         Option.when(keysInMenu)(styled(s"  $keys", Dim)).toList
-    (lines.map(fit), rows)
+    (lines, rows)

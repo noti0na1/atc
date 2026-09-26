@@ -118,3 +118,20 @@ class ToolBlockSuite extends munit.FunSuite:
       Some("Cannot refer to method sleep"),
     )
     assertEquals(problem(""), None)
+
+  test("every line of a classified print is marked"):
+    val (screen, tool, out) = block(expanded = true)
+    screen.frame(tool.start("println(secret)", "run_scala"))
+    screen.frame(tool.print("[classified]\n", "first secret\nsecond secret\n"))
+    assertEquals(rows(out).takeRight(2), List("  │ [classified] first secret", "  │ [classified] second secret"))
+
+  test("output that arrives while a pop-up is drawn waits for it to close"):
+    val (screen, tool, out) = block(expanded = false)
+    screen.frame(tool.start("parallel(tasks)", "run_scala"))
+    screen.frame(tool.emit("before\n"))
+    screen.frame { tool.endOutput(); tool.hold() }
+    val shown = out.size
+    screen.frame(tool.emit("during\n"))
+    assertEquals(out.size, shown, "nothing is written over the pop-up")
+    screen.frame(tool.release())
+    assert(rows(out).last.endsWith("during"), rows(out))

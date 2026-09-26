@@ -36,12 +36,17 @@ private[ui] final class Dialogs(
   ): Option[List[Int]] =
     keys.withPaused(menus.checkbox(message, labels, checked, escape))
 
-  private def menu(message: String, labels: List[String]): Option[String] =
-    menuIndex(message, labels).flatMap(labels.lift)
+  private def menu(message: String, labels: List[String], escape: String): Option[String] =
+    menuIndex(message, labels, escape).flatMap(labels.lift)
+
+  /** A question, wrapped with its lines under the first one's text. */
+  private def ask(question: String): Unit =
+    TextLayout.wrap(Ansi.sanitize(question), width - 5).zipWithIndex.foreach: (line, index) =>
+      write(Indent + styled((if index == 0 then "? " else "  ") + line, Cyan, Bold) + "\n")
 
   /** A permission request: allow once, allow for the session, deny, or instructions for the
-    * agent. A cancelled menu denies; empty or cancelled instructions return to the menu. A
-    * plain terminal reads a typed reply ([[Menus.permissionReply]]). */
+    * agent. A cancelled menu denies, so Esc is shown as deny; empty or cancelled instructions
+    * return to the menu. A plain terminal reads a typed reply ([[Menus.permissionReply]]). */
   def permission(req: PermissionRequest): Decision =
     alerts.alert(s"Permission needed: ${req.title} (${req.details.mkString(", ")})")
     // The request embeds model-chosen paths and command lines: sanitize.
@@ -55,7 +60,8 @@ private[ui] final class Dialogs(
       else
         var selected: Option[Decision] = None
         while selected.isEmpty do
-          selected = menu("Allow?", List(Menus.AllowOnce, Menus.AllowSession, Menus.DenyLabel, Menus.ReviseLabel)) match
+          val choices = List(Menus.AllowOnce, Menus.AllowSession, Menus.DenyLabel, Menus.ReviseLabel)
+          selected = menu("Allow?", choices, escape = "deny") match
             case Some(Menus.AllowOnce) => Some(Decision.AllowOnce)
             case Some(Menus.AllowSession) => Some(Decision.AllowSession)
             case Some(Menus.ReviseLabel) =>
@@ -79,10 +85,10 @@ private[ui] final class Dialogs(
   /** A yes/no question from the app itself (setup, not the agent): a menu when there is a
     * terminal, a `[y/N]` line otherwise. Cancelling means no. */
   def confirm(question: String): Boolean =
-    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
+    ask(question)
     val yes =
       if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase(Locale.ROOT).startsWith("y"))
-      else menu("Choose", List(Menus.YesLabel, Menus.NoLabel)).contains(Menus.YesLabel)
+      else menu("Choose", List(Menus.YesLabel, Menus.NoLabel), escape = "cancel").contains(Menus.YesLabel)
     if plain then
       write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
     yes
@@ -90,7 +96,7 @@ private[ui] final class Dialogs(
   /** A secret such as an API key: the typed text is shown as `*` and never enters the
     * prompt history. `None` when empty or cancelled. */
   def secret(question: String): Option[String] =
-    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
+    ask(question)
     answerField(prompt.readSecret(styled("key> ", Cyan)))
 
   /** A question from the agent. Options render as a menu (or checkboxes when `multiple`),
@@ -99,7 +105,7 @@ private[ui] final class Dialogs(
   def answer(question: String, options: List[String], multiple: Boolean): Option[String] =
     alerts.alert(s"Question: $question")
     // The question and options are model-written: sanitize.
-    write(Indent + styled("? " + Ansi.sanitize(question), Cyan, Bold) + "\n")
+    ask(question)
     val cleanOptions = options.map(Ansi.sanitize)
     val answerPrompt = styled("answer> ", Cyan)
     val reply =

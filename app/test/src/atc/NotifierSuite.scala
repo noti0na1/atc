@@ -41,6 +41,9 @@ class NotifierSuite extends munit.FunSuite:
     val command = Notifier.systemCommand("atc", "it's \"done\" $(x)")
     assert(command.nonEmpty)
     if !atc.platform.Platform.isWindows then assertEquals(command.takeRight(2), List("atc", "it's \"done\" $(x)"))
+    // notify-send would read a body starting with `-` as an option.
+    if !atc.platform.Platform.isWindows && !atc.platform.Platform.isMac then
+      assertEquals(Notifier.systemCommand("atc", "--icon=/x").takeRight(3), List("--", "atc", "--icon=/x"))
 
   test("markdown replies become plain prose"):
     val reply =

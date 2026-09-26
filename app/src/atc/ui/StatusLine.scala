@@ -1,6 +1,6 @@
 package atc.ui
 
-import org.jline.terminal.Terminal
+import org.jline.terminal.{Size, Terminal}
 import org.jline.utils.{AttributedString, Status}
 
 import scala.jdk.CollectionConverters.*
@@ -80,22 +80,22 @@ private[ui] final class StatusLine(
 
   def refreshTitle(): Unit = if !plain && !closed then
     val marker = if busy() && popupOpen() then "? " else if busy() then s"${g.bullet} " else ""
-    val title = Ansi.sanitize(marker + titleBase)
+    val title = Ansi.sanitize(marker + titleBase).replace('\n', ' ').replace('\t', ' ')
     if title != lastTitle then
       lastTitle = title
       screen.writeStyle(s"${Ansi.Esc}]0;$title\u0007")
       screen.flush()
 
-  /** Redraw the title and the footer where they changed; the footer also after a resize. */
+  /** Redraw the title and the footer where they changed; the footer also after a resize,
+    * at the size the screen measured when the terminal said it changed. */
   def refresh(): Unit =
     refreshTitle()
     if !closed then
       footer.foreach: status =>
-        val size = terminal.getSize
-        val dimensions = (size.getColumns, size.getRows)
+        val dimensions = (width, screen.height)
         val resized = dimensions != footerSize
         if resized then
-          status.resize(size)
+          status.resize(Size.of(width, screen.height))
           footerSize = dimensions
         val text = screen.fit(Ansi.sanitize(label).replace('\n', ' ').replace('\t', ' '), 0)
         if resized || text != lastFooter then

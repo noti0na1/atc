@@ -174,14 +174,15 @@ class MarkdownStream(
     close + "\n"
 
   /** A fenced line is coloured with the lines since a comment or string opened as
-    * context, or else the last [[FenceContext]] lines (a definition may span a few), so
-    * a long block costs the same per line as a short one. */
+    * context, up to [[OpenFenceContext]], or else the last [[FenceContext]] lines (a
+    * definition may span a few), so a long block costs the same per line as a short one. */
   private def fenceLine(line: String): String =
     val shown =
       if fenceScala then
         fenceLines += line
         val (coloured, open) = highlight(fenceLines.mkString("\n"))
-        if !open then fenceLines.dropInPlace((fenceLines.size - FenceContext).max(0))
+        val keep = if open then OpenFenceContext else FenceContext
+        fenceLines.dropInPlace((fenceLines.size - keep).max(0))
         coloured
       else line
     glyphs.codeGutter + shown + "\n"
@@ -305,6 +306,9 @@ object MarkdownStream:
 
   /** Lines of context kept for the highlighter after every comment and string is closed. */
   private val FenceContext = 8
+  /** Lines of an open comment or string kept as context; an unclosed one must not make
+    * every further line cost the whole block. */
+  private val OpenFenceContext = 200
 
   /** A highlighter that colours nothing: the last line as it is. */
   val verbatim: String => (String, Boolean) = code => (code.substring(code.lastIndexOf('\n') + 1), false)

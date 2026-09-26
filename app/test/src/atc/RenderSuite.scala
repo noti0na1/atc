@@ -162,3 +162,14 @@ class RenderSuite extends munit.FunSuite:
     assertEquals(plain(lines.mkString("\n")), "val s = \"\"\"a\nb\"\"\"\nval y = 1")
     assertEquals(plain(Highlight.scala("val = (((\"x").mkString), "val = (((\"x")
     assert(!Highlight.scala("// c").head.contains(s"$E[34m")) // comments not blue
+
+  test("a long comment in a scala fence stays a comment to its end, with the compiler's highlighter"):
+    val m = MarkdownStream(glyphs, Highlight.scalaTail)
+    val comment = (1 to 12).map(i => s"val x$i = $i").mkString("/*\n", "\n", "\n*/")
+    val lines = (m.push(s"```scala\n$comment\nval y = 1\n```\n") + m.finish()).split("\n").toList
+    for line <- lines.slice(1, 13) do
+      assert(line.contains(s"$E[2m") && !line.contains(s"$E[33m"), line) // dim like a comment, no keyword colour
+    assert(lines(14).contains(s"$E[33mval"), lines(14))
+    assert(Highlight.scalaTail("/* open\nstill")._2)
+    assert(Highlight.scalaTail("val s = \"\"\"a\nb")._2)
+    assert(!Highlight.scalaTail("/* closed */ val x = \"\"\"a\"\"\"")._2)
