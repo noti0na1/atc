@@ -3,6 +3,7 @@ package atc.host
 import atc.{LauncherEnvironment, ScalaSource}
 import atc.lib.*
 import atc.perms.ScopeId
+import atc.platform.Platform
 
 import java.lang.ProcessBuilder.Redirect
 import java.nio.file.Path
@@ -91,10 +92,12 @@ private[host] trait HostProcesses:
       val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
       // Windows launchers may carry the original command line (including a prompt)
       // in these variables, and the key variables hold ATC's credentials. They belong
-      // to ATC, not to commands the agent starts, which could print them.
-      val environment = builder.environment().nn
-      environment.keySet().nn.removeIf(LauncherEnvironment.isInternal)
-      keyVariables().foreach(environment.remove)
+      // to ATC, not to commands the agent starts, which could print them. Windows names
+      // ignore case, but this map's keys keep the system's spelling (`Path`, not `PATH`).
+      val keys = keyVariables()
+      builder.environment().nn.keySet().nn.removeIf: name =>
+        LauncherEnvironment.isInternal(name) ||
+          keys.exists(key => if Platform.isWindows then key.equalsIgnoreCase(name) else key == name)
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
 
