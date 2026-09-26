@@ -8,8 +8,10 @@ import upickle.default.*
 
 import java.io.IOException
 import java.net.{BindException, InetAddress, InetSocketAddress, URLDecoder, URLEncoder}
+import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.{Files, Path}
+import java.nio.file.{Files, Path, StandardOpenOption}
+import java.nio.file.attribute.PosixFilePermissions
 import java.security.{MessageDigest, SecureRandom}
 import java.time.Duration
 import java.util.Base64
@@ -24,7 +26,8 @@ import scala.util.control.NonFatal
   *
   * The file is read again for every request, so every atc process uses the
   * newest tokens. A refresh token can be used once: each refresh saves the
-  * one it returns. */
+  * one it returns, holding a lock on a file beside the tokens so that two
+  * processes do not refresh with the same one. */
 final class ChatGPTAuth(file: Path, issuer: String = ChatGPTAuth.Issuer, ports: List[Int] = ChatGPTAuth.Ports):
   import ChatGPTAuth.*
 
@@ -37,15 +40,32 @@ final class ChatGPTAuth(file: Path, issuer: String = ChatGPTAuth.Issuer, ports: 
 
   /** Tokens for a request: the saved ones, refreshed first when they expire soon. */
   def current(): Tokens = synchronized:
-    val saved = load().getOrElse(throw SignInNeeded("Not signed in to ChatGPT"))
-    if saved.expiresAt - System.currentTimeMillis() > RefreshMargin.toMillis then saved else refresh(saved)
+    def fresh(t: Tokens) = t.expiresAt - System.currentTimeMillis() > RefreshMargin.toMillis
+    val saved = signedIn()
+    if fresh(saved) then saved
+    else
+      locked:
+        // Another process may have refreshed while this one waited for the lock.
+        val latest = signedIn()
+        if fresh(latest) then latest else refresh(latest)
 
   /** New tokens after the backend rejected `stale`. Another process may have refreshed already. */
   def renewed(stale: Tokens): Tokens = synchronized:
-    load() match
-      case Some(saved) if saved.access != stale.access => saved
-      case Some(saved) => refresh(saved)
-      case None => throw SignInNeeded("Not signed in to ChatGPT")
+    locked:
+      val saved = signedIn()
+      if saved.access != stale.access then saved else refresh(saved)
+
+  private def signedIn(): Tokens = load().getOrElse(throw SignInNeeded("Not signed in to ChatGPT"))
+
+  /** Run `step` holding the lock on `<file>.lock`, which keeps two atc processes from using
+    * the same single-use refresh token. */
+  private def locked[T](step: => T): T =
+    val path = file.resolveSibling(s"${file.getFileName}.lock").nn
+    val options = java.util.Set.of(StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+    val channel =
+      try FileChannel.open(path, options, OwnerOnly).nn
+      catch case _: UnsupportedOperationException => FileChannel.open(path, options).nn
+    Using.resource(channel)(c => Using.resource(c.lock().nn)(_ => step))
 
   private def refresh(saved: Tokens): Tokens =
     val body = ujson.Obj("grant_type" -> "refresh_token", "client_id" -> ClientId, "refresh_token" -> saved.refresh)
@@ -187,6 +207,7 @@ object ChatGPTAuth:
   private val Originator = "atc"
   private val Timeout = Duration.ofSeconds(30)
   private val RefreshMargin = Duration.ofMinutes(5)
+  private val OwnerOnly = PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
   private val JsonType = okhttp3.MediaType.get("application/json")
   private val FormType = okhttp3.MediaType.get("application/x-www-form-urlencoded")
 

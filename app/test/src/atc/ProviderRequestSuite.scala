@@ -384,6 +384,35 @@ class ProviderRequestSuite extends munit.FunSuite:
       assertEquals(models.map(_.settings.thinking), List(None, Some(false), None))
       assertEquals(ChatModel.create(models.head).efforts, List("low", "medium", "high"))
 
+  test("an Anthropic provider at a custom url without a key never gets the environment's key"):
+    val headers = java.util.concurrent.ConcurrentLinkedQueue[com.sun.net.httpserver.Headers]()
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn
+    server.createContext(
+      "/",
+      exchange =>
+        try
+          headers.add(exchange.getRequestHeaders)
+          val bytes = """{"data":[],"has_more":false}""".getBytes(UTF_8)
+          exchange.getResponseHeaders.nn.add("Content-Type", "application/json")
+          exchange.sendResponseHeaders(200, bytes.length.toLong)
+          exchange.getResponseBody.nn.write(bytes)
+        finally exchange.close()
+    )
+    server.start()
+    // The SDK's environment lookup reads this property before `ANTHROPIC_API_KEY`.
+    val previous = System.getProperty("anthropic.apiKey")
+    System.setProperty("anthropic.apiKey", "from-the-environment")
+    try
+      val url = s"http://127.0.0.1:${server.getAddress.getPort}"
+      assertEquals(ChatModel.listModels(endpoint("anthropic", url).copy(apiKey = None)), Nil)
+      val sent = headers.peek().nn
+      assertEquals(sent.getFirst("x-api-key"), "none")
+      assertEquals(sent.getFirst("Authorization"), null)
+    finally
+      if previous == null then System.clearProperty("anthropic.apiKey")
+      else System.setProperty("anthropic.apiKey", previous)
+      server.stop(0)
+
   test("a switched effort applies to the next request"):
     withServer((_, _, _) => (200, "application/json", answer)): (url, requests) =>
       val spec =

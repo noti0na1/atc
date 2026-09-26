@@ -235,11 +235,17 @@ object OpenAIChatModel:
 
     /** Whether this chunk contributes a delta; ignored chunks must not reach the display either. */
     def accumulate(chunk: ChatCompletionChunk): Boolean =
-      chunk.usage().toScala.foreach(u => usage = Some(u))
+      val reported = chunk.usage().toScala
+      reported.foreach(u => usage = Some(u))
       if !chunk.choices().isEmpty && !finished then
         last = Some(chunk)
         chunk.choices().asScala.headOption.flatMap(_.delta().content().toScala).foreach(text.append(_))
-        acc.accumulate(numbered(chunk).toBuilder().usage(java.util.Optional.empty[CompletionUsage]()).build())
+        // The usage is fed to the accumulator once, after the choices; a chunk without it is passed as it is.
+        val fragments = numbered(chunk)
+        acc.accumulate(
+          if reported.isEmpty then fragments
+          else fragments.toBuilder().usage(java.util.Optional.empty[CompletionUsage]()).build()
+        )
         finished = chunk.choices().asScala.exists(_.finishReason().isPresent)
         true
       else false

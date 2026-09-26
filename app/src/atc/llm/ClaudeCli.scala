@@ -1,6 +1,7 @@
 package atc.llm
 
 import atc.{Debug, Main}
+import atc.host.WindowsExecutable
 
 import java.io.{BufferedReader, IOException, InputStream, InputStreamReader, OutputStream}
 import java.nio.charset.StandardCharsets.UTF_8
@@ -226,12 +227,15 @@ private[atc] object ClaudeCli:
     * working directory can configure it. */
   def launch(args: List[String]): Process =
     val dir = Files.createTempDirectory("atc-claude-code").nn
-    val builder = ProcessBuilder(("claude" :: args).asJava).directory(dir.toFile)
+    // `onExit` below never runs once the JVM has exited.
+    dir.toFile.deleteOnExit()
+    val builder = ProcessBuilder().directory(dir.toFile)
     val env = builder.environment().nn
     Removed.foreach(env.remove)
     Settings.foreach((k, v) => env.put(k, v))
     val process =
-      try builder.start().nn
+      // Windows would otherwise search ATC's working directory, the project, before the PATH.
+      try builder.command(WindowsExecutable.resolve("claude" :: args, dir).asJava).nn.start().nn
       catch
         case e: IOException =>
           deleteQuietly(dir)

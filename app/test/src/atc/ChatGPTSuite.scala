@@ -186,6 +186,37 @@ class ChatGPTSuite extends munit.FunSuite:
       assertEquals(auth.load().map(_.refresh), Some("refresh-2"))
       assertEquals(auth.current().access, fresh, "fresh tokens are used as they are")
       assertEquals(requests().size, 1)
+      if !atc.platform.Platform.isWindows then
+        val lock = file.resolveSibling("chatgpt-auth.json.lock").nn
+        assertEquals(
+          java.nio.file.attribute.PosixFilePermissions.toString(Files.getPosixFilePermissions(lock)),
+          "rw-------"
+        )
+
+  test("a refresh waits for another process's refresh and uses the tokens it saved"):
+    withServer(_ => (200, "application/json", tokenAnswer("mine", "refresh-3"))): (url, requests) =>
+      val file = tempFile()
+      saved(file, "old", "refresh-1", expiresIn = 0)
+      val javaBin =
+        Path.of(sys.props("java.home"), "bin", if atc.platform.Platform.isWindows then "java.exe" else "java")
+      val holder = ProcessBuilder(
+        javaBin.toString,
+        "-cp",
+        sys.props("java.class.path"),
+        "atc.ChatGPTLockHolder",
+        s"$file.lock",
+      ).redirectError(ProcessBuilder.Redirect.INHERIT).nn.start().nn
+      try
+        val out = java.io.BufferedReader(java.io.InputStreamReader(holder.getInputStream.nn, UTF_8))
+        assertEquals(out.readLine(), "locked")
+        val access =
+          java.util.concurrent.CompletableFuture.supplyAsync(() => ChatGPTAuth(file, url, List(0)).current().access)
+        Thread.sleep(300) // it reads the expired tokens and waits for the lock
+        saved(file, "theirs", "refresh-2", expiresIn = 3_600_000)
+        holder.getOutputStream.nn.close()
+        assertEquals(access.get(10, java.util.concurrent.TimeUnit.SECONDS), "theirs")
+        assert(requests().isEmpty, "the refresh token the other process used is not used again")
+      finally holder.destroy()
 
   test("a refresh token another process used gives way to the tokens it saved; otherwise sign in again"):
     val file = tempFile()
@@ -289,6 +320,30 @@ class ChatGPTSuite extends munit.FunSuite:
         assert(requests().isEmpty)
       finally model.close()
 
+  test("a malformed token answer fails the request with an IOException that quotes no token"):
+    withServer { r =>
+      if r.path == "/oauth/token" then (200, "application/json", """["secret-token"]""")
+      else (200, "text/event-stream", streamed)
+    } { (url, requests) =>
+      val file = tempFile()
+      saved(file, "old", "refresh-1", expiresIn = 0)
+      val model = ChatGPTModel(backend(url), ChatGPTAuth(file, url, List(0)))
+      try
+        val e = intercept[Exception](model.complete("s", List(Msg.User("hi")), Nil, StreamSink(_ => ()), () => false))
+        val messages = Iterator.iterate[Throwable | Null](e)(_.nn.getCause).takeWhile(_ != null)
+          .map(t => String.valueOf(t.nn.getMessage)).toList
+        assert(messages.exists(_.contains("ChatGPT sign-in")), messages.toString)
+        assert(!messages.exists(_.contains("secret-token")), messages.toString)
+        assert(requests().forall(_.path == "/oauth/token"), "the backend is not reached")
+      finally model.close()
+    }
+
+  test("a provider without a url reaches the ChatGPT backend"):
+    val auth = ChatGPTAuth(tempFile(), "http://127.0.0.1:1", List(0))
+    val model = ChatGPTModel(backend("http://x").copy(baseUrl = None), auth)
+    try assertEquals(model.spec.baseUrl, Some(ChatGPTModel.BackendUrl))
+    finally model.close()
+
   test("the backend's model list gives the listed models in order with names, context windows and efforts"):
     val listed = ujson.read("""{"models":[
       {"slug":"gpt-b","display_name":"GPT B","visibility":"list","priority":2,"context_window":272000,
@@ -311,3 +366,13 @@ class ChatGPTSuite extends munit.FunSuite:
     private def single: A =
       assertEquals(xs.size, 1, xs.toString)
       xs.head
+
+/** Another process holding the lock `ChatGPTAuth` refreshes under, until its input ends. */
+object ChatGPTLockHolder:
+  def main(args: Array[String]): Unit =
+    val options = java.util.Set.of(java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE)
+    val channel = java.nio.channels.FileChannel.open(Path.of(args(0)), options).nn
+    channel.lock()
+    System.out.println("locked")
+    System.out.flush()
+    System.in.read()

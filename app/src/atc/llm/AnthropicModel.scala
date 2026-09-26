@@ -29,8 +29,11 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   private def connection: Connection = synchronized:
     opened.getOrElse:
       val backendBuilder = AnthropicBackend.builder()
+      // As in `Providers.openAiClient`: the environment's credentials are for Anthropic's API,
+      // so a custom `url` without a configured key gets a placeholder instead of them.
       spec.apiKey match
         case Some(key) => backendBuilder.apiKey(key)
+        case None if spec.baseUrl.isDefined => backendBuilder.apiKey("none")
         case None => backendBuilder.fromEnv()
       spec.baseUrl.foreach(backendBuilder.baseUrl)
       val backend = backendBuilder.build()
@@ -47,7 +50,9 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
   private def client: AnthropicClient = connection.client
   private def streamingClient: AnthropicClient =
     val current = connection
-    current.client.withOptions(_.httpClient(ModelRequest.scopedTransport(current.transport)))
+    current.client.withOptions(
+      _.httpClient(ModelRequest.scopedTransport(current.transport)).timeout(AnthropicModel.StreamTimeout)
+    )
 
   override def close(): Unit = synchronized:
     opened.foreach(_.client.close())
@@ -230,6 +235,9 @@ final class AnthropicModel(spec: ModelSpec) extends SpecModel(spec):
 
 private[atc] object AnthropicModel:
   private val DefaultMaxTokens = 32000
+  /** As `Providers.StreamTimeout`, in this SDK's type. */
+  val StreamTimeout: Timeout = Timeout.builder().read(Providers.RequestTimeout).write(Providers.RequestTimeout)
+    .request(java.time.Duration.ZERO).build()
   /** The output limit of a one-shot call whose model configures none. */
   private val SimpleMaxTokens = 16000
 

@@ -85,7 +85,7 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
   protected def streamingClient: OpenAIClient =
     val current = connection
     val transport = com.openai.client.okhttp.OkHttpClient(ModelRequest.scopedHttpClient(current.http))
-    current.client.withOptions(_.httpClient(Providers.borrowed(transport)))
+    current.client.withOptions(_.httpClient(Providers.borrowed(transport)).timeout(Providers.StreamTimeout))
   override def close(): Unit = synchronized:
     opened.foreach(_.client.close())
     opened = None
@@ -151,6 +151,12 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
 private[atc] object Providers:
   /** Generous, because a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
+
+  /** A streamed answer may take longer than [[RequestTimeout]] in all, so a streaming request has
+    * no limit on the whole call. Connecting, and each wait for the next bytes, stay bounded, and
+    * Ctrl-C cancels the call. */
+  val StreamTimeout: Timeout =
+    Timeout.builder().read(RequestTimeout).write(RequestTimeout).request(Duration.ZERO).build()
 
   /** For listing a provider's models, which a user waits for. */
   val ListTimeout: Duration = Duration.ofSeconds(20)

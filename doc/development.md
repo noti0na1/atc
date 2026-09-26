@@ -669,8 +669,10 @@ through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …), `cha
 models of a ChatGPT plan, signed in through the browser; see
 [Models and providers](#models-and-providers)), `claude-code` (the models of a Claude plan,
 through the user's signed-in Claude Code CLI; same section) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
-variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
-then the environment. `headers` are extra HTTP headers for every request; a value may be a
+variables resolve from the project's `.atc/keys.properties` (once the project is trusted),
+then `~/.atc/keys.properties`, then the environment. Without `key` or `keyEnv`, the SDK's own
+variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only when `url` is unset; a gateway
+at a `url` that needs that key names it, as in `"key": "${ANTHROPIC_API_KEY}"`. `headers` are extra HTTP headers for every request; a value may be a
 `${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new`) for
 gateways that route by session, such as OpenCode
 (`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
@@ -809,7 +811,9 @@ newline and encoding conventions (commonly CRLF, sometimes BOM-marked UTF-16 on 
 `displayName` affects presentation only. A provider without configured models is listed
 through `ChatModel.listModels` (the adapter's own client, with `Providers.ListTimeout`), at
 most once per catalog and in parallel across providers: `App` starts `refresh()` after the
-banner, and `models` waits for it. Lookups never wait: they use this session's list when
+banner, and `models` waits for it at most 30 seconds (`ModelCatalog.ListWait`), since a Claude
+Code listing can take minutes; a provider whose fetch has not finished keeps its stored list
+until it does. Lookups never wait: they use this session's list when
 it has arrived, else the one `ModelListStore` kept (`~/.atc/model-lists.json`, reused only
 for the same provider name, api and url), else take `provider/model-id` as given. A model
 taken as given keeps its unknown context window until a later session finds it in the
@@ -827,7 +831,9 @@ the top-level one, listed models included. `SpecModel.withWebSearchFallback` res
 streaming request without the tool when the provider answers 400 or 422 naming web
 search before anything was streamed, and turns the tool off for that client. A gateway
 that drops the tool silently cannot be detected. `ChatModel` has streaming `complete` and one-shot
-`simple` operations. Provider adapters normalize stop reasons into `CompletionStop`.
+`simple` operations. Provider adapters normalize stop reasons into `CompletionStop`;
+`model_context_window_exceeded` (Anthropic, Claude Code) counts as truncation, as an output
+limit does, so the calls of a response cut by the context window are not run.
 
 `Msg` carries neutral text and tool calls. Assistant messages may also carry a `NativeTurn`
 for replay to the exact provider/model reference that produced it. Switching models uses
@@ -841,7 +847,13 @@ requests can retry without a guessed reasoning effort when the provider rejects 
 parameter; unrelated bad requests are not retried by this fallback.
 
 Provider SDK request construction remains in each adapter. Shared configuration and client
-setup belong in `Providers`; model selection belongs in `ModelCatalog`.
+setup belong in `Providers`; model selection belongs in `ModelCatalog`. Without a configured
+key, the Anthropic and OpenAI adapters take their SDK's credentials from the environment only
+for the provider's default endpoint; a provider with a `url` gets the placeholder key `none`
+instead, so those credentials never reach another host. A streaming request has no limit on
+the whole call, since a long answer can stream for longer than `Providers.RequestTimeout`
+(15 minutes); connecting, and each read and write, keep their timeouts, and Ctrl-C cancels
+the call. One-shot calls keep the 15-minute limit.
 
 A provider's `headers` are extra HTTP headers for every request to it. `KeyBindings.headers`
 resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
@@ -873,7 +885,8 @@ preset's `reasoningStyle`, arrive in the answer text between `<thought>` tags;
 could begin a tag, and the stored answer and the replayed turn keep only the answer text.
 
 The `chatgpt` api reaches the models of a ChatGPT plan through the backend the Codex CLI
-uses (`https://chatgpt.com/backend-api/codex`), signed in the way Codex signs in.
+uses (the provider's `url`, by default `https://chatgpt.com/backend-api/codex`), signed in the
+way Codex signs in.
 `ChatGPTAuth.begin` starts an OAuth authorization-code grant with PKCE and Codex's client id
 at `auth.openai.com`, with a callback server on the loopback interface at port 1455 or 1457,
 the two callbacks registered for that client. `FirstRun.signIn` opens the browser
@@ -886,9 +899,13 @@ the ID token's `https://api.openai.com/auth` claim, and the expiry from the acce
 `exp`. `ChatGPTModel` is the Responses adapter with an OkHttp interceptor that reads the file
 for every request, so every atc process sees the newest tokens. The interceptor refreshes
 tokens five minutes before they expire, and once more after a 401. A refresh token can be
-used once. When the token endpoint rejects one, another process may have used it already,
-so the saved tokens win if their refresh token differs; otherwise `SignInNeeded` tells the
-user to sign in again from `/providers`. The backend streams only, requires instructions
+used once, so a refresh holds a lock on `chatgpt-auth.json.lock` (created readable only by its
+owner) and reads the saved tokens again once it has the lock: another process may have
+refreshed while it waited. When the token endpoint still rejects a refresh token, the saved
+tokens win if their refresh token differs; otherwise `SignInNeeded` tells the user to sign in
+again from `/providers`. A failure of the sign-in step that is not an `IOException`, such as a
+malformed token answer, fails the request as an `IOException` that names only the exception's
+class, since its message may quote a token. The backend streams only, requires instructions
 and rejects `max_output_tokens` and `temperature`. Its closing `response.completed` carries
 an empty `output`, so `OpenAIResponsesModel.Accumulator` keeps the items of the
 `response.output_item.done` events and uses them when the final response has none. The adapter streams one-shot calls too,
@@ -903,7 +920,8 @@ covers the flow against a local server.
 
 The `claude-code` api reaches the models of a Claude plan through the `claude` CLI the user
 installed and signed in to; ATC never reads its credentials. `ClaudeCli` starts `claude -p`
-in the stream-json protocol of the Claude Agent SDK, in an empty temporary directory, with
+in the stream-json protocol of the Claude Agent SDK, in an empty temporary directory (deleted
+when the process exits, or else when ATC exits), with
 everything that would act or load context outside ATC turned off: `--tools=` (no built-in
 tools; `WebSearch` alone when `webSearch` is on), `--setting-sources=` (no settings files,
 hooks, plugins or skills), `--strict-mcp-config`, `--disable-slash-commands`,
@@ -932,7 +950,10 @@ A cancelled request stops its process. One-shot calls run in their own process w
 tools. The model list comes from the `initialize` answer, and each model's context
 window from `set_model` followed by `get_context_usage` (`rawMaxTokens`); none of these
 makes a model request. A configured model without `contextWindow` learns its window the
-same way when its first session starts. `ClaudeCodeSuite` covers the
+same way when a session starts, until the CLI has answered once; the session is published
+before that question, so an interrupt during it leaves a process that `close` or the next
+session ends. On Windows, `WindowsExecutable` resolves `claude` from the PATH only, so a
+`claude.exe` in the project cannot run in its place. `ClaudeCodeSuite` covers the
 protocol against a scripted CLI.
 
 Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.

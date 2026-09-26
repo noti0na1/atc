@@ -62,7 +62,9 @@ enum CompletionStop:
 
 object CompletionStop:
   private val ResumeReasons = Set("pause_turn")
-  private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens")
+  /** `model_context_window_exceeded` (Anthropic, Claude Code) cuts the answer where the
+    * context window ends, as an output limit does. */
+  private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens", "model_context_window_exceeded")
   private val BlockedReasons = Set("content_filter", "refusal")
 
   /** Normalize a provider's raw reason at the adapter boundary. */

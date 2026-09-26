@@ -18,6 +18,7 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(CompletionStop.fromReason("length"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("MAX-TOKENS"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("max_output_tokens"), CompletionStop.Truncated)
+    assertEquals(CompletionStop.fromReason("model_context_window_exceeded"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("CONTENT-FILTER"), CompletionStop.Blocked)
     assertEquals(CompletionStop.fromReason("refusal"), CompletionStop.Blocked)
     assertEquals(CompletionStop.fromReason("end_turn"), CompletionStop.Complete)
@@ -229,6 +230,27 @@ class ModelSuite extends munit.FunSuite:
     val e = intercept[IllegalArgumentException](catalog(("p", "openai", List("a", "b"))).find("nope"))
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
+
+  test("listing every model waits a bounded time for a slow provider, which keeps its stored list until it answers"):
+    val store = atc.config.ModelListStore(
+      java.nio.file.Files.createTempDirectory("atc-lists").nn.resolve("model-lists.json").nn
+    )
+    val slow = ModelSpec("slow", "", "openai", "", Some("http://localhost:1"), None, ModelConfig())
+    store.save(slow, List(slow.listed("old", ModelConfig())))
+    val release = java.util.concurrent.CountDownLatch(1)
+    val c = ModelCatalog(
+      Nil,
+      List(slow),
+      Some { p =>
+        release.await()
+        List(p.listed("new", ModelConfig()))
+      },
+      Some(store),
+      listWait = java.time.Duration.ofMillis(300),
+    )
+    try assertEquals(c.models.map(_.ref), List("slow/old"))
+    finally release.countDown()
+    assertEquals(c.models.map(_.ref), List("slow/new"))
 
   test("a config model that names no model is ignored with a warning naming its file; -m is not"):
     val dir = java.nio.file.Files.createTempDirectory("atc-models").nn
