@@ -1,7 +1,8 @@
 package atc
 
-import atc.config.{Config, Configuration, ModelCatalog, ModelConfig, ModelListStore, ModelSpec}
+import atc.config.{Config, ConfigLayer, Configuration, ModelCatalog, ModelConfig, ModelListStore, ModelSpec}
 import atc.llm.ChatModel
+import atc.perms.Mode
 import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
@@ -17,12 +18,29 @@ final class Models(args: Cli.Args, start: Configuration):
   /** Every model of every configured provider, resolved with its key; a
     * provider that configures none is asked for its list after the start. */
   var catalog: ModelCatalog = start.catalog(ChatModel.listModels, ModelListStore.global)
-  /** The configuration as `/providers` last left it. */
+  /** The configuration as `/providers` and `/config` last left it. */
   var configuration: Configuration = start
   private val clients = mutable.Map[String, ChatModel]()
+  /** What `/config` set for this session only: a last layer, over every file. */
+  private var session = Map.empty[String, ujson.Value]
+
+  /** Whether the sandbox mode reaches the network; provider web search is used only then. */
+  @volatile private var networkMode = true
 
   /** The client for one model, created once per session. */
-  def client(spec: ModelSpec): ChatModel = clients.getOrElseUpdate(spec.ref, ChatModel.create(spec))
+  def client(spec: ModelSpec): ChatModel =
+    clients.getOrElseUpdate(
+      spec.ref, {
+        val model = ChatModel.create(spec)
+        if !networkMode then model.useWebSearch(false)
+        model
+      }
+    )
+
+  /** Follow the sandbox mode: read-only and local mode keep the provider off the web too. */
+  def useMode(mode: Mode): Unit =
+    networkMode = mode.allowsNetwork
+    applyWebSearch()
 
   /** The client for a model reference (`alias` or `provider/alias`). */
   def client(reference: String): ChatModel = client(catalog.find(reference))
@@ -61,10 +79,33 @@ final class Models(args: Cli.Args, start: Configuration):
   /** `provider/alias — display-name-or-model-id`, how a model in use is named everywhere. */
   def describe(m: ChatModel): String = Models.describe(m, catalog.find(m.ref))
 
-  /** Load the configuration again and rebuild the catalog. */
+  /** Load the configuration again, with this session's settings over it, and
+    * rebuild the catalog. The clients made so far take up the new `webSearch`. */
   def reload(): Unit =
-    configuration = Config.load(args.cwd, args.config, bundledGlobal = start.bundledGlobal)
+    val files = Config.load(args.cwd, args.config, start.bundledGlobal, trustProject = args.approveAll)
+    configuration =
+      if session.isEmpty then files
+      else Configuration.combine(files.layers :+ ConfigLayer.session(ujson.Obj.from(session)), files.keys)
     catalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
+    applyWebSearch()
+
+  private def applyWebSearch(): Unit =
+    val default = configuration.settings.webSearch.getOrElse(false)
+    clients.values.foreach: client =>
+      client.useWebSearch(
+        networkMode && catalog.configured.find(_.ref == client.ref).fold(default)(_.settings.webSearch.contains(true))
+      )
+
+  /** Set a top-level `key` for this session only and load the configuration
+    * again. A value that leaves the configuration invalid is not kept. */
+  def setForSession(key: String, value: ujson.Value): Unit =
+    val before = session
+    session = session.updated(key, value)
+    try reload()
+    catch
+      case e: Exception =>
+        session = before
+        throw e
 
   def close(): Unit =
     clients.values.foreach: model =>

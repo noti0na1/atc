@@ -62,7 +62,9 @@ enum CompletionStop:
 
 object CompletionStop:
   private val ResumeReasons = Set("pause_turn")
-  private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens")
+  /** `model_context_window_exceeded` (Anthropic, Claude Code) cuts the answer where the
+    * context window ends, as an output limit does. */
+  private val TruncatedReasons = Set("length", "max_tokens", "max_output_tokens", "model_context_window_exceeded")
   private val BlockedReasons = Set("content_filter", "refusal")
 
   /** Normalize a provider's raw reason at the adapter boundary. */
@@ -128,17 +130,20 @@ trait ChatModel:
     * when replaying a turn. */
   def providerKey: String
   def webSearch: Boolean
+  /** Turn the provider's web search on or off for later requests, when the
+    * config's setting changes during the session. */
+  def useWebSearch(on: Boolean): Unit = ()
   /** The context window in tokens, when the config states it (`contextWindow`). */
   def contextWindow: Option[Int] = None
   /** Configured maximum output tokens, when the adapter sends one. Context
     * fitting reserves at least this much room for the answer. */
   def maxOutputTokens: Option[Int] = None
-  /** The efforts [[effort]] may be set to; empty when the model takes none. */
+  /** The efforts [[effort]] may be set to; empty when the model takes no effort parameter. */
   def efforts: List[String] = Nil
-  /** The effort the model's config sets (`reasoning`); `None` sends none. */
+  /** The effort the model's config sets (`reasoning`); `None` sends no effort. */
   def defaultEffort: Option[String] = None
   /** The reasoning effort later requests ask for, one of [[efforts]]; `None`
-    * sends none. Starts as [[defaultEffort]]; `/effort` switches it. */
+    * sends no effort. Starts as [[defaultEffort]]; `/effort` switches it. */
   @volatile var effort: Option[String] = None
 
   /** One agent step. Streams text, notes and reasoning to `sink`;

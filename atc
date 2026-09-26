@@ -112,7 +112,7 @@ require_command() {
 # Java
 # ---------------------------------------------------------------------------
 
-# The major version in the first line of `java -version` ("17.0.2" -> 17,
+# The major version in the version line of `java -version` ("17.0.2" -> 17,
 # "1.8.0_292" -> 8); fails when the line has no version.
 java_major_from_line() {
   local version_line="$1" raw_version major
@@ -133,11 +133,12 @@ java_major_from_line() {
 # Sets JAVA_VERSION (the whole `java -version` output, which is also what keys the startup
 # cache), JAVA_MAJOR and VERSIONED_JVM_OPTS (the defaults only some Java versions accept).
 # Reading the version starts a JVM, so it happens once per run and every later use reads
-# JAVA_VERSION instead.
+# JAVA_VERSION instead. The version line is looked up because JAVA_TOOL_OPTIONS and similar
+# variables make the JVM print a "Picked up ..." line before it.
 ensure_java() {
   command -v java >/dev/null 2>&1 || fail "Java 17+ is required. Install Java and try again."
   JAVA_VERSION="$(java -version 2>&1 || true)"
-  JAVA_MAJOR="$(java_major_from_line "$(printf '%s\n' "$JAVA_VERSION" | head -n1)")" \
+  JAVA_MAJOR="$(java_major_from_line "$(printf '%s\n' "$JAVA_VERSION" | grep -m1 ' version "')")" \
     || fail "Unable to detect the installed Java version. Install Java 17+ and try again."
   (( JAVA_MAJOR >= 17 )) || fail "Java 17+ is required. Found Java ${JAVA_MAJOR}. Install a newer Java version and try again."
   VERSIONED_JVM_OPTS=()
@@ -194,17 +195,25 @@ extract_release_field() {
     | sed -E 's/^[^"]*"[^"]*"[[:space:]]*:[[:space:]]*"([^"]+)"$/\1/'
 }
 
+# The first "id" in the document, which GitHub prints before the author's and the assets'.
+# grep -o prints every match of a line, and minified JSON is one line, so sed keeps the first.
 extract_release_id() {
   local json="$1"
-  printf '%s' "$json" | grep -m1 -oE '"id"[[:space:]]*:[[:space:]]*[0-9]+' | sed -E 's/.*:[[:space:]]*//'
+  printf '%s' "$json" | grep -m1 -oE '"id"[[:space:]]*:[[:space:]]*[0-9]+' | sed -E -n '1s/.*:[[:space:]]*//p'
 }
 
-# "<release id>|<tag>": what the cache marker records.
+# "<release id>|<tag>": what the cache marker records. jq reads the top-level fields when it
+# is available; the grep fallback depends on GitHub's field order.
 release_key_from_json() {
   local json="$1" release_id tag_name
 
-  release_id="$(extract_release_id "$json")"
-  tag_name="$(extract_release_field "$json" "tag_name")"
+  if command -v jq >/dev/null 2>&1; then
+    release_id="$(printf '%s' "$json" | jq -r '.id // empty' 2>/dev/null)" || release_id=""
+    tag_name="$(printf '%s' "$json" | jq -r '.tag_name // empty' 2>/dev/null)" || tag_name=""
+  else
+    release_id="$(extract_release_id "$json")"
+    tag_name="$(extract_release_field "$json" "tag_name")"
+  fi
   [[ -n "$release_id" && -n "$tag_name" ]] || fail "failed to parse the latest release metadata."
   printf '%s|%s\n' "$release_id" "$tag_name"
 }
@@ -473,7 +482,11 @@ should_check_update() {
 offer_startup_update() {
   should_check_update "$@" || return 0
   offer_release_update || return $?
+  # Removes the staged wrapper when its download or the prompt is interrupted.
+  SELF_UPDATE_TMP=""
+  trap 'rm -f -- "$SELF_UPDATE_TMP"; exit 130' INT TERM HUP
   offer_self_update
+  trap - INT TERM HUP
 }
 
 offer_release_update() {
@@ -504,6 +517,7 @@ offer_release_update() {
 # PATH and the wrapper itself
 # ---------------------------------------------------------------------------
 
+# The rc files of the user's shell that setup edits. Setup creates the first one when none exists.
 profile_candidates() {
   case "$(basename "${SHELL:-}")" in
     zsh) printf '%s\n' "${HOME}/.zshrc" "${HOME}/.zprofile" ;;
@@ -512,46 +526,62 @@ profile_candidates() {
   esac
 }
 
+# Puts INSTALL_DIR on PATH; %q quotes the directory for sh, bash and zsh.
 path_snippet() {
+  local dir
+  dir="$(printf '%q' "$INSTALL_DIR")"
   cat <<EOF
 ${PATH_MARKER_BEGIN}
 case ":\$PATH:" in
-  *":\$HOME/.local/bin:"*) ;;
-  *) export PATH="\$HOME/.local/bin:\$PATH" ;;
+  *:${dir}:*) ;;
+  *) export PATH=${dir}:"\$PATH" ;;
 esac
 ${PATH_MARKER_END}
 EOF
 }
 
+# Appends the snippet to each existing rc file of the user's shell that does not name
+# INSTALL_DIR yet. A file that cannot be written gets a warning, so setup still downloads the
+# release. fish reads none of these files, so for fish the command to run is printed instead.
 update_profile_path() {
-  local updated_any=false file content snippet
-
-  snippet="$(path_snippet)"
-  while IFS= read -r file; do
-    [[ -n "$file" && -f "$file" ]] || continue
-    content="$(cat "$file")"
-    if [[ "$content" == *"$PATH_MARKER_BEGIN"* || "$content" == *'$HOME/.local/bin'* || "$content" == *"${HOME}/.local/bin"* ]]; then
-      continue
-    fi
-    {
-      printf '\n'
-      printf '%s\n' "$snippet"
-    } >> "$file"
-    echo "Updated ${file} to include ~/.local/bin in PATH."
-    updated_any=true
-  done < <(profile_candidates)
+  local file content snippet files=() updated=false configured=false
 
   if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
     export PATH="${INSTALL_DIR}:${PATH}"
   fi
+  if [[ "$(basename "${SHELL:-}")" == fish ]]; then
+    echo "To put ${INSTALL_DIR} on PATH in fish, run: fish_add_path $(printf '%q' "$INSTALL_DIR")"
+    return 0
+  fi
 
-  if [[ "$updated_any" == true ]]; then
+  while IFS= read -r file; do
+    [[ ! -f "$file" ]] || files+=("$file")
+  done < <(profile_candidates)
+  [[ ${#files[@]} -gt 0 ]] || files=("$(profile_candidates | sed -n 1p)")
+
+  snippet="$(path_snippet)"
+  for file in "${files[@]}"; do
+    content="$(cat "$file" 2>/dev/null)" || content=""
+    # A file with the snippet, or naming the directory literally or through $HOME, is set up.
+    if [[ "$content" == *"$PATH_MARKER_BEGIN"* || "$content" == *"$INSTALL_DIR"* ||
+          "$content" == *"\$HOME/${INSTALL_DIR#"${HOME}/"}"* ]]; then
+      configured=true
+    elif printf '\n%s\n' "$snippet" 2>/dev/null >> "$file"; then
+      echo "Updated ${file} to put ${INSTALL_DIR} on PATH."
+      updated=true
+    else
+      echo "Warning: could not write ${file}; add ${INSTALL_DIR} to PATH yourself." >&2
+    fi
+  done
+
+  if [[ "$updated" == true ]]; then
     echo "Open a new shell or source your profile to pick up PATH changes."
-  else
-    echo "~/.local/bin is already configured in PATH profiles."
+  elif [[ "$configured" == true ]]; then
+    echo "${INSTALL_DIR} is already on PATH in your shell profile."
   fi
 }
 
+# Cleans the rc files of every shell setup knows, since the user may have switched shells.
 remove_profile_path() {
   local file content cleaned
 
@@ -579,7 +609,7 @@ remove_profile_path() {
     ')"
     printf '%s\n' "$cleaned" > "$file"
     echo "Cleaned PATH snippet from ${file}"
-  done < <(profile_candidates)
+  done < <(SHELL=zsh profile_candidates; SHELL=bash profile_candidates)
 }
 
 self_path() {
@@ -625,10 +655,12 @@ require_cached_jars() {
 # Developer mode: a checkout's local build in place of the release
 # ---------------------------------------------------------------------------
 
-# Whether a source file of the checkout is newer than the built app jar.
+# Whether a file the distribution is built from is newer than the built app jar. Tests are
+# not among those files.
 dev_build_stale() {
   local dir="$1" app="$2"
-  [[ -n "$(find "$dir/build.mill" "$dir/app" "$dir/lib" -type f -newer "$app" 2>/dev/null | head -n1)" ]]
+  [[ -n "$(find "$dir/build.mill" "$dir/app/src" "$dir/app/resources" "$dir/lib/src" "$dir/windows" \
+    -type f -newer "$app" 2>/dev/null | head -n1)" ]]
 }
 
 # The checkout a dev-marked cache came from; empty when the cache holds a release.
@@ -704,7 +736,9 @@ stage_latest_self() {
     return 1
   }
   SELF_UPDATE_TMP="$STAGED_SELF"
-  if ! download_latest_self "$STAGED_SELF" "$@"; then
+  # In a subshell: a failed check there (no curl, a malformed GITHUB_TOKEN) calls fail, which
+  # must end only the download, since the startup offer must never stop the launch.
+  if ! (download_latest_self "$STAGED_SELF" "$@"); then
     rm -f -- "$STAGED_SELF"
     STAGED_SELF=""
     echo "Failed to download the latest atc wrapper." >&2
@@ -824,7 +858,8 @@ cmd_uninstall() {
   if [[ -d "$CACHE_DIR" ]]; then
     # Remove known artifacts only. A dev.* or download.* directory name does not
     # establish ownership, especially when ATC_CACHE_DIR points to a shared directory.
-    rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp"
+    rm -f -- "$RELEASE_MARKER" "$APP_JAR" "$LIB_JAR" "${APP_JAR}.tmp" "${LIB_JAR}.tmp" \
+      "${CACHE_DIR}/self-check"
     rm -f -- "${STARTUP_CACHE_DIR}/atc.aot" "${STARTUP_CACHE_DIR}/atc.jsa" "$STARTUP_CACHE_KEY"
     rmdir -- "$STARTUP_CACHE_DIR" 2>/dev/null || true
     if rmdir -- "$CACHE_DIR" 2>/dev/null; then
@@ -882,12 +917,14 @@ startup_cache_flags() {
 }
 
 # What the cache was built for: the JDK (its whole -version output, read once by
-# ensure_java), the release marker and the version-gated JVM options (the JVM refuses a
-# cache built with different module options, such as --enable-native-access).
+# ensure_java), the release marker and the JVM options besides the defaults. The JVM refuses
+# a cache built with different module options, such as --enable-native-access, and prints
+# errors for one built with another GC or heap size, which ATC_JAVA_OPTS and -Xmx can set.
 startup_cache_key() {
   printf '%s\n' "$JAVA_VERSION"
   cat "$RELEASE_MARKER" 2>/dev/null || true
-  printf '%s\n' "${VERSIONED_JVM_OPTS[*]+"${VERSIONED_JVM_OPTS[*]}"}"
+  printf '%s\n' "${VERSIONED_JVM_OPTS[*]+"${VERSIONED_JVM_OPTS[*]}"}" "${ATC_JAVA_OPTS:-}" \
+    "${JVM_OPTS[*]+"${JVM_OPTS[*]}"}"
 }
 
 # True when the key file matches and neither jar is newer than it.
@@ -897,22 +934,24 @@ startup_cache_current() {
   [[ -z "$(find "$APP_JAR" "$LIB_JAR" -newer "$STARTUP_CACHE_KEY" 2>/dev/null)" ]]
 }
 
-# One echo-model turn with the cache-creating flag; output is discarded and a failure leaves
-# no cache file. The key is written either way, so a JDK that cannot build the cache does not
-# pay for another attempt on every run, and it is dated like a jar that is newer than it, so a
-# future-dated jar cannot force a rebuild on every run.
+# One echo-model turn with the cache-creating flag and the run's JVM options; output is
+# discarded and a failure leaves no cache file. The key is written either way, so a JDK that
+# cannot build the cache does not pay for another attempt on every run, and it is dated like a
+# jar that is newer than it, so a future-dated jar cannot force a rebuild on every run.
 build_startup_cache() {
   local tmp jar
   echo "atc: preparing the JVM startup cache (once per release and JDK, a few seconds)..." >&2
-  mkdir -p "$STARTUP_CACHE_DIR"
   rm -f -- "$STARTUP_CACHE_FILE"
-  tmp="$(mktemp -d "${TMPDIR:-/tmp}/atc-startup-cache.XXXXXX")"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/atc-startup-cache.XXXXXX")" || return 1
+  # Removes the throwaway directory when the training run is interrupted.
+  trap 'rm -rf -- "$tmp"; exit 130' INT TERM HUP
   printf '%s\n' '{"providers":{"echo":{"api":"echo","models":{"echo":{}}}},"model":"echo"}' > "${tmp}/train.json"
   # shellcheck disable=SC2086
   java ${DEFAULT_JVM_OPTS} ${VERSIONED_JVM_OPTS[@]+"${VERSIONED_JVM_OPTS[@]}"} "$STARTUP_CACHE_CREATE" \
-    -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" -jar "$APP_JAR" \
-    -c "${tmp}/train.json" -C "$tmp" -p 'run: 1 + 1' >/dev/null 2>&1 || true
+    ${ATC_JAVA_OPTS:-} ${JVM_OPTS[@]+"${JVM_OPTS[@]}"} -Dfile.encoding=UTF-8 -Datc.lib.classpath="$LIB_JAR" \
+    -jar "$APP_JAR" -c "${tmp}/train.json" -C "$tmp" -p 'run: 1 + 1' >/dev/null 2>&1 || true
   rm -rf -- "$tmp"
+  trap - INT TERM HUP
   startup_cache_key > "$STARTUP_CACHE_KEY"
   for jar in "$APP_JAR" "$LIB_JAR"; do
     [[ -z "$(find "$jar" -newer "$STARTUP_CACHE_KEY" 2>/dev/null)" ]] || touch -r "$jar" "$STARTUP_CACHE_KEY"
@@ -923,12 +962,17 @@ build_startup_cache() {
   fi
 }
 
-# Sets STARTUP_CACHE_OPTS to the flag that uses the cache, or leaves it empty.
+# Sets STARTUP_CACHE_OPTS to the flag that uses the cache, or leaves it empty. The cache is an
+# optimisation: ATC runs without it when its directory cannot be created or written, and a
+# failure while building it, such as a full disk, does not stop the start.
 prepare_startup_cache() {
   STARTUP_CACHE_OPTS=()
   [[ "${ATC_STARTUP_CACHE:-1}" != "0" ]] || return 0
   startup_cache_flags || return 0
-  startup_cache_current || build_startup_cache
+  if ! startup_cache_current; then
+    { mkdir -p "$STARTUP_CACHE_DIR" && [[ -w "$STARTUP_CACHE_DIR" ]]; } 2>/dev/null || return 0
+    build_startup_cache || true
+  fi
   [[ -s "$STARTUP_CACHE_FILE" ]] && STARTUP_CACHE_OPTS=("$STARTUP_CACHE_USE")
   return 0
 }

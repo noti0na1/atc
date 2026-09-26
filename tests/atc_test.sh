@@ -103,6 +103,10 @@ assert_eq "tag_name" "v0.2.0" "$(extract_release_field "$FIXTURE_JSON" tag_name)
 assert_eq "release key" "12345678|v0.2.0" "$(release_key_from_json "$FIXTURE_JSON")"
 assert_eq "tag of key" "v0.2.0" "$(release_tag_of_key "12345678|v0.2.0")"
 assert_fails "release key fails without tag" release_key_from_json '{"id": 1}'
+# Minified JSON is one line, with the author's and the assets' ids on it too.
+one_line_json="$(printf '%s' "$FIXTURE_JSON" | tr -d '\n')"
+assert_eq "one-line JSON: grep takes the release id" "12345678" "$(extract_release_id "$one_line_json")"
+assert_eq "one-line JSON: release key" "12345678|v0.2.0" "$(release_key_from_json "$one_line_json")"
 
 # The grep fallback: order as printed (app first, then lib).
 grep_assets="$(extract_assets_grep "$FIXTURE_JSON")"
@@ -173,6 +177,86 @@ assert_contains "start.sh reads CRLF and preserves exported values" \
   'loaded=<from file> kept=<exported> malformed=<> literal=<$(must_stay_literal)>' "$start_output"
 assert_contains "start.sh preserves argument boundaries" 'arg=<quoted "prompt">' "$start_output"
 
+# JAVA_TOOL_OPTIONS makes java print a "Picked up" line before its version.
+mkdir -p "$start_dir/picked-up"
+cat > "$start_dir/picked-up/java" <<'JAVA'
+#!/bin/sh
+if [ "$1" = -version ]; then
+  echo 'Picked up JAVA_TOOL_OPTIONS: -Dfoo=bar' >&2; echo 'openjdk version "24.0.1" 2025-04-15' >&2; exit 0
+fi
+printf 'arg=<%s>\n' "$@"
+JAVA
+chmod +x "$start_dir/picked-up/java"
+start_output="$(env -i PATH="$start_dir/picked-up:/usr/bin:/bin" ATC_SKIP_BUILD=1 ATC_STARTUP_CACHE=0 \
+  /bin/sh "$REPO_ROOT/start.sh")"
+assert_contains "start.sh finds the version after a 'Picked up' line" 'arg=<--enable-native-access=ALL-UNNAMED>' "$start_output"
+
+# A checkout whose mill stub builds the jars and records what it saw of the environment file.
+fake_checkout="$TEST_TMP/fake-checkout"
+mkdir -p "$fake_checkout/app/src" "$fake_checkout/app/test" "$fake_checkout/app/resources" \
+  "$fake_checkout/lib/src" "$fake_checkout/windows"
+cp "$REPO_ROOT/start.sh" "$fake_checkout/start.sh"
+printf 'object build\n' > "$fake_checkout/build.mill"
+printf 'object App\n' > "$fake_checkout/app/src/App.scala"
+cat > "$fake_checkout/mill" <<'MILL'
+#!/bin/sh
+printf 'mill saw loaded=<%s>\n' "${ATC_TEST_LOADED-}" >> mill.log
+mkdir -p out/dist.dest && echo app > out/dist.dest/atc.jar && echo lib > out/dist.dest/atc-lib.jar
+MILL
+chmod +x "$fake_checkout/mill"
+fake_start() { # [env file]
+  env -i PATH="$start_dir:/usr/bin:/bin" ATC_ENV_FILE="${1:-$start_dir/test.env}" ATC_STARTUP_CACHE=0 \
+    /bin/sh "$fake_checkout/start.sh" 2>/dev/null
+}
+builds() { wc -l < "$fake_checkout/mill.log" | tr -d ' '; }
+start_output="$(fake_start)"
+assert_eq "start.sh builds a missing distribution" "1" "$(builds)"
+assert_eq "the build does not see the environment file" "mill saw loaded=<>" "$(cat "$fake_checkout/mill.log")"
+assert_contains "ATC sees the environment file" "loaded=<from file>" "$start_output"
+fake_start >/dev/null
+assert_eq "an unchanged checkout is not rebuilt" "1" "$(builds)"
+printf 'class Suite\n' > "$fake_checkout/app/test/Suite.scala"
+touch -t 203001010000 "$fake_checkout/app/test/Suite.scala"
+fake_start >/dev/null
+assert_eq "a changed test does not rebuild the distribution" "1" "$(builds)"
+touch -t 203001010000 "$fake_checkout/app/src/App.scala"
+fake_start >/dev/null
+assert_eq "a changed source rebuilds it" "2" "$(builds)"
+printf 'ATC_SKIP_BUILD=1\n' > "$start_dir/skip.env"
+fake_start "$start_dir/skip.env" >/dev/null
+assert_eq "ATC_SKIP_BUILD from the environment file skips the build" "2" "$(builds)"
+
+# The checkout's startup cache is keyed and trained with ATC_JAVA_OPTS and -Xmx, and left out
+# when its directory cannot be written.
+mkdir -p "$start_dir/java25"
+cat > "$start_dir/java25/java" <<'JAVA'
+#!/bin/sh
+if [ "$1" = -version ]; then echo 'openjdk version "25.0.4" 2026-07-21 LTS' >&2; exit 0; fi
+for a in "$@"; do
+  case "$a" in -XX:AOTCacheOutput=*) printf 'train=<%s>\n' "$*" >> "$TRAIN_LOG"; echo cache > "${a#*=}" ;; esac
+done
+printf 'arg=<%s>\n' "$@"
+JAVA
+chmod +x "$start_dir/java25/java"
+fake_cache_start() {
+  env -i PATH="$start_dir/java25:/usr/bin:/bin" ATC_ENV_FILE="$start_dir/skip.env" TRAIN_LOG="$TEST_TMP/train.log" \
+    ATC_JAVA_OPTS=-Dfoo=bar /bin/sh "$fake_checkout/start.sh" -Xmx4g 2>/dev/null
+}
+fake_startup="$fake_checkout/out/dist.dest/startup"
+start_output="$(fake_cache_start)"
+assert_contains "start.sh trains with ATC_JAVA_OPTS and -Xmx" "-Dfoo=bar -Xmx4g" "$(cat "$TEST_TMP/train.log")"
+assert_contains "start.sh keys the cache by them" "-Dfoo=bar -Xmx4g" "$(cat "$fake_startup/key.txt")"
+assert_contains "start.sh runs with the cache" "arg=<-XX:AOTCache=$fake_startup/atc.aot>" "$start_output"
+rm -rf "$fake_startup"
+chmod 555 "$fake_checkout/out/dist.dest"
+if [[ ! -w "$fake_checkout/out/dist.dest" ]]; then
+  rc=0
+  start_output="$(fake_cache_start)" || rc=$?
+  assert_eq "start.sh starts when the cache directory cannot be created" "0" "$rc"
+  assert_eq "start.sh then runs without the cache" "" "$(printf '%s\n' "$start_output" | grep AOTCache || true)"
+fi
+chmod 755 "$fake_checkout/out/dist.dest"
+
 echo "--- java version ---"
 
 assert_eq "JDK 21" "21" "$(java_major_from_line 'openjdk version "21.0.1" 2023-10-17')"
@@ -180,6 +264,13 @@ assert_eq "JDK 17 short" "17" "$(java_major_from_line 'openjdk version "17" 2021
 assert_eq "JDK 17.0.2" "17" "$(java_major_from_line 'openjdk version "17.0.2" 2022-01-18')"
 assert_eq "legacy 1.8" "8" "$(java_major_from_line 'java version "1.8.0_292"')"
 assert_fails "unparseable" java_major_from_line 'something weird'
+picked_up_major() (
+  java() { printf '%s\n' 'Picked up JAVA_TOOL_OPTIONS: -Dfoo=bar' 'openjdk version "24.0.1" 2025-04-15' >&2; }
+  ensure_java
+  printf '%s %s' "$JAVA_MAJOR" "${VERSIONED_JVM_OPTS[*]}"
+)
+assert_eq "the version line follows a 'Picked up' line" \
+  "24 --sun-misc-unsafe-memory-access=allow --enable-native-access=ALL-UNNAMED" "$(picked_up_major)"
 
 # ---------------------------------------------------------------------------
 echo "--- checksums ---"
@@ -248,10 +339,16 @@ echo "--- PATH snippet ---"
 snippet="$(path_snippet)"
 assert_contains "snippet has begin marker" "$PATH_MARKER_BEGIN" "$snippet"
 assert_contains "snippet has end marker" "$PATH_MARKER_END" "$snippet"
-assert_contains "snippet exports PATH" 'export PATH="$HOME/.local/bin:$PATH"' "$snippet"
+assert_contains "snippet exports the install directory" "export PATH=$ATC_INSTALL_DIR:\"\$PATH\"" "$snippet"
+# The snippet quotes the directory for sh and adds it once.
+spaced_snippet="$(INSTALL_DIR="$TEST_TMP/my bin" path_snippet)"
+assert_eq "snippet quotes a directory with a space" "$TEST_TMP/my bin:/usr/bin:/bin" \
+  "$(env -i PATH=/usr/bin:/bin /bin/sh -c "$spaced_snippet"$'\n'"$spaced_snippet"$'\necho "$PATH"')"
 assert_contains "zsh profile candidates" ".zshrc" "$(SHELL=/bin/zsh profile_candidates)"
 assert_contains "bash profile candidates" ".bashrc" "$(SHELL=/bin/bash profile_candidates)"
-assert_contains "other shells use .profile" ".profile" "$(SHELL=/usr/bin/fish profile_candidates)"
+assert_contains "other shells use .profile" ".profile" "$(SHELL=/bin/sh profile_candidates)"
+# Runs setup's PATH step as `atc setup` does, with errexit.
+setup_path() { env SHELL="$1" bash -c "source '$WRAPPER'; update_profile_path" 2>&1; }
 
 profile="$HOME/.zshrc"
 printf '# my zshrc\n' > "$profile"
@@ -259,8 +356,42 @@ printf '# my zshrc\n' > "$profile"
 assert_contains "setup appends the snippet" "$PATH_MARKER_BEGIN" "$(cat "$profile")"
 (SHELL=/bin/zsh update_profile_path >/dev/null)
 assert_eq "second setup does not duplicate it" "1" "$(grep -c -F "$PATH_MARKER_BEGIN" "$profile")"
+assert_contains "a configured profile is reported" "is already on PATH" "$(setup_path /bin/zsh)"
 (SHELL=/bin/zsh remove_profile_path >/dev/null)
 assert_eq "uninstall restores the profile" "# my zshrc" "$(cat "$profile")"
+rm -f "$profile"
+
+out="$(setup_path /bin/zsh)"
+assert_contains "setup creates ~/.zshrc when zsh has no rc file" "$PATH_MARKER_BEGIN" "$(cat "$profile" 2>/dev/null)"
+assert_contains "the created file is reported" "Updated $profile" "$out"
+assert_eq "a created file is not 'already' configured" "" "$(printf '%s\n' "$out" | grep already || true)"
+assert_fails "only the first rc file is created" test -e "$HOME/.zprofile"
+rm -f "$profile"
+
+printf '# my zprofile\n\n%s\n' "$(path_snippet)" > "$HOME/.zprofile"
+(SHELL=/bin/bash remove_profile_path >/dev/null)
+assert_eq "uninstall cleans zsh's files after a switch to bash" "# my zprofile" "$(cat "$HOME/.zprofile")"
+rm -f "$HOME/.zprofile"
+
+out="$(setup_path /usr/local/bin/fish)"
+assert_contains "fish gets the command to run" "fish_add_path $ATC_INSTALL_DIR" "$out"
+assert_fails "fish: no profile is written" test -e "$HOME/.profile"
+
+printf '# read-only\n' > "$HOME/.zshrc"
+printf '# writable\n' > "$HOME/.zprofile"
+chmod 444 "$HOME/.zshrc"
+if [[ ! -w "$HOME/.zshrc" ]]; then
+  rc=0
+  out="$(setup_path /bin/zsh)" || rc=$?
+  assert_eq "an unwritable rc file does not stop setup" "0" "$rc"
+  assert_contains "an unwritable rc file is a warning" "Warning: could not write $HOME/.zshrc" "$out"
+  assert_eq "an unwritable rc file is not reported updated" "" "$(printf '%s\n' "$out" | grep "Updated $HOME/.zshrc" || true)"
+  assert_contains "the other rc file is still updated" "$PATH_MARKER_BEGIN" "$(cat "$HOME/.zprofile")"
+else
+  echo "  SKIP: running as a user who can write read-only files"
+fi
+chmod 644 "$HOME/.zshrc"
+rm -f "$HOME/.zshrc" "$HOME/.zprofile"
 
 # ---------------------------------------------------------------------------
 echo "--- locations ---"
@@ -283,6 +414,7 @@ assert_eq "wrapper defaults to ~/.local/bin/atc" "/h/.local/bin/atc" \
   mkdir -p "$STARTUP_CACHE_DIR"
   printf 'cache\n' > "$STARTUP_CACHE_DIR/atc.aot"
   printf 'key\n' > "$STARTUP_CACHE_KEY"
+  touch "$CACHE_DIR/self-check"
   cmd_uninstall >/dev/null
   [[ ! -e "$CACHE_DIR" && ! -e "$INSTALL_PATH" && -f "$HOME/.atc/config.json" && -f "$HOME/.atc/keys.properties" ]]
 ) && echo "  PASS: uninstall removes ~/.atc/jars and keeps config.json/keys.properties" && pass_count=$((pass_count + 1)) \
@@ -402,27 +534,35 @@ assert_contains "key records the JVM options" '--sun-misc-unsafe-memory-access=a
 assert_eq "second run reuses the cache" "3" "$(java_calls)"
 # Reading the Java version starts a JVM, which is most of what the cache saves: read it once.
 assert_eq "a cached run probes the Java version once" "1" "$(version_probes)"
-run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Dfoo=bar" main -Xmx4g)"
+run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Dfoo=bar" main -Xmx4g 2>/dev/null)"
+# The JVM prints errors for a cache built with another GC or heap size, so other options rebuild it.
+assert_eq "other JVM options rebuild the cache" "5" "$(java_calls)"
+training="$(awk 'BEGIN{RS="---\n"} NR==4' "$JAVA_CALLS")"
+assert_contains "training run uses ATC_JAVA_OPTS and -Xmx after the creating flag" \
+  "-XX:AOTCacheOutput=$STARTUP_DIR/atc.aot"$'\n-Dfoo=bar\n-Xmx4g\n-Dfile.encoding' "$training"
+assert_contains "key records ATC_JAVA_OPTS and -Xmx" $'-Dfoo=bar\n-Xmx4g' "$(cat "$STARTUP_DIR/key.txt")"
 assert_contains "cache flag precedes ATC_JAVA_OPTS and the command line" $'-XX:AOTCache='"$STARTUP_DIR/atc.aot"$'\n-Dfoo=bar\n-Xmx4g' "$run_out"
+(PATH="$TEST_TMP/mockbin:$PATH" ATC_JAVA_OPTS="-Dfoo=bar" main -Xmx4g) >/dev/null 2>&1
+assert_eq "the same options reuse the cache" "6" "$(java_calls)"
 
 touch -t 203501010000 "$APP_JAR"
 (PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
-assert_eq "a newer jar rebuilds the cache" "6" "$(java_calls)"
+assert_eq "a newer jar rebuilds the cache" "8" "$(java_calls)"
 (PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
-assert_eq "a future-dated jar does not rebuild it again" "7" "$(java_calls)"
+assert_eq "a future-dated jar does not rebuild it again" "9" "$(java_calls)"
 
 mock_java 'openjdk version "25.0.5" 2026-10-21 LTS' creates
 (PATH="$TEST_TMP/mockbin:$PATH" main) >/dev/null 2>&1
-assert_eq "a different JDK rebuilds the cache" "9" "$(java_calls)"
+assert_eq "a different JDK rebuilds the cache" "11" "$(java_calls)"
 
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" ATC_STARTUP_CACHE=0 main)"
 assert_eq "ATC_STARTUP_CACHE=0 runs without the cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache' || true)"
-assert_eq "ATC_STARTUP_CACHE=0 does not train" "10" "$(java_calls)"
+assert_eq "ATC_STARTUP_CACHE=0 does not train" "12" "$(java_calls)"
 
 rm -rf "$STARTUP_DIR"
 mock_java 'openjdk version "21.0.4" 2024-07-16 LTS' creates
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
-assert_contains "Java 21 trains a CDS archive" "-XX:ArchiveClassesAtExit=$STARTUP_DIR/atc.jsa" "$(awk 'BEGIN{RS="---\n"} NR==11' "$JAVA_CALLS")"
+assert_contains "Java 21 trains a CDS archive" "-XX:ArchiveClassesAtExit=$STARTUP_DIR/atc.jsa" "$(awk 'BEGIN{RS="---\n"} NR==13' "$JAVA_CALLS")"
 assert_contains "Java 21 runs with the CDS archive" "-XX:SharedArchiveFile=$STARTUP_DIR/atc.jsa" "$run_out"
 assert_eq "Java 21 gets no Unsafe opt-in (Java 23+ only)" "" "$(printf '%s\n' "$run_out" | grep -- 'sun-misc-unsafe' || true)"
 assert_eq "Java 21 gets no native-access opt-in (Java 24+ only)" "" "$(printf '%s\n' "$run_out" | grep -- 'enable-native-access' || true)"
@@ -431,7 +571,7 @@ rm -rf "$STARTUP_DIR"
 mock_java 'openjdk version "17.0.2" 2022-01-18' creates
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
 assert_eq "Java 17 has no startup cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache\|SharedArchiveFile' || true)"
-assert_eq "Java 17 does not train" "13" "$(java_calls)"
+assert_eq "Java 17 does not train" "15" "$(java_calls)"
 assert_eq "Java 17 gets no Unsafe opt-in" "" "$(printf '%s\n' "$run_out" | grep -- 'sun-misc-unsafe' || true)"
 
 rm -rf "$STARTUP_DIR"
@@ -440,7 +580,35 @@ run_err="$(PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main" 2>&1
 assert_contains "a failed build is reported" "could not build the startup cache" "$run_err"
 run_out="$(PATH="$TEST_TMP/mockbin:$PATH" main)"
 assert_eq "a failed build runs without the cache" "" "$(printf '%s\n' "$run_out" | grep -- 'AOTCache' || true)"
-assert_eq "a failed build is not retried until the key changes" "16" "$(java_calls)"
+assert_eq "a failed build is not retried until the key changes" "18" "$(java_calls)"
+rm -rf "$STARTUP_DIR"
+
+# The cache is an optimisation: a cache directory that cannot be written leaves it out.
+mock_java 'openjdk version "25.0.4" 2026-07-21 LTS' creates
+chmod 555 "$CACHE_DIR"
+if [[ ! -w "$CACHE_DIR" ]]; then
+  rc=0
+  run_out="$(PATH="$TEST_TMP/mockbin:$PATH" bash -c "source '$WRAPPER'; main" 2>&1)" || rc=$?
+  assert_eq "an unwritable cache directory does not stop the start" "0" "$rc"
+  assert_eq "an unwritable cache directory means no training run" "19" "$(java_calls)"
+  assert_eq "an unwritable cache directory runs without the cache, quietly" "" \
+    "$(printf '%s\n' "$run_out" | grep -- 'AOTCache\|startup cache\|ermission' || true)"
+else
+  echo "  SKIP: running as a user who can write read-only directories"
+fi
+chmod 755 "$CACHE_DIR"
+
+# An interrupted training run removes its throwaway directory.
+cat > "$TEST_TMP/mockbin/java" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-version" ]]; then echo 'openjdk version "25.0.4" 2026-07-21 LTS' >&2; exit 0; fi
+for a in "$@"; do [[ "$a" != -XX:AOTCacheOutput=* ]] || kill -TERM "$PPID"; done
+EOF
+mkdir -p "$TEST_TMP/train-tmp"
+rc=0
+env PATH="$TEST_TMP/mockbin:$PATH" TMPDIR="$TEST_TMP/train-tmp" bash -c "source '$WRAPPER'; main" >/dev/null 2>&1 || rc=$?
+assert_eq "an interrupted training run stops the start" "130" "$rc"
+assert_eq "an interrupted training run leaves no throwaway directory" "" "$(ls "$TEST_TMP/train-tmp")"
 rm -rf "$STARTUP_DIR"
 
 cat > "$TEST_TMP/mockbin/java" <<'EOF'
@@ -497,6 +665,11 @@ assert_contains "atc says it runs a local build" "running the local build from $
 touch -t 202001010000 "$DIST/atc.jar" "$DIST/atc-lib.jar"
 assert_contains "stale build is noted" "sources in $CHECKOUT changed since this build" "$(stderr_of main dev "$CHECKOUT")"
 assert_eq "stale build is still installed" "dev app" "$(cat "$APP_JAR")"
+# Tests are not part of the distribution.
+touch -t 201901010000 "$CHECKOUT/build.mill"
+mkdir -p "$CHECKOUT/app/test"
+printf 'class Suite\n' > "$CHECKOUT/app/test/Suite.scala"
+assert_eq "a changed test is not noted" "" "$(stderr_of main dev "$CHECKOUT")"
 
 # 'atc update' treats the dev marker as "not the latest release" and restores it.
 if have_sha256_tool; then
@@ -826,6 +999,8 @@ release_json() {
 }
 curl() {
   [[ "$STARTUP_SCENARIO" != "download-failure" ]] || return 1
+  # $$ is the wrapper's shell even in a subshell: a Ctrl-C during the download.
+  [[ "$STARTUP_SCENARIO" != "interrupted" ]] || kill -TERM $$
   local url="" output=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -906,12 +1081,13 @@ self_case() { # $1 = scenario, $2 = input
     *) { cat "$WRAPPER"; printf '\n# newer wrapper\n'; } > "$dir/assets/atc" ;;
   esac
   [[ "$scenario" != "throttled" ]] || touch "$dir/cache/self-check"
-  local wrapper="$dir/bin/atc" install_dir="$dir/bin"
+  local wrapper="$dir/bin/atc" install_dir="$dir/bin" token=""
   [[ "$scenario" != "not-installed" ]] || install_dir="$dir/elsewhere"
+  [[ "$scenario" != "bad-token" ]] || token="not-a-token"
   printf '%s\n' "$input" > "$dir/input"
   STARTUP_CASE_DIR="$dir" STARTUP_RC=0
   env PATH="$startup_bin:$PATH" ATC_CACHE_DIR="$dir/cache" ATC_INSTALL_DIR="$install_dir" ATC_CHECK_UPDATES=1 \
-    STARTUP_SCENARIO="$scenario" STARTUP_CASE_DIR="$dir" WRAPPER_UNDER_TEST="$wrapper" \
+    GITHUB_TOKEN="$token" STARTUP_SCENARIO="$scenario" STARTUP_CASE_DIR="$dir" WRAPPER_UNDER_TEST="$wrapper" \
     bash "$startup_driver" < "$dir/input" > "$dir/stdout" 2> "$dir/stderr" || STARTUP_RC=$?
 }
 self_prompt="A newer atc wrapper is available. Update it now? [y/N]"
@@ -933,15 +1109,22 @@ assert_contains "self decline: how to update later" "atc self update" "$(cat "$S
 assert_contains "self decline: app starts" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
 assert_eq "self decline: no temp file left" "" "$(ls "$STARTUP_CASE_DIR/bin"/atc.self-update.* 2>/dev/null || true)"
 
-for scenario in same broken throttled not-installed; do
+# bad-token: a GITHUB_TOKEN the download refuses must not stop the launch.
+for scenario in same broken throttled not-installed bad-token; do
   self_case "$scenario" request
   assert_eq "self $scenario: startup succeeds" "0" "$STARTUP_RC"
   assert_eq "self $scenario: no offer" "" "$(grep -F "$self_prompt" "$STARTUP_CASE_DIR/stderr" || true)"
   assert_succeeds "self $scenario: wrapper kept" cmp -s "$WRAPPER" "$STARTUP_CASE_DIR/bin/atc"
   assert_contains "self $scenario: stdin is untouched" "stdin:request" "$(cat "$STARTUP_CASE_DIR/stdout")"
+  assert_eq "self $scenario: no temp file left" "" "$(ls "$STARTUP_CASE_DIR/bin"/atc.self-update.* 2>/dev/null || true)"
 done
 assert_fails "self not-installed: no check stamp" test -e "$TEST_TMP/self-not-installed/cache/self-check"
 assert_succeeds "self broken: stamp written, so no retry within a day" test -f "$TEST_TMP/self-broken/cache/self-check"
+
+self_case interrupted request
+assert_eq "self interrupted: the start stops" "130" "$STARTUP_RC"
+assert_eq "self interrupted: no temp file left" "" "$(ls "$STARTUP_CASE_DIR/bin"/atc.self-update.* 2>/dev/null || true)"
+assert_succeeds "self interrupted: wrapper kept" cmp -s "$WRAPPER" "$STARTUP_CASE_DIR/bin/atc"
 
 for scenario in decline default-no qualified-yes eof; do
   startup_case "$scenario"

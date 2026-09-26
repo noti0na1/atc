@@ -18,6 +18,8 @@ final class Host(
   private[host] val ui: HostUi,
   /** Paths git ignores are left out of listings (config `respectGitignore`). */
   private[host] val gitIgnore: GitIgnore = GitIgnore.Disabled,
+  /** The environment variables holding provider keys, removed from every command's environment. */
+  private[host] val keyVariables: () => Set[String] = () => Set.empty,
 ) extends Interface, Derivations, HostPaths, HostFiles, HostProcesses, HostNetwork, HostInteraction:
 
   /** The permission scope for a capability issued by this host. */

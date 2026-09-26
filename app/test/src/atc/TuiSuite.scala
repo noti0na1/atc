@@ -116,6 +116,50 @@ class TuiSuite extends munit.FunSuite:
       assertEquals(terminal.encoding(), StandardCharsets.UTF_8)
     finally terminal.close()
 
+  test("a process event during streaming prose waits for the end of the turn, on a line of its own"):
+    val out = ByteArrayOutputStream()
+    val saved = System.out
+    // The non-interactive terminal writes to the `System.out` of when it is built.
+    System.setOut(java.io.PrintStream(out, true, StandardCharsets.UTF_8))
+    val tui =
+      try Tui(Files.createTempDirectory("atc-tui").nn.resolve("history").nn, nonInteractive = true)
+      finally System.setOut(saved)
+    try
+      tui.beginTurn()
+      tui.assistantDelta("Hello ")
+      tui.processEvent("[p1 exited 0]")
+      tui.assistantDelta("world")
+      tui.endTurn()
+      val lines = out.toString(StandardCharsets.UTF_8).linesIterator.toList
+      assert(lines.exists(_.endsWith(" Hello world")), lines)
+      assert(lines.contains("[p1 exited 0]"), lines)
+    finally tui.close()
+
+  test("a TODO status change shows the items that changed and the progress, a new list the whole list"):
+    val out = ByteArrayOutputStream()
+    val saved = System.out
+    System.setOut(java.io.PrintStream(out, true, StandardCharsets.UTF_8))
+    val tui =
+      try Tui(Files.createTempDirectory("atc-tui").nn.resolve("history").nn, nonInteractive = true)
+      finally System.setOut(saved)
+    try
+      import atc.lib.{Todo, TodoStatus}
+      val plan = List(Todo("read"), Todo("fix"), Todo("test"))
+      def shown(todos: List[Todo]): List[String] =
+        out.reset()
+        tui.beginTurn()
+        tui.showTodos(todos)
+        tui.endTurn() // draws what is pending
+        out.toString(StandardCharsets.UTF_8).linesIterator.map(_.trim).filter(_.nonEmpty).toList
+      assertEquals(shown(plan).count(_.contains(" read")) + shown(Nil).size, 2) // whole list; then empty
+      shown(plan)
+      val update = shown(plan.updated(1, Todo("fix", TodoStatus.Done)))
+      assert(update.exists(_.contains("1 of 3 done")), update)
+      assert(update.exists(_.endsWith("fix")) && !update.exists(_.endsWith("read")), update)
+      assertEquals(shown(plan.updated(1, Todo("fix", TodoStatus.Done))), Nil) // nothing changed
+      assert(shown(plan :+ Todo("ship")).exists(_.endsWith("read")), "a new list is shown whole")
+    finally tui.close()
+
   test("the footer draw leaves the terminal outside a synchronized update (JLine buffers the closer)"):
     val output = ByteArrayOutputStream()
     val terminal = org.jline.terminal.impl.ExternalTerminal(
@@ -187,11 +231,6 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(Format.contextUsage(199_000, Some(200_000)), "context 199k/200k (100%)")
     assertEquals(Format.contextUsage(45_200, None), "context ~45.2k")
 
-  test("uniqueIds keeps labels and disambiguates duplicates"):
-    assertEquals(Menus.uniqueIds(List("a", "b", "a", "a")), List("a", "b", "a (1)", "a (2)"))
-    assertEquals(Menus.uniqueIds(List("a", "a (1)", "a")), List("a", "a (1)", "a (2)"))
-    assertEquals(Menus.uniqueIds(Nil), Nil)
-
   test("history is an owner-only regular file where POSIX permissions exist"):
     val dir = Files.createTempDirectory("atc-history").nn
     val history = dir.resolve("nested/history").nn
@@ -254,12 +293,40 @@ class TuiSuite extends munit.FunSuite:
     b.append("f\n")
     assertEquals(b.tail(10), List("a", "b", "cd", "e", "f"))
 
-  test("TailBuffer: past the cap the front goes, the counts stay exact"):
+  test("TailBuffer: past half again the cap the front goes, the counts stay exact"):
     val b = TailBuffer(10)
     b.append("01234\n67890\n")
-    assertEquals(b.text, "67890\n")
-    assertEquals(b.lineCount, 2L) // the dropped line still counts
-    assertEquals(b.tail(5), List("67890"))
+    assertEquals(b.text, "01234\n67890\n", "cut only once it grows past 15")
+    b.append("abcd\n")
+    assertEquals(b.text, "abcd\n")
+    assertEquals(b.lineCount, 3L) // the dropped lines still count
+    assertEquals(b.tail(5), List("abcd"))
+    assertEquals(b.tail(0), Nil)
+    b.append("unfinished")
+    assertEquals(b.tail(0), Nil)
+
+  test("TailBuffer: cutting in batches keeps the tails the live views show"):
+    // The buffer as it was: cut back to the cap on every append.
+    final class EveryAppend(cap: Int):
+      val sb = StringBuilder()
+      def append(text: String): Unit =
+        sb.append(text)
+        if sb.length > cap then
+          val nl = sb.indexOf("\n", sb.length - cap)
+          sb.delete(0, if nl >= 0 then nl + 1 else sb.length - cap)
+      def tail(n: Int): List[String] = sb.toString.split("\n", -1).toList match
+        case init :+ "" => init.takeRight(n)
+        case ls => ls.takeRight(n)
+    // Both keep the whole lines of about the last `cap` characters, so the last ten short lines agree.
+    val random = scala.util.Random(7)
+    val batched = TailBuffer(1000)
+    val reference = EveryAppend(1000)
+    for _ <- 1 to 20000 do
+      val chunk = random.alphanumeric.take(random.nextInt(12)).mkString + (if random.nextInt(3) == 0 then "\n" else "")
+      batched.append(chunk)
+      reference.append(chunk)
+      assert(batched.text.length <= 1500)
+      for n <- 1 to 10 do assertEquals(batched.tail(n), reference.tail(n))
 
   // ── multi-line input (Continuation) ───────────────────────────────
 
@@ -303,3 +370,30 @@ class TuiSuite extends munit.FunSuite:
     assertEquals(pending("val x = 1\nx + 1", block = true), Some(0))
     assertEquals(pending("val x = 1\n", block = true), None)
     assertEquals(pending("", block = true), None)
+
+  private def commandRows =
+    List("/model [ref]" -> "choose a model", "/models" -> "list models", "/mode [name]" -> "change mode")
+
+  test("matchingCommands: a single word starting with / lists the names it starts, case-insensitively"):
+    assertEquals(PromptReader.matchingCommands("/", commandRows), commandRows)
+    assertEquals(
+      PromptReader.matchingCommands("/MODE", commandRows).map(_._1),
+      List("/model [ref]", "/models", "/mode [name]")
+    )
+    assertEquals(PromptReader.matchingCommands("/models", commandRows).map(_._1), List("/models"))
+    assertEquals(PromptReader.matchingCommands("/x", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("/model ", commandRows), Nil) // arguments: Tab completion instead
+    assertEquals(PromptReader.matchingCommands("/mo\nx", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("model", commandRows), Nil)
+    assertEquals(PromptReader.matchingCommands("", commandRows), Nil)
+
+  test("renderCommands: aligned rows cut to the width, scrolled to keep the selection in view"):
+    def plain(selected: Int, width: Int, height: Int) =
+      PromptReader.renderCommands(commandRows, selected, ">", width, height).toString.split("\n").toList
+    assertEquals(
+      plain(0, 80, 5),
+      List("> /model [ref]  choose a model", "  /models       list models", "  /mode [name]  change mode"),
+    )
+    assertEquals(plain(2, 80, 2), List("  /models       list models", "> /mode [name]  change mode"))
+    assertEquals(plain(0, 80, 2).head, "> /model [ref]  choose a model")
+    assert(plain(1, 12, 5).forall(_.length <= 11))

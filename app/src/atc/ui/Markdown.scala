@@ -15,6 +15,11 @@ import scala.collection.mutable
   * Styles are scoped to one line: an unclosed `**` never bleeds into the
   * next line. Everything is emitted as raw SGR sequences.
   *
+  * Paragraph, heading, list and quote text is wrapped at word boundaries to `columns`,
+  * a list item or quote continuing under its text: left to the terminal, a long line
+  * would continue at column 0, outside the block's gutter. The word being written is
+  * held back until it ends, since only then is it known whether it fits.
+  *
   * @param glyphs    what to draw bullets, quote bars, rules, code gutters and tables with
   * @param highlight colours the last line of a fenced Scala block given its context lines,
   *                  and says whether a comment or string is still open after it
@@ -41,6 +46,15 @@ class MarkdownStream(
   private var restStart = 0
   /** The current line produces no output at all (a dropped fence marker). */
   private var dropLine = false
+  /** Terminal cells written on the current line, its prefix included. */
+  private var col = 0
+  /** What a wrapped row of the current line starts with: the width of a list marker, or the quote bar. */
+  private var hang = ""
+  /** The rendered word being written (with its style sequences), and its width in cells. */
+  private val word = StringBuilder()
+  private var wordCells = 0
+  /** Spaces before the held word: written with it, or dropped when it starts a new row. */
+  private var spaces = 0
   /** A `|` line held back until the next line tells whether a table starts (a delimiter row). */
   private var tableHead: Option[String] = None
   /** The rows (header, delimiter, body) of the table being collected. */
@@ -70,14 +84,14 @@ class MarkdownStream(
           out.append(startLine(line))
           if !inFence && !dropLine then
             decided = true
-            out.append(spans(withhold(line.drop(restStart))))
+            out.append(styledText(withhold(line.drop(restStart))))
       else if nl >= 0 then
         val line = takeLine(nl)
-        out.append(spans(line)).append(endLine())
+        out.append(styledText(line)).append(endLine())
         progress = true
       else
         val text = pending.toString; pending.clear()
-        out.append(spans(withhold(text)))
+        out.append(styledText(withhold(text)))
     out.toString
 
   /** Flush whatever is still held (end of the message). */
@@ -87,7 +101,7 @@ class MarkdownStream(
       val text = pending.toString; pending.clear()
       if inFence then out.append(fenceLine(text))
       else if !decided then out.append(completeLine(text))
-      else out.append(spans(text)).append(endLine())
+      else out.append(styledText(text)).append(endLine())
     else if decided then out.append(endLine())
     out.append(leaveTable())
     decided = false
@@ -124,13 +138,19 @@ class MarkdownStream(
 
   private def renderLine(line: String): String =
     val prefix = startLine(line)
-    if inFence || dropLine then prefix else prefix + spans(line.drop(restStart)) + endLine()
+    if inFence || dropLine then prefix else prefix + styledText(line.drop(restStart)) + endLine()
 
   /** Decide the kind of a line and emit its prefix; sets `restStart` to where the text begins. */
   private def startLine(line: String): String =
     restStart = 0
     lineStyle = Nil
     dropLine = false
+    val prefix = linePrefix(line)
+    col = TextLayout.width(prefix)
+    hang = if lineStyle == List(Dim) && prefix.nonEmpty then sgr(Dim) + glyphs.quote + " " else " " * col
+    prefix
+
+  private def linePrefix(line: String): String =
     line match
       case FenceRe(lang0) =>
         val lang = lang0.nn.toLowerCase(Locale.ROOT)
@@ -169,19 +189,63 @@ class MarkdownStream(
 
   /** Close inline styles at the end of a line so mistakes stay local. */
   private def endLine(): String =
+    val rest = endWord()
     val close = if bold || code || lineStyle.nonEmpty then Reset else ""
     bold = false; code = false; lineStyle = Nil
-    close + "\n"
+    col = 0
+    rest + close + "\n"
+
+  /** Inline text, rendered and wrapped (see the class comment). */
+  private def styledText(text: String): String = flow(spans(text))
+
+  /** Lay rendered text out in rows of `columns` cells, breaking before a word that does not
+    * fit; style sequences take no cells and travel with their word. */
+  private def flow(rendered: String): String =
+    if columns() == Int.MaxValue then return rendered // rows never end: nothing to hold back
+    val out = StringBuilder()
+    var i = 0
+    while i < rendered.length do
+      val c = rendered.charAt(i)
+      if c == '\u001b' then
+        val end = rendered.indexOf('m', i)
+        val stop = if end < 0 then rendered.length else end + 1
+        word.append(rendered.substring(i, stop))
+        i = stop
+      else
+        val cp = rendered.codePointAt(i)
+        val size = Character.charCount(cp)
+        if cp == ' ' then
+          out.append(endWord())
+          spaces += 1
+        else
+          word.append(rendered.substring(i, i + size))
+          wordCells += Screen.cellWidth(cp, col + wordCells)
+        i += size
+    out.toString
+
+  /** Write the held word after its spaces, or start a new row with it when it does not fit on
+    * this one. Spaces with no word after them end the line and are dropped. */
+  private def endWord(): String =
+    val hangCells = TextLayout.width(hang)
+    val wrap = wordCells > 0 && col > hangCells && col + spaces + wordCells > columns()
+    val lead = if wrap then "\n" + hang else if word.isEmpty then "" else " " * spaces
+    col = (if wrap then hangCells else col + TextLayout.width(lead)) + wordCells
+    val text = lead + word
+    word.clear()
+    wordCells = 0
+    spaces = 0
+    text
 
   /** A fenced line is coloured with the lines since a comment or string opened as
-    * context, or else the last [[FenceContext]] lines (a definition may span a few), so
-    * a long block costs the same per line as a short one. */
+    * context, up to [[OpenFenceContext]], or else the last [[FenceContext]] lines (a
+    * definition may span a few), so a long block costs the same per line as a short one. */
   private def fenceLine(line: String): String =
     val shown =
       if fenceScala then
         fenceLines += line
         val (coloured, open) = highlight(fenceLines.mkString("\n"))
-        if !open then fenceLines.dropInPlace((fenceLines.size - FenceContext).max(0))
+        val keep = if open then OpenFenceContext else FenceContext
+        fenceLines.dropInPlace((fenceLines.size - keep).max(0))
         coloured
       else line
     glyphs.codeGutter + shown + "\n"
@@ -305,6 +369,9 @@ object MarkdownStream:
 
   /** Lines of context kept for the highlighter after every comment and string is closed. */
   private val FenceContext = 8
+  /** Lines of an open comment or string kept as context; an unclosed one must not make
+    * every further line cost the whole block. */
+  private val OpenFenceContext = 200
 
   /** A highlighter that colours nothing: the last line as it is. */
   val verbatim: String => (String, Boolean) = code => (code.substring(code.lastIndexOf('\n') + 1), false)

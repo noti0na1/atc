@@ -84,6 +84,9 @@ class MainSuite extends munit.FunSuite:
       Cli.validate(Cli.Args(cwd = cwd, config = Some(cwd.resolve("missing.json"))))
     )
     assert(configError.getMessage.nn.contains("Config file does not exist"), configError.getMessage)
+    // A blank request would only reach the provider as an empty message.
+    val blank = intercept[IllegalArgumentException](Cli.validate(Cli.Args(cwd = cwd, prompt = Some("  "))))
+    assert(blank.getMessage.nn.contains("-p needs a request"), blank.getMessage)
     // Informational/global-init actions do not depend on cwd or an explicit config.
     Cli.validate(Cli.Args(cwd = missingDir, help = true, config = Some(missingDir)))
     if Platform.isWindows then

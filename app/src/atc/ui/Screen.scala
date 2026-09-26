@@ -24,9 +24,19 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   /** Terminal columns, measured once per resize (`resized`): `getSize` is a system
     * call, and the live views ask for the width for every line of every token. */
   @volatile private var columns = measureColumns()
+  @volatile private var rows = measureRows()
   private def measureColumns(): Int = { val w = terminal.getSize.getColumns; if w <= 0 then 80 else w }
+  private def measureRows(): Int = { val h = terminal.getSize.getRows; if h <= 0 then 24 else h }
   def width: Int = columns
-  def resized(): Unit = columns = measureColumns()
+  /** Terminal rows, footer included; a live region must stay shorter to be redrawn. */
+  def height: Int = rows
+  /** Measure the terminal again; whether its size changed. */
+  def resized(): Boolean =
+    val (c, r) = (measureColumns(), measureRows())
+    val changed = c != columns || r != rows
+    columns = c
+    rows = r
+    changed
 
   // ── writing ───────────────────────────────────────────────────────
 
@@ -57,6 +67,12 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   def writeStyle(s: String): Unit =
     out.print(s)
     outputDirty = true
+
+  /** What goes before clearing the window: the footer's scroll region lifted and its row
+    * erased. VS Code moves a cleared window into the scrollback instead of erasing it, and
+    * only the rows inside the scroll region, so the old footer stayed below the cleared rows
+    * and the redrawn footer scrolled it up into view: the footer showed twice. */
+  def beforeClear: String = s"${Ansi.Esc}[r${Ansi.Esc}[$height;1H${Ansi.Esc}[2K"
 
   def atLineStart: Boolean = tail.endsWith("\n")
   def ensureNewline(): Unit = if !atLineStart then write("\n")
@@ -92,45 +108,51 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
     * single column would let a truncated ASCII line overflow and wrap. */
   private val EllipsisWidth = math.max(1, Screen.displayWidth(g.ellipsis))
 
-  /** Cut a plain line so it fits on one terminal row (region lines must not wrap). */
+  /** Cut a line that starts at column `used` so it fits on one terminal row (region lines
+    * must not wrap). A newline becomes a space. The scan stops once the row is full, so
+    * a very long line costs no more than a short one. */
   def fit(line: String, used: Int): String =
     val room = width - used - 1
     if room <= 0 then ""
-    else if Screen.displayWidth(line) <= room then line
-    else if room <= EllipsisWidth then g.ellipsis.take(room)
     else
-      // Whole code points until the width budget (minus the ellipsis) is spent.
+      // A cut keeps the text before `cut`, the first code point that leaves no room for the ellipsis.
       val budget = room - EllipsisWidth
-      val sb = StringBuilder()
+      var cut = -1
       var w = 0
       var i = 0
-      var styledText = false
-      while i < line.length && w < budget do
+      while i < line.length && w <= room do
         val styleEnd = Screen.sgrEnd(line, i)
-        if styleEnd > 0 then { sb.append(line, i, styleEnd); styledText = true; i = styleEnd } // takes no cells
+        if styleEnd > 0 then i = styleEnd // no cells
         else
           val cp = line.codePointAt(i)
-          val cw = Screen.cellWidth(cp, w)
-          if w + cw > budget then i = line.length
-          else { sb.underlying.appendCodePoint(cp); w += cw; i += Character.charCount(cp) }
-      // A cut may have dropped the line's own reset: never let its style leak into the next row.
-      sb.toString + (if styledText then Reset else "") + g.ellipsis
+          w += (if cp == '\n' then 1 else Screen.cellWidth(cp, used + w))
+          if w > budget && cut < 0 then cut = i
+          i += Character.charCount(cp)
+      if w <= room then line.replace('\n', ' ')
+      else if room <= EllipsisWidth then g.ellipsis.take(room)
+      else
+        val text = line.substring(0, cut).replace('\n', ' ')
+        // A cut may have dropped the line's own reset: never let its style leak into the next row.
+        text + (if text.contains('\u001b') then Reset else "") + g.ellipsis
 
   /** Update only changed rows in a live preview. Clearing the rest of the screen would
-    * also erase the footer, forcing unrelated output to be repainted on every token. */
+    * also erase the footer, forcing unrelated output to be repainted on every token.
+    * Each line is cut to one row here, measured from column 0 with its gutter: the next
+    * redraw moves the cursor up one row per line, so a line that wrapped would shift it. */
   final class LiveRegion:
     private var tailBefore = tail
     /** The rows this region owns, and what is on them. */
     private var previousLines = List.empty[String]
     def redraw(lines: List[String], force: Boolean = false): Unit =
-      if force || lines != previousLines then
+      val rows = lines.map(fit(_, 0))
+      if force || rows != previousLines then
         if previousLines.isEmpty then { ensureNewline(); tailBefore = tail }
-        write(Screen.replaceRows(previousLines, lines, force))
-        tail = lines.lastOption match
+        write(Screen.replaceRows(previousLines, rows, force))
+        tail = rows.lastOption match
           case Some("") => "\n\n"
           case Some(last) => last.takeRight(1) + "\n"
           case None => tailBefore
-        previousLines = lines
+        previousLines = rows
     def clear(): Unit = redraw(Nil)
     /** Keep what is drawn as ordinary output. */
     def freeze(): Unit = previousLines = Nil
@@ -208,6 +230,32 @@ object Screen:
     * which would let "one row" lines wrap and corrupt the live regions. */
   private[ui] def cellWidth(cp: Int, col: Int): Int =
     if cp == '\t' then 8 - (col % 8) else math.max(0, WCWidth.wcwidth(cp))
+
+  /** `text` with a line break wherever it would pass `room` cells, for a row that already
+    * holds `column` cells, and the column it ends at. Output is shown verbatim, so it breaks
+    * where the row ends rather than between words; left to the terminal, the rest of a long
+    * line would continue at column 0, outside its block's gutter. */
+  def breakLines(text: String, column: Int, room: Int): (String, Int) =
+    val out = StringBuilder()
+    var col = column
+    var i = 0
+    while i < text.length do
+      val styleEnd = sgrEnd(text, i)
+      if styleEnd > 0 then
+        out.append(text.substring(i, styleEnd))
+        i = styleEnd
+      else
+        val cp = text.codePointAt(i)
+        if cp == '\n' then col = 0
+        else
+          val w = cellWidth(cp, col)
+          if col > 0 && col + w > room then
+            out.append('\n')
+            col = 0
+          col += cellWidth(cp, col)
+        out.appendAll(Character.toChars(cp))
+        i += Character.charCount(cp)
+    (out.toString, col)
 
   /** Display width in terminal cells of `s` starting at column 0; SGR sequences take none. */
   def displayWidth(s: String): Int =

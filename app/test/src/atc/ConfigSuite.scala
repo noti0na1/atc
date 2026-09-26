@@ -10,9 +10,9 @@ import java.nio.file.{Files, Path}
   * like TACIT; this covers the equivalent surface.) */
 class ConfigSuite extends munit.FunSuite:
   /** Load with an absent global layer, so a test never depends on the machine's
-    * own `~/.atc/config.json`. Layer combination itself is `LayerSuite`. */
+    * own `~/.atc/config.json`. Layer combination and project trust are `LayerSuite`. */
   private def load(dir: Path, explicit: Option[Path]): Configuration =
-    Config.load(dir, explicit, dir.resolve("no-such-global.json").nn)
+    Config.load(dir, explicit, dir.resolve("no-such-global.json").nn, trustProject = true)
 
   private def writeCfg(dir: Path, name: String, json: String): Path =
     val p = dir.resolve(name)
@@ -169,6 +169,31 @@ class ConfigSuite extends munit.FunSuite:
     val edited = Files.readString(cfg).nn
     assert(edited.startsWith("\uFEFF{\r\n"), edited)
     assertEquals(ujson.read(edited.stripPrefix("\uFEFF"))("safeMode").bool, false)
+
+  test("a reasoning style fills in the effort, or leaves its member out without one"):
+    val fragment = ujson.read("""{ "extra_body": { "google": { "thinking_config":
+      { "include_thoughts": true, "thinking_level": "{effort}" } } } }""")
+    assertEquals(
+      ReasoningStyle.withEffort(fragment, Some("high"))("extra_body")("google")("thinking_config"),
+      ujson.Obj("include_thoughts" -> true, "thinking_level" -> "high"),
+    )
+    assertEquals(
+      ReasoningStyle.withEffort(fragment, None)("extra_body")("google")("thinking_config"),
+      ujson.Obj("include_thoughts" -> true),
+    )
+    val gemini = upickle.default.read[Config](ujson.read(Config.globalTemplate)).providers("gemini")
+    assertEquals(gemini.reasoningStyle.flatMap(_.tags), Some(List("<thought>", "</thought>")))
+
+  test("a reasoning style is checked: Chat Completions only, JSON objects, two tags"):
+    val dir = Files.createTempDirectory("atc-cfg-style").nn
+    def problem(provider: String) =
+      val file = writeCfg(dir, "config.json", s"""{ "providers": { "p": $provider } }""")
+      intercept[IllegalArgumentException](load(dir, Some(file))).getMessage.nn
+    assert(problem("""{ "api": "anthropic", "reasoningStyle": { "tags": ["<t>", "</t>"] } }""").contains("api openai"))
+    assert(
+      problem("""{ "api": "openai", "reasoningStyle": { "request": [1] } }""").contains("request must be a JSON object")
+    )
+    assert(problem("""{ "api": "openai", "reasoningStyle": { "tags": ["<t>"] } }""").contains("two non-empty strings"))
 
   test("a malformed config file is a clear error"):
     val dir = Files.createTempDirectory("atc-cfg-bad").nn
@@ -619,7 +644,7 @@ class ConfigSuite extends munit.FunSuite:
       "{\n  \"model\": \"b\",\n  \"classifiedModel\": null,\n  \"commands\": [\"ls\"]\n}\n"
     )
     permissions.foreach(p => assertEquals(Files.getPosixFilePermissions(project).nn, p))
-    val loaded = Config.load(dir, None, global)
+    val loaded = Config.load(dir, None, global, trustProject = true)
     assertEquals(loaded.settings.model, Some("b"))
     assertEquals(loaded.settings.classifiedModel, None)
     assertEquals(loaded.settings.commands, List("ls"))

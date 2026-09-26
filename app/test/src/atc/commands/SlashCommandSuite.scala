@@ -12,6 +12,10 @@ class SlashCommandSuite extends munit.FunSuite:
     assertEquals(names.last, "/quit")
     assert(names.forall(_.startsWith("/")))
 
+  test("an alias that starts a name belongs to that command (Enter runs the prompt's selected name)"):
+    for command <- values; alias <- command.aliases; other <- values if other.name.startsWith(alias) do
+      assertEquals(other, command, alias)
+
   test("parse resolves names and aliases case-insensitively and splits off the argument"):
     assertEquals(parse("/compact preserve paths"), Right((Compact, "preserve paths")))
     assertEquals(parse("/help"), Right((Help, "")))

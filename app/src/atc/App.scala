@@ -1,7 +1,7 @@
 package atc
 
 import atc.agent.{Agent, AgentEnvironment, InputPredictor, TurnOutcome}
-import atc.commands.Commands
+import atc.commands.{Commands, SlashCommand}
 import atc.config.{Config, Configuration}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -49,6 +49,7 @@ final class App(args: Cli.Args, val tui: Tui):
       config.denyHosts
     )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
+  models.useMode(policy.mode)
 
   // ── host (the sandbox API implementation) and its ports ───────────
 
@@ -83,12 +84,13 @@ final class App(args: Cli.Args, val tui: Tui):
       agent.recordUsage(Agent.ClassifiedChat, reply.usage)
       reply.text
   private val hostUi: HostUi = new HostUi:
+    // A `-p` run has nobody to ask, and its stdin may be a pipe whose data is not an answer.
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
-      withClockPaused(tui.askUser(question, options, multiple))
+      if args.prompt.isDefined then None else withClockPaused(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
-  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
+  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables)
 
   // ── agent ─────────────────────────────────────────────────────────
 
@@ -116,8 +118,18 @@ final class App(args: Cli.Args, val tui: Tui):
     () => agent.history,
     tui.suggest,
     agent.recordUsage(Agent.Prediction, _),
-    enabled = config.predictInput && tui.suggestionsAvailable && args.prompt.isEmpty,
+    enabled = config.predictInput && canPredict,
   )
+  private def canPredict: Boolean = tui.suggestionsAvailable && args.prompt.isEmpty
+
+  /** Apply the settings `/config` may change to the running session. The
+    * models take up `webSearch` when [[Models.reload]] loads it. */
+  def useSettings(settings: Config): Unit =
+    agent.config = agent.config
+      .copy(autoCompactThreshold = settings.autoCompactThreshold, compactKeepRatio = settings.compactKeepRatio)
+    if args.prompt.isEmpty then tui.notifier = Notifier.fromSetting(settings.notifications)
+    predictor.enabled = settings.predictInput && canPredict
+    if !predictor.enabled then predictor.invalidate()
 
   /** Show the model, its effort, the mode and the directory in the status line. */
   def updateStatus(): Unit =
@@ -130,6 +142,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   private val commands = Commands(this)
   tui.completions = commands.complete
+  tui.commandList = SlashCommand.table
 
   // ── running ───────────────────────────────────────────────────────
 
@@ -169,9 +182,10 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model)),
+      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
+        ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
-        ++ Option.when(predictor.enabled)("Tab or → accept the suggested next request")).mkString(" · "),
+        ++ Option.when(predictor.enabled)("Tab or → accept a suggestion")).mkString(" · "),
     )
 
   /** Run one turn and retain its outcome for the terminal summary and scripted exit code. */
@@ -207,7 +221,7 @@ final class App(args: Cli.Args, val tui: Tui):
     while running do
       val next = if agent.queuedInputCount > 0 then Some("") else tui.readLine(prompt)
       next match
-        case Some("") if agent.queuedInputCount > 0 => runTurn("")
+        case Some("") if agent.queuedInputCount > 0 => afterTurn(runTurn(""))
         case None =>
           Debug.log("input closed, exiting")
           running = false
@@ -215,7 +229,14 @@ final class App(args: Cli.Args, val tui: Tui):
         // Typed out of habit; not listed in /help.
         case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(Locale.ROOT)) => running = false
         case Some(line) if line.trim.startsWith("/") => running = commands.run(line.trim)
-        case Some(line) => runTurn(line)
+        case Some(line) => afterTurn(runTurn(line))
+
+  /** After Ctrl-C, a correction typed during the turn goes back to the prompt: starting
+    * another turn with it would contact the model right after the user stopped it. */
+  private def afterTurn(outcome: TurnOutcome): Unit =
+    if outcome == TurnOutcome.Interrupted then
+      val queued = agent.takeQueuedInput()
+      if queued.nonEmpty then tui.draft(queued.mkString("\n"))
 
   /** The input prompt names the mode unless it is the full one. */
   def prompt: String = policy.mode match

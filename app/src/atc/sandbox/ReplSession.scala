@@ -262,7 +262,9 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
             skipInvalidWrapper(previousIndex)
             ExecutionResult.failed(InterruptedMessage)
           case t: ThreadDeath => throw t
-          case _: Throwable => ExecutionResult.failed(NoResultMessage)
+          case _: Throwable =>
+            skipInvalidWrapper(previousIndex)
+            ExecutionResult.failed(NoResultMessage)
         finally
           evalThread = null
           Thread.interrupted() // an interrupt meant for the evaluation must not hit this thread's later work
@@ -355,7 +357,10 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
         )
       else
         resultRef.get() match
-          case null => ExecutionResult.failed(NoResultMessage)
+          case null =>
+            // The worker died without a result; its wrapper may be half-initialized.
+            skipInvalidWrapper(previousIndex)
+            ExecutionResult.failed(NoResultMessage)
           case evaluated => adopt(res, evaluated)
     finally evalThread = null
 

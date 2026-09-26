@@ -18,6 +18,7 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(CompletionStop.fromReason("length"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("MAX-TOKENS"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("max_output_tokens"), CompletionStop.Truncated)
+    assertEquals(CompletionStop.fromReason("model_context_window_exceeded"), CompletionStop.Truncated)
     assertEquals(CompletionStop.fromReason("CONTENT-FILTER"), CompletionStop.Blocked)
     assertEquals(CompletionStop.fromReason("refusal"), CompletionStop.Blocked)
     assertEquals(CompletionStop.fromReason("end_turn"), CompletionStop.Complete)
@@ -102,6 +103,46 @@ class ModelSuite extends munit.FunSuite:
     assertEquals(m.alias, "myalias")
     assertEquals(m.providerKey, "echo")
     assertEquals(m.webSearch, false)
+
+  test("a model takes up a changed webSearch setting"):
+    val spec = ModelSpec("p", "a", "openai", "a", Some("http://127.0.0.1:9"), Some("k"), ModelConfig())
+    val m = ChatModel.create(spec)
+    try
+      assertEquals(m.webSearch, false)
+      m.useWebSearch(true)
+      assertEquals(m.webSearch, true)
+      m.useWebSearch(false)
+      assertEquals(m.webSearch, false)
+    finally m.close()
+
+  test("provider web search follows the sandbox mode: only full mode reaches the network"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-search-mode").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(
+      global,
+      """{ "providers": { "p": { "api": "openai", "url": "http://127.0.0.1:9", "key": "k", "models": {
+        |  "a": { "webSearch": true }, "b": { "webSearch": true } } } } }""".stripMargin
+    )
+    val models = Models(Cli.Args(cwd = dir), Config.load(dir, None, global))
+    try
+      val a = models.client("a")
+      assertEquals(a.webSearch, true)
+      models.useMode(atc.perms.Mode.Local)
+      assertEquals(a.webSearch, false)
+      assertEquals(models.client("b").webSearch, false, "a client made in local mode starts without it")
+      models.useMode(atc.perms.Mode.Full)
+      assertEquals((a.webSearch, models.client("b").webSearch), (true, true))
+    finally models.close()
+
+  test("reasoning between tags is told from the answer, even when a tag is split across chunks"):
+    val split = OpenAIChatModel.TagSplitter("<thought>", "</thought>")
+    val parts = List("<tho", "ught>plan", " it</th", "ought>The answer", " is 42.<", "b>").flatMap(split.push) ++
+      split.finish()
+    def joined(thinking: Boolean) = parts.collect { case (`thinking`, text) => text }.mkString
+    assertEquals(joined(true), "plan it")
+    assertEquals(joined(false), "The answer is 42.<b>")
+    assertEquals(OpenAIChatModel.answer("no tags <at all", "<thought>", "</thought>"), "no tags <at all")
+    assertEquals(OpenAIChatModel.answer("<thought>unclosed", "<thought>", "</thought>"), "")
 
   // ── ChatModel.create dispatch ───────────────────────────────────
 
@@ -190,6 +231,27 @@ class ModelSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Unknown model 'nope'"), e.getMessage)
     assert(e.getMessage.nn.contains("a, b"), e.getMessage)
 
+  test("listing every model waits a bounded time for a slow provider, which keeps its stored list until it answers"):
+    val store = atc.config.ModelListStore(
+      java.nio.file.Files.createTempDirectory("atc-lists").nn.resolve("model-lists.json").nn
+    )
+    val slow = ModelSpec("slow", "", "openai", "", Some("http://localhost:1"), None, ModelConfig())
+    store.save(slow, List(slow.listed("old", ModelConfig())))
+    val release = java.util.concurrent.CountDownLatch(1)
+    val c = ModelCatalog(
+      Nil,
+      List(slow),
+      Some { p =>
+        release.await()
+        List(p.listed("new", ModelConfig()))
+      },
+      Some(store),
+      listWait = java.time.Duration.ofMillis(300),
+    )
+    try assertEquals(c.models.map(_.ref), List("slow/old"))
+    finally release.countDown()
+    assertEquals(c.models.map(_.ref), List("slow/new"))
+
   test("a config model that names no model is ignored with a warning naming its file; -m is not"):
     val dir = java.nio.file.Files.createTempDirectory("atc-models").nn
     val global = dir.resolve("global.json").nn
@@ -200,7 +262,7 @@ class ModelSuite extends munit.FunSuite:
       Config.projectPath(project),
       """{ "model": "typo", "classifiedModel": "p/a" }"""
     )
-    val configuration = Config.load(project, None, global)
+    val configuration = Config.load(project, None, global, trustProject = true)
     val models = Models(Cli.Args(cwd = project), configuration)
     val warned = List.newBuilder[String]
     assertEquals(models.configured("model", configuration.settings.model, warned += _), None)

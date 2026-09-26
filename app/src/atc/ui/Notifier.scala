@@ -132,7 +132,8 @@ object Notifier:
       )
     else if Platform.isWindows then
       List("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowerShell(toast(title, body)))
-    else List("notify-send", "--app-name=atc", title, body)
+    // `--` ends the options: a body starting with `-` is text, not an option.
+    else List("notify-send", "--app-name=atc", "--", title, body)
 
   /** A PowerShell script showing a toast through the WinRT API, under
     * PowerShell's own application id because atc has none registered. */

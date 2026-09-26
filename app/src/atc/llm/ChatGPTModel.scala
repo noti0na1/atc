@@ -9,22 +9,34 @@ import java.util.Locale
 import scala.util.Using
 import scala.util.control.NonFatal
 
-/** The models of a ChatGPT plan, through the backend the Codex CLI uses. It
-  * speaks the Responses API with the signed-in user's token instead of a key.
-  * It only streams, and it rejects an output limit and a temperature, so
-  * neither is sent (`maxTokens` still reserves room for the answer). */
-final class ChatGPTModel(spec: ModelSpec, auth: ChatGPTAuth) extends OpenAIResponsesModel(spec):
+/** The models of a ChatGPT plan, through the backend the Codex CLI uses (the
+  * provider's `url`, else [[ChatGPTModel.BackendUrl]]). It speaks the Responses
+  * API with the signed-in user's token instead of a key. It only streams, and it
+  * rejects an output limit and a temperature, so neither is sent (`maxTokens`
+  * still reserves room for the answer). */
+final class ChatGPTModel(configured: ModelSpec, auth: ChatGPTAuth)
+    extends OpenAIResponsesModel(configured.copy(baseUrl = configured.baseUrl.orElse(Some(ChatGPTModel.BackendUrl)))):
   override protected def authorization: Option[okhttp3.Interceptor] = Some: chain =>
     def authorized(t: ChatGPTAuth.Tokens) =
       val b = chain.request().newBuilder().header("Authorization", s"Bearer ${t.access}")
       t.accountId.foreach(b.header("ChatGPT-Account-ID", _))
       b.build()
-    val tokens = auth.current()
+    // OkHttp reports only an `IOException` as a failed call; anything else from an asynchronous call is
+    // thrown again on its dispatcher thread. The cause is left out, since its message may quote a token.
+    def signedIn(step: => ChatGPTAuth.Tokens) =
+      try step
+      catch
+        case e: IOException => throw e
+        case NonFatal(e) => throw IOException(s"Could not read the ChatGPT sign-in (${e.getClass.getSimpleName})")
+    val tokens = signedIn(auth.current())
     val response = chain.proceed(authorized(tokens))
     if response.code != 401 then response
     else
       response.close()
-      chain.proceed(authorized(auth.renewed(tokens)))
+      chain.proceed(authorized(signedIn(auth.renewed(tokens))))
+
+  /** Codex asks for summaries, the only reasoning text the backend shows. */
+  override protected def defaultReasoningSummary: Option[String] = Some("auto")
 
   override protected def limits(b: ResponseCreateParams.Builder): Unit =
     b.promptCacheKey(Providers.conversation)

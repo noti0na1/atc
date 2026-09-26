@@ -138,7 +138,9 @@ private[ui] final class KeyReader(
                 case ch if ch > 0xffff => typeAhead.append(String(Character.toChars(ch)))
                 case ch if ch >= 32 => typeAhead.append(ch.toChar)
                 case _ => ()
-          onDraft(typeAhead.toString)
+          // A paste reports its text once, at its end, not with every byte; a pause
+          // in the input still reports it, which also keeps the footer's clock going.
+          if !pasting || c == NonBlockingReader.READ_EXPIRED then onDraft(typeAhead.toString)
         finally
           pauseLock.synchronized:
             reading = false

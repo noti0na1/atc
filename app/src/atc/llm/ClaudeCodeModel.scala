@@ -46,7 +46,7 @@ final class ClaudeCodeModel(spec: ModelSpec, launch: List[String] => ClaudeCli.P
 
   private var session: Option[Session] = None
 
-  /** The window the CLI reported when the last session started. */
+  /** The window the CLI reported. A new session asks for it until the CLI has answered once. */
   @volatile private var reported: Option[Int] = None
 
   /** The configured window, else the one the CLI reports for this model (known once a
@@ -72,8 +72,10 @@ final class ClaudeCodeModel(spec: ModelSpec, launch: List[String] => ClaudeCli.P
       Debug.log(s"$ref: new Claude Code session for ${history.size} messages")
       synchronized(end(session))
       val started = Session(start(system, tools, thinking = true), setup)
-      if settings.contextWindow.isEmpty then reported = windowOf(_ => started.cli.contextWindow(), modelId).map(_.toInt)
+      // Published first, so that `close` or the next session ends it when the question below is interrupted.
       synchronized { session = Some(started) }
+      if settings.contextWindow.isEmpty && reported.isEmpty then
+        reported = windowOf(_ => started.cli.contextWindow(), modelId).map(_.toInt)
       started -> Input.Prompt(transcript(history))
     val guard = Guard(() => end(Some(active)))
     try

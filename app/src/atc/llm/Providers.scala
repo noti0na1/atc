@@ -32,9 +32,11 @@ private[llm] abstract class SpecModel(val spec: ModelSpec) extends ChatModel:
   /** Every effort the provider's api accepts, for a model whose config lists none. */
   protected def knownEfforts: List[String]
 
+  @volatile private var webSearchOn = settings.webSearch.getOrElse(false)
   /** Set once the provider rejected its web search tool for this model. */
   @volatile private var webSearchRejected = false
-  def webSearch: Boolean = settings.webSearch.getOrElse(false) && !webSearchRejected
+  def webSearch: Boolean = webSearchOn && !webSearchRejected
+  override def useWebSearch(on: Boolean): Unit = webSearchOn = on
 
   /** Run one streaming request. Web search is best effort: when the provider
     * rejects the tool before anything was streamed, this model continues
@@ -83,7 +85,7 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
   protected def streamingClient: OpenAIClient =
     val current = connection
     val transport = com.openai.client.okhttp.OkHttpClient(ModelRequest.scopedHttpClient(current.http))
-    current.client.withOptions(_.httpClient(Providers.borrowed(transport)))
+    current.client.withOptions(_.httpClient(Providers.borrowed(transport)).timeout(Providers.StreamTimeout))
   override def close(): Unit = synchronized:
     opened.foreach(_.client.close())
     opened = None
@@ -108,7 +110,10 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
     settings.thinking.map(on => Providers.thinkingSwitch(thinking && on))
 
   /** `GET /models`. Besides the id, reads the context window that OpenRouter
-    * (`context_length`) and vLLM (`max_model_len`) report, and OpenRouter's `name`. */
+    * (`context_length`), vLLM (`max_model_len`) and DeepSeek (`context_window`) report,
+    * the `name` OpenRouter and DeepSeek give, and the efforts DeepSeek lists with its
+    * default. A reported output limit is not taken: it would be sent with every request
+    * and reserved from the window. */
   private[llm] def listModels(): List[ModelSpec] =
     val options = RequestOptions.builder().timeout(Providers.ListTimeout).build()
     client.models().list(options).items().asScala.toList.map: m =>
@@ -116,9 +121,19 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
       val id = m.id().stripPrefix("models/")
       val extra = m._additionalProperties().asScala
       def number(key: String) = extra.get(key).flatMap(_.asNumber().toScala).map(_.longValue)
-      val window = number("context_length").orElse(number("max_model_len")).flatMap(Tokens.from)
+      val window =
+        number("context_length").orElse(number("max_model_len")).orElse(number("context_window")).flatMap(Tokens.from)
       val name = extra.get("name").flatMap(_.asString().toScala).map(_.trim).filter(_.nonEmpty)
-      spec.listed(id, spec.settings.copy(contextWindow = window, displayName = name))
+      val effort = extra.get("effort").flatMap(_.asObject().toScala).map(_.asScala)
+      def level(v: JsonValue) = v.asString().toScala.map(_.toLowerCase(Locale.ROOT))
+      val efforts = effort.flatMap(_.get("supported_levels")).flatMap(_.asArray().toScala)
+        .map(_.asScala.toList.flatMap(level).filter(ModelConfig.ReasoningEfforts.contains)).filter(_.nonEmpty)
+      val reasoning = effort.flatMap(_.get("default_level")).flatMap(level).filter(e => efforts.forall(_.contains(e)))
+      val settings = spec.settings.copy(contextWindow = window, displayName = name)
+      spec.listed(
+        id,
+        settings.copy(efforts = efforts.orElse(settings.efforts), reasoning = reasoning.orElse(settings.reasoning))
+      )
 
   /** Send `request` with `effort` (the reasoning setting of a one-shot call).
     * When that was a guessed lowest effort (a non-thinking call) and the model
@@ -137,6 +152,12 @@ private[atc] object Providers:
   /** Generous, because a reasoning model with tools can take many minutes. */
   val RequestTimeout: Duration = Duration.ofMinutes(15)
 
+  /** A streamed answer may take longer than [[RequestTimeout]] in all, so a streaming request has
+    * no limit on the whole call. Connecting, and each wait for the next bytes, stay bounded, and
+    * Ctrl-C cancels the call. */
+  val StreamTimeout: Timeout =
+    Timeout.builder().read(RequestTimeout).write(RequestTimeout).request(Duration.ZERO).build()
+
   /** For listing a provider's models, which a user waits for. */
   val ListTimeout: Duration = Duration.ofSeconds(20)
 
@@ -151,7 +172,7 @@ private[atc] object Providers:
   /** The current conversation id. */
   def conversation: String = conversationId
 
-  /** Start a new conversation id (`/new`, `/clear`). */
+  /** Start a new conversation id (`/new`, or a resumed session). */
   def newConversation(): Unit = conversationId = newId()
 
   /** The headers of one request to `spec`'s provider: the user agent, then the

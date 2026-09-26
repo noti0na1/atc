@@ -9,7 +9,12 @@
   { "name": "claude-code", "label": "Claude (through your Claude Code)", "api": "claude-code" },
   { "name": "gemini", "label": "Google Gemini", "api": "openai",
     "url": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "key": "${GEMINI_API_KEY}", "keyUrl": "https://aistudio.google.com/apikey" },
+    "key": "${GEMINI_API_KEY}", "keyUrl": "https://aistudio.google.com/apikey",
+    "reasoningStyle": {
+      "request": { "extra_body": { "google": { "thinking_config":
+        { "include_thoughts": true, "thinking_level": "{effort}" } } } },
+      "requestOff": { "extra_body": { "google": { "thinking_config": { "thinking_level": "low" } } } },
+      "tags": ["<thought>", "</thought>"] } },
   { "name": "deepseek", "label": "DeepSeek", "api": "openai-responses", "url": "https://api.deepseek.com",
     "key": "${DEEPSEEK_API_KEY}", "keyUrl": "https://platform.deepseek.com/api_keys" },
   { "name": "openrouter", "label": "OpenRouter", "api": "openai", "url": "https://openrouter.ai/api/v1",

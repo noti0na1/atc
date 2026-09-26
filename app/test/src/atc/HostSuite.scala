@@ -415,22 +415,16 @@ class HostSuite extends munit.FunSuite:
     intercept[IllegalArgumentException](
       CommandLine.parsePipeline(List.fill(CommandLine.MaxPipelineStages + 1)("echo").mkString(" | "))
     )
-    val r = PathGlob.regex("src/**/*.scala")
-    assert(
-      r.matches("src/X.scala") && r.matches("src/a/b/X.scala") && !r.matches("lib/X.scala") && !r.matches("src/X.java")
-    )
-    assert(
-      PathGlob.regex("**/test/*.py").matches("test/a.py") && PathGlob.regex("**/test/*.py").matches("x/y/test/a.py")
-    )
-    assert(
-      PathGlob.regex("a/[!x]*.{md,txt}").matches("a/b.md") &&
-        !PathGlob.regex("a/[!x]*.{md,txt}").matches("a/x.md")
-    )
-    assert(!PathGlob.regex("a/*.md").matches("a/b/c.md"))
-    assert(PathGlob.regex("{a,{b,c}}").matches("c"))
+    def glob(pattern: String)(path: String) = PathGlob.pattern(pattern).matcher(path).matches()
+    val r = glob("src/**/*.scala")
+    assert(r("src/X.scala") && r("src/a/b/X.scala") && !r("lib/X.scala") && !r("src/X.java"))
+    assert(glob("**/test/*.py")("test/a.py") && glob("**/test/*.py")("x/y/test/a.py"))
+    assert(glob("a/[!x]*.{md,txt}")("a/b.md") && !glob("a/[!x]*.{md,txt}")("a/x.md"))
+    assert(!glob("a/*.md")("a/b/c.md"))
+    assert(glob("{a,{b,c}}")("c"))
     for bad <- List("a/{b,c", "[abc", "[]]") do
-      assert(intercept[IllegalArgumentException](PathGlob.regex(bad)).getMessage.nn.contains("bad glob"), bad)
-    if Platform.isWindows then assert(PathGlob.regex("SRC/**/*.SCALA").matches("src/main/A.scala"))
+      assert(intercept[IllegalArgumentException](PathGlob.pattern(bad)).getMessage.nn.contains("bad glob"), bad)
+    assertEquals(glob("SRC/**/*.SCALA")("src/main/A.scala"), Platform.caseInsensitivePaths)
 
   test("Windows path validation rejects device aliases and ambiguous components"):
     for path <- List(
@@ -455,6 +449,12 @@ class HostSuite extends munit.FunSuite:
       ScalaSource.stringLiteral("C:\\Users\\alice\nnotes\".txt"),
       "\"C:\\\\Users\\\\alice\\nnotes\\\".txt\"",
     )
+
+  test("a UNC path is refused before the file system (and so the network) is touched"):
+    if Platform.isWindows then
+      for path <- List("//server.invalid/share/x", "\\\\server.invalid\\share\\x") do
+        val error = intercept[IllegalArgumentException](exists(path))
+        assert(error.getMessage.nn.contains("UNC path"), error.getMessage)
 
   test("readBytes/writeBytes round-trip a binary file byte for byte"):
     val bytes = Array[Byte](0, 1, 2, -1, -128, 127, 10, 13)
@@ -609,6 +609,30 @@ class HostSuite extends munit.FunSuite:
     decisions = List(Decision.AllowSession)
     assertEquals(requestExec(Set(pattern), "inspect cwd") { exec(pwd).exitCode }, 0)
     assertEquals(exec(pwd, Nil, root.toString).exitCode, 0) // session grant persists
+
+  test("commands do not inherit the variables that hold provider keys"):
+    val envPolicy = Policy(List(rule(".", Some(Access.Read))), List(ProcessFixture.pattern("env")), Nil, prompter)
+    val printPath = ProcessFixture.command("env", "PATH")
+    val plain = Host(envPolicy, root, output, llm, hostUi)
+    val keyed = Host(envPolicy, root, output, llm, hostUi, keyVariables = () => Set("PATH"))
+    assertEquals(plain.exec(printPath).stdout.trim, "<set>")
+    assertEquals(keyed.exec(printPath).stdout.trim, "<unset>")
+
+  test("provider key variables: named references, keyEnv, headers and the SDK defaults"):
+    import atc.config.{KeyBindings, ProviderConfig}
+    val named = ProviderConfig(
+      api = Some("anthropic"),
+      key = Some("${MY_KEY}"),
+      headers = Map("x-token" -> "${GATEWAY_TOKEN}", "x-plain" -> "literal"),
+    )
+    assertEquals(KeyBindings.variables(named), Set("MY_KEY", "GATEWAY_TOKEN"))
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai"), keyEnv = Some("K"))), Set("K"))
+    assertEquals(
+      KeyBindings.variables(ProviderConfig(api = Some("anthropic"))),
+      Set("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    )
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai-responses"))), Set("OPENAI_API_KEY"))
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai"), url = Some("http://localhost"))), Set())
 
   test("a denied executable path gets a copyable requestExec hint"):
     val executable = if Platform.isWindows then "C:\\Program Files\\Example\\tool.exe" else "/opt/Example Tools/tool"

@@ -23,6 +23,12 @@ private[host] trait HostPaths:
     PlatformPath.validationError(expanded).foreach: reason =>
       throw IllegalArgumentException(s"Invalid Windows path ${ScalaSource.stringLiteral(path)}: $reason")
     val raw = Paths.get(PlatformPath.native(expanded)).nn
+    // Canonicalizing a UNC path contacts its server (DNS, SMB) before any permission check,
+    // so even a read-only file system inside `Classified.map` could reach the network.
+    if PlatformPath.isUnc(raw) && raw.getRoot != cwd.getRoot then
+      throw IllegalArgumentException(
+        s"UNC path ${ScalaSource.stringLiteral(path)} is not supported outside the working directory's share"
+      )
     PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
 
   /** `operation` carries its own preposition, so that it reads as a phrase in

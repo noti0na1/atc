@@ -151,3 +151,9 @@ class FirstRunSuite extends munit.FunSuite:
     assertEquals(keys.get("B_KEY"), Some("three"))
     assert(Files.readString(path).nn.contains("# a note"))
     intercept[IllegalArgumentException](KeyBindings.bind(path, "A_KEY", "two\nlines"))
+    // a key file others could read is made private by the next binding
+    if !Platform.isWindows then
+      Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-r--r--"))
+      KeyBindings.bind(path, "C_KEY", "four")
+      assertEquals(PosixFilePermissions.toString(Files.getPosixFilePermissions(path)), "rw-------")
+      assertEquals(KeyBindings.load(List(path)).get("B_KEY"), Some("three"))

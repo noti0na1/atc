@@ -16,8 +16,8 @@ final class InputPredictor(
   show: Option[String] => Unit,
   /** Told what every guess cost, so `/cost` includes it. */
   spent: TokenUsage => Unit = _ => (),
-  /** `false` never guesses: [[start]] does nothing. */
-  val enabled: Boolean = true,
+  /** `false` never guesses: [[start]] does nothing. `/config` switches it. */
+  @volatile var enabled: Boolean = true,
 ):
   private val generation = AtomicLong(0)
   private final case class Job(generation: Long, model: ChatModel, history: List[Msg])
@@ -137,7 +137,7 @@ object InputPredictor:
   private def cut(text: String): String =
     val t = text.trim
     if t.length <= MessageChars then t
-    else t.take(MessageChars / 2) + " […] " + t.takeRight(MessageChars / 2)
+    else AgentMessages.takeChars(t, MessageChars / 2) + " […] " + AgentMessages.takeRightChars(t, MessageChars / 2)
 
   /** The first non-empty line, unquoted and capped; empty answers and no-prediction markers are hidden. */
   def clean(answer: String): Option[String] =

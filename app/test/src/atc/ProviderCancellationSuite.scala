@@ -30,6 +30,14 @@ class ProviderCancellationSuite extends munit.FunSuite:
     ModelRequest.scopedTransport(base).close()
     assert(!closed.get(), "the owning model must still release resources")
 
+  test("a streaming request has no limit on the whole call, while connecting and each read keep theirs"):
+    val openai = Providers.StreamTimeout
+    val anthropic = AnthropicModel.StreamTimeout
+    assertEquals(List(openai.request(), anthropic.request()), List(java.time.Duration.ZERO, java.time.Duration.ZERO))
+    assertEquals(List(openai.read(), anthropic.read()), List(Providers.RequestTimeout, Providers.RequestTimeout))
+    assertEquals(List(openai.write(), anthropic.write()), List(Providers.RequestTimeout, Providers.RequestTimeout))
+    assert(!openai.connect().isZero && !anthropic.connect().isZero)
+
   for api <- List("openai", "openai-responses", "anthropic") do
     test(s"$api: garbage collection between streamed requests does not close the model's executor"):
       val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn

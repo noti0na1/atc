@@ -14,9 +14,10 @@ private[atc] final class ToolHistory(maxChars: Int = 8 * 1024 * 1024, maxEntries
     millis: Long,
     changes: List[FileChange]
   ):
-    def render: String =
-      s"Tool $id (${if success then "ok" else "failed"}, $millis ms)\n\n$code\n\n$output" +
-        changes.map(c => s"\n\n${c.path}: ${c.summary}\n${c.preview}").mkString
+    private def result = s"Tool $id (${if success then "ok" else "failed"}, $millis ms)\n\n$code\n\n$output"
+    def render: String = result + changes.map(c => s"\n\n${c.path}: ${c.summary}\n${c.preview}").mkString
+    /** The first line of [[render]] that belongs to the file-change previews. */
+    def changesFrom: Int = result.linesIterator.size
     def size: Int = code.length + output.length +
       changes.map(c => c.path.length + c.summary.length + c.preview.length).sum
 

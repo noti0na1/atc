@@ -6,10 +6,10 @@
   ],
 
   "commands": [
-    "git status", "git log", "git show", "git diff", "git blame",
+    "git status", "git log", "git show",
     "git branch --list", "git rev-parse", "git ls-files", "git stash list"
   ],
-  "denyCommands": ["git push*", "git reset --hard*"],
+  "denyCommands": ["git push*", "git reset --hard*", "git *--output*"],
 
   "hosts": [
     "developer.mozilla.org", "man7.org", "git-scm.com", "*.git-scm.com",

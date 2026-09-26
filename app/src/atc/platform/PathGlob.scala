@@ -1,15 +1,12 @@
 package atc.platform
 
 import java.util.regex.{Pattern, PatternSyntaxException}
-import scala.util.matching.Regex
 
 /** Slash-based path globs shared by configuration rules and host searches: `*` and `?` stay within
   * one component, `**` crosses components, `[…]`/`[!…]` are character classes and `{a,b}` are
-  * alternatives. Matching is case-insensitive on Windows. */
+  * alternatives. Matching is case-insensitive where file names are (Windows and macOS). */
 private[atc] object PathGlob:
   def pattern(glob: String): Pattern = checked(glob)(Pattern.compile(source(glob), Platform.pathRegexFlags))
-
-  def regex(glob: String): Regex = checked(glob)(((if Platform.isWindows then "(?i)" else "") + source(glob)).r)
 
   /** A malformed class or brace group surfaces as an error about the glob, not the regex. */
   private def checked[A](glob: String)(compile: => A): A =

@@ -19,7 +19,8 @@ import scala.util.control.NonFatal
   * resume limits and cancellation bound each turn. Conversation repairs keep
   * provider history valid after interruptions or failures. */
 final class Agent(
-  config: Config,
+  /** The settings the loop reads each turn; `/config` changes the harmless ones. */
+  @volatile var config: Config,
   environment: AgentEnvironment,
   policy: Policy,
   ui: AgentUI,
@@ -60,6 +61,7 @@ final class Agent(
   def model_=(next: ChatModel): Unit =
     currentModel = next
     context.modelChanged()
+    compactRetryAt = 0 // a mark set against another window says nothing about this one
 
   def history: List[Msg] = conversation.history
 
@@ -95,6 +97,10 @@ final class Agent(
 
   def queuedInputCount: Int = queuedInput.size()
 
+  /** Remove and return the input queued during a turn, in the order it was typed. */
+  def takeQueuedInput(): List[String] =
+    Iterator.continually(queuedInput.poll()).takeWhile(_ != null).map(_.nn).toList
+
   private def acceptQueuedInput(): Unit =
     var input = queuedInput.poll()
     while input != null do
@@ -121,6 +127,8 @@ final class Agent(
 
   def notePermissionRevoked(grant: String): Unit =
     conversation.queueNote(AgentMessages.permissionRevoked(grant))
+
+  def noteProcessesKilled(what: String): Unit = conversation.queueNote(AgentMessages.processesKilled(what))
 
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
@@ -160,12 +168,15 @@ final class Agent(
     ujson.write(ujson.Obj(
       "originalRequest" -> conversation.userRequests.headOption.getOrElse(""),
       "recentUserInstructions" ->
-        ujson.Arr.from(conversation.userRequests.drop(1).takeRight(Conversation.RecentRequests).map(_.take(2000))),
+        ujson.Arr.from(
+          conversation.userRequests.drop(1).takeRight(Conversation.RecentRequests).map(AgentMessages.takeChars(_, 2000))
+        ),
       "goal" -> notes.goal,
       "constraints" -> ujson.Arr.from(notes.constraints),
       "completed" -> ujson.Arr.from(notes.completed),
       "remaining" -> ujson.Arr.from(notes.remaining),
-      "todos" -> ujson.Arr.from(todos.take(50).map(todo => s"${todo.status}: ${todo.text.take(200)}")),
+      "todos" ->
+        ujson.Arr.from(todos.take(50).map(todo => s"${todo.status}: ${AgentMessages.takeChars(todo.text, 200)}")),
     ))
 
   /** Summarize the older exchanges with the current model (`/compact`). History
@@ -193,7 +204,7 @@ final class Agent(
         throw IllegalStateException(
           s"the transcript to summarize (about ${Format.count(needed)} tokens) exceeds the ${current.alias} " +
             s"input allowance (${Format.count(allowance)}); run /compact with a model that has a larger context " +
-            "window, or /clear"
+            "window, or start over with /new"
         )
     val retained = retainedContext
     ui.status("Compacting context…")
@@ -240,6 +251,7 @@ final class Agent(
     private var budgetRejections = 0
     private var resumes = 0
     private var incompleteResumes = 0
+    private var truncatedCalls = 0
 
     /** Ends a model request: the user interrupted, or queued input should be read first. */
     private val stop = () => cancelled() || !queuedInput.isEmpty
@@ -265,6 +277,7 @@ final class Agent(
       else
         acceptQueuedInput()
         autoCompact()
+        acceptQueuedInput() // input typed during a compaction ended it; the request must include it
         val prepared =
           context.prepare(fixedTokens, history, ContextManager.ModelContext.from(model), retainedContext)
         conversation.useHistory(prepared.history)
@@ -292,14 +305,19 @@ final class Agent(
                 else if budgetRejections > 0 then Done(TurnOutcome.LimitReached)
                 else if raw.text.trim.isEmpty then Done(TurnOutcome.Failed)
                 else Done(TurnOutcome.Finished)
-              case CompletionPolicy.Next.Resume(needsContinuation) =>
+              case CompletionPolicy.Next.Resume(continuation) =>
+                val droppedCalls = raw.stop == CompletionStop.Truncated && raw.toolCalls.nonEmpty
                 if cancelled() then interrupted()
                 else if raw.stop == CompletionStop.Incomplete && incompleteResumes >= Agent.MaxIncompleteResumes then
                   ui.warn(AgentMessages.incompleteStreamExhausted(model.alias, Agent.MaxIncompleteResumes))
                   Done(TurnOutcome.Failed)
+                else if droppedCalls && truncatedCalls >= Agent.MaxTruncatedCalls then
+                  ui.warn(AgentMessages.truncatedToolCallsExhausted(model.alias, Agent.MaxTruncatedCalls + 1))
+                  Done(TurnOutcome.LimitReached)
                 else if resumes < Agent.MaxResumes then
                   if raw.stop == CompletionStop.Incomplete then incompleteResumes += 1
-                  if needsContinuation then conversation.append(Msg.Continuation(AgentMessages.truncationContinuation))
+                  if droppedCalls then truncatedCalls += 1
+                  continuation.foreach(text => conversation.append(Msg.Continuation(text)))
                   resume()
                 else
                   ui.warn(AgentMessages.resumeExhaustedWarning(model.alias, Agent.MaxResumes))
@@ -314,7 +332,11 @@ final class Agent(
     private def autoCompact(): Unit =
       if config.autoCompactThreshold > 0 && !stop() then
         val usage = contextUsage
-        val due = usage.window.exists(window => usage.tokens.toDouble >= window.toDouble * config.autoCompactThreshold)
+        // Trimming fits every request into the window less the output reserve; a threshold
+        // above that allowance would never be reached, and history would be cut, not summarized.
+        val due = usage.window.exists: window =>
+          val allowance = window - ContextManager.outputReserve(window, model.maxOutputTokens)
+          usage.tokens.toDouble >= (window.toDouble * config.autoCompactThreshold).min(allowance.toDouble)
         if due && usage.tokens >= compactRetryAt then
           def retryLater(): Unit = compactRetryAt = usage.tokens + usage.window.getOrElse(0) / 10
           try
@@ -421,5 +443,7 @@ object Agent:
   val MaxResumes = 20
   /** A broken provider stream gets fewer retries than a normal output-limit continuation. */
   val MaxIncompleteResumes = 2
+  /** Retries after the output limit cut a tool call; a model that cannot shorten it will not start to. */
+  val MaxTruncatedCalls = 2
   /** Rounds in which the model may hit the exhausted tool budget before the turn is stopped. */
   val MaxBudgetRejections = 2

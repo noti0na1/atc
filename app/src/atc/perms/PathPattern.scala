@@ -2,7 +2,7 @@ package atc.perms
 
 import atc.platform.{PathGlob, PlatformPath}
 
-import java.nio.file.{FileSystems, Path, PathMatcher, Paths}
+import java.nio.file.{Path, Paths}
 import java.util.regex.Pattern
 
 /** A path pattern from the configuration, in the style of gitignore (as in TACIT):
@@ -23,7 +23,7 @@ final class PathPattern private (val raw: String, private val kind: PathPattern.
   import PathPattern.*
 
   def matches(p: Path): Boolean = kind match
-    case Kind.Component(m) => (0 until p.getNameCount).exists(i => m.matches(p.getName(i)))
+    case Kind.Component(glob) => (0 until p.getNameCount).exists(i => glob.matcher(p.getName(i).toString).matches())
     case Kind.Anchored(root, matchers) =>
       p.startsWith(root) && {
         val relative = if p == root then "" else PlatformPath.portable(root.relativize(p))
@@ -35,7 +35,8 @@ final class PathPattern private (val raw: String, private val kind: PathPattern.
 
 object PathPattern:
   private enum Kind:
-    case Component(m: PathMatcher)
+    /** Matched against each name of the path; case-insensitive where file names are. */
+    case Component(glob: Pattern)
     /** `root` is an absolute, real path; matchers are applied to the path relative to it. */
     case Anchored(root: Path, matchers: List[Pattern])
     case Exact(path: Path)
@@ -52,7 +53,7 @@ object PathPattern:
     if path == "." then new PathPattern(pattern, Kind.Exact(PlatformPath.canonical(base)))
     else if !PlatformPath.hasSeparator(path) then
       if !globChars.exists(path.contains(_)) then requireValid(PlatformPath.validationError(path))
-      new PathPattern(pattern, Kind.Component(FileSystems.getDefault.getPathMatcher(s"glob:$path")))
+      new PathPattern(pattern, Kind.Component(PathGlob.pattern(path)))
     else
       // Windows refuses `*`, `?` and several other glob characters in a Path,
       // so never hand the glob-bearing suffix to Paths.get. Split it as text,
@@ -80,6 +81,6 @@ object PathPattern:
         else (value.substring(0, boundary + 1), value.substring(boundary + 1))
 
   /** Matchers for the glob and for everything below what it matches. The syntax is slash-based on
-    * every platform; on Windows matching is case-insensitive like the file system. */
+    * every platform; matching is case-insensitive where the file system is. */
   private def globOrDescendantMatchers(glob: String): List[Pattern] =
     List(PathGlob.pattern(glob), PathGlob.pattern(s"$glob/**"))

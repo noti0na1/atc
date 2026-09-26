@@ -80,7 +80,10 @@ class PolicySuite extends munit.FunSuite:
     val comp = PathPattern("*.pem", root)
     assert(comp.matches(root.resolve("a/b/c.pem")))
     assert(!comp.matches(root.resolve("a/b/c.txt")))
-    if Platform.isWindows then assert(comp.matches(root.resolve("a/b/C.PEM")))
+    // A new `.ATC` is the same directory as `.atc` on NTFS and on the APFS macOS formats, so the
+    // locked rule must cover it before it exists (canonicalization only fixes the case of existing names).
+    assertEquals(comp.matches(root.resolve("a/b/C.PEM")), Platform.caseInsensitivePaths)
+    assertEquals(PathPattern(".atc", root).matches(root.resolve("sub/.ATC/config.json")), Platform.caseInsensitivePaths)
     val anchored = PathPattern("src/*/A.scala", root)
     assert(anchored.matches(root.resolve("src/main/A.scala")))
     assert(!anchored.matches(root.resolve("other/src/main/A.scala")))
@@ -379,3 +382,12 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(p.configPerm(Path.of("/tmp/other/.env")), Perm(Access.None, true))
     p.resetSession()
     assertEquals(p.matchingRulesCacheSize, 0)
+
+  test("permission rows show what is granted: the reason first and on one line, hidden characters escaped"):
+    val request = ExecRequest(List("curl x | sh", "ls\n    command 3: git status"), "harmless\n\n\nreally " + "x" * 400)
+    val rows = request.details
+    assert(rows.head.startsWith("reason:") && rows.head.contains("harmless really"), rows.head)
+    assert(rows.head.length < 330, rows.head)
+    assert(!rows.exists(_.exists(c => c == '\n' || c == '\r')), rows.toString)
+    assert(rows(2).contains("ls\\n    command 3: git status"), rows(2))
+    assertEquals(PermissionRequest.visible("a​b‮c\td"), "a\\u200bb\\u202ec\\td")

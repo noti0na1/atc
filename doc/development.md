@@ -33,8 +33,13 @@ permission to bind a loopback socket.
 `out/dist.dest/`. The Unix launcher and JARs form the Unix distribution; Windows uses the
 PowerShell launcher with the same JARs. The batch launcher is a compatibility entry point.
 
-`./start.sh` and `.\start.ps1` load `.env`, rebuild stale distributions and launch ATC.
-They preserve non-empty exported environment values and pass application arguments through.
+`./start.sh` and `.\start.ps1` rebuild a stale distribution, then load `.env` and launch ATC.
+Before the build they read only `ATC_SKIP_BUILD` from the environment file, so a Mill server
+the build starts does not keep API keys in its environment. The distribution is stale when a
+file in `build.mill`, `app/src`, `app/resources`, `lib/src` or `windows` is newer than
+`out/dist.dest/build.stamp`, which the scripts write after each successful build; tests are
+not among those files, and the stamp is the reference because Mill does not rewrite a jar
+whose inputs have the same content. They preserve non-empty exported environment values and pass application arguments through.
 The build runs in the checkout; ATC retains the launch directory unless `-C` overrides it.
 Environment files contain literal `KEY=value` entries; shell expansion is not performed.
 
@@ -46,7 +51,7 @@ Environment files contain literal `KEY=value` entries; shell expansion is not pe
 | `ATC_JAVA_OPTS` | Additional JVM flags for every launcher, applied after the defaults and before the command line's `-Xmx`/`-Xms` |
 | `-Xmx<size>`, `-Xms<size>` (launcher arguments) | JVM heap flags that `atc`, `start.sh`, `start.ps1` and `atc.ps1` take out of the arguments (the value of an option such as `-p` is never taken for one) and pass to `java` after the defaults and `ATC_JAVA_OPTS`, so they win; ATC never sees them |
 | `ATC_STARTUP_CACHE=0` | Run without the JVM startup cache (`atc`, `start.sh`) |
-| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set |
+| `ATC_DEBUG` | Enable stack traces and stream/terminal diagnostics when set; logged text has terminal controls removed |
 | `ATC_ASCII` | Select ASCII terminal glyphs when set |
 
 ### JVM settings
@@ -71,16 +76,22 @@ The **startup cache** halves the cold start (2.6 s to 1.3 s on that machine, and
 CPU over a session, since the JDK 25 cache carries method profiles): on Java 25+ an AOT
 cache (`-XX:AOTCacheOutput=` to build, `-XX:AOTCache=` to use), on Java 19 to 24 a dynamic
 CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are bound to
-the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
+the exact jars, JDK and JVM options, and a stale one makes the JVM print error lines and (for CDS) is
 *not* regenerated, so the launchers never point the JVM at one that might be stale:
 `~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
 `-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`), the release
-marker and the version-gated JVM options (the JVM refuses a cache built under other module
-options, such as `--enable-native-access`), its timestamp is compared with the jars
+marker, the version-gated JVM options (the JVM refuses a cache built under other module
+options, such as `--enable-native-access`), `ATC_JAVA_OPTS` and the command line's
+`-Xmx`/`-Xms` (another GC or heap size makes it print `[error][aot]` lines); its timestamp is compared with the jars
 (`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
 on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
-building flag. A build that leaves no file writes the key anyway, so it is not retried until
-the JDK or release changes. `atc self uninstall` removes the cache with the jars.
+building flag and the same JVM options. A build that leaves no file writes the key anyway, so
+it is not retried until the JDK, release or options change. The cache is an optimisation: when
+its directory cannot be created or written the launchers run without it, a key that cannot be
+written does not stop the start, and an interrupted training run removes its temporary
+directory. The Java version comes from the ` version "` line of `java -version`, because
+`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` add a `Picked up` line before it.
+`atc self uninstall` removes the cache with the jars.
 `-XX:TieredStopAtLevel=1` (60% less CPU, 50% slower steady-state compiles) and
 `-XX:+UseSerialGC` (200 MB less resident memory, five times the GC time, pauses still under
 10 ms) were measured and left to `ATC_JAVA_OPTS`.
@@ -413,9 +424,10 @@ separate character limit. User-visible prints also enter the REPL capture; the T
 a bounded prefix to subtract already-displayed output from result panels. Preserve leading
 whitespace in capture because subtraction uses exact text.
 
-`/clear` resets the conversation, queued notes and usage accounting. `/reset` and `/mode`
-reset the REPL and its spawned processes, `/mode` with the newly selected capabilities.
-`/new` resets all of that plus task notes, TODOs, retained output and session grants.
+`/reset` and `/mode` reset the REPL and its spawned processes, `/mode` with the newly
+selected capabilities. `/new` resets that and the conversation, queued notes, usage
+accounting, task notes, TODOs, retained output and session grants, and clears the window
+and its scrollback; the footer is drawn again from nothing.
 REPL restarts queue a notice for the model's next turn. `/run` queues the user's code and
 its result because definitions are shared with the agent. Closed sessions reject further
 runs. Input predictions are invalidated after state changes and before shutdown.
@@ -472,7 +484,9 @@ asks only for permissions not already held. `AllowOnce` applies to the child sco
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
 
-Permission requests display numbered command or host rows. The host sorts and deduplicates
+Permission requests display numbered command or host rows, and a `note` row when a command
+pattern holds `*`, which allows any arguments and so, for an interpreter, any code. The host
+sorts and deduplicates
 requested patterns so the displayed order agrees with decision notes. `Policy.sessionGrants`
 provides the current grant list; `/perms revoke` selects from it and `Policy.revoke` removes
 the selected grant from future checks. Configuration rules and open-scope semantics remain
@@ -490,7 +504,11 @@ patterns with separators use the layer's base; absolute patterns and `~` use an 
 path. `PathGlob` handles slash-based globs on all platforms. Canonicalization resolves
 symlinks, including dangling write targets. Directory traversal does not follow symlinked
 directories or Windows junctions. Filesystem checks and subsequent operations are not an
-OS-level transactional sandbox.
+OS-level transactional sandbox. Canonicalization corrects the case of existing names only, so
+on Windows and macOS (`Platform.caseInsensitivePaths`) globs match case-insensitively: a new
+`.ATC` is the same directory as `.atc` there and must fall under its locked rule. An agent path
+on a UNC share other than the working directory's is refused before canonicalization, which
+would otherwise contact the server even from a read-only file system.
 
 `GitIgnore` controls visibility in listings and recursive searches, independently of
 permissions. It reads repository and nested `.gitignore` files, caches them for the session
@@ -554,7 +572,10 @@ passed verbatim. Each pipeline stage and redirected file is checked separately; 
 must be written on the stage it applies to (`<` on the first command, `>`/`>>` on the last),
 anything else is refused like the other shell forms rather than silently moved.
 `WindowsExecutable` resolves bare commands from absolute PATH entries and validates batch
-arguments before launch.
+arguments before launch. Commands do not inherit the variables that hold provider keys
+(`Configuration.keyVariables`: the `${VAR}`s of `key` and `headers`, `keyEnv`, and the SDK's
+default variables for a provider that names no key), since a command that prints its
+environment would hand them to the model.
 
 `Processes` drains stdout and stderr concurrently into bounded buffers. Foreground commands
 retain prefixes; spawned processes retain recent output. Results use the rightmost non-zero
@@ -596,7 +617,7 @@ paths retain their first role. Project rules are anchored to the directory conta
 
 | Setting | Merge rule |
 |---|---|
-| Providers | Merge by provider name; model entries merge by alias, replacing a repeated alias |
+| Providers | Merge by provider name; model entries merge by alias, replacing a repeated alias. A project layer may set only `models` and `enabled` of a provider a granting layer defines |
 | Model selection, instructions, other ordinary settings | Later layer wins |
 | Commands, hosts | Concatenate across layers |
 | File rules | Retain each rule and its layer base |
@@ -604,11 +625,35 @@ paths retain their first role. Project rules are anchored to the directory conta
 | Mode and numeric limits | Granting layers set values; project layers may only tighten them |
 | Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
 
+A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,
+reach beyond its own files, and a cloned repository can ship them. `ProjectTrust` records a
+SHA-256 fingerprint of exactly these per project root in `~/.atc/trusted-projects.json`
+(owner-only); `Config.load` leaves them out while the fingerprint is not recorded, so every
+reload agrees with the decision. `Setup.load` shows what they grant, escaped like permission
+details, and offers Trust, Run without these grants, or Quit; it says whether the config is
+new or has changed since it was trusted. A `-p` run warns and goes without them unless
+`--approve-all` is given, which takes them unrecorded. Configs ATC writes itself (`--init`,
+the offered starter config) are trusted as they are written, and a `/model`, `/effort` or
+`/classifiedmodel` save keeps a trusted project trusted. Other edits, such as a new
+`model`, do not change the fingerprint.
+
 Only explicitly defined project settings narrow a value. `executionTimeoutMs` defaults to
 300000; a JSON `null` clears it and means no limit.
 `Configuration.rules` is the complete rule list; do not build policy from `settings.files`,
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
+
+`/config` (`ConfigCommands`) changes only `predictInput`, `notifications`, `webSearch`,
+`autoCompactThreshold` and `compactKeepRatio`: settings outside `PolicyKeys`, so none can
+loosen the sandbox, and a project config may set them. Every change goes into a `session`
+layer that `Models` keeps in memory and appends after the files on each reload, so a
+`/providers` edit does not drop it. Saving to the project config in force or to the global
+config also writes that file with `Config.setTopLevel`; a failed reload restores the file.
+The note on a saved value names a later file that sets the same key and wins at the next
+start. `App.useSettings` applies the combined settings to the agent, the notifier and the
+predictor, and `Models.reload` switches web search on the cached clients
+(`ChatModel.useWebSearch`); clients are not recreated, since a Claude Code client holds a
+CLI session. The sandbox keeps the policy it started with.
 
 `Configuration.combine` first merges ordinary settings in layer order, then obtains policy
 settings from granting layers and applies project restrictions. Numeric restrictions use
@@ -637,12 +682,35 @@ through `url`), `openai` (Chat Completions: Ollama, vLLM, OpenRouter, …), `cha
 models of a ChatGPT plan, signed in through the browser; see
 [Models and providers](#models-and-providers)), `claude-code` (the models of a Claude plan,
 through the user's signed-in Claude Code CLI; same section) or `echo` (keyless, for smoke tests). `key` is a literal or `${VAR}`, and `keyEnv` names a variable;
-variables resolve from the project's `.atc/keys.properties`, then `~/.atc/keys.properties`,
-then the environment. `headers` are extra HTTP headers for every request; a value may be a
-`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new` and
-`/clear`) for gateways that route by session, such as OpenCode
+variables resolve from the project's `.atc/keys.properties` (once the project is trusted),
+then `~/.atc/keys.properties`, then the environment. Without `key` or `keyEnv`, the SDK's own
+variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only when `url` is unset; a gateway
+at a `url` that needs that key names it, as in `"key": "${ANTHROPIC_API_KEY}"`. `headers` are extra HTTP headers for every request; a value may be a
+`${VAR}` or `${ATC_SESSION}`, a random id of the conversation (renewed by `/new`) for
+gateways that route by session, such as OpenCode
 (`"x-opencode-session": "${ATC_SESSION}"`). Requests identify ATC as `atc/<version>` unless
 `headers` sets `User-Agent`.
+
+`reasoningStyle` describes a Chat Completions provider (`api: openai`) that asks for
+reasoning and returns it in its own way. `request` is a JSON object merged into the body of a
+call that reasons, in place of `reasoning_effort`; a string `{effort}` in it becomes the
+model's current effort, and with no effort chosen the member holding it is left out.
+`requestOff` is merged into calls that should reason little (next-request prediction).
+`tags` names the opening and closing tag around reasoning written into the answer text:
+what is between them streams as reasoning and stays out of the answer and the history. The
+Gemini preset uses all three:
+
+```json
+"reasoningStyle": {
+  "request": { "extra_body": { "google": { "thinking_config":
+    { "include_thoughts": true, "thinking_level": "{effort}" } } } },
+  "requestOff": { "extra_body": { "google": { "thinking_config": { "thinking_level": "low" } } } },
+  "tags": ["<thought>", "</thought>"]
+}
+```
+
+A model's own `thinking` switch still applies beside it. Reasoning in the `reasoning_content`
+or `reasoning` fields of a delta streams as reasoning whatever the style says.
 
 **Models.** A model is an alias with a provider-specific `name` and its own settings:
 `contextWindow` (the real window, so the conversation is compacted and trimmed to fit),
@@ -652,8 +720,9 @@ then the environment. `headers` are extra HTTP headers for every request; a valu
 lists its own, each named `provider/model-id`: the last list each provider returned is kept
 in `~/.atc/model-lists.json`, a new one is fetched in the background once a session has
 started, and a provider that cannot be reached, or whose configured key is unset, is
-skipped. Anthropic's list supplies context windows and effort levels, OpenRouter's the
-context window. Without `-m` or `model`, a session starts with the model last chosen with
+skipped. Anthropic's and DeepSeek's lists supply context windows and effort levels (DeepSeek's
+also the default effort), OpenRouter's and vLLM's the context window. A listed output limit
+is not taken, since it would be sent with every request and reserved from the window. Without `-m` or `model`, a session starts with the model last chosen with
 `/model`.
 
 **First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:
@@ -685,19 +754,21 @@ with ChatGPT*, which replaces the saved sign-in.
 **Efforts.** `reasoning` is the effort a session starts with; `efforts` lists the ones the
 model accepts (by default every effort its api knows: `low` to `max` for Anthropic, `none`
 to `max` for OpenAI). `/effort [level]` switches the agent model's effort, and `default`
-sends none. The choice is saved as the top-level `effort` of the working directory's project
+sends no effort. The choice is saved as the top-level `effort` of the working directory's project
 config (when it has one, like `/model`'s `model`), which replaces the starting model's
 `reasoning` in later sessions; an effort that model does not take is ignored with a
 warning. `/model` starts the new model at its configured effort and removes `effort`.
 
 **Web search.** A model's `webSearch` turns on the provider's own search tool; the
-top-level `webSearch` does so for every model that does not set its own. It is best effort:
+top-level `webSearch` does so for every model that does not set its own. It applies in full
+mode only (`Models.useMode`), since read-only and local mode keep the agent off the network. It is best effort:
 when a provider rejects the tool, the model continues without it for the session.
 
 **Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
 in kitty, iTerm2, WezTerm, Ghostty and foot, a desktop notification on a local machine, the
-bell otherwise), `system`, `terminal`, `bell` or `off`. An alert waits ten seconds for
-input, or comes at once when the terminal reports that it lost focus.
+bell otherwise), `system`, `terminal`, `bell` or `off`. An alert comes only after a wait in
+which the user neither typed nor had the terminal focused: ten seconds for a question or
+permission request, thirty for a finished turn.
 
 ### File rules and command patterns
 
@@ -729,7 +800,11 @@ are not followed. `denyCommands` and `denyHosts` use the same syntax: a deny rul
 every allow rule, including a session grant, an open `request*` scope, and `--approve-all`.
 The template's shell denials are bare names: `"bash"` blocks both `bash` and `bash -c ...`,
 but not an explicit `/bin/bash`, a wrapper, or a renamed interpreter; no finite deny list
-can classify every program that might execute code.
+can classify every program that might execute code. The project template pre-approves only
+git commands whose options cannot reach files outside the repository once `--output` is
+denied: `git diff` reads any file when one of two paths lies outside the repository or the
+directory is not one (`git diff .env /dev/null`), and `git blame` through `--contents`,
+`--ignore-revs-file`, `-S` and their abbreviations, so neither is in the template.
 
 **Windows.** Use `/` separators in configuration on every platform: in JSON,
 `"C:/Users/alice/project"` (a native backslash starts a JSON escape, so the equivalent form
@@ -749,7 +824,9 @@ newline and encoding conventions (commonly CRLF, sometimes BOM-marked UTF-16 on 
 `displayName` affects presentation only. A provider without configured models is listed
 through `ChatModel.listModels` (the adapter's own client, with `Providers.ListTimeout`), at
 most once per catalog and in parallel across providers: `App` starts `refresh()` after the
-banner, and `models` waits for it. Lookups never wait: they use this session's list when
+banner, and `models` waits for it at most 30 seconds (`ModelCatalog.ListWait`), since a Claude
+Code listing can take minutes; a provider whose fetch has not finished keeps its stored list
+until it does. Lookups never wait: they use this session's list when
 it has arrived, else the one `ModelListStore` kept (`~/.atc/model-lists.json`, reused only
 for the same provider name, api and url), else take `provider/model-id` as given. A model
 taken as given keeps its unknown context window until a later session finds it in the
@@ -767,7 +844,9 @@ the top-level one, listed models included. `SpecModel.withWebSearchFallback` res
 streaming request without the tool when the provider answers 400 or 422 naming web
 search before anything was streamed, and turns the tool off for that client. A gateway
 that drops the tool silently cannot be detected. `ChatModel` has streaming `complete` and one-shot
-`simple` operations. Provider adapters normalize stop reasons into `CompletionStop`.
+`simple` operations. Provider adapters normalize stop reasons into `CompletionStop`;
+`model_context_window_exceeded` (Anthropic, Claude Code) counts as truncation, as an output
+limit does, so the calls of a response cut by the context window are not run.
 
 `Msg` carries neutral text and tool calls. Assistant messages may also carry a `NativeTurn`
 for replay to the exact provider/model reference that produced it. Switching models uses
@@ -781,7 +860,13 @@ requests can retry without a guessed reasoning effort when the provider rejects 
 parameter; unrelated bad requests are not retried by this fallback.
 
 Provider SDK request construction remains in each adapter. Shared configuration and client
-setup belong in `Providers`; model selection belongs in `ModelCatalog`.
+setup belong in `Providers`; model selection belongs in `ModelCatalog`. Without a configured
+key, the Anthropic and OpenAI adapters take their SDK's credentials from the environment only
+for the provider's default endpoint; a provider with a `url` gets the placeholder key `none`
+instead, so those credentials never reach another host. A streaming request has no limit on
+the whole call, since a long answer can stream for longer than `Providers.RequestTimeout`
+(15 minutes); connecting, and each read and write, keep their timeouts, and Ctrl-C cancels
+the call. One-shot calls keep the 15-minute limit.
 
 A provider's `headers` are extra HTTP headers for every request to it. `KeyBindings.headers`
 resolves `${VAR}` values through the key bindings (an unset variable drops the header) and
@@ -800,8 +885,21 @@ and extra choice chunks after completion. Auxiliary chat calls also apply config
 `maxTokens` and `temperature`. `ModelSuite` checks chunk handling; `ProviderRequestSuite`
 checks requests and usage accounting against a local HTTP server.
 
+Gemini's OpenAI-compatible endpoint streams each tool call whole, without the `index` the
+SDK accumulator needs, so `ChunkFeed` numbers such fragments: one with an id starts the next
+call. Gemini 3 also attaches a thought signature to each call (`extra_content`), requires it
+back with the calls of the exchange in progress, and refuses `null` where it expects text.
+The accumulator drops `extra_content`, so `ChunkFeed` keeps it by call, and
+`OpenAIChatModel.replayable` builds the native turn without null fields and with each call's
+`extra_content`. Native turns are not saved with a session; Gemini accepts earlier exchanges
+without signatures, so a resumed conversation still works. Its thoughts, asked for through the
+preset's `reasoningStyle`, arrive in the answer text between `<thought>` tags;
+`OpenAIChatModel.TagSplitter` splits them off as the stream arrives, holding back a tail that
+could begin a tag, and the stored answer and the replayed turn keep only the answer text.
+
 The `chatgpt` api reaches the models of a ChatGPT plan through the backend the Codex CLI
-uses (`https://chatgpt.com/backend-api/codex`), signed in the way Codex signs in.
+uses (the provider's `url`, by default `https://chatgpt.com/backend-api/codex`), signed in the
+way Codex signs in.
 `ChatGPTAuth.begin` starts an OAuth authorization-code grant with PKCE and Codex's client id
 at `auth.openai.com`, with a callback server on the loopback interface at port 1455 or 1457,
 the two callbacks registered for that client. `FirstRun.signIn` opens the browser
@@ -814,14 +912,20 @@ the ID token's `https://api.openai.com/auth` claim, and the expiry from the acce
 `exp`. `ChatGPTModel` is the Responses adapter with an OkHttp interceptor that reads the file
 for every request, so every atc process sees the newest tokens. The interceptor refreshes
 tokens five minutes before they expire, and once more after a 401. A refresh token can be
-used once. When the token endpoint rejects one, another process may have used it already,
-so the saved tokens win if their refresh token differs; otherwise `SignInNeeded` tells the
-user to sign in again from `/providers`. The backend streams only, requires instructions
+used once, so a refresh holds a lock on `chatgpt-auth.json.lock` (created readable only by its
+owner) and reads the saved tokens again once it has the lock: another process may have
+refreshed while it waited. When the token endpoint still rejects a refresh token, the saved
+tokens win if their refresh token differs; otherwise `SignInNeeded` tells the user to sign in
+again from `/providers`. A failure of the sign-in step that is not an `IOException`, such as a
+malformed token answer, fails the request as an `IOException` that names only the exception's
+class, since its message may quote a token. The backend streams only, requires instructions
 and rejects `max_output_tokens` and `temperature`. Its closing `response.completed` carries
 an empty `output`, so `OpenAIResponsesModel.Accumulator` keeps the items of the
 `response.output_item.done` events and uses them when the final response has none. The adapter streams one-shot calls too,
 supplies instructions when a call has none, sends neither setting and sets
-`prompt_cache_key` to the conversation id. Its model list is `GET /models?client_version=`,
+`prompt_cache_key` to the conversation id. The backend never returns the reasoning itself,
+so a model without `reasoningSummary` asks for `auto` summaries, as Codex does, and shows
+them as thinking. Its model list is `GET /models?client_version=`,
 filtered to the models marked `list`, with their context windows and efforts. The backend
 lists the models that Codex release may use, so `ChatGPTModel.ClientVersion` follows Codex
 releases. The preset sends `originator: atc` and `session-id: ${ATC_SESSION}`. `ChatGPTSuite`
@@ -829,7 +933,8 @@ covers the flow against a local server.
 
 The `claude-code` api reaches the models of a Claude plan through the `claude` CLI the user
 installed and signed in to; ATC never reads its credentials. `ClaudeCli` starts `claude -p`
-in the stream-json protocol of the Claude Agent SDK, in an empty temporary directory, with
+in the stream-json protocol of the Claude Agent SDK, in an empty temporary directory (deleted
+when the process exits, or else when ATC exits), with
 everything that would act or load context outside ATC turned off: `--tools=` (no built-in
 tools; `WebSearch` alone when `webSearch` is on), `--setting-sources=` (no settings files,
 hooks, plugins or skills), `--strict-mcp-config`, `--disable-slash-commands`,
@@ -858,7 +963,10 @@ A cancelled request stops its process. One-shot calls run in their own process w
 tools. The model list comes from the `initialize` answer, and each model's context
 window from `set_model` followed by `get_context_usage` (`rawMaxTokens`); none of these
 makes a model request. A configured model without `contextWindow` learns its window the
-same way when its first session starts. `ClaudeCodeSuite` covers the
+same way when a session starts, until the CLI has answered once; the session is published
+before that question, so an interrupt during it leaves a process that `close` or the next
+session ends. On Windows, `WindowsExecutable` resolves `claude` from the PATH only, so a
+`claude.exe` in the project cannot run in its place. `ClaudeCodeSuite` covers the
 protocol against a scripted CLI.
 
 Some compatible gateways end a stream without a `finish_reason`, with or without `[DONE]`.
@@ -877,8 +985,12 @@ do not change the prompt prefix. Repository-derived scalar values are JSON-quote
 instruction and permission blocks are marked as data.
 
 `CompletionPolicy` selects tool execution, continuation or completion. Calls from truncated
-or blocked responses are not executed. Output limits add `Msg.Continuation`; server-side
-pauses can resume directly. Resume and tool-budget rejection counts bound repeated work.
+or blocked responses are not executed, and the assistant message says so even when it has
+text. Output limits add `Msg.Continuation`; server-side pauses can resume directly. A tool
+call the output limit cut gets its own continuation (`AgentMessages.truncatedToolCall`: the
+call did not run, split it), since the plain one made models send the same call again, and
+at most `Agent.MaxTruncatedCalls` retries. Resume and tool-budget rejection counts bound
+repeated work.
 The interactive tool budget may be extended by the user; non-interactive runs stop at it.
 
 `TurnOutcome` records why the loop ended. `Finished` means the model produced a final
@@ -917,7 +1029,9 @@ and internal continuation messages remain distinct for context fitting and predi
 
 `ContextManager` estimates tokens from text and replay payloads, then calibrates against
 provider counts. It reserves output capacity and drops complete older exchanges at user
-boundaries. The latest exchange is retained. An unavoidable overflow produces a warning
+boundaries. The latest exchange is retained. A cut rewrites the first message, which ends
+every cached prompt prefix, so it goes down to three quarters of the budget
+(`ContextManager.CutTarget`) and the next rounds fit without another one. An unavoidable overflow produces a warning
 once per user turn. Changing models resets calibration.
 
 The estimator starts at approximately one token per four UTF-16 characters, plus message
@@ -935,7 +1049,7 @@ complete, nonempty summaries smaller than the older prefix they replace; the res
 can say which. Pending notes, user request tracking, task state and REPL definitions are
 unchanged; usage is recorded separately. Before the summary request is sent, the transcript
 is estimated against the model's input allowance, using the same output reservation as
-ordinary requests. If it cannot fit, the error suggests a larger model or `/clear`.
+ordinary requests. If it cannot fit, the error suggests a larger model or `/new`.
 
 `autoCompact` in `Agent`'s turn loop runs at the top of every round, after queued input is accepted and
 before `ContextManager.prepare` fits the request: before the first request of a turn and
@@ -943,9 +1057,11 @@ between tool rounds, so a long tool loop can be summarized while it runs. It nev
 between a tool request and its results, which would make the history invalid, and never
 after the final answer, where a `-p` run would pay for a summary it never uses. It compares
 calibrated
-next-request usage with `contextWindow * autoCompactThreshold`. This fraction defaults to
+next-request usage with `contextWindow * autoCompactThreshold`, or with the input allowance
+(the window less the output reserve) when that is smaller, since trimming keeps every request
+within the allowance and a higher threshold would never be reached. This fraction defaults to
 `0.8`, accepts `[0, 1]`, and uses zero to disable automatic compaction. It is a non-policy
-setting merged with later-layer precedence and shown in `/config`. When the exchange in
+setting merged with later-layer precedence, shown and changed by `/config`. When the exchange in
 progress is itself summarized (nothing fits the retention budget), a
 `Msg.Continuation` (`AgentMessages.compactionContinuation`) closes the request so that the
 model continues from the summary instead of being asked to complete an assistant message.
@@ -983,7 +1099,9 @@ Current user instructions and actual permissions take precedence over working no
 Submitted updates enter a concurrent queue. While a model is generating, an update cancels
 that request; while Scala is running, it waits for the call to return. Remaining calls in
 the old completion receive skipped results. `Conversation.steer` adds the correction as a
-user message, inserting an assistant bridge after tool results when needed. The next model
+user message, inserting an assistant bridge after tool results when needed. When the user
+interrupts the turn instead, queued text goes back to the prompt as a draft
+(`Agent.takeQueuedInput`, `Tui.draft`) rather than starting another turn. The next model
 request therefore sees the correction before choosing another operation.
 
 `SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
@@ -998,7 +1116,8 @@ Interactive terminal sessions save on normal exit (`/quit`, its aliases, or Ctrl
 a checkpoint under `~/.atc/sessions/`. This works with read-only project directories and
 keeps different working directories separate. Startup offers to resume that checkpoint;
 bare `/resume` opens it later. Empty sessions leave it unchanged, so declining the startup
-offer and immediately quitting does not erase previous work. Conversation messages, pending
+offer and immediately quitting does not erase previous work; `/new` deletes it, so the next
+start does not offer the conversation the user discarded. Conversation messages, pending
 notes from `/run`, task notes or TODOs make a session non-empty. Manual `/save` files remain
 independent. Scripted runs and redirected input do not save or prompt automatically.
 
@@ -1029,9 +1148,9 @@ Predictions are reduced to visible single-line text and reported separately in u
 the framing of pop-ups. It composes parts that live in their own files: `Screen` (writes
 that track line boundaries, styles, width, live regions and the spinner; its monitor is the
 TUI's lock), `StatusLine` (the footer and the window title), `ToolBlock` (one tool call's
-block, its live output and the `/output` history), `ThinkingView` and `LiveOutput` (the
-reasoning window and folded tool output), `Dialogs` (what pop-ups show and read, through
-the jline-prompt `Menus`), `KeyReader` (the key thread during a turn), `PromptReader` (the
+block, its live output, its summary and the `/output` history), `ThinkingView` (the
+reasoning window), `Dialogs` (what pop-ups show and read, through
+`Menus` and `ListMenu`), `KeyReader` (the key thread during a turn), `PromptReader` (the
 JLine line reader and its bindings) and `Alerts` (notifications and focus tracking).
 `Format` holds the short number, duration and plural forms of status and summary lines.
 `Ansi` removes terminal controls from external text before display. Keep model-visible
@@ -1044,8 +1163,47 @@ cancels block input. During a turn, a separate reader collects corrections and u
 draft text and handles escape sequences, stopping on timeout or EOF. Menu reads pause that
 reader.
 
+Slash-command menus share one pattern, through `Tui`. A one-shot picker (`/model`, `/effort`,
+`/perms revoke`) acts on the choice and closes. A menu the user comes back to after each
+change (`/providers`, `/config`) is a `menuLoop`: its rows are rebuilt every time, so they show
+the change, and its last row is Done. A menu opened from another is `chooseOrBack`, whose last
+row is Back; a confirmation inside a command is such a sub-menu, with one action row. Carrying
+out an action returns to the looping menu; Back, or an action that did not go through (a
+refused change, a cancelled checkbox), returns to the menu one level up. Esc goes back one
+level everywhere, and the footer says so (`Esc back`); the agent's questions say `Esc cancel`,
+and permission requests, which Esc denies, say `Esc deny`.
+
+Every menu is a `ListMenu`, drawn in a live region and read in raw mode; `MenuState` holds
+what it shows apart from the terminal, and `MenuKey` decodes keys with `KeyReader`'s escape
+parsing. A pop-up's menu (a permission request, a question, a confirmation) has no title row:
+its question stands above it, and its rows, then the answer it leaves (`› Yes`), are indented
+to the question's text. A slash command's menu shows its title, then at most twelve rows, fewer when the screen is short, so
+the whole menu stays shorter than the screen; the window scrolls with the cursor and says how
+many rows are out of view above and below. A longer list is filtered by typing, every word
+matching, with the filter and the number of matches on a line of its own; Backspace edits it
+and Esc clears it before it leaves the menu. Ticks belong to items, so they survive a change
+of filter, the ticked items open first, and the title counts them. PgUp, PgDn, Home and End
+move by a page or to the ends. A menu opens on the value in use (`/model`, `/effort`,
+`/classifiedmodel`) or, in a `menuLoop`, on the row last chosen. When it ends, one line says
+what was chosen; leaving it leaves nothing. The footer shows its keys, or the menu's last row
+when there is no footer. Menus read focus reports, and a resize redraws them at the new size.
+Nothing inside a bracketed paste is taken as a key, and Enter counts only 300 ms after a menu
+opens (`ListMenu.EnterDelayNanos`): a newline typed or pasted just before a permission request
+must not choose its first row, Allow once.
+
+While the main prompt holds a single word starting with `/`, `PromptReader` lists the matching
+`SlashCommand.table` rows in JLine's `post` area under the buffer, with an exact name
+preselected. It sets `post` in a `redisplay` override, leaves it to other users (completion
+lists, history search) while they hold it, and skips it in the final display `doCleanup` draws.
+↑/↓ move the selection, Tab fills in the name (and a space for commands with arguments), and
+Enter replaces the word with the selected name before accepting. A line that ↑/↓ recalled from
+history is not listed until it is edited, so the arrows keep browsing history. Answers, block
+input and dumb terminals get no list. Enter runs the selection, so no alias may be a prefix
+of another command's name.
+
 During a turn, Enter submits a correction and unsent text is shown in the status line.
-Bracketed pastes are collected without submitting individual lines. The status line uses
+Bracketed pastes are collected without submitting individual lines, and the footer shows the
+pasted text once, when the paste ends. The status line uses
 JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
 operation, elapsed time and model/mode/directory context. Spinner writes and status updates
 share the TUI lock. The footer is reserved before the first content line, so adding it does
@@ -1053,46 +1211,65 @@ not scroll the banner away. Its activity indicator replaces a separate spinner w
 terminal supports a status line. Idle state shows a short model, mode and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
+`Screen` measures the terminal once per resize, since the views ask for the width for every
+line; the footer is resized to that measurement as well. JLine's line reader takes the resize signal while it reads,
+so `Tui` measures again when a prompt or pop-up returns and redraws what depends on the size
+if it changed; otherwise output after a resize at the prompt would keep the old width. A live
+region redraws in place at the new width. Terminals that reflow on a narrower width (most
+do, VS Code's included) rewrap the region's old rows, so a shrink can leave some of them
+above the redrawn region.
 Every footer update goes through `StatusLine.draw`, which flushes the terminal writer after
 JLine's `Status.update`: JLine flushes the footer text but leaves the closing
 synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honours mode 2026
 (xterm.js in VS Code, iTerm2, kitty, Ghostty, WezTerm) freezes rendering until it arrives.
 Without that flush, a footer repainted from the input-poll clock stalled the window for up to
 a poll interval per repaint (`TuiSuite` checks the closer is written).
+Before a clear (`/new`, Ctrl-L), `Screen.beforeClear` lifts the footer's scroll region and
+erases its row. VS Code runs xterm.js with `scrollOnEraseInDisplay`, which moves a cleared
+window into the scrollback instead of erasing it, and only the rows inside the scroll region:
+the old footer stayed on the last row, and the line feeds with which JLine reserves the row
+again scrolled it up into view, so the footer showed twice.
 ASCII mode also selects ASCII menu markers and control separators.
 Streaming text is flushed at the end of each incoming update. Nested rendering helpers share
 that flush instead of flushing every gutter and style fragment. Live previews compare their
-rows with the previous view and immediately repaint only changed rows. They use line erasure,
+rows with the previous view and immediately repaint only changed rows. `LiveRegion.redraw` cuts
+every row to one terminal row, measured from column 0 with its gutter and tab stops, with
+newlines shown as spaces: a row that wrapped would take two terminal rows and shift every later
+redraw. `Screen.fit` stops scanning once the row is full, so a very long output line costs no
+more than a short one. They use line erasure,
 not erase-to-end-of-screen, so updating a preview cannot erase the footer. Footer work runs on
 state changes and the existing input-loop clock; writing text does not trigger a footer redraw.
 There is no frame-rate cap or deferred stream queue. `TuiSuite` checks preview growth,
 replacement, shrinkage and clearing while preserving a footer outside the owned rows.
-Background process events between turns use `LineReader.printAbove`
-so notifications do not overwrite the user's input.
+Process events wait while a pop-up is open, and during a turn until a tool block opens, where
+they join its output, or the turn ends; written into streaming prose they would land mid-line.
+Between turns they use `LineReader.printAbove` while the prompt reads, so they do not overwrite
+the user's input.
 
 `Notifier` sends the `notifications` alert when a turn ends, a permission request or
-question opens, or the tool budget runs out. `Alerts.alert` schedules it ten seconds ahead and
-drops it on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
+question opens, or the tool budget runs out. `Alerts` schedules it ten seconds ahead
+(`QuestionDelayMillis`; `TurnDelayMillis`, thirty, for a finished turn) unless the terminal
+is known to be focused, and drops it on focus coming back or on any key, answer or Ctrl-C: the turn's key reader, the prompt highlighter (a
 changed buffer) and the end of a pop-up count as input. The terminal's focus reports
 (`ESC[?1004h`) come through JLine's focus widgets at the prompt and through the key reader
 during a turn. Reporting is on only while one of those raw-mode readers runs (`callback-init`
 to `callback-finish` for the line reader, `KeyReader.start` to `KeyReader.stop`): between reads the
-terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends a pending alert at once, and an alert raised while
-unfocused is not delayed. jline-prompt menus do not parse focus reports, so reporting is
-off while a menu reads. There are no alerts for `-p` runs or dumb terminals.
+terminal is in line mode and its driver would echo a report as `^[[I`. Losing focus sends nothing early. Focus is
+known only once the terminal has sent a report, since JLine assumes support for every `xterm*`
+type and such a terminal may send none; until then only keys count. Menus read focus reports as well. There are no alerts for `-p` runs or dumb terminals.
 The alert title is `atc · <directory>`. A turn's alert shows the start of its last prose
 block as plain text (`Notifier.plainText`), or the outcome with the error or duration when
 the turn did not finish normally (`Alerts.turnText`). Permission alerts name the request and
 its details, and question alerts show the question.
 `StatusLine.refreshTitle` sets the window title (OSC 0) from `busy` and the pop-up depth whenever
-the status refreshes, writing only changes. The previous title is pushed on xterm's title
+the status refreshes, on one line, writing only changes. The previous title is pushed on xterm's title
 stack (`CSI 22;0t`) at start and popped (`CSI 23;0t`) by `close`; terminals without the
 stack keep ATC's title until the shell sets its own.
 Terminal alerts are OSC 9, 99 (kitty) or 777 sequences, chosen from `TERM` and
 `TERM_PROGRAM` and wrapped for tmux passthrough; they are written as style text so they
 leave the line tracking alone. System alerts start `osascript`, a Base64-encoded PowerShell
-toast script or `notify-send` on a daemon thread, passing the text as arguments or quoted
-script data, and ring the bell if the command cannot start. Alert text is sanitized, put
+toast script or `notify-send` on a daemon thread, passing the text as arguments (after `--` for `notify-send`, so a body starting with `-` is
+not an option) or quoted script data, and ring the bell if the command cannot start. Alert text is sanitized, put
 on one line and capped at 200 characters.
 
 `TextLayout` wraps complete lines by terminal cell width, preserving ANSI styles and whole
@@ -1109,10 +1286,33 @@ column widths cannot fit use the same fallback. This preserves information witho
 long identifiers and sentences into narrow strips. Completed output panels remove the
 Ctrl-O hint once that live view is no longer active.
 
+In the compact view (the default on a terminal), a running tool block is one `LiveRegion`:
+the title, up to eight rows of code and the last ten lines of output, both cut further so
+the region stays shorter than the screen and can always be redrawn. When the call ends the
+region becomes its summary: the title with the code's first line, the files changed and the
+verdict, which names how much output it held or, for a failure, the first line of the
+error (`ToolBlock.firstProblem`; a compiler heading gives its code or its message, and a
+`java.lang` exception its simple name). The same change made to a file several times in a
+row (one-line edits, one after another) is one row with a count. A
+pop-up, or any line written outside the block, freezes what the region shows and the
+block continues below. Output that `parallel` tasks write while a pop-up is open is held, up to
+its last million characters, and written when the pop-up closes; Ctrl-O takes the region down and writes the block out in full. The
+expanded view and a plain terminal write every block in full, with the result panel; the
+expanded view breaks output lines at the row's end (`Screen.breakLines`, which keeps the
+column across chunks), so a long line stays inside the block's gutter.
+
+The TODO panel is drawn once per tool call. A new list is drawn whole; when only statuses
+changed, the header gives the progress (`· 3 of 7 done`) and only the items that changed are
+drawn, since the agent marks one item per call and the whole list each time buried the work
+between. `/todos` always draws the whole list.
+
 `ToolHistory` retains up to 20 results within an eight-million-character budget. Each
 result retains at most two million output characters plus bounded code and file previews;
-live command output is capped separately at one million characters. `/output` displays
-200-line windows without evaluating code again. Classified terminal-only output is never
+live command output is capped separately at one million characters. A live view keeps its
+text in a `TailBuffer`, which grows to half again its cap before cutting back, so small appends
+do not move the whole text. `/output` displays
+200-line windows without evaluating code again, with file-change previews coloured as diffs
+(`ToolHistory.Entry.changesFrom` says where they start). Classified terminal-only output is never
 added to the history, and `/new` clears it. These records are for inspection and are not
 part of saved conversations.
 
@@ -1124,12 +1324,20 @@ Plain prompts accept exact `y`/`yes` or
 `Decision.Revise`. A qualified answer starting with “yes” or “skip” must not become an
 approval by prefix matching. EOF and empty plain replies deny the request.
 
-Question menus always include a custom-answer option. For multiple selections, chosen
+Question menus always include a custom-answer option. Questions wrap with their continuation
+lines under the question text, like permission details. For multiple selections, chosen
 answers retain their display order and custom text is appended. User input is returned to
 the host's `ask` call; only its terminal display is sanitized.
 
 `MarkdownStream` incrementally renders supported Markdown and buffers tables until column
-widths are known. `Highlight` uses the compiler's Scala scanner. Layout calculations use
+widths are known. It wraps paragraph, heading, list and quote text at word boundaries to the
+width, a list item or quote continuing under its text: left to the terminal, the rest of a long
+line continued at column 0, outside the prose gutter, and broke inside words. The word being
+written, and the spaces before it, are held until the word ends, since only then is it known
+whether it fits; without a column limit (tests) text passes through at once. `Highlight` uses the compiler's Scala scanner. A fenced Scala line is
+highlighted with earlier lines as context: the last eight, or, while `Continuation.unclosed`
+finds a comment or triple-quoted string open, up to 200 lines back (the compiler's colours
+cannot tell what is open, since it resets them after the last coloured character). Layout calculations use
 terminal cell widths. History is owner-only on POSIX systems and rejects final symlinks.
 Non-interactive runs use a dumb UTF-8 terminal and do not prompt for permission unless
 explicitly configured to auto-approve requests.
@@ -1137,7 +1345,8 @@ explicitly configured to auto-approve requests.
 ### Sessions, inspection and compaction
 
 After each interactive turn the model predicts the next request and the prompt shows it as
-ghost text (Tab or → accepts it; `"predictInput": false` disables it). When there is no useful
+ghost text (Tab or → accepts it; `"predictInput": false` disables it). The redraw a read
+leaves on screen has no ghost text, so a suggestion never looks sent after Ctrl-D or Enter. When there is no useful
 suggestion, the model is asked to return `[NO_PREDICTION]`. This marker and empty responses
 are suppressed before reaching the prompt. A summary line
 shows the turn's cost and how full the context window is. Turn summaries distinguish
@@ -1155,7 +1364,7 @@ never waits for a compiler.
 | `/output 3 201` | Continue from a line in a long result |
 | `/task` | Show the task goal, constraints, completed work and remaining steps |
 | `/perms revoke` | Select a session grant to revoke (`/perms revoke 2`, `/perms revoke all`) |
-| `/save [file]` | Save to a new file (never overwrites); default location `.atc/sessions/` |
+| `/save [file]` | Save to a new file (never overwrites); default location `~/.atc/sessions/`, outside the project |
 | `/resume [file]` | Resume the last session for this directory, or restore a saved file |
 | `/ps`, `/kill [id|all]` | The processes the agent started with `spawn` |
 | `/reset` | Fresh REPL, killing those processes |
@@ -1182,12 +1391,12 @@ complete exchanges verbatim, as many as fit within `compactKeepRatio` of the con
 rest, keeping tool calls with their exchange. When everything fits there is nothing to
 compact and no request is made; a summary that is not smaller is discarded; a transcript
 larger than the model's input allowance is refused with a suggestion to use a larger model
-or `/clear`. Automatic compaction runs immediately before a request when its estimated size
+or `/new`. Automatic compaction runs immediately before a request when its estimated size
 reaches `autoCompactThreshold` times the model's `contextWindow` (default `0.8`; `0`
 disables), before the first request of a turn and between tool rounds, never after a final
 answer, and never without a configured window. A failed or not-smaller attempt is reported
 and not retried until the conversation has grown by a tenth of the window; a new conversation
-(`/new`, `/clear`) lifts that mark. Compaction is lossy; essential details belong in task notes or files.
+(`/new`) lifts that mark. Compaction is lossy; essential details belong in task notes or files.
 
 ## Testing and conventions
 
@@ -1238,7 +1447,14 @@ in `~/.atc/jars`; `ATC_INSTALL_DIR` and `ATC_CACHE_DIR` override those locations
 downloads require SHA-256 digests for both JARs. Metadata uses jq when available and a
 field-order-dependent fallback otherwise. A cache marker records `release-id|tag`; verified updates replace it
 with the downloaded artifacts. Uninstall validates the cache root and removes ATC-owned
-artifacts while retaining configuration and unrelated files.
+artifacts while retaining configuration and unrelated files. `atc setup` appends a marked
+snippet that puts the install directory on `PATH` to each existing rc file of the user's shell
+(`.zshrc` and `.zprofile` for zsh, `.bashrc`, `.bash_profile` and `.profile` for bash,
+`.profile` otherwise), creates the first of them when none exists, skips a file that already
+has the snippet or names the directory, and warns about a file it cannot write. fish reads none
+of these files, so setup prints the `fish_add_path` command instead. Uninstall removes the
+snippet from all five files, whatever the current shell, and removes the `self-check` stamp
+with the jars.
 Directory-name prefixes alone do not prove ownership: uninstall retains directories such
 as `dev.notes` and `download.notes`, including in a custom cache location. Temporary
 download and development directories are cleaned by the operation that creates them.
@@ -1258,7 +1474,11 @@ declined offer also waits a day), only when the running script is the installed 
 script with `stage_latest_self` (the download and `bash -n` check `atc self update` uses,
 with the release check's timeouts), compares it with `cmp`, and on `y` moves it into place
 with `install_staged_self`; bash keeps reading the running script from its old inode, so
-the new wrapper takes effect at the next start.
+the new wrapper takes effect at the next start. The download runs in a subshell, so a check
+that fails there (no curl, or a `GITHUB_TOKEN` with characters the wrapper refuses to put in a
+curl config) skips the offer instead of ending the launch; `atc self update` still reports it
+and exits 1. An INT, TERM or HUP trap removes the staged file when the download or the prompt
+is interrupted.
 
 The prompt defaults to No. Approval passes the already-fetched metadata to
 `download_latest_release`, so the updater installs the release the user approved without

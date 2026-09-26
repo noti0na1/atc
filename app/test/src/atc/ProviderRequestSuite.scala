@@ -1,6 +1,6 @@
 package atc
 
-import atc.config.{ModelConfig, ModelSpec}
+import atc.config.{ModelConfig, ModelSpec, ReasoningStyle}
 import atc.llm.*
 import atc.agent.{Agent, AgentEnvironment, AgentMessages, ToolRunner, TurnOutcome}
 import atc.config.Config
@@ -15,6 +15,11 @@ class ProviderRequestSuite extends munit.FunSuite:
     """{"id":"one","object":"chat.completion","created":1,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":2,"total_tokens":44}}"""
 
   private def withModel(response: ujson.Value => (String, String))(test: (ChatModel, () => ujson.Value) => Unit): Unit =
+    withModel(None)(response)(test)
+
+  private def withModel(style: Option[ReasoningStyle])(response: ujson.Value => (String, String))(
+    test: (ChatModel, () => ujson.Value) => Unit
+  ): Unit =
     val received = AtomicReference[ujson.Value](ujson.Null)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn
     server.createContext(
@@ -39,6 +44,7 @@ class ProviderRequestSuite extends munit.FunSuite:
       Some(s"http://127.0.0.1:${server.getAddress.getPort}"),
       Some("test"),
       ModelConfig(maxTokens = Some(1234), temperature = Some(0.25)),
+      reasoningStyle = style,
     ))
     try test(model, () => received.get().nn)
     finally
@@ -157,6 +163,97 @@ class ProviderRequestSuite extends munit.FunSuite:
         assert(ui.warnings.exists(_.contains("finish marker")))
       }
 
+  test("tool calls streamed whole without an index, as Gemini sends them, are kept apart"):
+    def call(id: String, code: String) = ujson.Obj(
+      "id" -> id,
+      "type" -> "function",
+      "function" -> ujson.Obj("name" -> "run_scala", "arguments" -> ujson.write(ujson.Obj("code" -> code))),
+    )
+    withModel(_ =>
+      events(
+        chunk(ujson.Obj("role" -> "assistant", "tool_calls" -> ujson.Arr(call("a", "1 + 1")))),
+        chunk(ujson.Obj("tool_calls" -> ujson.Arr(call("b", "2 + 2"))), ujson.Str("tool_calls")),
+        "[DONE]",
+      )
+    ): (model, _) =>
+      val result = model.complete("test", List(Msg.User("hello")), Nil, StreamSink(_ => ()), () => false)
+      assertEquals(
+        result.toolCalls.map(c => (c.id, c.name, ujson.read(c.arguments))),
+        List(
+          ("a", "run_scala", ujson.Obj("code" -> "1 + 1")),
+          ("b", "run_scala", ujson.Obj("code" -> "2 + 2")),
+        )
+      )
+
+  test("a Gemini tool call is sent back without null text and with its thought signature"):
+    val signature = ujson.Obj("google" -> ujson.Obj("thought_signature" -> "sig"))
+    val call = ujson.Obj(
+      "id" -> "a",
+      "type" -> "function",
+      "function" -> ujson.Obj("name" -> "run_scala", "arguments" -> "{\"code\":\"6 * 7\"}"),
+      "extra_content" -> signature,
+    )
+    withModel(request =>
+      if request("messages").arr.exists(_("role").str == "tool") then
+        events(chunk(ujson.Obj("role" -> "assistant", "content" -> "42"), ujson.Str("stop")), "[DONE]")
+      else
+        events(
+          chunk(ujson.Obj("role" -> "assistant", "tool_calls" -> ujson.Arr(call)), ujson.Str("tool_calls")),
+          "[DONE]"
+        )
+    ): (model, request) =>
+      val sink = StreamSink(_ => ())
+      val first = model.complete("test", List(Msg.User("hello")), Nil, sink, () => false)
+      val history = List(
+        Msg.User("hello"),
+        Msg.Assistant(first.text, first.toolCalls, first.native),
+        Msg.ToolResults(List(ToolResult("a", "42", isError = false))),
+      )
+      assertEquals(model.complete("test", history, Nil, sink, () => false).text, "42")
+      val replayed = request()("messages").arr.find(_("role").str == "assistant").get
+      assert(!replayed.obj.contains("content"), replayed)
+      assert(!replayed.obj.contains("refusal"), replayed)
+      assertEquals(replayed("tool_calls")(0)("extra_content"), signature)
+
+  test("a reasoning style replaces reasoning_effort, and its tagged reasoning streams as thinking"):
+    val style = ReasoningStyle(
+      request = Some(ujson.Obj("extra_body" -> ujson.Obj("level" -> ReasoningStyle.Effort, "thoughts" -> true))),
+      requestOff = Some(ujson.Obj("extra_body" -> ujson.Obj("level" -> "low"))),
+      tags = Some(List("<thought>", "</thought>")),
+    )
+    withModel(Some(style))(request =>
+      if request.obj.contains("stream") then
+        events(
+          chunk(ujson.Obj("role" -> "assistant", "content" -> "<thought>Plan")),
+          chunk(ujson.Obj("content" -> " it.</thought>The answer")),
+          chunk(ujson.Obj("content" -> " is 42."), ujson.Str("stop")),
+          "[DONE]",
+        )
+      else "application/json" -> answer
+    ): (model, request) =>
+      model.effort = Some("high")
+      val shown = collection.mutable.ListBuffer[(String, String)]()
+      val sink = StreamSink(text => shown += "answer" -> text, onThinking = text => shown += "thinking" -> text)
+      val result = model.complete("test", List(Msg.User("hello")), Nil, sink, () => false)
+      assert(!request().obj.contains("reasoning_effort"), request())
+      assertEquals(request()("extra_body"), ujson.Obj("level" -> "high", "thoughts" -> true))
+      assertEquals(
+        shown.toList,
+        List("thinking" -> "Plan", "thinking" -> " it.", "answer" -> "The answer", "answer" -> " is 42.")
+      )
+      assertEquals(result.text, "The answer is 42.")
+      model.complete(
+        "test",
+        List(Msg.User("hello"), Msg.Assistant(result.text, Nil, result.native), Msg.User("again")),
+        Nil,
+        sink,
+        () => false
+      )
+      assertEquals(request()("messages").arr.find(_("role").str == "assistant").get("content").str, "The answer is 42.")
+      model.simple(None, "guess", thinking = false)
+      assertEquals(request()("extra_body"), ujson.Obj("level" -> "low"))
+      assert(!request().obj.contains("reasoning_effort"), request())
+
   test("a cut-off tool call is discarded even when its arguments are valid JSON"):
     val calls = ujson.Arr(ujson.Obj(
       "index" -> 0,
@@ -234,13 +331,24 @@ class ProviderRequestSuite extends munit.FunSuite:
         {"id":"vendor/big","object":"model","created":1,"owned_by":"x","name":"Big","context_length":262144},
         {"id":"local","object":"model","created":1,"owned_by":"x","max_model_len":32768},
         {"id":"plain","object":"model","created":1,"owned_by":"x"},
-        {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"}]}"""
+        {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"},
+        {"id":"deep","object":"model","owned_by":"deepseek","name":"Deep","context_window":1048576,
+         "max_output_tokens":393216,"effort":{"supported_levels":["low","high","max"],"default_level":"high"}}]}"""
     withServer((_, _, _) => (200, "application/json", list)): (url, requests) =>
       val models = ChatModel.listModels(endpoint("openai", url))
       assertEquals(requests(), List("GET /models"))
-      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x"))
-      assertEquals(models.map(_.settings.contextWindow.map(_.toInt)), List(Some(262144), Some(32768), None, None))
-      assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None))
+      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x", "p/deep"))
+      assertEquals(
+        models.map(_.settings.contextWindow.map(_.toInt)),
+        List(Some(262144), Some(32768), None, None, Some(1048576)),
+      )
+      assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None, Some("Deep")))
+      val deep = models.last.settings
+      assertEquals(
+        (deep.efforts, deep.reasoning, deep.maxTokens),
+        (Some(List("low", "high", "max")), Some("high"), None)
+      )
+      assertEquals(models.head.settings.efforts, None)
       assertEquals(models.head.baseUrl, Some(url))
 
   test("an Anthropic provider's models come with their input limit, effort levels and thinking support"):
@@ -275,6 +383,35 @@ class ProviderRequestSuite extends munit.FunSuite:
       assertEquals(models.map(_.settings.efforts), List(Some(List("low", "medium", "high")), Some(Nil), None))
       assertEquals(models.map(_.settings.thinking), List(None, Some(false), None))
       assertEquals(ChatModel.create(models.head).efforts, List("low", "medium", "high"))
+
+  test("an Anthropic provider at a custom url without a key never gets the environment's key"):
+    val headers = java.util.concurrent.ConcurrentLinkedQueue[com.sun.net.httpserver.Headers]()
+    val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).nn
+    server.createContext(
+      "/",
+      exchange =>
+        try
+          headers.add(exchange.getRequestHeaders)
+          val bytes = """{"data":[],"has_more":false}""".getBytes(UTF_8)
+          exchange.getResponseHeaders.nn.add("Content-Type", "application/json")
+          exchange.sendResponseHeaders(200, bytes.length.toLong)
+          exchange.getResponseBody.nn.write(bytes)
+        finally exchange.close()
+    )
+    server.start()
+    // The SDK's environment lookup reads this property before `ANTHROPIC_API_KEY`.
+    val previous = System.getProperty("anthropic.apiKey")
+    System.setProperty("anthropic.apiKey", "from-the-environment")
+    try
+      val url = s"http://127.0.0.1:${server.getAddress.getPort}"
+      assertEquals(ChatModel.listModels(endpoint("anthropic", url).copy(apiKey = None)), Nil)
+      val sent = headers.peek().nn
+      assertEquals(sent.getFirst("x-api-key"), "none")
+      assertEquals(sent.getFirst("Authorization"), null)
+    finally
+      if previous == null then System.clearProperty("anthropic.apiKey")
+      else System.setProperty("anthropic.apiKey", previous)
+      server.stop(0)
 
   test("a switched effort applies to the next request"):
     withServer((_, _, _) => (200, "application/json", answer)): (url, requests) =>

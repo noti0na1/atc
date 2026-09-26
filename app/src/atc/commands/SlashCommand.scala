@@ -15,12 +15,11 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Mode extends SlashCommand("/mode [name]", "change mode and restart the REPL")
   case Perms
       extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
-  case Config extends SlashCommand("/config", "show the active configuration")
+  case Config extends SlashCommand("/config [show|setting value]", "change a setting, or show the configuration")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run extends SlashCommand("/run [code]", "run Scala; omit code for multiline input", "/scala")
   case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")
   case Reset extends SlashCommand("/reset", "restart the REPL; keep the conversation")
-  case Clear extends SlashCommand("/clear", "clear the conversation; keep the REPL")
   case Compact extends SlashCommand("/compact [focus]", "summarize conversation context; keep the REPL")
   case Todos extends SlashCommand("/todos", "show tasks and progress", "/todo")
   case Ps extends SlashCommand("/ps", "list background processes", "/processes")
@@ -39,6 +38,9 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
 object SlashCommand:
   /** The names, in `/help` order, for Tab completion (aliases are accepted but not offered). */
   def names: List[String] = values.toList.map(_.name)
+
+  /** Usage and description of each command, as `/help` and the prompt's command list show them. */
+  def table: List[(String, String)] = values.toList.map(command => command.usage -> command.help)
 
   /** The command a typed line names (case-insensitively), with its argument:
     * the rest of the line, trimmed. `Left(typed)` when nothing answers to it. */

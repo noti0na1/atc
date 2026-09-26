@@ -89,6 +89,16 @@ class ContextManagerSuite extends munit.FunSuite:
     assertEquals(second.totalDropped, 4)
     assertEquals(second.history.head, Msg.User(s"${AgentMessages.contextCutNotice(4)}\n\nq2"))
 
+  test("a cut leaves room below the budget, so the next rounds keep the same prefix"):
+    val manager = ContextManager()
+    // 1000 tokens of window, 875 of them for the request: five exchanges of about 180 tokens.
+    val model = ModelContext("m", "p", "p/m", contextWindow = Some(1000))
+    val exchanges = (1 to 5).toList.flatMap(i => List(user(s"q$i"), assistant("x" * 700)))
+    val cut = manager.prepare(0, exchanges, model, "")
+    assertEquals(cut.dropped, 4, "down to three quarters of the budget, not just under it")
+    val next = cut.history ++ List(user("q6"), assistant("x" * 700))
+    assertEquals(manager.prepare(0, next, model, "").dropped, 0)
+
   test("an unavoidable overflow warns at most once per user turn"):
     val manager = ContextManager()
     val model = ModelContext(

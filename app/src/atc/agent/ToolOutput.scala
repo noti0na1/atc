@@ -69,8 +69,8 @@ object ToolOutput:
     val bounded =
       if hinted.length <= maxChars then hinted
       else
-        val head = hinted.take(maxChars * 2 / 3)
-        val tail = hinted.takeRight(maxChars / 3)
+        val head = AgentMessages.takeChars(hinted, maxChars * 2 / 3)
+        val tail = AgentMessages.takeRightChars(hinted, maxChars / 3)
         s"$head\n... [${hinted.length - head.length - tail.length} characters omitted] ...\n$tail"
     val withCodeHint = codeHint(code).fold(bounded)(h => s"$bounded\nHint: $h")
     if decisions.isEmpty then withCodeHint else s"$withCodeHint\n${decisionNote(decisions)}"

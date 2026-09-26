@@ -65,6 +65,7 @@ private[atc] object Cli:
         throw IllegalArgumentException(s"Working directory does not exist: ${args.cwd}")
       if !Files.isDirectory(args.cwd) then
         throw IllegalArgumentException(s"Working directory is not a directory: ${args.cwd}")
+    if args.prompt.exists(_.trim.isEmpty) then throw IllegalArgumentException("-p needs a request (try --help)")
     if !args.help && !args.version && !args.init && !args.initGlobal then
       args.config.foreach: config =>
         if !Files.exists(config) then throw IllegalArgumentException(s"Config file does not exist: $config")

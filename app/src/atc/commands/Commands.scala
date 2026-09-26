@@ -12,11 +12,12 @@ import scala.util.control.NonFatal
   * command line. [[SlashCommand]] is the table of commands; the `*Commands`
   * classes and [[ProvidersMenu]] implement them. */
 final class Commands(app: App):
-  import app.{host, models, tui}
+  import app.{agent, host, models, tui}
 
   private val modelCommands = ModelCommands(app)
   private val statusCommands = StatusCommands(app)
   private val providersMenu = ProvidersMenu(app, modelCommands)
+  private val configCommands = ConfigCommands(app)
   /** Also used at the start and end of an interactive run, to resume and save the session. */
   val sessionCommands: SessionCommands = SessionCommands(app)
 
@@ -28,6 +29,9 @@ final class Commands(app: App):
     case "/classifiedmodel" :: _ :: Nil => "none" +: models.catalog.labels
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
     case "/perms" :: _ :: Nil => List("revoke")
+    case "/config" :: _ :: Nil => "show" :: ConfigCommands.Setting.values.toList.map(_.key)
+    case "/config" :: key :: _ :: Nil => ConfigCommands.Setting.named(key).fold(Nil)(_.choices)
+    case "/config" :: key :: _ :: _ :: Nil if ConfigCommands.Setting.named(key).isDefined => ConfigCommands.ScopeNames
     case _ => Nil
 
   /** Handle a slash command line; returns false to quit. */
@@ -46,7 +50,7 @@ final class Commands(app: App):
         true
 
   private def dispatch(cmd: SlashCommand, arg: String): Unit = cmd match
-    case Cmd.Help => tui.showHelp(SlashCommand.values.toList.map(command => command.usage -> command.help))
+    case Cmd.Help => tui.showHelp(SlashCommand.table)
     case Cmd.Model => modelCommands.switchModel(arg)
     case Cmd.ClassifiedModel => modelCommands.switchClassified(arg)
     case Cmd.Models => modelCommands.show()
@@ -54,17 +58,20 @@ final class Commands(app: App):
     case Cmd.Providers => providersMenu.run()
     case Cmd.Mode => sessionCommands.switchMode(arg)
     case Cmd.Perms => statusCommands.permissions(arg)
-    case Cmd.Config => statusCommands.showConfig()
+    case Cmd.Config => configCommands.run(arg)
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
     case Cmd.Run => sessionCommands.run(arg)
     case Cmd.New => sessionCommands.newSession()
     case Cmd.Reset => sessionCommands.reset()
-    case Cmd.Clear => sessionCommands.clear()
     case Cmd.Compact => sessionCommands.compact(arg)
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
-    case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
+    case Cmd.Kill =>
+      val result = host.killProcess(arg)
+      tui.println(Ansi.sanitize(result))
+      // The agent's handles to those processes are dead now; it should hear why.
+      if result.startsWith("killed") then agent.noteProcessesKilled(result)
     case Cmd.Cost => statusCommands.showCost()
     case Cmd.Output => tui.showOutput(arg)
     case Cmd.Task => statusCommands.showTask()

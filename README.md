@@ -332,7 +332,7 @@ agent can express at all, before the permission policy applies:
 |---|---|
 | **read-only** | read files, report, ask |
 | **local** | also write files and run commands |
-| **full** | also reach the network |
+| **full** | also reach the network, and let the model's provider search the web |
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
 explain what it *would* have done. The policy enforces the same three levels again at run
@@ -375,11 +375,14 @@ The [starting global config](app/resources/atc/config-template.json) protects wi
 granting: it lists the providers, classifies common credential paths, puts `.atc` out of
 reach, refuses `rm -rf *`, `sudo` and bare shells, and grants no files, commands or hosts.
 The [project config](app/resources/atc/project-template.json) opens a project, and because
-it lives inside the repository it can open *that repository* but nothing beyond it, and
-cannot exceed the limits the global config sets. Review a project's `.atc/config.json`
-before running ATC on code you do not trust: it chooses the models, commands and hosts.
-The exact merge rules are in
-[doc/development.md](doc/development.md#configuration-semantics).
+it lives inside the repository it can open *that repository* but no files beyond it, cannot
+loosen the limits the global config sets, and cannot change a provider's address or key.
+What it adds beyond its own files (pre-approved commands and hosts, a classified model, the
+keys in its `.atc/keys.properties`) applies only after ATC has shown it to you and you chose
+to trust it; ATC asks again when that part changes.
+`/config` changes the settings that leave the sandbox alone (input prediction,
+notifications, web search, compaction) for the session or in either file. The exact merge
+rules are in [doc/development.md](doc/development.md#configuration-semantics).
 
 ```json
 {
@@ -403,8 +406,8 @@ The exact merge rules are in
     { "path": "secrets",  "classified": true },
     { "path": "~/notes",  "access": "read", "locked": true }
   ],
-  "commands": ["git status", "git diff*", "git log*"],
-  "denyCommands": ["git push*", "rm -rf *", "sudo", "sh", "bash", "zsh", "powershell"],
+  "commands": ["git status", "git log"],
+  "denyCommands": ["git push*", "git *--output*", "rm -rf *", "sudo", "sh", "bash", "zsh", "powershell"],
   "hosts": ["*.scala-lang.org", "docs.oracle.com"],
   "mode": "full",
   "instructions": "Use 2-space indentation."
@@ -430,7 +433,8 @@ access. `commands` are patterns over the whole command line (`"git status"` also
 `git status --short`; `*` is a wildcard); `hosts` are glob patterns on host names.
 `denyCommands` and `denyHosts` use the same syntax and override every allow, session grant
 and open scope. A pre-approved command runs with your privileges and outside the file
-rules, so pre-approve the subcommands you mean rather than `git *`. Pattern details and
+rules, so pre-approve the subcommands you mean rather than `git *`, and check their options:
+`git diff` and `git blame` can print any file, and `git log --output` can write one. Pattern details and
 Windows notes are in [doc/development.md](doc/development.md#file-rules-and-command-patterns).
 
 ## Security model
@@ -496,8 +500,10 @@ and the configured permissions.
 
 ## The terminal
 
-`/help` lists the slash commands. Ctrl-C interrupts the turn, Ctrl-O shows folded output
-and reasoning in full, Shift-Tab cycles the mode, and Shift+Enter adds a line. While the
+`/help` lists the slash commands, and typing `/` lists them under the prompt (↑/↓ select,
+Tab fills in, Enter runs). Ctrl-C interrupts the turn. Finished code runs fold
+to a summary (`/output <n>` shows one in full), and Ctrl-O switches to writing code, output
+and reasoning out in full, Shift-Tab cycles the mode, and Shift+Enter adds a line. While the
 agent is working, type a correction and press Enter: it reaches the agent before its next
 tool call. Sessions are saved when you leave, and the next start in the same directory
 offers to resume. ATC notifies you when a turn ends or the agent waits for you.

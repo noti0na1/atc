@@ -2,6 +2,7 @@ package atc
 
 import atc.config.{Config, KeyBindings, ModelCatalog, ModelSpec, ProviderPreset}
 import atc.llm.ChatGPTAuth
+import atc.ui.Menus
 
 import java.nio.file.Path
 import java.time.Duration
@@ -143,9 +144,10 @@ object FirstRun:
   private val KeepWaitingLabel = "Keep waiting"
   private val CancelLabel = "Cancel"
 
+  /** A sub-menu: Back returns to where the provider was chosen. */
   private def chooseModel(ui: Ui, models: List[ModelSpec]): Option[ModelSpec] =
     val labels = models.map(m => m.displayName.fold(m.modelId)(name => s"$name  (${m.modelId})"))
-    ui.choose("Choose a model (type to filter)", labels).flatMap: label =>
+    ui.choose("Choose a model", labels :+ Menus.BackLabel).flatMap: label =>
       models.zip(labels).collectFirst { case (m, l) if l == label => m }
 
   /** The provider as the catalog resolves it; `None` when its key is not bound. */

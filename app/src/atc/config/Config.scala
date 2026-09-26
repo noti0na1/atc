@@ -23,7 +23,7 @@ final case class ModelConfig(
   webSearch: Option[Boolean] = None,
   /** Reasoning effort: OpenAI `none|minimal|low|medium|high|xhigh|max`,
     * Anthropic `low|medium|high|xhigh|max` (`output_config.effort`). The effort
-    * a session starts with; `/effort` switches it. */
+    * a session starts with; `/effort` switches it. Unset: no effort is sent. */
   reasoning: Option[String] = None,
   /** The efforts the model accepts, offered by `/effort`. Unset: every effort
     * its provider's api knows. `[]`: the model takes no effort setting. */
@@ -79,9 +79,12 @@ final case class ProviderConfig(
   /** Extra HTTP headers sent with every request to this provider. A value is a
     * literal, a `${VAR}` resolved like [[key]] (a header whose variable is unset
     * is not sent), or `${ATC_SESSION}`, a random id of the current
-    * conversation (renewed by `/new` and `/clear`), which gateways such as
+    * conversation (renewed by `/new`), which gateways such as
     * OpenCode use for routing and prompt caching. */
   headers: Map[String, String] = Map.empty,
+  /** How this Chat Completions endpoint (`api: openai`) asks for reasoning and returns
+    * it, where that differs from OpenAI's `reasoning_effort`. Unset: OpenAI's way. */
+  reasoningStyle: Option[ReasoningStyle] = None,
   /** The provider's models, by alias. Empty: the models the provider lists
     * (`GET /models`) are fetched the first time they are needed, and each is
     * named `provider/model-id`. */
@@ -89,6 +92,36 @@ final case class ProviderConfig(
   /** `false` turns the provider off: none of its models is offered or fetched. */
   enabled: Boolean = true,
 ) derives ReadWriter
+
+/** A provider's own way to ask for reasoning and to return it. Gemini, for example, takes
+  * a `thinking_config` of its own, refuses it beside `reasoning_effort`, and writes its
+  * thoughts into the answer text between `<thought>` tags. */
+final case class ReasoningStyle(
+  /** Merged into the request body of a call that reasons, in place of `reasoning_effort`.
+    * A string `{effort}` in it is the model's current effort; with no effort chosen, the
+    * member holding it is left out. */
+  request: Option[ujson.Value] = None,
+  /** Merged into the request body of a call that should reason little or not at all
+    * (next-request prediction and other small side calls). */
+  requestOff: Option[ujson.Value] = None,
+  /** The opening and the closing tag around reasoning written into the answer text: what
+    * is between them streams as reasoning and stays out of the answer and the history. */
+  tags: Option[List[String]] = None,
+) derives ReadWriter
+
+object ReasoningStyle:
+  val Effort = "{effort}"
+
+  /** `fragment` with each `{effort}` string replaced by `effort`, or left out when there is none. */
+  def withEffort(fragment: ujson.Value, effort: Option[String]): ujson.Value = fragment match
+    case o: ujson.Obj =>
+      ujson.Obj.from(o.value.flatMap: (key, value) =>
+        if value == ujson.Str(Effort) then effort.map(key -> ujson.Str(_)) else Some(key -> withEffort(value, effort)))
+    case a: ujson.Arr =>
+      ujson.Arr.from(a.value.flatMap(v =>
+        if v == ujson.Str(Effort) then effort.map(ujson.Str(_)) else Some(withEffort(v, effort))
+      ))
+    case other => other
 
 object ProviderConfig:
   /** The placeholder in a provider header for the conversation id, filled in
@@ -106,8 +139,10 @@ final case class ProviderPreset(
   /** Where to create a key, shown when the first run asks for one. */
   keyUrl: Option[String] = None,
   headers: Map[String, String] = Map.empty,
+  reasoningStyle: Option[ReasoningStyle] = None,
 ) derives ReadWriter:
-  def config: ProviderConfig = ProviderConfig(api = Some(api), url = url, key = key, headers = headers)
+  def config: ProviderConfig =
+    ProviderConfig(api = Some(api), url = url, key = key, headers = headers, reasoningStyle = reasoningStyle)
   /** The variable a `${VAR}` key is read from. */
   def keyVariable: Option[String] = key.flatMap(KeyBindings.envRefName)
 
@@ -182,8 +217,9 @@ final case class Config(
   /** Fraction of the context window reserved for recent verbatim exchanges
     * during manual or automatic compaction. Zero summarizes everything. */
   compactKeepRatio: Double = 0.2,
-  /** How to tell the user that a turn ended or a question waits, when they do
-    * not type within ten seconds: `auto`, `system` (a desktop notification),
+  /** How to tell the user that a question waits or a turn ended, when for ten
+    * or thirty seconds (respectively) they neither type nor have the terminal
+    * focused: `auto`, `system` (a desktop notification),
     * `terminal` (the terminal's own notification sequence), `bell` or `off`. */
   notifications: String = "auto",
 ) derives ReadWriter
@@ -226,15 +262,24 @@ object Config:
     * "later" means per setting. With `bundledGlobal`, the starting config stands
     * in for a missing `~/.atc/config.json` (the user declined to write it), as a
     * layer with no path. */
-  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean): Configuration =
-    load(cwd, explicit, globalPath, bundledGlobal)
+  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean, trustProject: Boolean): Configuration =
+    load(cwd, explicit, globalPath, bundledGlobal, trustProject)
 
-  /** As [[load]], with the global path given explicitly (tests). */
-  def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
+  /** As [[load]], with the global path given explicitly (tests). What a project config adds
+    * beyond its own files ([[ProjectTrust]]) is left out unless the user trusted it or
+    * `trustProject` says to take it anyway (`--approve-all`). */
+  def load(
+    cwd: Path,
+    explicit: Option[Path],
+    global: Path,
+    bundledGlobal: Boolean = false,
+    trustProject: Boolean = false,
+  ): Configuration =
     explicit.foreach: path =>
       if !Files.exists(path) then throw IllegalArgumentException(s"Explicit config does not exist: $path")
       if !Files.isRegularFile(path) then throw IllegalArgumentException(s"Explicit config is not a regular file: $path")
     val root = projectRoot(cwd)
+    val untrusted = !trustProject && ProjectTrust.pending(cwd, global.getParent.nn).isDefined
     val candidates =
       List(Origin.Global -> global) ++ root.map(Origin.Project -> projectPath(_)) ++ explicit.map(Origin.Explicit -> _)
     // A path named twice is read once, in the first role it appears in. That
@@ -244,10 +289,12 @@ object Config:
       .filter((_, p) => Files.isRegularFile(p))
       .distinctBy((_, p) => p.toAbsolutePath.normalize)
       .map((origin, path) => ConfigLayer.read(origin, path))
+      .map(layer => if untrusted && layer.origin == Origin.Project then ProjectTrust.withoutGrants(layer) else layer)
     val bundled = Option.when(bundledGlobal && !layers.exists(_.origin == Origin.Global))(ConfigLayer.bundled)
     // Keys are read separately, most specific first: they are secrets, not
     // settings, so they never take part in the layer merge.
-    val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
+    val projectKeys = if untrusted then Nil else root.map(keysPath).toList
+    val keys = KeyBindings.load(projectKeys :+ global.getParent.nn.resolve(KeysFile).nn)
     Configuration.combine(bundled.toList ++ layers, keys)
 
   /** Create the global configuration and adjacent key bindings if they are

@@ -1,6 +1,6 @@
 package atc
 
-import atc.config.Config
+import atc.config.{Config, ProjectTrust}
 import atc.ui.{Ansi, Tui}
 
 import java.nio.file.Path
@@ -48,7 +48,9 @@ object Main:
       else if args.initGlobal then
         report(Config.globalPath, Config.ensureGlobal(), "fill in the API keys and edit the permissions")
       else if args.init then
-        report(Config.projectPath(args.cwd), Config.initProject(args.cwd), "edit the project's permissions")
+        val created = Config.initProject(args.cwd)
+        if created.nonEmpty then ProjectTrust.trust(args.cwd, Config.globalDir) // it grants what the user asked for
+        report(Config.projectPath(args.cwd), created, "edit the project's permissions")
       else run(args)
     sys.exit(exitCode)
 

@@ -1,7 +1,7 @@
 package atc.commands
 
 import atc.{App, Debug, Models}
-import atc.config.{Config, ModelConfig, ModelSpec, ObjectText, Origin}
+import atc.config.{Config, ModelConfig, ModelSpec, ObjectText, Origin, ProjectTrust}
 import atc.llm.ChatModel
 import atc.platform.PlatformPath
 
@@ -32,12 +32,14 @@ final class ModelCommands(app: App):
   def show(): Unit = rows(models.catalog.models).foreach(r => tui.println("  " + r))
 
   /** Pick a model from the list, after the `none` row when there is one: `Some(None)`
-    * when that was chosen. Without a menu (plain mode) the list is printed instead, so
-    * the user can name one with `/model <ref>`. */
-  private def pick(title: String, none: Option[String]): Option[Option[ModelSpec]] =
+    * when that was chosen. The menu opens on the model `inUse` (the `none` row when there
+    * is none). Without a menu (plain mode) the list is printed instead, so the user can
+    * name one with `/model <ref>`. */
+  private def pick(title: String, none: Option[String], inUse: Option[String]): Option[Option[ModelSpec]] =
     val all = models.catalog.models
     val listed = rows(all)
-    tui.choose(title, none.toList ++ listed) match
+    val initial = inUse.map(ref => all.indexWhere(_.ref == ref)).filter(_ >= 0).fold(0)(_ + none.size)
+    tui.choose(title, none.toList ++ listed, initial) match
       case Some(chosen) if none.contains(chosen) => Some(None)
       case Some(chosen) => all.zip(listed).collectFirst { case (m, r) if r == chosen => Some(m) }
       case None =>
@@ -47,7 +49,7 @@ final class ModelCommands(app: App):
   /** `/model`: pick from the list, or switch to the named one. The model starts
     * with its configured effort, and a saved `effort` is removed. */
   def switchModel(arg: String): Unit =
-    choose(arg, "model", models.describe(agent.model)): spec =>
+    choose(arg, "model", models.describe(agent.model), Some(agent.model.ref)): spec =>
       val model = models.client(spec)
       model.effort = model.defaultEffort
       agent.model = model
@@ -73,7 +75,7 @@ final class ModelCommands(app: App):
       (if agent.classifiedModel.isEmpty then "  [classified]" else "")
     if Set("off", "none").contains(arg.trim.toLowerCase(Locale.ROOT)) then disable()
     else
-      choose(arg, "classified model", current, Some(noneRow), disable): spec =>
+      choose(arg, "classified model", current, agent.classifiedModel.map(_.ref), Some(noneRow), disable): spec =>
         val m = models.client(spec)
         agent.classifiedModel = Some(m)
         app.predictor.start()
@@ -87,6 +89,7 @@ final class ModelCommands(app: App):
     arg: String,
     what: String,
     current: String,
+    inUse: Option[String],
     none: Option[String] = None,
     disable: () => Unit = () => (),
   )(use: ModelSpec => Unit): Unit =
@@ -94,12 +97,12 @@ final class ModelCommands(app: App):
       try use(models.catalog.find(arg))
       catch case e: IllegalArgumentException => tui.error(Debug.message(e))
     else
-      pick(s"Choose the $what", none) match
+      pick(s"Choose the $what", none, inUse) match
         case Some(Some(spec)) => use(spec)
         case Some(None) => disable()
         case None => tui.info(s"$what: $current")
 
-  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends none. */
+  /** What `/effort` offers for the agent model: its efforts, and `default`, which sends no effort. */
   def effortChoices: List[String] =
     if agent.model.efforts.isEmpty then Nil else agent.model.efforts :+ ModelConfig.DefaultEffort
 
@@ -113,7 +116,7 @@ final class ModelCommands(app: App):
     else
       val chosen =
         if arg.nonEmpty then Some(arg.toLowerCase(Locale.ROOT))
-        else tui.choose(s"Choose the reasoning effort of ${model.ref}", choices)
+        else tui.choose(s"Choose the reasoning effort of ${model.ref}", choices, choices.indexOf(current).max(0))
       chosen match
         case None => tui.info(s"effort: $current (${choices.mkString(" | ")})")
         case Some(e) if !choices.contains(e) => tui.error(s"${model.ref} takes ${choices.mkString(" | ")}, not '$e'")
@@ -166,9 +169,13 @@ final class ModelCommands(app: App):
       case None => ""
       case Some(path) =>
         try
+          // The user's own choice, such as a classified model, must not make a trusted project
+          // ask again at the next start, nor trust one that was not.
+          val trusted = ProjectTrust.pending(cwd, Config.globalDir).isEmpty
           value match
             case Some(v) => Config.setTopLevel(path, key, v, after = List("model"))
             case None => Config.editFile(path)(ObjectText.withMember(_, List(key), None, path.toString))
+          if trusted then ProjectTrust.trust(cwd, Config.globalDir)
           // A `-c` file that sets the same key wins over the project config on the next start.
           val overridden = app.configuration.layers
             .filter(l => l.origin == Origin.Explicit && l.defines(key))

@@ -4,7 +4,7 @@ import atc.{ScalaSource, TextFiles}
 import atc.lib.*
 import atc.platform.{PathGlob, PlatformPath}
 
-import java.nio.file.{FileSystems, Paths}
+import java.nio.file.Paths
 import java.util.regex.{Matcher, Pattern}
 import scala.collection.mutable
 import scala.util.Using
@@ -308,13 +308,11 @@ private[host] trait HostFiles:
 
   private def matchingFiles(entries: Iterator[FileEntryImpl], dir: String, glob: String): Iterator[FileEntryImpl] =
     val files = entries.filterNot(_.isDirectory)
+    val pattern = PathGlob.pattern(glob)
     if glob.contains('/') || glob.contains("**") then
       val base = canonical(dir)
-      val regex = PathGlob.regex(glob)
-      files.filter(entry => regex.matches(PlatformPath.portable(base.relativize(Paths.get(entry.path)).nn)))
-    else
-      val matcher = FileSystems.getDefault.nn.getPathMatcher(s"glob:$glob").nn
-      files.filter(entry => matcher.matches(Paths.get(entry.path).nn.getFileName))
+      files.filter(entry => pattern.matcher(PlatformPath.portable(base.relativize(Paths.get(entry.path)).nn)).matches())
+    else files.filter(entry => pattern.matcher(entry.name).matches())
 
   def readClassified(path: String)(using fs: FileSystem): Classified[String] = fs.access(path).readClassified()
 

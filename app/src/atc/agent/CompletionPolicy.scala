@@ -8,8 +8,8 @@ import atc.llm.{Completion, CompletionStop, Msg, ToolCall}
 private[atc] object CompletionPolicy:
   enum Next:
     case RunTools(calls: List[ToolCall])
-    /** Resume the model; an output-limit stop first needs a user-role bridge. */
-    case Resume(needsContinuation: Boolean)
+    /** Resume the model; an output-limit stop first needs a user-role bridge, this `continuation`. */
+    case Resume(continuation: Option[String])
     case Finish
     case Blocked
 
@@ -25,9 +25,11 @@ private[atc] object CompletionPolicy:
     val unsafeCalls = raw.toolCalls.nonEmpty && (resumable || blocked)
     val emptyTerminal = raw.text.trim.isEmpty && raw.toolCalls.isEmpty && !resumable
 
+    // A resumed model must learn that its calls were dropped, or it only repeats them.
     val text =
       if raw.stop == CompletionStop.Incomplete && raw.text.trim.isEmpty then AgentMessages.incompleteStream
       else if unsafeCalls && raw.text.trim.isEmpty then AgentMessages.unsafeResponse(raw.stopReason)
+      else if unsafeCalls && resumable then s"${raw.text}\n\n${AgentMessages.unsafeResponse(raw.stopReason)}"
       else if emptyTerminal then AgentMessages.emptyResponse(raw.stopReason)
       else raw.text
     val calls = if unsafeCalls then Nil else raw.toolCalls
@@ -36,8 +38,10 @@ private[atc] object CompletionPolicy:
     val next = raw.stop match
       case CompletionStop.Blocked => Next.Blocked
       case _ if calls.nonEmpty => Next.RunTools(calls)
-      case CompletionStop.Resume => Next.Resume(needsContinuation = false)
-      case CompletionStop.Truncated | CompletionStop.Incomplete => Next.Resume(needsContinuation = true)
+      case CompletionStop.Resume => Next.Resume(None)
+      case CompletionStop.Truncated if raw.toolCalls.nonEmpty => Next.Resume(Some(AgentMessages.truncatedToolCall))
+      case CompletionStop.Truncated | CompletionStop.Incomplete =>
+        Next.Resume(Some(AgentMessages.truncationContinuation))
       case CompletionStop.Complete => Next.Finish
 
     val warnings = List(

@@ -61,6 +61,11 @@ class ClaudeCodeSuite extends munit.FunSuite:
     /** The session's model, which `set_model` changes. */
     private var model = args.collectFirst { case a if a.startsWith("--model=") => a.stripPrefix("--model=") }
 
+    /** Whether `get_context_usage` is answered at once; otherwise the script receives it. */
+    @volatile var answersWindow = true
+    /** How many `get_context_usage` requests were answered. */
+    val windowQueries = java.util.concurrent.atomic.AtomicInteger()
+
     /** The next message, after answering the model and context queries the CLI answers at once. */
     private def read(): ujson.Value =
       val line = lines.readLine()
@@ -72,7 +77,8 @@ class ClaudeCodeSuite extends munit.FunSuite:
           model = Some(message("request")("model").str)
           control(message, ujson.Obj())
           read()
-        case "get_context_usage" =>
+        case "get_context_usage" if answersWindow =>
+          windowQueries.incrementAndGet()
           control(message, ujson.Obj("rawMaxTokens" -> Windows.getOrElse(model.getOrElse(""), 200000)))
           read()
         case _ => message
@@ -367,6 +373,29 @@ class ClaudeCodeSuite extends munit.FunSuite:
     assert(error.get().isInstanceOf[CancelledException], String.valueOf(error.get()))
     assert(h.launches.peek().nn.stopped.get())
 
+  test("a session interrupted while it asks for the window is ended when the model closes"):
+    val asked = java.util.concurrent.CountDownLatch(1)
+    val h = Harness: cli =>
+      cli.answersWindow = false
+      cli.handshake()
+      cli.receive(m => m("type").str == "control_request" && m("request")("subtype").str == "get_context_usage")
+      asked.countDown()
+    val cancelled = AtomicBoolean(false)
+    val request = ModelRequest()
+    val caller = Thread(() =>
+      try
+        request.run(() => cancelled.get())(h.model.complete("system", List(Msg.User("hi")), tools, quiet, () => false))
+      catch case _: CancelledException => ()
+      ()
+    )
+    caller.start()
+    assert(asked.await(5, TimeUnit.SECONDS))
+    cancelled.set(true)
+    request.recheck()
+    caller.join(2000)
+    h.model.close()
+    assert(h.launches.peek().nn.stopped.get())
+
   test("a one-shot call runs in its own CLI without tools"):
     val h = Harness(cli => { cli.handshake(); assertEquals(cli.user(), "name it"); cli.answer("Atlas") })
     assertEquals(h.model.simple(Some("be brief"), "name it", thinking = false).text, "Atlas")
@@ -399,11 +428,16 @@ class ClaudeCodeSuite extends munit.FunSuite:
     val error = intercept[IOException](ClaudeCodeModel(spec, h.launch).listModels())
     assert(error.getMessage.contains("claude auth login"), error.getMessage)
 
-  test("a configured model without a window learns it from the CLI; a configured window wins"):
-    val h = Harness(cli => { cli.handshake(); cli.user(); cli.answer("hi") })
+  test("a configured model without a window learns it from the CLI once; a configured window wins"):
+    val h = Harness(
+      cli => { cli.handshake(); cli.user(); cli.answer("hi") },
+      cli => { cli.handshake(); cli.user(); cli.answer("hi again") },
+    )
     assertEquals(h.model.contextWindow, None)
     completion(h, List(Msg.User("hello")))
     assertEquals(h.model.contextWindow, Some(1000000))
+    completion(h, List(Msg.User("another conversation")))
+    assertEquals(h.launches.asScala.toList.map(_.windowQueries.get), List(1, 0), "a later session does not ask")
     val fixed =
       ClaudeCodeModel(spec.copy(settings = ModelConfig(contextWindow = atc.config.Tokens.from(300000L))), h.launch)
     assertEquals(fixed.contextWindow, Some(300000))

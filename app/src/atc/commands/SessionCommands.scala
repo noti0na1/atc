@@ -39,19 +39,18 @@ final class SessionCommands(app: App):
       predictor.invalidate()
     ok
 
-  /** `/new`. */
+  /** `/new`: also clears the window, so the new session starts on an empty screen. */
   def newSession(): Unit =
-    if startOver() then tui.success("new session: conversation, task notes and session grants cleared")
+    if startOver() then
+      // The next start must not offer the conversation the user just discarded.
+      try Files.deleteIfExists(autoSaveFile)
+      catch case NonFatal(error) => Debug.trace(error)
+      tui.clearScreen()
+      tui.success("new session: conversation, task notes and session grants cleared")
 
   /** `/reset`. */
   def reset(): Unit =
     if restartRepl("you asked for /reset") then tui.success("REPL cleared; starts with the next tool call")
-
-  /** `/clear`. */
-  def clear(): Unit =
-    agent.clear()
-    predictor.invalidate()
-    tui.success("conversation cleared")
 
   /** `/compact`. */
   def compact(instructions: String): Unit =
@@ -87,6 +86,7 @@ final class SessionCommands(app: App):
         val previous = policy.mode
         policy.mode = m
         if restartRepl(s"the sandbox mode changed to ${m.label}") then
+          app.models.useMode(m)
           app.updateStatus()
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
@@ -124,10 +124,11 @@ final class SessionCommands(app: App):
     tui.suggest(None) // no ghost text while typing code
     tui.readBlock(app.prompt).getOrElse("")
 
-  /** `/save`. */
+  /** `/save`. A bare `/save` writes beside the automatic saves, outside the project, where a
+    * transcript cannot be committed with the repository or follow a symlink the repository planted. */
   def save(arg: String): Unit =
     val path =
-      if arg.isEmpty then cwd.resolve(s".atc/sessions/session-${System.currentTimeMillis()}.json").nn
+      if arg.isEmpty then autoSaveFile.resolveSibling(s"session-${System.currentTimeMillis()}.json").nn
       else sessionPath(arg)
     try
       SessionStore.write(path, agent.snapshot)

@@ -5,8 +5,9 @@ import atc.Debug
 import upickle.default.*
 
 import java.nio.file.{Files, Path}
+import java.time.Duration
 import java.util.Locale
-import java.util.concurrent.CompletableFuture
+import java.util.concurrent.{CompletableFuture, TimeUnit, TimeoutException}
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
@@ -28,6 +29,8 @@ final case class ModelSpec(
   settings: ModelConfig,
   /** The provider's extra request headers (`ProviderConfig.headers`, resolved). */
   headers: Map[String, String] = Map.empty,
+  /** The provider's way to ask for and return reasoning (`ProviderConfig.reasoningStyle`). */
+  reasoningStyle: Option[ReasoningStyle] = None,
 ):
   /** The unambiguous name of this model, `provider/alias`. */
   def ref: String = s"$provider/$alias"
@@ -64,6 +67,8 @@ final class ModelCatalog(
   val discoverable: List[ModelSpec],
   discover: Option[ModelSpec => List[ModelSpec]] = None,
   store: Option[ModelListStore] = None,
+  /** How long [[models]] waits for the lists being fetched. */
+  listWait: Duration = ModelCatalog.ListWait,
 ):
   private def lower(s: String) = s.toLowerCase(Locale.ROOT)
 
@@ -105,9 +110,14 @@ final class ModelCatalog(
   /** Start fetching every provider's list in the background; returns at once. */
   def refresh(): Unit = discoverable.foreach(fetching)
 
-  /** Every model, waiting for the fetches of this session (a failed one leaves the stored list). */
+  /** Every model, waiting up to `listWait` for the fetches of this session. A fetch that failed
+    * or has not finished by then leaves the stored list; one that finishes later is used from then on. */
   def models: List[ModelSpec] =
-    discoverable.flatMap(fetching).foreach(_.join())
+    val pending = discoverable.flatMap(fetching)
+    try CompletableFuture.allOf(pending*).get(listWait.toMillis, TimeUnit.MILLISECONDS)
+    catch
+      case _: TimeoutException => Debug.log(s"model lists still loading after ${listWait.toSeconds} s")
+      case _: InterruptedException => Thread.currentThread().interrupt()
     configured ++ discoverable.flatMap(known(_).getOrElse(Nil))
 
   /** The shortest name that identifies `m` on its own. */
@@ -175,6 +185,9 @@ final class ModelCatalog(
       )
 
 object ModelCatalog:
+  /** Long enough for an HTTP listing (`Providers.ListTimeout`); Claude Code's can take minutes. */
+  val ListWait: Duration = Duration.ofSeconds(30)
+
   /** Resolve every model of every provider. A provider's `${VAR}` key is
     * resolved through `keys` (a project's `.atc/keys.properties`, then the global one)
     * and then the environment. A provider without models is listed through
@@ -188,7 +201,10 @@ object ModelCatalog:
   ): ModelCatalog =
     val defaults = ModelConfig(webSearch = config.webSearch)
     val providers = config.providers.toList.sortBy(_._1).filter(_._2.enabled).map: (name, p) =>
-      (p, ModelSpec(name, "", p.api.getOrElse(""), "", p.url, keys.apiKey(p), defaults, keys.headers(p)))
+      (
+        p,
+        ModelSpec(name, "", p.api.getOrElse(""), "", p.url, keys.apiKey(p), defaults, keys.headers(p), p.reasoningStyle)
+      )
     val configured = providers.flatMap: (p, endpoint) =>
       p.models.toList.sortBy(_._1).filter(_._2.enabled).map: (alias, m) =>
         endpoint.copy(

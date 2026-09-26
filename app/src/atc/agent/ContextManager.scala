@@ -64,8 +64,12 @@ final class ContextManager:
     val (fitted, dropped) = allowance match
       case Some(a) =>
         val budget = (a.input / tokenCalibration).toLong - fixedTokens
-        val reserve = if history.map(estimateFor(_, model)).sum > budget then estimateTokens(retained) else 0L
-        fitToContext(history, budget - reserve, estimateFor(_, model))
+        if history.map(estimateFor(_, model)).sum <= budget then (history, 0)
+        else
+          // A cut rewrites the first message and so every cached prefix after it. Cutting to
+          // part of the budget leaves room for the next rounds before another cut.
+          val target = ((budget - estimateTokens(retained)) * CutTarget).toLong
+          fitToContext(history, target, estimateFor(_, model))
       case None => (history, 0)
     contextDropped += dropped
     val preparedHistory = fitted match
@@ -113,6 +117,9 @@ object ContextManager:
     window: Int,
     maxOutputTokens: Option[Int]
   ): Long = (window.toLong / 8).max(maxOutputTokens.fold(0L)(_.toLong))
+
+  /** The share of the history budget a cut leaves, so that cuts are rare and caches last. */
+  val CutTarget = 0.75
 
   /** Below this many prompt tokens a completion is not used to calibrate the estimator. */
   val CalibrationMinTokens = 200L
