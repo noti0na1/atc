@@ -110,8 +110,9 @@ class ToolBlockSuite extends munit.FunSuite:
       ToolBlock.firstProblem(ExecutionResult(success = false, output = output, error = error), "")
     assertEquals(
       problem("", Some("java.lang.RuntimeException: boom\n  at x")),
-      Some("java.lang.RuntimeException: boom")
+      Some("RuntimeException: boom") // java.lang is noise in a one-line summary
     )
+    assertEquals(problem("", Some("java.io.IOException: gone")), Some("java.io.IOException: gone"))
     assertEquals(problem("-- [E007] Type Mismatch Error: ----\n1 |x\n  |^"), Some("[E007] Type Mismatch Error"))
     assertEquals(
       problem("-- Error: ----\n1 |Thread.sleep(1)\n  |^^^^^^^^^^^^\n  |Cannot refer to method sleep\n"),
@@ -124,6 +125,24 @@ class ToolBlockSuite extends munit.FunSuite:
     screen.frame(tool.start("println(secret)", "run_scala"))
     screen.frame(tool.print("[classified]\n", "first secret\nsecond secret\n"))
     assertEquals(rows(out).takeRight(2), List("  │ [classified] first secret", "  │ [classified] second secret"))
+
+  test("the expanded view keeps a long output line inside the gutter, across chunks"):
+    val (screen, tool, out) = block(expanded = true)
+    screen.frame(tool.start("println(long)", "run_scala"))
+    screen.frame(tool.emit("x" * 60))
+    screen.frame(tool.emit("y" * 60 + "\nshort\n"))
+    val shown = rows(out).dropWhile(!_.contains("output")).drop(1)
+    assert(shown.take(3).forall(_.startsWith("  │ ")), shown)
+    assertEquals(shown.map(_.stripPrefix("  │ ")).take(3).mkString, "x" * 60 + "y" * 60 + "short")
+    assert(shown.forall(Screen.displayWidth(_) < 80), shown)
+
+  test("repeated identical file changes fold into one row with a count"):
+    val (screen, tool, out) = block(expanded = false)
+    screen.frame(tool.start("edits", "run_scala"))
+    for _ <- 1 to 4 do tool.fileChanged(atc.host.FileChange("a.py", "updated (+1 -1)", ""))
+    tool.fileChanged(atc.host.FileChange("b.py", "created (+3 -0)", ""))
+    screen.frame(tool.end(ExecutionResult(success = true, output = ""), 5))
+    assertEquals(rows(out).slice(1, 3), List("  a.py: updated (+1 -1), 4 times", "  b.py: created (+3 -0)"))
 
   test("output that arrives while a pop-up is drawn waits for it to close"):
     val (screen, tool, out) = block(expanded = false)

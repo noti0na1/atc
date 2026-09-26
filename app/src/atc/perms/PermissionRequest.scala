@@ -54,7 +54,8 @@ final case class FileRequest(path: Path, access: Access, current: Perm, reason: 
 final case class ExecRequest(commands: List[String], reason: String) extends PermissionRequest:
   def title: String = "Run commands"
   protected def fields: List[(String, String)] =
-    commands.zipWithIndex.map((command, index) => s"command ${index + 1}" -> command)
+    commands.zipWithIndex.map((command, index) => s"command ${index + 1}" -> command) ++
+      Option.when(commands.exists(_.contains('*')))("note" -> "* matches any arguments; for an interpreter, any code")
 
 final case class NetRequest(hosts: List[String], reason: String) extends PermissionRequest:
   def title: String = "Network access"

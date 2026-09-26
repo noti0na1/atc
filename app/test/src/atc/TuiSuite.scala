@@ -135,6 +135,31 @@ class TuiSuite extends munit.FunSuite:
       assert(lines.contains("[p1 exited 0]"), lines)
     finally tui.close()
 
+  test("a TODO status change shows the items that changed and the progress, a new list the whole list"):
+    val out = ByteArrayOutputStream()
+    val saved = System.out
+    System.setOut(java.io.PrintStream(out, true, StandardCharsets.UTF_8))
+    val tui =
+      try Tui(Files.createTempDirectory("atc-tui").nn.resolve("history").nn, nonInteractive = true)
+      finally System.setOut(saved)
+    try
+      import atc.lib.{Todo, TodoStatus}
+      val plan = List(Todo("read"), Todo("fix"), Todo("test"))
+      def shown(todos: List[Todo]): List[String] =
+        out.reset()
+        tui.beginTurn()
+        tui.showTodos(todos)
+        tui.endTurn() // draws what is pending
+        out.toString(StandardCharsets.UTF_8).linesIterator.map(_.trim).filter(_.nonEmpty).toList
+      assertEquals(shown(plan).count(_.contains(" read")) + shown(Nil).size, 2) // whole list; then empty
+      shown(plan)
+      val update = shown(plan.updated(1, Todo("fix", TodoStatus.Done)))
+      assert(update.exists(_.contains("1 of 3 done")), update)
+      assert(update.exists(_.endsWith("fix")) && !update.exists(_.endsWith("read")), update)
+      assertEquals(shown(plan.updated(1, Todo("fix", TodoStatus.Done))), Nil) // nothing changed
+      assert(shown(plan :+ Todo("ship")).exists(_.endsWith("read")), "a new list is shown whole")
+    finally tui.close()
+
   test("the footer draw leaves the terminal outside a synchronized update (JLine buffers the closer)"):
     val output = ByteArrayOutputStream()
     val terminal = org.jline.terminal.impl.ExternalTerminal(

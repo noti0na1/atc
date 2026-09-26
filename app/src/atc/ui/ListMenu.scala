@@ -137,7 +137,8 @@ private[ui] object MenuState:
 private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Alerts):
   import screen.styled
 
-  /** The chosen items, `None` when the menu was left without a choice. */
+  /** The chosen items, `None` when the menu was left without a choice. Every row starts
+    * with `indent`; an empty `title` draws no title row, for a menu under its question. */
   def run(
     title: String,
     labels: List[String],
@@ -145,6 +146,7 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
     initial: Int,
     checked: Set[Int],
     escape: String,
+    indent: String = "",
   ): Option[List[Int]] =
     if labels.isEmpty then None
     else
@@ -156,7 +158,7 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
         screen.LiveRegion()
       var page = MenuState.MaxRows
       def draw(force: Boolean = false): Unit = screen.frame:
-        val (lines, rows) = ListMenu.render(state, title, keys, !status.shown, screen.height, screen)
+        val (lines, rows) = ListMenu.render(state, title, keys, !status.shown, screen.height, screen, indent)
         page = rows
         region.redraw(lines, force)
       val outcome = status.withHint(keys):
@@ -174,7 +176,10 @@ private[ui] final class ListMenu(screen: Screen, status: StatusLine, alerts: Ale
           case MenuState.Outcome.Chosen(items) =>
             val answer =
               if multi then Format.plural(items.size, "item") + " ticked" else items.headOption.fold("")(labels(_))
-            val line = styled("? ", Cyan, Bold) + Ansi.sanitize(title) + styled(s" › ${Ansi.sanitize(answer)}", Cyan)
+            val line =
+              if title.isEmpty then indent + styled(s"› ${Ansi.sanitize(answer)}", Cyan)
+              else
+                indent + styled("? ", Cyan, Bold) + Ansi.sanitize(title) + styled(s" › ${Ansi.sanitize(answer)}", Cyan)
             region.redraw(List(line), force = true)
             region.freeze()
           case _ => region.clear()
@@ -235,18 +240,21 @@ private[ui] object ListMenu:
     keysInMenu: Boolean,
     height: Int,
     screen: Screen,
+    indent: String = "",
   ): (List[String], Int) =
     import screen.{g, styled}
     val total = state.labels.size
     val shown = state.matches
-    val counter =
-      if state.multi then styled(s"  ${g.dot} ${state.checked.size} of $total ticked", Dim)
-      else ""
-    val head = styled("? ", Cyan, Bold) + styled(Ansi.sanitize(title), Bold) + counter
+    val ticked = Option.when(state.multi)(s"${g.dot} ${state.checked.size} of $total ticked")
+    val head =
+      if title.isEmpty then ticked.map(styled(_, Dim))
+      else
+        Some(styled("? ", Cyan, Bold) + styled(Ansi.sanitize(title), Bold) + ticked.fold("")(t => styled(s"  $t", Dim)))
     val filterLine = Option.when(state.filterable):
       if state.filter.isEmpty then styled(s"  Type to filter ${g.dot} $total items", Dim)
       else "  Filter: " + styled(Ansi.sanitize(state.filter), Cyan) + styled(s"  ${g.dot} ${shown.size} of $total", Dim)
-    val fixed = 1 + filterLine.size + (if keysInMenu then 1 else 0) + 2 // title, filter, keys, the rows out of view
+    val fixed = head.size + filterLine.size + (if keysInMenu then 1 else 0) +
+      2 // title, filter, keys, the rows out of view
     val rows = (height - fixed - 3).min(MenuState.MaxRows).max(1) // and the footer, the line under, a margin
     val (from, until) = state.window(rows)
     val scrolls = shown.size > rows
@@ -269,6 +277,6 @@ private[ui] object ListMenu:
           val label = Ansi.sanitize(state.labels(item))
           s"$pointer $box" + (if here then styled(label, Cyan, Bold) else label)
     val lines =
-      head :: filterLine.toList ++ above.toList ++ items ++ below.toList ++
+      head.toList ++ filterLine.toList ++ above.toList ++ items ++ below.toList ++
         Option.when(keysInMenu)(styled(s"  $keys", Dim)).toList
-    (lines, rows)
+    (lines.map(line => if line.isEmpty then line else indent + line), rows)

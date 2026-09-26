@@ -9,14 +9,13 @@ import Ansi.{Bold, Cyan, Dim, Green, Red, Yellow}
 /** What the pop-ups show and read: permission requests, questions, confirmations, secrets
   * and choices. The TUI runs each inside `popupBlock`, which makes it a block of its own.
   * Menus and answer fields pause the turn's key reader and show their keys in the footer;
-  * no screen lock is held while they read. `info` prints a dim line. */
+  * no screen lock is held while they read. */
 private[ui] final class Dialogs(
   screen: Screen,
   alerts: Alerts,
   keys: KeyReader,
   status: StatusLine,
   prompt: PromptReader,
-  info: String => Unit,
 ):
   import screen.{Indent, g, plain, styled, width, write}
 
@@ -36,8 +35,14 @@ private[ui] final class Dialogs(
   ): Option[List[Int]] =
     keys.withPaused(menus.checkbox(message, labels, checked, escape))
 
-  private def menu(message: String, labels: List[String], escape: String): Option[String] =
-    menuIndex(message, labels, escape).flatMap(labels.lift)
+  /** Where a pop-up continues: under the text of its question or request. */
+  private val Under = Indent + Indent
+
+  /** A pop-up's menu: under its question, which it does not repeat as a title. */
+  private def menu(labels: List[String], escape: String): Option[String] =
+    keys.withPaused(menus.list("", labels, escape, 0, Under)).flatMap(labels.lift)
+
+  private def note(text: String): Unit = write(Under + styled(text, Dim) + "\n")
 
   /** A question, wrapped with its lines under the first one's text. */
   private def ask(question: String): Unit =
@@ -54,6 +59,7 @@ private[ui] final class Dialogs(
     req.details.foreach: detail =>
       TextLayout.wrap(Ansi.sanitize(detail), width - 5)
         .foreach(line => write(Indent + Indent + styled(line, Yellow) + "\n"))
+    var cancelled = false
     val decision =
       if plain then
         Menus.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
@@ -61,24 +67,27 @@ private[ui] final class Dialogs(
         var selected: Option[Decision] = None
         while selected.isEmpty do
           val choices = List(Menus.AllowOnce, Menus.AllowSession, Menus.DenyLabel, Menus.ReviseLabel)
-          selected = menu("Allow?", choices, escape = "deny") match
+          selected = menu(choices, escape = "deny") match
             case Some(Menus.AllowOnce) => Some(Decision.AllowOnce)
             case Some(Menus.AllowSession) => Some(Decision.AllowSession)
             case Some(Menus.ReviseLabel) =>
-              info("Describe what to change. The current request will not be approved.")
-              freeText(styled("instructions> ", Cyan)).map(Decision.Revise(_))
-            case _ => Some(Decision.Deny)
+              note("Describe what to change. The current request will not be approved.")
+              freeText(Under + styled("instructions> ", Cyan)).map(Decision.Revise(_))
+            case Some(_) => Some(Decision.Deny)
+            case None =>
+              cancelled = true
+              Some(Decision.Deny)
         selected.get
-    // The menu already echoes the choice; confirm only what the user did not see.
+    // The menu echoes the choice and the instructions stay where they were typed; confirm
+    // only what the user did not see.
     decision match
-      case Decision.Revise(instructions) =>
-        write(Indent + styled(s"${g.arrow} instructions sent: ${Ansi.sanitize(instructions)}", Cyan) + "\n")
-      case _ if plain || decision == Decision.Deny =>
+      case Decision.Revise(_) => write(Under + styled(s"${g.arrow} sent to the agent", Cyan) + "\n")
+      case _ if plain || cancelled =>
         val label = decision match
           case Decision.AllowOnce => styled(s"${g.arrow} allowed once", Green)
           case Decision.AllowSession => styled(s"${g.arrow} allowed for this session", Green)
           case _ => styled(s"${g.arrow} denied", Red)
-        write(Indent + label + "\n")
+        write(Under + label + "\n")
       case _ => ()
     decision
 
@@ -87,17 +96,17 @@ private[ui] final class Dialogs(
   def confirm(question: String): Boolean =
     ask(question)
     val yes =
-      if plain then freeText(styled("[y/N]: ", Cyan)).exists(_.toLowerCase(Locale.ROOT).startsWith("y"))
-      else menu("Choose", List(Menus.YesLabel, Menus.NoLabel), escape = "cancel").contains(Menus.YesLabel)
+      if plain then freeText(Under + styled("[y/N]: ", Cyan)).exists(_.toLowerCase(Locale.ROOT).startsWith("y"))
+      else menu(List(Menus.YesLabel, Menus.NoLabel), escape = "cancel").contains(Menus.YesLabel)
     if plain then
-      write(Indent + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
+      write(Under + styled(s"${g.arrow} ${if yes then "yes" else "no"}", if yes then Green else Red) + "\n")
     yes
 
   /** A secret such as an API key: the typed text is shown as `*` and never enters the
     * prompt history. `None` when empty or cancelled. */
   def secret(question: String): Option[String] =
     ask(question)
-    answerField(prompt.readSecret(styled("key> ", Cyan)))
+    answerField(prompt.readSecret(Under + styled("key> ", Cyan)))
 
   /** A question from the agent. Options render as a menu (or checkboxes when `multiple`),
     * always with a custom-answer entry; no options give a free-text line. `None` on
@@ -107,26 +116,28 @@ private[ui] final class Dialogs(
     // The question and options are model-written: sanitize.
     ask(question)
     val cleanOptions = options.map(Ansi.sanitize)
-    val answerPrompt = styled("answer> ", Cyan)
+    val answerPrompt = Under + styled("answer> ", Cyan)
     val reply =
       if cleanOptions.isEmpty || plain then
-        cleanOptions.foreach(o => write(Indent + Indent + styled(s"- $o", Cyan) + "\n"))
-        if cleanOptions.nonEmpty then info("Choose a listed answer or type your own answer or instructions.")
+        cleanOptions.foreach(o => write(Under + styled(s"- $o", Cyan) + "\n"))
+        if cleanOptions.nonEmpty then note("Choose a listed answer or type your own answer or instructions.")
         freeText(answerPrompt)
       else if multiple then
-        checkboxIndices("Choose answers", cleanOptions :+ Menus.AddAnswerLabel).flatMap: ids =>
+        val labels = cleanOptions :+ Menus.AddAnswerLabel
+        keys.withPaused(menus.checkbox("", labels, Set.empty, "cancel", Under)).flatMap: ids =>
           val chosen = ids.sorted.filter(_ < options.size).flatMap(options.lift)
           if ids.contains(cleanOptions.size) then freeText(answerPrompt).map(t => (chosen :+ t).mkString("; "))
           else Option.when(chosen.nonEmpty)(chosen.mkString("; "))
       else
-        menuIndex("Choose an answer", cleanOptions :+ Menus.OtherLabel).flatMap: i =>
+        val labels = cleanOptions :+ Menus.OtherLabel
+        keys.withPaused(menus.list("", labels, "cancel", 0, Under)).flatMap: i =>
           if i == cleanOptions.size then freeText(answerPrompt) else options.lift(i)
     // A single-choice menu echoes the selection itself; confirm the other outcomes.
     reply match
       case Some(a) if options.isEmpty || plain || multiple || !options.contains(a) =>
-        write(Indent + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
+        write(Under + styled(s"${g.arrow} ${Ansi.sanitize(a)}", Green) + "\n")
       case Some(_) => ()
-      case None => write(Indent + styled(s"${g.arrow} No answer", Dim) + "\n")
+      case None => write(Under + styled(s"${g.arrow} No answer", Dim) + "\n")
     reply
 
   private def freeText(promptText: String): Option[String] = answerField(prompt.readAnswer(promptText))

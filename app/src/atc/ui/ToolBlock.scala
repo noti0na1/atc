@@ -24,6 +24,8 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
   /** A tool block is open; `outputStarted` once its output section has begun. */
   private var open = false
   private var outputStarted = false
+  /** Cells on the output's current row, where the expanded view breaks long lines. */
+  private var outputColumn = 0
   /** Agent-visible text printed during the current tool call, as it appears in
     * the REPL's captured output; `end` subtracts it from the result panel. */
   private val printed = StringBuilder()
@@ -124,7 +126,10 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
           ensureNewline()
           write(section("output", Dim))
           outputStarted = true
-        screen.writeGuttered(text, gutter(Dim))
+          outputColumn = 0
+        val (rows, column) = if plain then (text, 0) else Screen.breakLines(text, outputColumn, width - GutterWidth - 1)
+        outputColumn = column
+        screen.writeGuttered(rows, gutter(Dim))
 
   /** Output of `parallel` tasks that arrives while a pop-up is drawn, which writing it
     * would break; the last [[TailBuffer.MaxChars]] characters are kept. */
@@ -184,8 +189,7 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
     val first = Ansi.sanitize(currentCode).linesIterator.map(_.trim).find(_.nonEmpty).getOrElse("")
     val more = if currentCode.trim.linesIterator.size > 1 then s" ${g.ellipsis}" else ""
     val head = Option.when(headed)(titleRow + "  " + styled(first + more, Dim))
-    val changes = fileChanges.toList.map: change =>
-      Indent + styled(Ansi.sanitize(s"${change.path}: ${change.summary}"), Cyan)
+    val changes = changeRows
     val link = styled(s" ${g.dot} /output $id", Dim)
     val verdict =
       if r.success then
@@ -199,6 +203,15 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
           styled(s" ${g.dot} ", Red) + styled(screen.fit(problem, used), Red)
         start + reason + link
     head.toList ++ changes :+ verdict
+
+  /** A row per file change, with a change repeated in a row (four one-line edits of a
+    * file) folded into one row that counts them. */
+  private def changeRows: List[String] =
+    val folded =
+      fileChanges.toList.map(change => s"${change.path}: ${change.summary}").foldRight(List.empty[(String, Int)]):
+        case (line, (same, n) :: rest) if same == line => (same, n + 1) :: rest
+        case (line, rest) => (line, 1) :: rest
+    folded.map((line, n) => Indent + styled(Ansi.sanitize(if n == 1 then line else s"$line, $n times"), Cyan))
 
   // ── the end of a block ────────────────────────────────────────────
 
@@ -243,8 +256,7 @@ private[ui] final class ToolBlock(screen: Screen, expanded: () => Boolean):
       else
         write(section("error", Red))
         kept.foreach(l => write(gutter(Red) + l + "\n"))
-    fileChanges.foreach: change =>
-      write(Indent + styled(Ansi.sanitize(s"${change.path}: ${change.summary}"), Cyan) + "\n")
+    changeRows.foreach(row => write(row + "\n"))
     val verdict =
       if r.success then styled(s"${g.end} ok ${millis} ms", Green) else styled(s"${g.end} failed ${millis} ms", Red)
     write(Indent + verdict + styled(s" ${g.dot} /output $id", Dim) + "\n")
@@ -312,6 +324,7 @@ private[atc] object ToolBlock:
             .find(m => m.nonEmpty && !m.forall(c => c == '^' || c == ' '))
           if heading.startsWith("[") then heading else message.getOrElse(heading)
     r.error.flatMap(first).orElse(first(withoutPrinted(ExecutionResult.trimStackFrames(r.output), printed)))
+      .map(_.replaceFirst("^java\\.lang\\.(?=\\w+(?:Exception|Error)\\b)", ""))
 
   /** The REPL output without the agent's own prints. The host wrote those to
     * the same stream, so they occur verbatim and contiguously: remove the

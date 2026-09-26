@@ -12,13 +12,19 @@ import java.util.Locale
 private[ui] final class Menus(screen: Screen, alerts: Alerts, status: StatusLine):
   private val menu = ListMenu(screen, status, alerts)
 
-  /** A single-choice menu, its cursor on `initial` at first. */
-  def list(message: String, labels: List[String], escape: String, initial: Int): Option[Int] =
-    menu.run(message, labels, multi = false, initial, Set.empty, escape).flatMap(_.headOption)
+  /** A single-choice menu, its cursor on `initial` at first; see [[ListMenu.run]] for `indent`. */
+  def list(message: String, labels: List[String], escape: String, initial: Int, indent: String = ""): Option[Int] =
+    menu.run(message, labels, multi = false, initial, Set.empty, escape, indent).flatMap(_.headOption)
 
   /** A multi-choice menu with `checked` ticked at first; `Some(Nil)` if nothing is ticked. */
-  def checkbox(message: String, labels: List[String], checked: Set[Int], escape: String): Option[List[Int]] =
-    menu.run(message, labels, multi = true, 0, checked, escape)
+  def checkbox(
+    message: String,
+    labels: List[String],
+    checked: Set[Int],
+    escape: String,
+    indent: String = "",
+  ): Option[List[Int]] =
+    menu.run(message, labels, multi = true, 0, checked, escape, indent)
 
 private[atc] object Menus:
   val AllowOnce = "Allow once"

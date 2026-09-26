@@ -484,7 +484,9 @@ asks only for permissions not already held. `AllowOnce` applies to the child sco
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
 
-Permission requests display numbered command or host rows. The host sorts and deduplicates
+Permission requests display numbered command or host rows, and a `note` row when a command
+pattern holds `*`, which allows any arguments and so, for an interpreter, any code. The host
+sorts and deduplicates
 requested patterns so the displayed order agrees with decision notes. `Policy.sessionGrants`
 provides the current grant list; `/perms revoke` selects from it and `Policy.revoke` removes
 the selected grant from future checks. Configuration rules and open-scope semantics remain
@@ -1173,7 +1175,9 @@ and permission requests, which Esc denies, say `Esc deny`.
 
 Every menu is a `ListMenu`, drawn in a live region and read in raw mode; `MenuState` holds
 what it shows apart from the terminal, and `MenuKey` decodes keys with `KeyReader`'s escape
-parsing. A menu shows its title, then at most twelve rows, fewer when the screen is short, so
+parsing. A pop-up's menu (a permission request, a question, a confirmation) has no title row:
+its question stands above it, and its rows, then the answer it leaves (`› Yes`), are indented
+to the question's text. A slash command's menu shows its title, then at most twelve rows, fewer when the screen is short, so
 the whole menu stays shorter than the screen; the window scrolls with the cursor and says how
 many rows are out of view above and below. A longer list is filtered by typing, every word
 matching, with the filter and the number of matches on a line of its own; Backspace edits it
@@ -1282,18 +1286,28 @@ the title, up to eight rows of code and the last ten lines of output, both cut f
 the region stays shorter than the screen and can always be redrawn. When the call ends the
 region becomes its summary: the title with the code's first line, the files changed and the
 verdict, which names how much output it held or, for a failure, the first line of the
-error (`ToolBlock.firstProblem`; a compiler heading gives its code or its message). A
+error (`ToolBlock.firstProblem`; a compiler heading gives its code or its message, and a
+`java.lang` exception its simple name). The same change made to a file several times in a
+row (one-line edits, one after another) is one row with a count. A
 pop-up, or any line written outside the block, freezes what the region shows and the
 block continues below. Output that `parallel` tasks write while a pop-up is open is held, up to
 its last million characters, and written when the pop-up closes; Ctrl-O takes the region down and writes the block out in full. The
-expanded view and a plain terminal write every block in full, with the result panel.
+expanded view and a plain terminal write every block in full, with the result panel; the
+expanded view breaks output lines at the row's end (`Screen.breakLines`, which keeps the
+column across chunks), so a long line stays inside the block's gutter.
+
+The TODO panel is drawn once per tool call. A new list is drawn whole; when only statuses
+changed, the header gives the progress (`· 3 of 7 done`) and only the items that changed are
+drawn, since the agent marks one item per call and the whole list each time buried the work
+between. `/todos` always draws the whole list.
 
 `ToolHistory` retains up to 20 results within an eight-million-character budget. Each
 result retains at most two million output characters plus bounded code and file previews;
 live command output is capped separately at one million characters. A live view keeps its
 text in a `TailBuffer`, which grows to half again its cap before cutting back, so small appends
 do not move the whole text. `/output` displays
-200-line windows without evaluating code again. Classified terminal-only output is never
+200-line windows without evaluating code again, with file-change previews coloured as diffs
+(`ToolHistory.Entry.changesFrom` says where they start). Classified terminal-only output is never
 added to the history, and `/new` clears it. These records are for inspection and are not
 part of saved conversations.
 
@@ -1326,7 +1340,8 @@ explicitly configured to auto-approve requests.
 ### Sessions, inspection and compaction
 
 After each interactive turn the model predicts the next request and the prompt shows it as
-ghost text (Tab or → accepts it; `"predictInput": false` disables it). When there is no useful
+ghost text (Tab or → accepts it; `"predictInput": false` disables it). The redraw a read
+leaves on screen has no ghost text, so a suggestion never looks sent after Ctrl-D or Enter. When there is no useful
 suggestion, the model is asked to return `[NO_PREDICTION]`. This marker and empty responses
 are suppressed before reaching the prompt. A summary line
 shows the turn's cost and how full the context window is. Turn summaries distinguish

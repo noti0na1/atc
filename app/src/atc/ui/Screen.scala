@@ -225,6 +225,32 @@ object Screen:
   private[ui] def cellWidth(cp: Int, col: Int): Int =
     if cp == '\t' then 8 - (col % 8) else math.max(0, WCWidth.wcwidth(cp))
 
+  /** `text` with a line break wherever it would pass `room` cells, for a row that already
+    * holds `column` cells, and the column it ends at. Output is shown verbatim, so it breaks
+    * where the row ends rather than between words; left to the terminal, the rest of a long
+    * line would continue at column 0, outside its block's gutter. */
+  def breakLines(text: String, column: Int, room: Int): (String, Int) =
+    val out = StringBuilder()
+    var col = column
+    var i = 0
+    while i < text.length do
+      val styleEnd = sgrEnd(text, i)
+      if styleEnd > 0 then
+        out.append(text.substring(i, styleEnd))
+        i = styleEnd
+      else
+        val cp = text.codePointAt(i)
+        if cp == '\n' then col = 0
+        else
+          val w = cellWidth(cp, col)
+          if col > 0 && col + w > room then
+            out.append('\n')
+            col = 0
+          col += cellWidth(cp, col)
+        out.appendAll(Character.toChars(cp))
+        i += Character.charCount(cp)
+    (out.toString, col)
+
   /** Display width in terminal cells of `s` starting at column 0; SGR sequences take none. */
   def displayWidth(s: String): Int =
     var w = 0

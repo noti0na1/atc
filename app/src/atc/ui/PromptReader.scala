@@ -38,6 +38,8 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
   /** The predicted next message (`suggest`), drawn as ghost text after what
     * is typed as long as that is a prefix of it. */
   @volatile var suggestion: Option[String] = None
+  /** Set while a read ends: its final redraw is what stays on screen, without a list or ghost text. */
+  @volatile private var closing = false
   /** What the ghost text would add to `typed`: the rest of the suggestion. */
   private def ghost(typed: String): Option[String] =
     suggestion.filter(s => s.length > typed.length && s.startsWith(typed)).map(_.drop(typed.length))
@@ -54,7 +56,7 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
         alerts.touch()
       val base = super.highlight(r, buffer).nn
       ghost(buffer) match
-        case Some(rest) if !plain =>
+        case Some(rest) if !plain && !closing =>
           AttributedStringBuilder().append(base).styled(AttributedStyle.DEFAULT.faint(), rest).toAttributedString.nn
         case _ => base
 
@@ -127,7 +129,6 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
     * keep it while they have it. The list is not drawn into the final display
     * `doCleanup` leaves behind when the read ends. */
   private final class Reader extends LineReaderImpl(terminal, terminal.getName, java.util.HashMap[String, Object]()):
-    private var closing = false
     private val commandRows: java.util.function.Supplier[AttributedString] = () =>
       val (rows, index) = listState()
       val size = getTerminal.getSize

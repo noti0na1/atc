@@ -96,6 +96,10 @@ class ListMenuSuite extends munit.FunSuite:
     val end = plain(ListMenu.render(menu, "Models gemini offers", "keys", keysInMenu = true, 16, screen)._1)
     assert(end.exists(_.startsWith("❯ ◯ xxxx")) && end.exists(_.endsWith("…")), end)
     assertEquals(end.last, "  keys")
+    // under a question: no title row, only the count, and every row indented
+    val under = plain(ListMenu.render(menu, "", "keys", keysInMenu = false, 16, screen, indent = "    ")._1)
+    assertEquals(under.head, "    · 1 of 26 ticked")
+    assert(under.drop(1).filter(_.nonEmpty).forall(_.startsWith("    ")), under)
 
   /** Run a two-row menu on a terminal that sends `input` after `delayMillis`, then ends. */
   private def choose(input: String, delayMillis: Long = 0): Option[List[Int]] =

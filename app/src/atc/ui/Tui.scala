@@ -90,7 +90,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     text => frame { statusLine.draft = text; statusLine.refresh() },
   )
   private val statusLine = StatusLine(screen, () => busy, () => popupDepth > 0, () => queuedInputs())
-  private val dialogs = Dialogs(screen, alerts, keys, statusLine, prompt, text => info(text))
+  private val dialogs = Dialogs(screen, alerts, keys, statusLine, prompt)
 
   def fileChanged(change: FileChange): Unit = screen.synchronized(tool.fileChanged(change))
 
@@ -122,9 +122,19 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           if from > lines.size then error(s"Tool ${entry.id} has ${lines.size} lines of retained output.")
           else
             val end = (from.toLong - 1 + 200).min(lines.size.toLong).toInt
-            lines.slice(from - 1, end).foreach(println)
+            (from - 1 until end).foreach: i =>
+              val line = Ansi.sanitize(lines(i))
+              renderedLine(if i < entry.changesFrom then line else diffLine(line))
             if lines.size > end then info(s"More output: /output ${entry.id} ${end + 1}")
         case _ => error("Output is unavailable. Use /output to list retained results.")
+
+  /** A line of a file-change preview: the file's header bold, additions green, removals red. */
+  private def diffLine(line: String): String =
+    if line.startsWith("@@") then styled(line, Dim)
+    else if line.startsWith("+") then styled(line, Green)
+    else if line.startsWith("-") then styled(line, Red)
+    else if line.nonEmpty && !line.startsWith(" ") then styled(line, Bold)
+    else line
 
   def setContext(model: String, mode: String, directory: String): Unit = screen.synchronized:
     val title = s"atc ${g.dot} $directory"
@@ -191,7 +201,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       flushTodos()
       flushProcessEvents()
       stats.foreach: s =>
-        ensureNewline()
+        blankLine()
         val calls = Format.plural(s.toolCalls, "tool call")
         val context = Format.contextUsage(s.context, s.window)
         val summary =
@@ -226,7 +236,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * and paths may be repository-controlled, so terminal controls never pass. */
   def println(s: String = ""): Unit = renderedLine(Ansi.sanitize(s))
   def info(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Dim))
-  def preview(s: String): Unit = info(screen.fit(Ansi.sanitize(s).replace('\n', ' '), 0))
+  /** One dim line of context, set apart from what came before. */
+  def preview(s: String): Unit =
+    frame(blankLine())
+    info(screen.fit(Ansi.sanitize(s).replace('\n', ' '), 0))
   def success(s: String): Unit = renderedLine(styled(Ansi.sanitize(s), Green))
   def warn(s: String): Unit = renderedLine(styled(s"${g.warn} ${Ansi.sanitize(s)}", Yellow))
   def error(s: String): Unit =
@@ -241,14 +254,21 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
   /** The start-up banner: a title, aligned `label → value` rows and a dim hint line. */
   def banner(title: String, rows: List[(String, String)], hint: String): Unit = frame:
     screen.stopSpinner()
-    ensureNewline()
+    blankLine()
     write(styled(s"${g.bullet} ${Ansi.sanitize(title)}", Cyan, Bold) + "\n")
     // Values can be paths (possibly named by an attacker in a cloned repo): sanitize.
     TextLayout.fields(rows.map((label, value) => styled(Ansi.sanitize(label), Dim) -> Ansi.sanitize(value)), width)
       .foreach(line => write(line + "\n"))
-    val separated = Ansi.sanitize(hint).replace(" · ", s" ${g.dot} ")
-    val controls = if g == Glyphs.ascii then separated.replace("→", "Right") else separated
-    TextLayout.wrap(controls, width - 3).foreach(line => write(Indent + styled(line, Dim) + "\n"))
+    val controls =
+      Ansi.sanitize(hint).split(" · ").toList.map(c => if g == Glyphs.ascii then c.replace("→", "Right") else c)
+    // Rows of whole controls: a row break inside one would split a key from what it does.
+    val hintRows = controls.foldLeft(List.empty[String]):
+      case (row :: done, control) if TextLayout.width(row) + 3 + TextLayout.width(control) <= width - 3 =>
+        s"$row ${g.dot} $control" :: done
+      case (done, control) => control :: done
+    hintRows.reverse.foreach(row =>
+      TextLayout.wrap(row, width - 3).foreach(line => write(Indent + styled(line, Dim) + "\n"))
+    )
 
   // ── model output: reasoning and prose ─────────────────────────────
 
@@ -471,16 +491,33 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * ends (or before the next pop-up), not on every `markTodo`. */
   def showTodos(todos: List[Todo]): Unit = pendingTodos = Some(todos)
 
+  /** The list the panel last showed, to tell a status change from a new list. */
+  private var shownTodos: List[Todo] = Nil
+
+  /** A new list is shown whole; when only statuses changed, the changed items are shown
+    * with the progress, since the agent marks one item per call and the whole list again
+    * each time buries the work between. */
   private def flushTodos(): Unit =
-    pendingTodos.foreach(showTodosNow)
+    pendingTodos.foreach: todos =>
+      if todos.isEmpty || todos.map(_.text) != shownTodos.map(_.text) then showTodosNow(todos)
+      else
+        val changed = todos.zip(shownTodos).collect { case (now, before) if now.status != before.status => now }
+        if changed.nonEmpty then drawTodos(todos, changed)
     pendingTodos = None
 
-  def showTodosNow(todos: List[Todo]): Unit = frame:
+  def showTodosNow(todos: List[Todo]): Unit = drawTodos(todos, todos)
+
+  /** The panel: its header, then `rows`, the whole list or the items that changed. */
+  private def drawTodos(todos: List[Todo], rows: List[Todo]): Unit = frame:
+    shownTodos = todos
     screen.stopSpinner()
     ensureNewline()
-    val empty = if todos.isEmpty then styled(" (empty)", Dim) else ""
-    write(Indent + styled(s"${g.todo} TODO", Blue, Bold) + empty + "\n")
-    todos.foreach: t =>
+    val note =
+      if todos.isEmpty then " (empty)"
+      else if rows.size < todos.size then s" ${g.dot} ${todos.count(_.status == TodoStatus.Done)} of ${todos.size} done"
+      else ""
+    write(Indent + styled(s"${g.todo} TODO", Blue, Bold) + styled(note, Dim) + "\n")
+    rows.foreach: t =>
       val text = Ansi.sanitize(t.text) // model-written
       val line = t.status match
         case TodoStatus.Done => styled(s"${g.done} $text", Dim)

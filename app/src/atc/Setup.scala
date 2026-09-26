@@ -82,14 +82,14 @@ object Setup:
           s"No configuration grants access to ${PlatformPath.display(args.cwd)}, so the agent would have to ask for every file."
         )
         val accepted =
-          tui.confirm(
-            s"Write a starting project config to ${PlatformPath.display(project)}? (It opens this directory to the agent)"
-          )
+          tui.confirm("Write a starting project config to .atc/config.json here? It opens this directory to the agent.")
         if !accepted then current
         else
-          val created = Config.initProject(args.cwd).map(PlatformPath.display).mkString(" and ")
+          val created = Config.initProject(args.cwd).map(p => PlatformPath.portable(args.cwd.relativize(p)))
           ProjectTrust.trust(args.cwd, Config.globalDir) // it grants what the user just accepted
-          tui.println(s"Wrote $created; edit it to change what the agent may touch here.")
+          tui.success(
+            s"Wrote ${created.mkString(" and ")}; edit .atc/config.json to change what the agent may touch here."
+          )
           load()
 
     def confirmTrust(current: Configuration): Configuration =
