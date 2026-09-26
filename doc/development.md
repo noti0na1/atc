@@ -33,8 +33,13 @@ permission to bind a loopback socket.
 `out/dist.dest/`. The Unix launcher and JARs form the Unix distribution; Windows uses the
 PowerShell launcher with the same JARs. The batch launcher is a compatibility entry point.
 
-`./start.sh` and `.\start.ps1` load `.env`, rebuild stale distributions and launch ATC.
-They preserve non-empty exported environment values and pass application arguments through.
+`./start.sh` and `.\start.ps1` rebuild a stale distribution, then load `.env` and launch ATC.
+Before the build they read only `ATC_SKIP_BUILD` from the environment file, so a Mill server
+the build starts does not keep API keys in its environment. The distribution is stale when a
+file in `build.mill`, `app/src`, `app/resources`, `lib/src` or `windows` is newer than
+`out/dist.dest/build.stamp`, which the scripts write after each successful build; tests are
+not among those files, and the stamp is the reference because Mill does not rewrite a jar
+whose inputs have the same content. They preserve non-empty exported environment values and pass application arguments through.
 The build runs in the checkout; ATC retains the launch directory unless `-C` overrides it.
 Environment files contain literal `KEY=value` entries; shell expansion is not performed.
 
@@ -71,16 +76,22 @@ The **startup cache** halves the cold start (2.6 s to 1.3 s on that machine, and
 CPU over a session, since the JDK 25 cache carries method profiles): on Java 25+ an AOT
 cache (`-XX:AOTCacheOutput=` to build, `-XX:AOTCache=` to use), on Java 19 to 24 a dynamic
 CDS archive (`-XX:ArchiveClassesAtExit=` / `-XX:SharedArchiveFile=`). Both are bound to
-the exact jars and JDK, and a stale one makes the JVM print error lines and (for CDS) is
+the exact jars, JDK and JVM options, and a stale one makes the JVM print error lines and (for CDS) is
 *not* regenerated, so the launchers never point the JVM at one that might be stale:
 `~/.atc/jars/startup/key.txt` (`out/dist.dest/startup/` for `start.sh`) records the JDK's
 `-version` output (read once per run by `ensure_java`, kept in `JAVA_VERSION`), the release
-marker and the version-gated JVM options (the JVM refuses a cache built under other module
-options, such as `--enable-native-access`), its timestamp is compared with the jars
+marker, the version-gated JVM options (the JVM refuses a cache built under other module
+options, such as `--enable-native-access`), `ATC_JAVA_OPTS` and the command line's
+`-Xmx`/`-Xms` (another GC or heap size makes it print `[error][aot]` lines); its timestamp is compared with the jars
 (`find -newer`; it is dated like a newer jar so a future-dated jar cannot force a rebuild
 on every run), and a mismatch triggers one silent echo-model `-p 'run: 1 + 1'` run with the
-building flag. A build that leaves no file writes the key anyway, so it is not retried until
-the JDK or release changes. `atc self uninstall` removes the cache with the jars.
+building flag and the same JVM options. A build that leaves no file writes the key anyway, so
+it is not retried until the JDK, release or options change. The cache is an optimisation: when
+its directory cannot be created or written the launchers run without it, a key that cannot be
+written does not stop the start, and an interrupted training run removes its temporary
+directory. The Java version comes from the ` version "` line of `java -version`, because
+`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and `JDK_JAVA_OPTIONS` add a `Picked up` line before it.
+`atc self uninstall` removes the cache with the jars.
 `-XX:TieredStopAtLevel=1` (60% less CPU, 50% slower steady-state compiles) and
 `-XX:+UseSerialGC` (200 MB less resident memory, five times the GC time, pauses still under
 10 ms) were measured and left to `ATC_JAVA_OPTS`.
@@ -1412,7 +1423,14 @@ in `~/.atc/jars`; `ATC_INSTALL_DIR` and `ATC_CACHE_DIR` override those locations
 downloads require SHA-256 digests for both JARs. Metadata uses jq when available and a
 field-order-dependent fallback otherwise. A cache marker records `release-id|tag`; verified updates replace it
 with the downloaded artifacts. Uninstall validates the cache root and removes ATC-owned
-artifacts while retaining configuration and unrelated files.
+artifacts while retaining configuration and unrelated files. `atc setup` appends a marked
+snippet that puts the install directory on `PATH` to each existing rc file of the user's shell
+(`.zshrc` and `.zprofile` for zsh, `.bashrc`, `.bash_profile` and `.profile` for bash,
+`.profile` otherwise), creates the first of them when none exists, skips a file that already
+has the snippet or names the directory, and warns about a file it cannot write. fish reads none
+of these files, so setup prints the `fish_add_path` command instead. Uninstall removes the
+snippet from all five files, whatever the current shell, and removes the `self-check` stamp
+with the jars.
 Directory-name prefixes alone do not prove ownership: uninstall retains directories such
 as `dev.notes` and `download.notes`, including in a custom cache location. Temporary
 download and development directories are cleaned by the operation that creates them.
@@ -1432,7 +1450,11 @@ declined offer also waits a day), only when the running script is the installed 
 script with `stage_latest_self` (the download and `bash -n` check `atc self update` uses,
 with the release check's timeouts), compares it with `cmp`, and on `y` moves it into place
 with `install_staged_self`; bash keeps reading the running script from its old inode, so
-the new wrapper takes effect at the next start.
+the new wrapper takes effect at the next start. The download runs in a subshell, so a check
+that fails there (no curl, or a `GITHUB_TOKEN` with characters the wrapper refuses to put in a
+curl config) skips the offer instead of ending the launch; `atc self update` still reports it
+and exits 1. An INT, TERM or HUP trap removes the staged file when the download or the prompt
+is interrupted.
 
 The prompt defaults to No. Approval passes the already-fetched metadata to
 `download_latest_release`, so the updater installs the release the user approved without
