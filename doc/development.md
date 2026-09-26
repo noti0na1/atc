@@ -491,7 +491,11 @@ patterns with separators use the layer's base; absolute patterns and `~` use an 
 path. `PathGlob` handles slash-based globs on all platforms. Canonicalization resolves
 symlinks, including dangling write targets. Directory traversal does not follow symlinked
 directories or Windows junctions. Filesystem checks and subsequent operations are not an
-OS-level transactional sandbox.
+OS-level transactional sandbox. Canonicalization corrects the case of existing names only, so
+on Windows and macOS (`Platform.caseInsensitivePaths`) globs match case-insensitively: a new
+`.ATC` is the same directory as `.atc` there and must fall under its locked rule. An agent path
+on a UNC share other than the working directory's is refused before canonicalization, which
+would otherwise contact the server even from a read-only file system.
 
 `GitIgnore` controls visibility in listings and recursive searches, independently of
 permissions. It reads repository and nested `.gitignore` files, caches them for the session

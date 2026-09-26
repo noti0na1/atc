@@ -49,28 +49,33 @@ object GitIgnore:
             catch case _: Exception => None
         catch case _: Exception => Nil // unreadable or not text: no rules from it
 
+    /** Whether each directory seen as a parent is ignored; a listing asks for all its entries. */
+    private val ignoredDirs = TrieMap[Path, Boolean]()
+
     /** Component by component, as git decides it: a path is ignored as soon as
       * one of its ancestors is, so a negation inside an ignored directory does
       * not bring it back. For one component, the deepest `.gitignore` that
       * matches wins, and within a file the last matching rule wins. */
-    def ignores(p: Path): Boolean =
+    def ignores(p: Path): Boolean = ignores(p, Files.isDirectory(p))
+
+    private def ignores(p: Path, isDir: Boolean): Boolean =
       if p == root || !p.startsWith(root) then false
       else
-        val rel = root.relativize(p).nn
-        val n = rel.getNameCount
+        val parent = p.getParent.nn
+        (parent != root && ignoredDirs.getOrElseUpdate(parent, ignores(parent, isDir = true))) ||
+        lastNameIgnored(p, isDir)
+
+    /** Whether the rules ignore the last component of `p`, its ancestors aside. */
+    private def lastNameIgnored(p: Path, isDir: Boolean): Boolean =
+      val rel = root.relativize(p).nn
+      val n = rel.getNameCount
+      if Platform.samePathName(rel.getName(n - 1).nn.toString, ".git") then true
+      else
         var ignored = false
-        var i = 0
-        while i < n && !ignored do
-          if Platform.samePathName(rel.getName(i).nn.toString, ".git") then ignored = true
-          else
-            val isDir = i < n - 1 || Files.isDirectory(root.resolve(rel.subpath(0, i + 1)))
-            var j = 0
-            while j <= i do
-              val dir = if j == 0 then root else root.resolve(rel.subpath(0, j)).nn
-              val name = PlatformPath.portable(rel.subpath(j, i + 1).nn)
-              for r <- rulesOf(dir) if r.matches(name, isDir) do ignored = !r.negated
-              j += 1
-          i += 1
+        for j <- 0 until n do
+          val dir = if j == 0 then root else root.resolve(rel.subpath(0, j)).nn
+          val name = PlatformPath.portable(rel.subpath(j, n).nn)
+          for r <- rulesOf(dir) if r.matches(name, isDir) do ignored = !r.negated
         ignored
 
   /** One `.gitignore` line, compiled against paths relative to its own directory. */
@@ -94,7 +99,8 @@ object GitIgnore:
           val core = pattern.stripPrefix("/")
           val anchored = pattern.startsWith("/") || core.contains('/')
           val prefix = if anchored then "" else "(?:.*/)?"
-          Some(Rule(negated, dirOnly, Regex((if Platform.isWindows then "(?i)" else "") + prefix + toRegex(core))))
+          val flags = if Platform.caseInsensitivePaths then "(?iu)" else ""
+          Some(Rule(negated, dirOnly, Regex(flags + prefix + toRegex(core))))
 
     /** Trailing spaces are not part of the pattern unless backslash-escaped. */
     private def trimTrailing(line: String): String =

@@ -11,7 +11,10 @@ private[atc] object Platform:
   val isMac: Boolean = System.getProperty("os.name", "").nn.toLowerCase(Locale.ROOT).startsWith("mac")
   val fileSeparator: Char = File.separatorChar
   val pathListSeparator: String = File.pathSeparator
-  val pathRegexFlags: Int = if isWindows then Pattern.CASE_INSENSITIVE else 0
+  /** Whether the usual file systems ignore case in names: NTFS, and APFS as macOS formats it. A rule
+    * on `.atc` must also cover a new `.ATC`, which is the same directory there. */
+  val caseInsensitivePaths: Boolean = isWindows || isMac
+  val pathRegexFlags: Int = if caseInsensitivePaths then Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE else 0
   /** The file that reads as empty, for a child process's input. */
   val nullDevice: File = File(if isWindows then "NUL" else "/dev/null")
 
@@ -32,4 +35,4 @@ private[atc] object Platform:
 
   /** Compare filesystem names using the host filesystem's case semantics. */
   def samePathName(left: String, right: String): Boolean =
-    if isWindows then left.equalsIgnoreCase(right) else left == right
+    if caseInsensitivePaths then left.equalsIgnoreCase(right) else left == right

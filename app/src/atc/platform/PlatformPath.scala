@@ -86,6 +86,10 @@ private[atc] object PlatformPath:
             Option.when(reserved)(s"'$component' is a reserved Windows device name")
         .nextOption()
 
+  /** A Windows path on a network share (`\\server\share\...`). */
+  def isUnc(path: Path): Boolean =
+    Platform.isWindows && Option(path.getRoot).exists(_.toString.startsWith("\\\\"))
+
   private val DriveRelativeError = "drive-relative paths such as 'C:work' are ambiguous; use 'C:/work'"
 
   private def isDriveRelative(value: String): Boolean =
