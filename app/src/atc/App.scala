@@ -49,6 +49,7 @@ final class App(args: Cli.Args, val tui: Tui):
       config.denyHosts
     )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
+  models.useMode(policy.mode)
 
   // ── host (the sandbox API implementation) and its ports ───────────
 
@@ -88,7 +89,7 @@ final class App(args: Cli.Args, val tui: Tui):
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
-  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore)
+  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables)
 
   // ── agent ─────────────────────────────────────────────────────────
 
@@ -180,7 +181,8 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model)),
+      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
+        ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
         ++ Option.when(predictor.enabled)("Tab or → accept the suggested next request")).mkString(" · "),
     )

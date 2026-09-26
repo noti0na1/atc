@@ -90,8 +90,11 @@ private[host] trait HostProcesses:
       val argv = WindowsExecutable.resolve(stage.argv, dir)
       val builder = ProcessBuilder(argv.asJava).directory(dir.toFile).nn
       // Windows launchers may carry the original command line (including a prompt)
-      // in these variables. It belongs to ATC, not to commands the agent starts.
-      builder.environment().nn.keySet().nn.removeIf(LauncherEnvironment.isInternal)
+      // in these variables, and the key variables hold ATC's credentials. They belong
+      // to ATC, not to commands the agent starts, which could print them.
+      val environment = builder.environment().nn
+      environment.keySet().nn.removeIf(LauncherEnvironment.isInternal)
+      keyVariables().foreach(environment.remove)
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
 

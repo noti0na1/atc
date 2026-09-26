@@ -2,6 +2,7 @@ package atc
 
 import atc.config.{Config, ConfigLayer, Configuration, ModelCatalog, ModelConfig, ModelListStore, ModelSpec}
 import atc.llm.ChatModel
+import atc.perms.Mode
 import atc.platform.PlatformPath
 
 import java.nio.file.{Files, Path}
@@ -23,8 +24,23 @@ final class Models(args: Cli.Args, start: Configuration):
   /** What `/config` set for this session only: a last layer, over every file. */
   private var session = Map.empty[String, ujson.Value]
 
+  /** Whether the sandbox mode reaches the network; provider web search is used only then. */
+  @volatile private var networkMode = true
+
   /** The client for one model, created once per session. */
-  def client(spec: ModelSpec): ChatModel = clients.getOrElseUpdate(spec.ref, ChatModel.create(spec))
+  def client(spec: ModelSpec): ChatModel =
+    clients.getOrElseUpdate(
+      spec.ref, {
+        val model = ChatModel.create(spec)
+        if !networkMode then model.useWebSearch(false)
+        model
+      }
+    )
+
+  /** Follow the sandbox mode: read-only and local mode keep the provider off the web too. */
+  def useMode(mode: Mode): Unit =
+    networkMode = mode.allowsNetwork
+    applyWebSearch()
 
   /** The client for a model reference (`alias` or `provider/alias`). */
   def client(reference: String): ChatModel = client(catalog.find(reference))
@@ -66,15 +82,18 @@ final class Models(args: Cli.Args, start: Configuration):
   /** Load the configuration again, with this session's settings over it, and
     * rebuild the catalog. The clients made so far take up the new `webSearch`. */
   def reload(): Unit =
-    val files = Config.load(args.cwd, args.config, bundledGlobal = start.bundledGlobal)
+    val files = Config.load(args.cwd, args.config, start.bundledGlobal, trustProject = args.approveAll)
     configuration =
       if session.isEmpty then files
       else Configuration.combine(files.layers :+ ConfigLayer.session(ujson.Obj.from(session)), files.keys)
     catalog = configuration.catalog(ChatModel.listModels, ModelListStore.global)
+    applyWebSearch()
+
+  private def applyWebSearch(): Unit =
     val default = configuration.settings.webSearch.getOrElse(false)
     clients.values.foreach: client =>
       client.useWebSearch(
-        catalog.configured.find(_.ref == client.ref).fold(default)(_.settings.webSearch.contains(true))
+        networkMode && catalog.configured.find(_.ref == client.ref).fold(default)(_.settings.webSearch.contains(true))
       )
 
   /** Set a top-level `key` for this session only and load the configuration

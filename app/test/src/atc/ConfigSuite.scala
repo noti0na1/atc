@@ -10,9 +10,9 @@ import java.nio.file.{Files, Path}
   * like TACIT; this covers the equivalent surface.) */
 class ConfigSuite extends munit.FunSuite:
   /** Load with an absent global layer, so a test never depends on the machine's
-    * own `~/.atc/config.json`. Layer combination itself is `LayerSuite`. */
+    * own `~/.atc/config.json`. Layer combination and project trust are `LayerSuite`. */
   private def load(dir: Path, explicit: Option[Path]): Configuration =
-    Config.load(dir, explicit, dir.resolve("no-such-global.json").nn)
+    Config.load(dir, explicit, dir.resolve("no-such-global.json").nn, trustProject = true)
 
   private def writeCfg(dir: Path, name: String, json: String): Path =
     val p = dir.resolve(name)
@@ -644,7 +644,7 @@ class ConfigSuite extends munit.FunSuite:
       "{\n  \"model\": \"b\",\n  \"classifiedModel\": null,\n  \"commands\": [\"ls\"]\n}\n"
     )
     permissions.foreach(p => assertEquals(Files.getPosixFilePermissions(project).nn, p))
-    val loaded = Config.load(dir, None, global)
+    val loaded = Config.load(dir, None, global, trustProject = true)
     assertEquals(loaded.settings.model, Some("b"))
     assertEquals(loaded.settings.classifiedModel, None)
     assertEquals(loaded.settings.commands, List("ls"))

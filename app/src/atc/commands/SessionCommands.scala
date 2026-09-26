@@ -83,6 +83,7 @@ final class SessionCommands(app: App):
         val previous = policy.mode
         policy.mode = m
         if restartRepl(s"the sandbox mode changed to ${m.label}") then
+          app.models.useMode(m)
           app.updateStatus()
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous

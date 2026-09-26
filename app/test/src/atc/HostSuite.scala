@@ -610,6 +610,30 @@ class HostSuite extends munit.FunSuite:
     assertEquals(requestExec(Set(pattern), "inspect cwd") { exec(pwd).exitCode }, 0)
     assertEquals(exec(pwd, Nil, root.toString).exitCode, 0) // session grant persists
 
+  test("commands do not inherit the variables that hold provider keys"):
+    val envPolicy = Policy(List(rule(".", Some(Access.Read))), List(ProcessFixture.pattern("env")), Nil, prompter)
+    val printPath = ProcessFixture.command("env", "PATH")
+    val plain = Host(envPolicy, root, output, llm, hostUi)
+    val keyed = Host(envPolicy, root, output, llm, hostUi, keyVariables = () => Set("PATH"))
+    assertEquals(plain.exec(printPath).stdout.trim, "<set>")
+    assertEquals(keyed.exec(printPath).stdout.trim, "<unset>")
+
+  test("provider key variables: named references, keyEnv, headers and the SDK defaults"):
+    import atc.config.{KeyBindings, ProviderConfig}
+    val named = ProviderConfig(
+      api = Some("anthropic"),
+      key = Some("${MY_KEY}"),
+      headers = Map("x-token" -> "${GATEWAY_TOKEN}", "x-plain" -> "literal"),
+    )
+    assertEquals(KeyBindings.variables(named), Set("MY_KEY", "GATEWAY_TOKEN"))
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai"), keyEnv = Some("K"))), Set("K"))
+    assertEquals(
+      KeyBindings.variables(ProviderConfig(api = Some("anthropic"))),
+      Set("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+    )
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai-responses"))), Set("OPENAI_API_KEY"))
+    assertEquals(KeyBindings.variables(ProviderConfig(api = Some("openai"), url = Some("http://localhost"))), Set())
+
   test("a denied executable path gets a copyable requestExec hint"):
     val executable = if Platform.isWindows then "C:\\Program Files\\Example\\tool.exe" else "/opt/Example Tools/tool"
     val error = intercept[SecurityException](exec(s"'$executable' --status"))

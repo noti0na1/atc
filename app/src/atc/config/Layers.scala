@@ -116,6 +116,9 @@ final case class Configuration(
         grantsWithin = r.base,
       )
 
+  /** The environment variables that hold provider credentials, which commands must not inherit. */
+  def keyVariables: Set[String] = settings.providers.values.flatMap(KeyBindings.variables).toSet
+
   /** Every configured model, resolved, with its provider's key. */
   def catalog: ModelCatalog = ModelCatalog.from(settings, keys)
 
@@ -139,7 +142,8 @@ object Configuration:
     *  - **models, providers, instructions** (nothing to do with permissions)
     *    merge in layer order, the later layer winning; providers merge per
     *    provider and then per model alias, so a project config can add a model
-    *    to a provider the global config defined.
+    *    to a provider the global config defined. A project config may set
+    *    nothing else of a provider (see [[requireOwnProviders]]).
     *  - **`commands` / `hosts`** are the union of every layer's list: a project
     *    config may pre-approve the commands and hosts its work needs, the way
     *    it may open its own files. Deny rules restrict all grants.
@@ -164,6 +168,7 @@ object Configuration:
     def merged(ls: List[ConfigLayer]) = ls.map(_.json).foldLeft(ujson.Obj())(mergeJson)
     val everything = merged(layers)
     val granted = merged(granting)
+    narrowing.foreach(requireOwnProviders(_, granted))
     // Non-policy settings from every layer, policy settings from the granting ones.
     val effective = ujson.Obj()
     for (k, v) <- everything.value do if !PolicyKeys.contains(k) then effective(k) = v
@@ -173,6 +178,26 @@ object Configuration:
     val rules = layers.flatMap(l => l.config.files.map(LayeredRule(_, base = l.base)))
     rules.foreach(ConfigValidation.validateRule)
     Configuration(layers, ConfigValidation.validate(settings), rules, keys)
+
+  /** What a narrowing layer may set on a provider: which models it offers and whether it is on. */
+  private val NarrowingProviderKeys = Set("models", "enabled")
+
+  /** A project config may add models to the providers a granting layer defines, or turn them
+    * off, and nothing else: with a provider's `url`, `key` or `headers`, or a provider of its
+    * own, a cloned repository could send the user's keys and prompts wherever it names. */
+  private def requireOwnProviders(layer: ConfigLayer, granted: ujson.Obj): Unit =
+    def refuse(what: String, why: String) = throw IllegalArgumentException(
+      s"Invalid config ${layer.path.getOrElse("")}: $what: $why; endpoints and keys belong in ~/.atc/config.json"
+    )
+    val known = granted.value.get("providers").flatMap(_.objOpt).fold(Set.empty[String])(_.keySet.toSet)
+    for
+      providers <- layer.json.value.get("providers").flatMap(_.objOpt)
+      (name, provider) <- providers
+    do
+      if !known.contains(name) then
+        refuse(s"providers.$name", "a project config may not define a provider, only add models to one")
+      for fields <- provider.objOpt; key <- fields.keys.find(!NarrowingProviderKeys.contains(_)) do
+        refuse(s"providers.$name.$key", "a project config may set only a provider's models and enabled")
 
   /** Apply one narrowing layer to the settings it defines. Every field moves
     * towards "stricter" or stays put, so this can never widen the policy. */

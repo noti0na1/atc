@@ -559,7 +559,10 @@ passed verbatim. Each pipeline stage and redirected file is checked separately; 
 must be written on the stage it applies to (`<` on the first command, `>`/`>>` on the last),
 anything else is refused like the other shell forms rather than silently moved.
 `WindowsExecutable` resolves bare commands from absolute PATH entries and validates batch
-arguments before launch.
+arguments before launch. Commands do not inherit the variables that hold provider keys
+(`Configuration.keyVariables`: the `${VAR}`s of `key` and `headers`, `keyEnv`, and the SDK's
+default variables for a provider that names no key), since a command that prints its
+environment would hand them to the model.
 
 `Processes` drains stdout and stderr concurrently into bounded buffers. Foreground commands
 retain prefixes; spawned processes retain recent output. Results use the rightmost non-zero
@@ -601,13 +604,25 @@ paths retain their first role. Project rules are anchored to the directory conta
 
 | Setting | Merge rule |
 |---|---|
-| Providers | Merge by provider name; model entries merge by alias, replacing a repeated alias |
+| Providers | Merge by provider name; model entries merge by alias, replacing a repeated alias. A project layer may set only `models` and `enabled` of a provider a granting layer defines |
 | Model selection, instructions, other ordinary settings | Later layer wins |
 | Commands, hosts | Concatenate across layers |
 | File rules | Retain each rule and its layer base |
 | Deny commands, deny hosts | Accumulate across layers |
 | Mode and numeric limits | Granting layers set values; project layers may only tighten them |
 | Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
+
+A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,
+reach beyond its own files, and a cloned repository can ship them. `ProjectTrust` records a
+SHA-256 fingerprint of exactly these per project root in `~/.atc/trusted-projects.json`
+(owner-only); `Config.load` leaves them out while the fingerprint is not recorded, so every
+reload agrees with the decision. `Setup.load` shows what they grant, escaped like permission
+details, and offers Trust, Run without these grants, or Quit; it says whether the config is
+new or has changed since it was trusted. A `-p` run warns and goes without them unless
+`--approve-all` is given, which takes them unrecorded. Configs ATC writes itself (`--init`,
+the offered starter config) are trusted as they are written, and a `/model`, `/effort` or
+`/classifiedmodel` save keeps a trusted project trusted. Other edits, such as a new
+`model`, do not change the fingerprint.
 
 Only explicitly defined project settings narrow a value. `executionTimeoutMs` defaults to
 300000; a JSON `null` clears it and means no limit.
@@ -730,7 +745,8 @@ config (when it has one, like `/model`'s `model`), which replaces the starting m
 warning. `/model` starts the new model at its configured effort and removes `effort`.
 
 **Web search.** A model's `webSearch` turns on the provider's own search tool; the
-top-level `webSearch` does so for every model that does not set its own. It is best effort:
+top-level `webSearch` does so for every model that does not set its own. It applies in full
+mode only (`Models.useMode`), since read-only and local mode keep the agent off the network. It is best effort:
 when a provider rejects the tool, the model continues without it for the session.
 
 **Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
@@ -769,7 +785,11 @@ are not followed. `denyCommands` and `denyHosts` use the same syntax: a deny rul
 every allow rule, including a session grant, an open `request*` scope, and `--approve-all`.
 The template's shell denials are bare names: `"bash"` blocks both `bash` and `bash -c ...`,
 but not an explicit `/bin/bash`, a wrapper, or a renamed interpreter; no finite deny list
-can classify every program that might execute code.
+can classify every program that might execute code. The project template pre-approves only
+git commands whose options cannot reach files outside the repository once `--output` is
+denied: `git diff` reads any file when one of two paths lies outside the repository or the
+directory is not one (`git diff .env /dev/null`), and `git blame` through `--contents`,
+`--ignore-revs-file`, `-S` and their abbreviations, so neither is in the template.
 
 **Windows.** Use `/` separators in configuration on every platform: in JSON,
 `"C:/Users/alice/project"` (a native backslash starts a JSON escape, so the equivalent form

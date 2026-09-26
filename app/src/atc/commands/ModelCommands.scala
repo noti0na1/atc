@@ -1,7 +1,7 @@
 package atc.commands
 
 import atc.{App, Debug, Models}
-import atc.config.{Config, ModelConfig, ModelSpec, ObjectText, Origin}
+import atc.config.{Config, ModelConfig, ModelSpec, ObjectText, Origin, ProjectTrust}
 import atc.llm.ChatModel
 import atc.platform.PlatformPath
 
@@ -169,9 +169,13 @@ final class ModelCommands(app: App):
       case None => ""
       case Some(path) =>
         try
+          // The user's own choice, such as a classified model, must not make a trusted project
+          // ask again at the next start, nor trust one that was not.
+          val trusted = ProjectTrust.pending(cwd, Config.globalDir).isEmpty
           value match
             case Some(v) => Config.setTopLevel(path, key, v, after = List("model"))
             case None => Config.editFile(path)(ObjectText.withMember(_, List(key), None, path.toString))
+          if trusted then ProjectTrust.trust(cwd, Config.globalDir)
           // A `-c` file that sets the same key wins over the project config on the next start.
           val overridden = app.configuration.layers
             .filter(l => l.origin == Origin.Explicit && l.defines(key))

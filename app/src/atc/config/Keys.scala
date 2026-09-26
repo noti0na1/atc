@@ -56,9 +56,22 @@ object KeyBindings:
     case EnvRef(name) => Some(name.nn)
     case _ => None
 
+  /** The environment variables a provider's credentials may come from: the `${VAR}`s of
+    * its key and headers, its `keyEnv`, and the SDK's own variables when it names no key. */
+  def variables(p: ProviderConfig): Set[String] =
+    val named = (p.key.toList ++ p.headers.values).flatMap(envRefName) ++ p.keyEnv
+    val sdkDefaults =
+      if p.key.nonEmpty || p.keyEnv.nonEmpty then Nil
+      else
+        p.api match
+          case Some("anthropic") if p.url.isEmpty => List("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+          case Some("openai" | "openai-responses") if p.url.isEmpty => List("OPENAI_API_KEY")
+          case _ => Nil
+    (named ++ sdkDefaults).toSet
+
   /** Bind `name` to `value` in the key file at `path`: an existing binding of
-    * `name` is replaced and every other line is kept. A new file is readable
-    * by its owner only. */
+    * `name` is replaced and every other line is kept. The file is replaced
+    * atomically and is readable by its owner only afterwards. */
   def bind(path: Path, name: String, value: String): Unit =
     require(!value.exists(c => c == '\n' || c == '\r'), "a key must be a single line")
     val line = s"$name=${value.replace("\\", "\\\\")}"
@@ -69,7 +82,7 @@ object KeyBindings:
       val lines = TextFiles.splitLines(TextFiles.stripBom(Files.readString(path).nn)).lines
       val binds = s"^\\s*${Pattern.quote(name)}\\s*[=:\\s]".r
       val kept = lines.filterNot(l => binds.findFirstIn(l + " ").isDefined)
-      Files.writeString(path, (kept :+ line).mkString("", "\n", "\n"))
+      Config.replaceFile(path.toRealPath().nn, (kept :+ line).mkString("", "\n", "\n"), keepPermissions = false)
 
   /** Read existing `keys.properties` files from most to least specific. Warn if
     * a file containing API keys is readable by other users. */
@@ -92,7 +105,7 @@ object KeyBindings:
     * `!` comments, `=` or `:` after the name, `\` escapes and continuations;
     * `java.util.Properties` does the reading). An empty value means "not
     * bound", so the next source still applies. */
-  private def read(path: Path): Map[String, String] =
+  private[config] def read(path: Path): Map[String, String] =
     val props = Properties()
     try
       val text = TextFiles.stripBom(Files.readString(path).nn)

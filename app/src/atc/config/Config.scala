@@ -262,15 +262,24 @@ object Config:
     * "later" means per setting. With `bundledGlobal`, the starting config stands
     * in for a missing `~/.atc/config.json` (the user declined to write it), as a
     * layer with no path. */
-  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean): Configuration =
-    load(cwd, explicit, globalPath, bundledGlobal)
+  def load(cwd: Path, explicit: Option[Path], bundledGlobal: Boolean, trustProject: Boolean): Configuration =
+    load(cwd, explicit, globalPath, bundledGlobal, trustProject)
 
-  /** As [[load]], with the global path given explicitly (tests). */
-  def load(cwd: Path, explicit: Option[Path], global: Path, bundledGlobal: Boolean = false): Configuration =
+  /** As [[load]], with the global path given explicitly (tests). What a project config adds
+    * beyond its own files ([[ProjectTrust]]) is left out unless the user trusted it or
+    * `trustProject` says to take it anyway (`--approve-all`). */
+  def load(
+    cwd: Path,
+    explicit: Option[Path],
+    global: Path,
+    bundledGlobal: Boolean = false,
+    trustProject: Boolean = false,
+  ): Configuration =
     explicit.foreach: path =>
       if !Files.exists(path) then throw IllegalArgumentException(s"Explicit config does not exist: $path")
       if !Files.isRegularFile(path) then throw IllegalArgumentException(s"Explicit config is not a regular file: $path")
     val root = projectRoot(cwd)
+    val untrusted = !trustProject && ProjectTrust.pending(cwd, global.getParent.nn).isDefined
     val candidates =
       List(Origin.Global -> global) ++ root.map(Origin.Project -> projectPath(_)) ++ explicit.map(Origin.Explicit -> _)
     // A path named twice is read once, in the first role it appears in. That
@@ -280,10 +289,12 @@ object Config:
       .filter((_, p) => Files.isRegularFile(p))
       .distinctBy((_, p) => p.toAbsolutePath.normalize)
       .map((origin, path) => ConfigLayer.read(origin, path))
+      .map(layer => if untrusted && layer.origin == Origin.Project then ProjectTrust.withoutGrants(layer) else layer)
     val bundled = Option.when(bundledGlobal && !layers.exists(_.origin == Origin.Global))(ConfigLayer.bundled)
     // Keys are read separately, most specific first: they are secrets, not
     // settings, so they never take part in the layer merge.
-    val keys = KeyBindings.load(root.map(keysPath).toList :+ global.getParent.nn.resolve(KeysFile).nn)
+    val projectKeys = if untrusted then Nil else root.map(keysPath).toList
+    val keys = KeyBindings.load(projectKeys :+ global.getParent.nn.resolve(KeysFile).nn)
     Configuration.combine(bundled.toList ++ layers, keys)
 
   /** Create the global configuration and adjacent key bindings if they are

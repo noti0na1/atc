@@ -114,6 +114,25 @@ class ModelSuite extends munit.FunSuite:
       assertEquals(m.webSearch, false)
     finally m.close()
 
+  test("provider web search follows the sandbox mode: only full mode reaches the network"):
+    val dir = java.nio.file.Files.createTempDirectory("atc-search-mode").nn
+    val global = dir.resolve("global.json").nn
+    java.nio.file.Files.writeString(
+      global,
+      """{ "providers": { "p": { "api": "openai", "url": "http://127.0.0.1:9", "key": "k", "models": {
+        |  "a": { "webSearch": true }, "b": { "webSearch": true } } } } }""".stripMargin
+    )
+    val models = Models(Cli.Args(cwd = dir), Config.load(dir, None, global))
+    try
+      val a = models.client("a")
+      assertEquals(a.webSearch, true)
+      models.useMode(atc.perms.Mode.Local)
+      assertEquals(a.webSearch, false)
+      assertEquals(models.client("b").webSearch, false, "a client made in local mode starts without it")
+      models.useMode(atc.perms.Mode.Full)
+      assertEquals((a.webSearch, models.client("b").webSearch), (true, true))
+    finally models.close()
+
   test("reasoning between tags is told from the answer, even when a tag is split across chunks"):
     val split = OpenAIChatModel.TagSplitter("<thought>", "</thought>")
     val parts = List("<tho", "ught>plan", " it</th", "ought>The answer", " is 42.<", "b>").flatMap(split.push) ++
@@ -221,7 +240,7 @@ class ModelSuite extends munit.FunSuite:
       Config.projectPath(project),
       """{ "model": "typo", "classifiedModel": "p/a" }"""
     )
-    val configuration = Config.load(project, None, global)
+    val configuration = Config.load(project, None, global, trustProject = true)
     val models = Models(Cli.Args(cwd = project), configuration)
     val warned = List.newBuilder[String]
     assertEquals(models.configured("model", configuration.settings.model, warned += _), None)
