@@ -30,9 +30,13 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
   def width: Int = columns
   /** Terminal rows, footer included; a live region must stay shorter to be redrawn. */
   def height: Int = rows
-  def resized(): Unit =
-    columns = measureColumns()
-    rows = measureRows()
+  /** Measure the terminal again; whether its size changed. */
+  def resized(): Boolean =
+    val (c, r) = (measureColumns(), measureRows())
+    val changed = c != columns || r != rows
+    columns = c
+    rows = r
+    changed
 
   // ── writing ───────────────────────────────────────────────────────
 

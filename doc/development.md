@@ -1123,6 +1123,13 @@ not scroll the banner away. Its activity indicator replaces a separate spinner w
 terminal supports a status line. Idle state shows a short model, mode and directory label;
 menus and answer fields replace it with the applicable keyboard controls.
 Resize signals update the footer even while a menu has paused the turn's key reader.
+`Screen` measures the terminal once per resize, since the views ask for the width for every
+line. JLine's line reader and the jline-prompt menus take the resize signal while they read,
+so `Tui` measures again when a prompt or pop-up returns and redraws what depends on the size
+if it changed; otherwise output after a resize at the prompt would keep the old width. A live
+region redraws in place at the new width. Terminals that reflow on a narrower width (most
+do, VS Code's included) rewrap the region's old rows, so a shrink can leave some of them
+above the redrawn region.
 Every footer update goes through `StatusLine.draw`, which flushes the terminal writer after
 JLine's `Status.update`: JLine flushes the footer text but leaves the closing
 synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honours mode 2026

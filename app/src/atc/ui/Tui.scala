@@ -158,6 +158,14 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
 
   private def resized(): Unit = frame:
     screen.resized()
+    redrawSized()
+
+  /** JLine's reader and the jline-prompt menus take the terminal's resize signal while
+    * they read, so a size changed meanwhile is caught up with when they return. */
+  private def catchUpOnResize(): Unit = if screen.resized() then frame(redrawSized())
+
+  /** Redraw what depends on the terminal's size. */
+  private def redrawSized(): Unit =
     statusLine.refresh()
     thinking.resize()
     tool.resize()
@@ -381,6 +389,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
           beginBlock()
         try body
         finally frame:
+            catchUpOnResize()
             alerts.touch()
             blankLine()
             popupDepth -= 1
@@ -503,6 +512,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       finally
         screen.tail = "\n" // the reader echoed the line and moved to the next one
         alerts.touch()
+        catchUpOnResize()
     result
 
   /** Offer `text` as the predicted next message: ghost text at the prompt,
