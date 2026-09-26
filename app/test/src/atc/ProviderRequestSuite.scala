@@ -331,13 +331,24 @@ class ProviderRequestSuite extends munit.FunSuite:
         {"id":"vendor/big","object":"model","created":1,"owned_by":"x","name":"Big","context_length":262144},
         {"id":"local","object":"model","created":1,"owned_by":"x","max_model_len":32768},
         {"id":"plain","object":"model","created":1,"owned_by":"x"},
-        {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"}]}"""
+        {"id":"models/gemini-x","object":"model","created":1,"owned_by":"google"},
+        {"id":"deep","object":"model","owned_by":"deepseek","name":"Deep","context_window":1048576,
+         "max_output_tokens":393216,"effort":{"supported_levels":["low","high","max"],"default_level":"high"}}]}"""
     withServer((_, _, _) => (200, "application/json", list)): (url, requests) =>
       val models = ChatModel.listModels(endpoint("openai", url))
       assertEquals(requests(), List("GET /models"))
-      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x"))
-      assertEquals(models.map(_.settings.contextWindow.map(_.toInt)), List(Some(262144), Some(32768), None, None))
-      assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None))
+      assertEquals(models.map(_.ref), List("p/vendor/big", "p/local", "p/plain", "p/gemini-x", "p/deep"))
+      assertEquals(
+        models.map(_.settings.contextWindow.map(_.toInt)),
+        List(Some(262144), Some(32768), None, None, Some(1048576)),
+      )
+      assertEquals(models.map(_.displayName), List(Some("Big"), None, None, None, Some("Deep")))
+      val deep = models.last.settings
+      assertEquals(
+        (deep.efforts, deep.reasoning, deep.maxTokens),
+        (Some(List("low", "high", "max")), Some("high"), None)
+      )
+      assertEquals(models.head.settings.efforts, None)
       assertEquals(models.head.baseUrl, Some(url))
 
   test("an Anthropic provider's models come with their input limit, effort levels and thinking support"):

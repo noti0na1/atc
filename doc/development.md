@@ -686,8 +686,9 @@ or `reasoning` fields of a delta streams as reasoning whatever the style says.
 lists its own, each named `provider/model-id`: the last list each provider returned is kept
 in `~/.atc/model-lists.json`, a new one is fetched in the background once a session has
 started, and a provider that cannot be reached, or whose configured key is unset, is
-skipped. Anthropic's list supplies context windows and effort levels, OpenRouter's the
-context window. Without `-m` or `model`, a session starts with the model last chosen with
+skipped. Anthropic's and DeepSeek's lists supply context windows and effort levels (DeepSeek's
+also the default effort), OpenRouter's and vLLM's the context window. A listed output limit
+is not taken, since it would be sent with every request and reserved from the window. Without `-m` or `model`, a session starts with the model last chosen with
 `/model`.
 
 **First run.** An interactive start without `~/.atc/config.json` or `-c` runs `FirstRun`:

@@ -110,7 +110,10 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
     settings.thinking.map(on => Providers.thinkingSwitch(thinking && on))
 
   /** `GET /models`. Besides the id, reads the context window that OpenRouter
-    * (`context_length`) and vLLM (`max_model_len`) report, and OpenRouter's `name`. */
+    * (`context_length`), vLLM (`max_model_len`) and DeepSeek (`context_window`) report,
+    * the `name` OpenRouter and DeepSeek give, and the efforts DeepSeek lists with its
+    * default. A reported output limit is not taken: it would be sent with every request
+    * and reserved from the window. */
   private[llm] def listModels(): List[ModelSpec] =
     val options = RequestOptions.builder().timeout(Providers.ListTimeout).build()
     client.models().list(options).items().asScala.toList.map: m =>
@@ -118,9 +121,19 @@ private[llm] abstract class OpenAIShapedModel(spec: ModelSpec) extends SpecModel
       val id = m.id().stripPrefix("models/")
       val extra = m._additionalProperties().asScala
       def number(key: String) = extra.get(key).flatMap(_.asNumber().toScala).map(_.longValue)
-      val window = number("context_length").orElse(number("max_model_len")).flatMap(Tokens.from)
+      val window =
+        number("context_length").orElse(number("max_model_len")).orElse(number("context_window")).flatMap(Tokens.from)
       val name = extra.get("name").flatMap(_.asString().toScala).map(_.trim).filter(_.nonEmpty)
-      spec.listed(id, spec.settings.copy(contextWindow = window, displayName = name))
+      val effort = extra.get("effort").flatMap(_.asObject().toScala).map(_.asScala)
+      def level(v: JsonValue) = v.asString().toScala.map(_.toLowerCase(Locale.ROOT))
+      val efforts = effort.flatMap(_.get("supported_levels")).flatMap(_.asArray().toScala)
+        .map(_.asScala.toList.flatMap(level).filter(ModelConfig.ReasoningEfforts.contains)).filter(_.nonEmpty)
+      val reasoning = effort.flatMap(_.get("default_level")).flatMap(level).filter(e => efforts.forall(_.contains(e)))
+      val settings = spec.settings.copy(contextWindow = window, displayName = name)
+      spec.listed(
+        id,
+        settings.copy(efforts = efforts.orElse(settings.efforts), reasoning = reasoning.orElse(settings.reasoning))
+      )
 
   /** Send `request` with `effort` (the reasoning setting of a one-shot call).
     * When that was a guessed lowest effort (a non-thinking call) and the model
