@@ -42,6 +42,9 @@ final class SessionCommands(app: App):
   /** `/new`: also clears the window, so the new session starts on an empty screen. */
   def newSession(): Unit =
     if startOver() then
+      // The next start must not offer the conversation the user just discarded.
+      try Files.deleteIfExists(autoSaveFile)
+      catch case NonFatal(error) => Debug.trace(error)
       tui.clearScreen()
       tui.success("new session: conversation, task notes and session grants cleared")
 
@@ -121,10 +124,11 @@ final class SessionCommands(app: App):
     tui.suggest(None) // no ghost text while typing code
     tui.readBlock(app.prompt).getOrElse("")
 
-  /** `/save`. */
+  /** `/save`. A bare `/save` writes beside the automatic saves, outside the project, where a
+    * transcript cannot be committed with the repository or follow a symlink the repository planted. */
   def save(arg: String): Unit =
     val path =
-      if arg.isEmpty then cwd.resolve(s".atc/sessions/session-${System.currentTimeMillis()}.json").nn
+      if arg.isEmpty then autoSaveFile.resolveSibling(s"session-${System.currentTimeMillis()}.json").nn
       else sessionPath(arg)
     try
       SessionStore.write(path, agent.snapshot)

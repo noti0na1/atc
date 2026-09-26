@@ -495,12 +495,19 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     try readBuffer(promptText).map(_.stripTrailing)
     finally prompt.blockMode = false
 
+  /** Text the next prompt starts with, before any keys typed ahead. */
+  @volatile private var nextDraft = ""
+
+  /** Start the next prompt with `text`, for the user to edit or send. */
+  def draft(text: String): Unit = nextDraft = text
+
   private def readBuffer(promptText: String): Option[String] =
     var result: Option[String] = None
     var again = true
     while again do
       try
-        val typed = keys.takeTypeAhead()
+        val typed = nextDraft + keys.takeTypeAhead()
+        nextDraft = ""
         statusLine.draft = ""
         result = Some(prompt.read(styled(promptText, Cyan, Bold), typed))
         again = false

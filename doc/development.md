@@ -951,8 +951,12 @@ do not change the prompt prefix. Repository-derived scalar values are JSON-quote
 instruction and permission blocks are marked as data.
 
 `CompletionPolicy` selects tool execution, continuation or completion. Calls from truncated
-or blocked responses are not executed. Output limits add `Msg.Continuation`; server-side
-pauses can resume directly. Resume and tool-budget rejection counts bound repeated work.
+or blocked responses are not executed, and the assistant message says so even when it has
+text. Output limits add `Msg.Continuation`; server-side pauses can resume directly. A tool
+call the output limit cut gets its own continuation (`AgentMessages.truncatedToolCall`: the
+call did not run, split it), since the plain one made models send the same call again, and
+at most `Agent.MaxTruncatedCalls` retries. Resume and tool-budget rejection counts bound
+repeated work.
 The interactive tool budget may be extended by the user; non-interactive runs stop at it.
 
 `TurnOutcome` records why the loop ended. `Finished` means the model produced a final
@@ -991,7 +995,9 @@ and internal continuation messages remain distinct for context fitting and predi
 
 `ContextManager` estimates tokens from text and replay payloads, then calibrates against
 provider counts. It reserves output capacity and drops complete older exchanges at user
-boundaries. The latest exchange is retained. An unavoidable overflow produces a warning
+boundaries. The latest exchange is retained. A cut rewrites the first message, which ends
+every cached prompt prefix, so it goes down to three quarters of the budget
+(`ContextManager.CutTarget`) and the next rounds fit without another one. An unavoidable overflow produces a warning
 once per user turn. Changing models resets calibration.
 
 The estimator starts at approximately one token per four UTF-16 characters, plus message
@@ -1017,7 +1023,9 @@ between tool rounds, so a long tool loop can be summarized while it runs. It nev
 between a tool request and its results, which would make the history invalid, and never
 after the final answer, where a `-p` run would pay for a summary it never uses. It compares
 calibrated
-next-request usage with `contextWindow * autoCompactThreshold`. This fraction defaults to
+next-request usage with `contextWindow * autoCompactThreshold`, or with the input allowance
+(the window less the output reserve) when that is smaller, since trimming keeps every request
+within the allowance and a higher threshold would never be reached. This fraction defaults to
 `0.8`, accepts `[0, 1]`, and uses zero to disable automatic compaction. It is a non-policy
 setting merged with later-layer precedence, shown and changed by `/config`. When the exchange in
 progress is itself summarized (nothing fits the retention budget), a
@@ -1057,7 +1065,9 @@ Current user instructions and actual permissions take precedence over working no
 Submitted updates enter a concurrent queue. While a model is generating, an update cancels
 that request; while Scala is running, it waits for the call to return. Remaining calls in
 the old completion receive skipped results. `Conversation.steer` adds the correction as a
-user message, inserting an assistant bridge after tool results when needed. The next model
+user message, inserting an assistant bridge after tool results when needed. When the user
+interrupts the turn instead, queued text goes back to the prompt as a draft
+(`Agent.takeQueuedInput`, `Tui.draft`) rather than starting another turn. The next model
 request therefore sees the correction before choosing another operation.
 
 `SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
@@ -1072,7 +1082,8 @@ Interactive terminal sessions save on normal exit (`/quit`, its aliases, or Ctrl
 a checkpoint under `~/.atc/sessions/`. This works with read-only project directories and
 keeps different working directories separate. Startup offers to resume that checkpoint;
 bare `/resume` opens it later. Empty sessions leave it unchanged, so declining the startup
-offer and immediately quitting does not erase previous work. Conversation messages, pending
+offer and immediately quitting does not erase previous work; `/new` deletes it, so the next
+start does not offer the conversation the user discarded. Conversation messages, pending
 notes from `/run`, task notes or TODOs make a session non-empty. Manual `/save` files remain
 independent. Scripted runs and redirected input do not save or prompt automatically.
 
@@ -1280,7 +1291,7 @@ never waits for a compiler.
 | `/output 3 201` | Continue from a line in a long result |
 | `/task` | Show the task goal, constraints, completed work and remaining steps |
 | `/perms revoke` | Select a session grant to revoke (`/perms revoke 2`, `/perms revoke all`) |
-| `/save [file]` | Save to a new file (never overwrites); default location `.atc/sessions/` |
+| `/save [file]` | Save to a new file (never overwrites); default location `~/.atc/sessions/`, outside the project |
 | `/resume [file]` | Resume the last session for this directory, or restore a saved file |
 | `/ps`, `/kill [id|all]` | The processes the agent started with `spawn` |
 | `/reset` | Fresh REPL, killing those processes |

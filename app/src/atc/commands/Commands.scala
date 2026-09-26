@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
   * command line. [[SlashCommand]] is the table of commands; the `*Commands`
   * classes and [[ProvidersMenu]] implement them. */
 final class Commands(app: App):
-  import app.{host, models, tui}
+  import app.{agent, host, models, tui}
 
   private val modelCommands = ModelCommands(app)
   private val statusCommands = StatusCommands(app)
@@ -67,7 +67,11 @@ final class Commands(app: App):
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))
-    case Cmd.Kill => tui.println(Ansi.sanitize(host.killProcess(arg)))
+    case Cmd.Kill =>
+      val result = host.killProcess(arg)
+      tui.println(Ansi.sanitize(result))
+      // The agent's handles to those processes are dead now; it should hear why.
+      if result.startsWith("killed") then agent.noteProcessesKilled(result)
     case Cmd.Cost => statusCommands.showCost()
     case Cmd.Output => tui.showOutput(arg)
     case Cmd.Task => statusCommands.showTask()

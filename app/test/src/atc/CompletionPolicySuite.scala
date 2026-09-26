@@ -1,6 +1,6 @@
 package atc
 
-import atc.agent.CompletionPolicy
+import atc.agent.{AgentMessages, CompletionPolicy}
 import atc.llm.*
 
 class CompletionPolicySuite extends munit.FunSuite:
@@ -24,10 +24,10 @@ class CompletionPolicySuite extends munit.FunSuite:
 
   test("server pauses and output truncation select distinct resume steps"):
     val paused = CompletionPolicy(completion(reason = "pause_turn", stop = CompletionStop.Resume))
-    assertEquals(paused.next, CompletionPolicy.Next.Resume(needsContinuation = false))
+    assertEquals(paused.next, CompletionPolicy.Next.Resume(None))
 
     val truncated = CompletionPolicy(completion(reason = "max_tokens", stop = CompletionStop.Truncated))
-    assertEquals(truncated.next, CompletionPolicy.Next.Resume(needsContinuation = true))
+    assertEquals(truncated.next, CompletionPolicy.Next.Resume(Some(AgentMessages.truncationContinuation)))
 
   test("calls on resumable responses are stripped with native replay and warned about"):
     val native = NativeTurn("provider", "model", "payload")
@@ -41,8 +41,17 @@ class CompletionPolicySuite extends munit.FunSuite:
     assert(decision.message.text.contains("tool calls were not executed"), decision.message.text)
     assertEquals(decision.message.toolCalls, Nil)
     assertEquals(decision.message.native, None)
-    assertEquals(decision.next, CompletionPolicy.Next.Resume(needsContinuation = true))
+    assertEquals(decision.next, CompletionPolicy.Next.Resume(Some(AgentMessages.truncatedToolCall)))
     assert(decision.warnings.exists(_.contains("ignored 1 tool call")), decision.warnings.toString)
+    // with text before the cut call, the marker still says the call did not run
+    val withText = CompletionPolicy(completion(
+      text = "Writing the file now.",
+      calls = List(call()),
+      reason = "max_tokens",
+      stop = CompletionStop.Truncated,
+    ))
+    assert(withText.message.text.startsWith("Writing the file now."), withText.message.text)
+    assert(withText.message.text.contains("tool calls were not executed"), withText.message.text)
 
   test("a blocked response stops and never exposes accompanying calls"):
     val decision = CompletionPolicy(completion(
@@ -68,7 +77,7 @@ class CompletionPolicySuite extends munit.FunSuite:
     assert(decision.message.text.contains("stream ended"))
     assertEquals(decision.message.toolCalls, Nil)
     assertEquals(decision.message.native, None)
-    assertEquals(decision.next, CompletionPolicy.Next.Resume(needsContinuation = true))
+    assertEquals(decision.next, CompletionPolicy.Next.Resume(Some(AgentMessages.truncationContinuation)))
     assert(decision.warnings.exists(_.contains("finish marker")))
     val partial = CompletionPolicy(completion(
       text = "partial answer",

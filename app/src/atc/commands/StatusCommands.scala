@@ -27,7 +27,7 @@ final class StatusCommands(app: App):
         tui.println(policy.summary)
         list()
         if grants.nonEmpty then tui.info("Use /perms revoke to remove a session grant; /kill stops existing processes.")
-      case "revoke" :: "all" :: Nil => grants.foreach(revoke)
+      case "revoke" :: "all" :: Nil => if grants.isEmpty then list() else grants.foreach(revoke)
       case "revoke" :: number :: Nil =>
         number.toIntOption.flatMap(n => grants.lift(n - 1)) match
           case Some(grant) => revoke(grant)

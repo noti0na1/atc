@@ -137,7 +137,7 @@ object InputPredictor:
   private def cut(text: String): String =
     val t = text.trim
     if t.length <= MessageChars then t
-    else t.take(MessageChars / 2) + " […] " + t.takeRight(MessageChars / 2)
+    else AgentMessages.takeChars(t, MessageChars / 2) + " […] " + AgentMessages.takeRightChars(t, MessageChars / 2)
 
   /** The first non-empty line, unquoted and capped; empty answers and no-prediction markers are hidden. */
   def clean(answer: String): Option[String] =

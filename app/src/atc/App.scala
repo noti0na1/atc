@@ -84,8 +84,9 @@ final class App(args: Cli.Args, val tui: Tui):
       agent.recordUsage(Agent.ClassifiedChat, reply.usage)
       reply.text
   private val hostUi: HostUi = new HostUi:
+    // A `-p` run has nobody to ask, and its stdin may be a pipe whose data is not an answer.
     def askUser(question: String, options: List[String], multiple: Boolean): Option[String] =
-      withClockPaused(tui.askUser(question, options, multiple))
+      if args.prompt.isDefined then None else withClockPaused(tui.askUser(question, options, multiple))
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
@@ -220,7 +221,7 @@ final class App(args: Cli.Args, val tui: Tui):
     while running do
       val next = if agent.queuedInputCount > 0 then Some("") else tui.readLine(prompt)
       next match
-        case Some("") if agent.queuedInputCount > 0 => runTurn("")
+        case Some("") if agent.queuedInputCount > 0 => afterTurn(runTurn(""))
         case None =>
           Debug.log("input closed, exiting")
           running = false
@@ -228,7 +229,14 @@ final class App(args: Cli.Args, val tui: Tui):
         // Typed out of habit; not listed in /help.
         case Some(line) if App.QuitWords.contains(line.trim.toLowerCase(Locale.ROOT)) => running = false
         case Some(line) if line.trim.startsWith("/") => running = commands.run(line.trim)
-        case Some(line) => runTurn(line)
+        case Some(line) => afterTurn(runTurn(line))
+
+  /** After Ctrl-C, a correction typed during the turn goes back to the prompt: starting
+    * another turn with it would contact the model right after the user stopped it. */
+  private def afterTurn(outcome: TurnOutcome): Unit =
+    if outcome == TurnOutcome.Interrupted then
+      val queued = agent.takeQueuedInput()
+      if queued.nonEmpty then tui.draft(queued.mkString("\n"))
 
   /** The input prompt names the mode unless it is the full one. */
   def prompt: String = policy.mode match

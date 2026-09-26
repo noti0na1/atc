@@ -630,6 +630,51 @@ class AgentLoopSuite extends munit.FunSuite:
     agent.restore(saved)
     assertEquals(agent.history, saved.history)
 
+  test("automatic compaction runs when the output reserve leaves less room than the threshold"):
+    val big = "old findings " * 1000
+    val (_, session, ui, agent) = setup(ScriptedModel("m", Nil), Config(compactKeepRatio = 0.02))
+    val afterFirst = usageOf(agent, Msg.User("investigate"), Msg.Assistant(big, Nil, None))
+    // The next request sits at 70% of the window: under the 80% threshold, but over the
+    // 60% that a 40% output reserve leaves, so trimming would otherwise cut it.
+    val window = (afterFirst / 0.7).toInt
+    val model = ScriptedModel(
+      "m",
+      Seq(ScriptedModel.Reply(big), ScriptedModel.Reply("Earlier work found the bug."), ScriptedModel.Reply("fixed")),
+      contextWindow = Some(window),
+      maxOutputTokens = Some((window * 0.4).toInt),
+    )
+    agent.model = model
+    assertEquals(agent.turn(session, "investigate", never), TurnOutcome.Finished)
+    assertEquals(agent.turn(session, "fix it now", never), TurnOutcome.Finished)
+    assertEquals(model.i, 3)
+    assert(ui.warnings.exists(_.contains("compacted")), ui.warnings.toString)
+    assertEquals(model.seenHistories(2)(1), Msg.Assistant("Earlier work found the bug.", Nil, None))
+
+  test("input queued during a turn can be taken back in order, for the prompt after Ctrl-C"):
+    val (_, _, _, agent) = setup(ScriptedModel("m", Nil))
+    agent.submit("first")
+    agent.submit("  ")
+    agent.submit("second")
+    assertEquals(agent.takeQueuedInput(), List("first", "second"))
+    assertEquals(agent.queuedInputCount, 0)
+
+  test("a tool call cut by the output limit is reported as not run and retried a bounded number of times"):
+    def cut = ScriptedModel.Comp(Completion(
+      "Writing the file.",
+      List(ToolCall("cut", Prompts.ToolName, """{"code": "write(\"a.txt\", \"""")),
+      None,
+      TokenUsage(1, 1),
+      "max_tokens",
+      CompletionStop.Truncated,
+    ))
+    val model = ScriptedModel("m", Seq(cut, cut, cut, ScriptedModel.Reply("unused")))
+    val (_, session, ui, agent) = setup(model)
+    assertEquals(agent.turn(session, "write a big file", never), TurnOutcome.LimitReached)
+    assertEquals(model.i, 3)
+    assertEquals(agent.toolCalls, 0)
+    assertEquals(model.seenHistories(1).last, Msg.Continuation(AgentMessages.truncatedToolCall))
+    assert(ui.warnings.exists(_.contains("output limit inside a tool call")), ui.warnings.toString)
+
   test("automatic compaction failure falls back to whole-exchange trimming and is not retried at once"):
     val big = "old findings " * 1000
     val (_, session, ui, agent) = setup(ScriptedModel("m", Nil))

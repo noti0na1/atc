@@ -20,7 +20,7 @@ private[agent] final class Conversation:
 
   private def remember(input: String): Unit =
     if input.nonEmpty then
-      requests :+= input.take(MaxRequestChars)
+      requests :+= AgentMessages.takeChars(input, MaxRequestChars)
       if requests.size > RecentRequests + 1 then requests = requests.take(1) ++ requests.takeRight(RecentRequests)
 
   def queueNote(note: String): Unit = pendingNotes :+= note
