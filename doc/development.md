@@ -1424,7 +1424,8 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
 `ReplAssertions` checks snippets. Prefer `ProcessFixture` over host shell commands for
 portable process tests; reserve native commands for platform integration suites.
 `tests/atc_test.sh` uses temporary files and stubbed downloads/Java to test the Unix wrapper
-and checkout environment loading.
+and checkout environment loading; `tests/atc_test.ps1` does the same for the Windows wrapper
+without touching the registry.
 
 All Scala modules use explicit null checks where configured; Java APIs may require `.nn`.
 Use `inline` selectively for small predicates, primitive conversions and wrappers where
@@ -1488,11 +1489,28 @@ checks critical failures explicitly because Bash conditional callers can disable
 
 `atc dev <checkout>` copies an existing local distribution and records `dev|<checkout>`.
 It does not build. `atc update` replaces that development installation with a release.
-Windows updates replace the launchers and JARs together. Native Windows launchers transport
+The Windows wrapper, `atc.ps1` at the root, follows the Unix one. It runs under Windows
+PowerShell 5.1 and PowerShell 7 and stays ASCII, since Windows PowerShell reads a script
+without a byte order mark in the system code page. `setup` writes the wrapper and an `atc.cmd`
+shim (which starts it with `-ExecutionPolicy Bypass`) to `%USERPROFILE%\.atc\bin` and appends
+that directory to the user `Path` in the registry, keeping the value's `REG_EXPAND_SZ` type and
+its unexpanded `%VARIABLE%` entries, then broadcasts `WM_SETTINGCHANGE` so new terminals see it.
+It installs the two JARs and the release's `atc.ps1` launcher together in
+`%USERPROFILE%\.atc\jars`, requires SHA-256 digests for all three, and runs that launcher,
+which takes the JVM options, so the wrapper holds no JVM settings of its own. The marker is
+removed before the verified files are moved into place and written after, and a run without
+a complete install downloads the latest release first. Windows does not replace a JAR that a
+running ATC holds open, so an update checks that the files can be opened exclusively before
+downloading, and the startup offer is skipped while they cannot. The startup check has the
+Unix conditions. There is no `dev` command, startup cache or daily wrapper check;
+`atc self update` replaces the wrapper after parsing the download.
+
+Native Windows launchers transport
 Unicode application arguments through private `ATC_INTERNAL_*` environment variables;
 ATC removes those variables from tool-process environments.
 
 CI builds distributions and runs application tests on Linux, macOS and Windows. Linux
-checks formatting; Unix jobs run the Bash wrapper tests. Published release tags must match
+checks formatting; Unix jobs run the Bash wrapper tests, and the Windows job runs the
+PowerShell wrapper tests under Windows PowerShell and PowerShell 7. Published release tags must match
 `Versions.atc` (with an optional `v` prefix). The release job builds and uploads the two
 JARs and Windows launchers after the platform jobs succeed.

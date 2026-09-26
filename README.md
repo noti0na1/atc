@@ -113,19 +113,19 @@ a checkout instead, see
 <details>
 <summary><strong>Windows (best-effort support)</strong></summary>
 
-Windows support is best effort and has no installer or automatic updater yet. From the
-[latest release](https://github.com/noti0na1/atc/releases/latest), download `atc.ps1`,
-`atc.cmd`, `atc.jar` and `atc-lib.jar` into one directory. With JDK 17+ on `PATH`, run ATC
-from your project directory:
+Windows support is best effort. In PowerShell, with JDK 17+ installed, download the
+`atc.ps1` wrapper and run its setup, which downloads the latest release and checks it the
+same way:
 
 ```powershell
-Set-Location 'C:\path\to\your-project'
-& 'C:\path\to\atc\atc.ps1'
+irm https://raw.githubusercontent.com/noti0na1/atc/refs/heads/main/atc.ps1 -OutFile atc.ps1
+powershell -ExecutionPolicy Bypass -File .\atc.ps1 setup   # installs atc in %USERPROFILE%\.atc\bin and puts it on PATH
 ```
 
-Prefer the PowerShell launcher, which preserves Unicode and complex arguments; `atc.cmd` is
-a compatibility entrypoint for Command Prompt. To update, replace all four files with the
-assets of a newer release.
+In a new terminal, `atc` then runs ATC in the current directory and offers to upgrade when a
+newer release is out; `atc help` lists the wrapper's commands. If PowerShell refuses to run
+scripts, use `atc.cmd`, or allow local scripts with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 </details>
 
