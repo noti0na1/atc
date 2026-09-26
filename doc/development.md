@@ -1204,12 +1204,18 @@ of another command's name.
 During a turn, Enter submits a correction and unsent text is shown in the status line.
 Bracketed pastes are collected without submitting individual lines, and the footer shows the
 pasted text once, when the paste ends. The status line uses
-JLine `Status`, updates on phase/input changes, and reserves a terminal row for the active
-operation, elapsed time and model/mode/directory context. Spinner writes and status updates
-share the TUI lock. The footer is reserved before the first content line, so adding it does
-not scroll the banner away. Its activity indicator replaces a separate spinner when the
-terminal supports a status line. Idle state shows a short model, mode and directory label;
-menus and answer fields replace it with the applicable keyboard controls.
+JLine `Status`, updates on phase/input changes, and reserves a terminal row. Its left side
+holds the mode, then the model, its context window, its effort and whether it searches the
+web (`App.updateStatus`, run again after a model, mode or `/config` change and after each
+turn, when a model may have learned its window); its right side holds the working
+directory's name, which also names the window. During a turn the activity, the elapsed time
+and any queued messages sit beside it, so the fields keep their place; a narrow footer cuts
+the fields first.
+Spinner writes and status updates share the TUI lock. The footer is reserved before the
+first content line, so adding it does not scroll the banner away. Its activity indicator
+replaces a separate spinner when the terminal supports a status line. Menus and answer
+fields replace the whole line with the applicable keyboard controls, and an unsent
+correction with its text.
 Resize signals update the footer even while a menu has paused the turn's key reader.
 `Screen` measures the terminal once per resize, since the views ask for the width for every
 line; the footer is resized to that measurement as well. JLine's line reader takes the resize signal while it reads,

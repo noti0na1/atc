@@ -5,9 +5,10 @@ import org.jline.utils.{AttributedString, Status}
 
 import scala.jdk.CollectionConverters.*
 
-/** The footer (JLine `Status`) and the window title. The footer shows what the turn is
-  * doing, an unsent correction, or the keys a pop-up takes; between turns it shows the
-  * model, mode and directory. The title is `atc · <directory>`, marked while a turn runs
+/** The footer (JLine `Status`) and the window title. The footer's left side holds the
+  * mode, then the model and its settings; its right side holds the folder's name, with what
+  * a turn is doing beside it while one runs, so the fields keep their place. An unsent correction or
+  * the keys a pop-up takes replace the whole line. The title is `atc · <directory>`, marked while a turn runs
   * (`●`) or a pop-up waits during one (`?`), so a tab that needs the user stands out. The
   * terminal's own title is saved first (xterm's title stack) and restored by `close`.
   *
@@ -23,7 +24,12 @@ private[ui] final class StatusLine(
   private val footer = if plain then None else Option(Status.getStatus(terminal))
   private var footerSize = (0, 0)
   private var lastFooter = ""
+  /** The sandbox mode, the footer's first field, drawn in its own colour. */
+  private var mode = ""
+  /** The model and its settings, after the mode. */
   private var context = ""
+  /** What the footer's right end shows: the working directory's name. */
+  private var folder = ""
   private var titleBase = "atc"
   private var lastTitle = ""
   @volatile private var closed = false
@@ -44,8 +50,10 @@ private[ui] final class StatusLine(
   /** Whether there is a footer to show progress in (otherwise a spinner line shows it). */
   def shown: Boolean = footer.isDefined
 
-  def setContext(label: String, title: String): Unit =
+  def setContext(modeLabel: String, label: String, place: String, title: String): Unit =
+    mode = modeLabel
     context = label
+    folder = place
     titleBase = title
     refresh()
 
@@ -97,7 +105,7 @@ private[ui] final class StatusLine(
         if resized then
           status.resize(Size.of(width, screen.height))
           footerSize = dimensions
-        val text = screen.fit(Ansi.sanitize(label).replace('\n', ' ').replace('\t', ' '), 0)
+        val text = line
         if resized || text != lastFooter then
           screen.flush()
           StatusLine.draw(terminal, status, text)
@@ -110,16 +118,31 @@ private[ui] final class StatusLine(
     lastFooter = ""
     refresh()
 
-  private def label: String =
-    val elapsed = if busy() then s" ${Format.duration((System.nanoTime() - turnStarted) / 1e9)}" else ""
+  /** The footer's text, cut to one row. */
+  private[ui] def line: String =
+    def clean(text: String) = Ansi.sanitize(text).replace('\n', ' ').replace('\t', ' ')
     val queued = queuedInputs()
     val waiting = if queued > 0 then s" ${g.dot} ${Format.plural(queued, "message")} queued" else ""
-    if hint.nonEmpty then hint
-    else if draft.nonEmpty then s"Update: ${draft.takeRight((width - 30).max(10))} ${g.dot} Enter to send$waiting"
-    else if busy() then
-      val frame = g.spinner(((System.nanoTime() - turnStarted) / 100_000_000L % g.spinner.length).toInt)
-      s"$frame ${operation.take((width / 2).max(20))}$elapsed$waiting ${g.dot} $context"
-    else context
+    if hint.nonEmpty then screen.fit(clean(hint), 0)
+    else if draft.nonEmpty then
+      screen.fit(clean(s"Update: ${draft.takeRight((width - 30).max(10))} ${g.dot} Enter to send$waiting"), 0)
+    else
+      val activity =
+        if !busy() then ""
+        else
+          val frame = g.spinner(((System.nanoTime() - turnStarted) / 100_000_000L % g.spinner.length).toInt)
+          val elapsed = Format.duration((System.nanoTime() - turnStarted) / 1e9)
+          s"$frame ${operation.take((width / 2).max(20))} $elapsed$waiting   "
+      val fields = screen.styled(clean(mode), Ansi.Cyan, Ansi.Bold) + clean(s" ${g.dot} $context")
+      spread(fields, clean(activity) + clean(folder))
+
+  /** `left` at the start of the row and `right` at its end; `left` is cut first when both do not fit. */
+  private def spread(left: String, right: String): String =
+    val room = width - 1
+    val rightCells = Screen.displayWidth(right)
+    val shown = if Screen.displayWidth(left) + 2 + rightCells <= room then left else screen.fit(left, rightCells + 2)
+    if shown.isEmpty then screen.fit(right, 0)
+    else shown + " " * (room - Screen.displayWidth(shown) - rightCells).max(2) + right
 
   /** Restore the terminal's title and take the footer down; later updates draw nothing. */
   def close(): Unit =
@@ -135,5 +158,5 @@ private[atc] object StatusLine:
     * then keeps rendering frozen until something else flushes, so a footer repainted from the
     * input-poll clock stalled the whole window for up to a poll interval per repaint. */
   private[atc] def draw(terminal: Terminal, status: Status, text: String): Unit =
-    status.update(List(AttributedString(text)).asJava)
+    status.update(List(AttributedString.fromAnsi(text)).asJava)
     terminal.writer().flush()
