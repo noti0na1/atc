@@ -98,7 +98,7 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     * above a footer drawn again. A plain terminal has nothing to clear. */
   def clearScreen(): Unit = if !plain then
     frame:
-      screen.writeStyle(s"${Ansi.Esc}[H${Ansi.Esc}[2J${Ansi.Esc}[3J")
+      screen.writeStyle(s"${screen.beforeClear}${Ansi.Esc}[H${Ansi.Esc}[2J${Ansi.Esc}[3J")
       screen.tail = "\n\n"
       statusLine.redraw()
 

@@ -1224,6 +1224,11 @@ synchronized-update sequence (`ESC[?2026l`) buffered, and a terminal that honour
 (xterm.js in VS Code, iTerm2, kitty, Ghostty, WezTerm) freezes rendering until it arrives.
 Without that flush, a footer repainted from the input-poll clock stalled the window for up to
 a poll interval per repaint (`TuiSuite` checks the closer is written).
+Before a clear (`/new`, Ctrl-L), `Screen.beforeClear` lifts the footer's scroll region and
+erases its row. VS Code runs xterm.js with `scrollOnEraseInDisplay`, which moves a cleared
+window into the scrollback instead of erasing it, and only the rows inside the scroll region:
+the old footer stayed on the last row, and the line feeds with which JLine reserves the row
+again scrolled it up into view, so the footer showed twice.
 ASCII mode also selects ASCII menu markers and control separators.
 Streaming text is flushed at the end of each incoming update. Nested rendering helpers share
 that flush instead of flushing every gutter and style fragment. Live previews compare their

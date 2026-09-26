@@ -252,6 +252,18 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
       true
     ): Widget,
   )
+  // Ctrl-L: JLine clears the window and redraws the footer, which VS Code shows twice unless
+  // the footer's scroll region is lifted first (see `Screen.beforeClear`).
+  if !plain then
+    val clear = reader.getWidgets.get(LineReader.CLEAR_SCREEN).nn
+    reader.getWidgets.put(
+      LineReader.CLEAR_SCREEN,
+      (() =>
+        terminal.writer().write(screen.beforeClear)
+        clear.apply()
+      ): Widget,
+    )
+
   if alerts.focusSupported then
     reader.getWidgets.put(LineReader.FOCUS_IN, (() => { alerts.focusChanged(true); true }): Widget)
     reader.getWidgets.put(LineReader.FOCUS_OUT, (() => { alerts.focusChanged(false); true }): Widget)

@@ -68,6 +68,12 @@ private[ui] final class Screen(val terminal: Terminal, val plain: Boolean, val g
     out.print(s)
     outputDirty = true
 
+  /** What goes before clearing the window: the footer's scroll region lifted and its row
+    * erased. VS Code moves a cleared window into the scrollback instead of erasing it, and
+    * only the rows inside the scroll region, so the old footer stayed below the cleared rows
+    * and the redrawn footer scrolled it up into view: the footer showed twice. */
+  def beforeClear: String = s"${Ansi.Esc}[r${Ansi.Esc}[$height;1H${Ansi.Esc}[2K"
+
   def atLineStart: Boolean = tail.endsWith("\n")
   def ensureNewline(): Unit = if !atLineStart then write("\n")
   /** Make sure the previous content is followed by an empty line. */

@@ -19,6 +19,15 @@ class PromptReaderSuite extends munit.FunSuite:
     val alerts = Alerts(terminal, plain = false, _ => ())
     (PromptReader(screen, Files.createTempDirectory("atc-prompt").nn.resolve("history").nn, alerts), terminal, out)
 
+  test("Ctrl-L lifts the footer's scroll region and erases its row before clearing"):
+    val (prompt, terminal, out) = promptOn("\f\u0004")
+    try
+      intercept[org.jline.reader.EndOfFileException](prompt.read("> ", ""))
+      val text = out.toString(UTF_8)
+      val lifted = text.indexOf("\u001b[r\u001b[24;1H\u001b[2K")
+      assert(lifted >= 0 && lifted < text.indexOf("\u001b[2J"), text.replace("\u001b", "ESC"))
+    finally terminal.close()
+
   test("the ghost suggestion is not left on the prompt line when the read ends"):
     val (prompt, terminal, out) = promptOn("\u0004")
     prompt.suggestion = Some("rename word_count")
