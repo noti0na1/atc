@@ -2,13 +2,13 @@ package atc
 
 import atc.agent.{Agent, AgentEnvironment, InputPredictor, TurnOutcome}
 import atc.commands.{Commands, SlashCommand}
-import atc.config.{Config, Configuration, ModelConfig}
+import atc.config.{Config, Configuration}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.ui.{Format, Notifier, Tui}
+import atc.ui.{Notifier, Tui}
 
 import java.nio.file.Path
 import java.util.Locale
@@ -130,18 +130,12 @@ final class App(args: Cli.Args, val tui: Tui):
     if args.prompt.isEmpty then tui.notifier = Notifier.fromSetting(settings.notifications)
     predictor.enabled = settings.predictInput && canPredict
     if !predictor.enabled then predictor.invalidate()
-    updateStatus() // web search may have changed
 
-  /** The footer: the mode, then the model, its context window, its effort and whether it
-    * searches the web, and at its right end the directory's name, which also names the window. */
+  /** Show the model, its effort, the mode and the directory in the status line. */
   def updateStatus(): Unit =
     val directory = Option(cwd.getFileName).fold(PlatformPath.display(cwd))(_.toString)
-    val model = agent.model
-    val effort = Option.when(model.efforts.nonEmpty)(s"effort ${model.effort.getOrElse(ModelConfig.DefaultEffort)}")
-    val window = model.contextWindow.map(w => s"ctx ${Format.count(w)}")
-    val search = s"web search ${if model.webSearch then "on" else "off"}"
-    val name = models.catalog.label(models.catalog.find(model.ref))
-    tui.setContext(policy.mode.label, List(name) ++ window ++ effort :+ search, directory)
+    val effort = agent.model.effort.fold("")(e => s" ($e)")
+    tui.setContext(models.catalog.label(models.catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
   updateStatus()
 
   // ── commands ──────────────────────────────────────────────────────
@@ -220,7 +214,6 @@ final class App(args: Cli.Args, val tui: Tui):
         context.window,
         outcome,
       )))
-      updateStatus() // a model can learn its context window during a turn
       predictor.start()
 
   private def interactive(): Unit =
