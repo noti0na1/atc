@@ -324,6 +324,15 @@ class LayerSuite extends munit.FunSuite:
     assert(checkpoints(GrantCwd, """{ "checkpoints": false }"""), "a project may not switch them off")
     assert(checkpoints("""{ "checkpoints": false }""", """{ "checkpoints": true }"""), "a project may switch them on")
 
+  test("a project layer may make the command sandbox stricter, never weaker"):
+    def sandbox(global: String, project: String = "") =
+      World(global = global, project = project).settings.commandSandbox
+    assertEquals(sandbox(""), "auto")
+    assertEquals(sandbox(GrantCwd, """{ "commandSandbox": "required" }"""), "required")
+    assertEquals(sandbox(GrantCwd, """{ "commandSandbox": "off" }"""), "auto")
+    assertEquals(sandbox("""{ "commandSandbox": "off" }"""), "off")
+    assertEquals(sandbox("""{ "commandSandbox": "off" }""", """{ "commandSandbox": "auto" }"""), "auto")
+
   test("the starting project config grants the project and protects its history"):
     val w = World(global = Config.globalTemplate, project = Config.projectTemplate)
     assertEquals(w.access("src/A.scala"), Access.Write)

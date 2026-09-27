@@ -3,6 +3,7 @@ package atc
 import atc.agent.{Agent, AgentEnvironment, InputPredictor, ToolCallHooks, TurnOutcome}
 import atc.checkpoint.Checkpoints
 import atc.commands.{Commands, SlashCommand}
+import atc.confine.CommandSandbox
 import atc.config.{Config, Configuration}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
@@ -91,7 +92,10 @@ final class App(args: Cli.Args, val tui: Tui):
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
-  val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables)
+  /** How commands run: confined by the platform's sandbox, refused, or unconfined (config `commandSandbox`). */
+  val commandSandbox: CommandSandbox = CommandSandbox.detect(config.commandSandbox)
+  val host: Host =
+    Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, commandSandbox)
 
   /** Records the files the agent changes in each turn, for `/undo` (config
     * `checkpoints`). A `-p` run has nobody to undo anything. */
@@ -104,7 +108,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   val agent: Agent = Agent(
     config,
-    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty),
+    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty, commandsConfined = commandSandbox.confined),
     policy,
     tui,
     initialModel,
@@ -191,7 +195,8 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
+      ) ++ Option.unless(commandSandbox.confined)("commands" -> commandSandbox.describe)
+        ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
         ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
         ++ Option.when(predictor.enabled)("Tab or → accept a suggestion")).mkString(" · "),

@@ -224,7 +224,8 @@ installs would test the original sources.
 | 0 | This document | Done |
 | 1 | Spikes: macOS profiles, Linux bubblewrap, checkpoint store, evaluator process | Done (September 2026) |
 | 2 | L3 checkpoints, turn summary, `/undo` | Done; see [Checkpoints](development.md#checkpoints) |
-| 3 | L2 on macOS and Linux, local mode without network for commands, protected paths, proxy | Planned |
+| 3 | L2 on macOS and Linux, local mode without network for commands, protected paths | Done; see [Command sandbox](development.md#command-sandbox) |
+| 3b | Host proxy that enforces `hosts` for commands in full mode | Planned |
 | 4 | Capability-derived process authority in the API | Planned |
 | 5 | L1 evaluator on macOS, then Linux | Planned |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |

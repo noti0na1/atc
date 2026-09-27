@@ -23,23 +23,36 @@ final class PathPattern private (val raw: String, private val kind: PathPattern.
   import PathPattern.*
 
   def matches(p: Path): Boolean = kind match
-    case Kind.Component(glob) => (0 until p.getNameCount).exists(i => glob.matcher(p.getName(i).toString).matches())
-    case Kind.Anchored(root, matchers) =>
+    case Kind.Component(glob, _) => (0 until p.getNameCount).exists(i => glob.matcher(p.getName(i).toString).matches())
+    case Kind.Anchored(root, matchers, _) =>
       p.startsWith(root) && {
         val relative = if p == root then "" else PlatformPath.portable(root.relativize(p))
         matchers.exists(_.matcher(relative).matches())
       }
     case Kind.Exact(path) => p == path || p.startsWith(path)
 
+  /** The pattern's shape, for rendering it into an OS sandbox profile. */
+  def form: Form = kind match
+    case Kind.Component(_, glob) => Form.Component(glob)
+    case Kind.Anchored(root, _, glob) => Form.Anchored(root, glob)
+    case Kind.Exact(path) => Form.Exact(path)
+
   override def toString: String = raw
 
 object PathPattern:
   private enum Kind:
     /** Matched against each name of the path; case-insensitive where file names are. */
-    case Component(glob: Pattern)
+    case Component(glob: Pattern, source: String)
     /** `root` is an absolute, real path; matchers are applied to the path relative to it. */
-    case Anchored(root: Path, matchers: List[Pattern])
+    case Anchored(root: Path, matchers: List[Pattern], source: String)
     case Exact(path: Path)
+
+  /** A pattern as a sandbox profile sees it: a real path and its subtree, a glob
+    * relative to a real path (slash-separated), or a glob on any single name. */
+  enum Form:
+    case Exact(path: Path)
+    case Anchored(root: Path, glob: String)
+    case Component(glob: String)
 
   private val globChars = "*?[{"
 
@@ -53,7 +66,7 @@ object PathPattern:
     if path == "." then new PathPattern(pattern, Kind.Exact(PlatformPath.canonical(base)))
     else if !PlatformPath.hasSeparator(path) then
       if !globChars.exists(path.contains(_)) then requireValid(PlatformPath.validationError(path))
-      new PathPattern(pattern, Kind.Component(PathGlob.pattern(path)))
+      new PathPattern(pattern, Kind.Component(PathGlob.pattern(path), path))
     else
       // Windows refuses `*`, `?` and several other glob characters in a Path,
       // so never hand the glob-bearing suffix to Paths.get. Split it as text,
@@ -65,7 +78,7 @@ object PathPattern:
       val literal = Paths.get(PlatformPath.native(prefix)).nn
       val root = if literal.isAbsolute then literal else base.resolve(literal).nn
       if rest.isEmpty then new PathPattern(pattern, Kind.Exact(PlatformPath.canonical(root)))
-      else new PathPattern(pattern, Kind.Anchored(PlatformPath.canonical(root), globOrDescendantMatchers(rest)))
+      else new PathPattern(pattern, Kind.Anchored(PlatformPath.canonical(root), globOrDescendantMatchers(rest), rest))
 
   private def requireValid(error: Option[String]): Unit =
     error.foreach(reason => throw IllegalArgumentException(s"invalid Windows path: $reason"))

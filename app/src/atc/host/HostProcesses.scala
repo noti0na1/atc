@@ -1,6 +1,7 @@
 package atc.host
 
 import atc.{LauncherEnvironment, ScalaSource}
+import atc.confine.CommandSandbox
 import atc.lib.*
 import atc.perms.ScopeId
 import atc.platform.Platform
@@ -39,7 +40,12 @@ private[host] trait HostProcesses:
 
   /** A command line ready to start: parsed, authorized, and represented as one
     * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
-  private final case class Prepared(pbs: List[ProcessBuilder], stageLines: List[String], line: String)
+  private final case class Prepared(
+    pbs: List[ProcessBuilder],
+    stageLines: List[String],
+    line: String,
+    launch: CommandSandbox.Launch,
+  )
 
   private def withArgs(command: String, args: Seq[String]): CommandLine.Pipeline =
     val pipeline = CommandLine.parsePipeline(command)
@@ -120,7 +126,9 @@ private[host] trait HostProcesses:
     stdoutFile.foreach: path =>
       val file = path.toFile
       pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
-    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line)
+    // File grants travel with the file system capability, so its scope decides what the command may touch.
+    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), dir)
+    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
     if options.timeoutMs <= 0 then
@@ -131,16 +139,19 @@ private[host] trait HostProcesses:
     val live = new Processes.LiveOutput:
       def begin(): Unit = port.commandRunning(prepared.line)
       def output(text: String): Unit = port.commandOutput(text)
-    output.whileCommandRuns(
-      Processes.run(
-        prepared.pbs,
-        prepared.stageLines,
-        prepared.line,
-        options.timeoutMs,
-        Some(live),
-        options.stdin
+    try
+      output.whileCommandRuns(
+        Processes.run(
+          prepared.pbs,
+          prepared.stageLines,
+          prepared.line,
+          options.timeoutMs,
+          Some(live),
+          options.stdin,
+          prepared.launch.start,
+        )
       )
-    )
+    finally prepared.launch.cleanup()
 
   // The registry is per host; ids are never reused within a session.
   private val spawned = mutable.LinkedHashMap[Int, ProcessImpl]()
@@ -154,22 +165,33 @@ private[host] trait HostProcesses:
     spawned.synchronized:
       reapProcesses()
       if spawned.size >= Host.MaxProcesses then
+        prepared.launch.cleanup()
         throw IllegalStateException(
           s"spawn: ${Host.MaxProcesses} processes are already running (${spawned.keys.map(id => s"p$id").mkString(", ")}); kill() one first"
         )
       nextProcessId += 1
       val id = nextProcessId
       val port = output
-      val managed = Processes.ManagedProcess.start(
-        prepared.pbs,
-        prepared.stageLines,
-        prepared.line,
-        options.stdin,
-        closeStdinAfter = false,
-        live = None,
-        keepHead = false,
-        onExit = code => port.processExited(id, code),
-      )
+      val managed =
+        try
+          Processes.ManagedProcess.start(
+            prepared.pbs,
+            prepared.stageLines,
+            prepared.line,
+            options.stdin,
+            closeStdinAfter = false,
+            live = None,
+            keepHead = false,
+            onExit = code =>
+              port.processExited(id, code)
+              prepared.launch.cleanup()
+            ,
+            starter = prepared.launch.start,
+          )
+        catch
+          case e: Throwable =>
+            prepared.launch.cleanup()
+            throw e
       val handle = ProcessImpl(id, managed, output, scopeOf(ex), policy)
       spawned(id) = handle
       output.processStarted(id, prepared.line)

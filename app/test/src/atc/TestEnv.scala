@@ -1,5 +1,6 @@
 package atc
 
+import atc.confine.CommandSandbox
 import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
@@ -23,6 +24,7 @@ final class TestEnv(
   prefix: String = "atc-test",
   denyCommands: List[String] = Nil,
   denyHosts: List[String] = Nil,
+  commandSandbox: CommandSandbox = CommandSandbox.Unconfined("tests"),
 ):
   val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
 
@@ -104,7 +106,7 @@ final class TestEnv(
         case Nil => None
     def showTodos(items: List[Todo]): Unit = shownTodos = items
 
-  val host: Host = Host(policy, root, output, llm, ui)
+  val host: Host = Host(policy, root, output, llm, ui, commandSandbox = commandSandbox)
 
   /** Root capabilities for calling the host directly from tests. */
   given io: IOCap = new IOCap()

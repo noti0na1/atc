@@ -1,0 +1,139 @@
+package atc.confine
+
+import atc.confine.SandboxPlan.{Level, Restriction, Target}
+import atc.platform.{PathGlob, PlatformPath}
+
+import java.nio.file.attribute.BasicFileAttributes
+import java.nio.file.{FileVisitResult, Files, LinkOption, Path, Paths, SimpleFileVisitor}
+import java.util.concurrent.TimeUnit
+import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
+
+/** Linux: commands run under bubblewrap with new user, PID, IPC and (without network)
+  * network namespaces. The root file system is mounted read-only; `/tmp` and the home
+  * directory are replaced by empty file systems, and the plan's roots are mounted back
+  * over them, read-only or writable. Restrictions are mounted last: an empty read-only
+  * file system over a hidden directory, `/dev/null` over a hidden file, and a read-only
+  * mount over a read-only path. Mounts need existing paths, so a glob restriction is
+  * applied to the matches that exist when the command starts, and a restricted path
+  * created later is not covered. */
+private[atc] object Bubblewrap:
+  /** Whether `bwrap` runs here: missing, or refused where unprivileged user namespaces are off. */
+  def available: Boolean =
+    try
+      val process = ProcessBuilder(
+        "bwrap",
+        "--ro-bind",
+        "/",
+        "/",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--die-with-parent",
+        "--",
+        "true"
+      ).redirectErrorStream(true).start().nn
+      process.getInputStream.nn.readAllBytes()
+      process.waitFor(10, TimeUnit.SECONDS) && process.exitValue == 0
+    catch case NonFatal(_) => false
+
+  /** Directories not searched for glob matches: dependencies and build output. */
+  val SkippedDirs: Set[String] = Set(
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "site-packages",
+    "target",
+    "out",
+    "build",
+    "dist",
+    "__pycache__",
+    ".gradle",
+    ".bloop",
+    ".metals",
+    ".bsp"
+  )
+
+  /** Entries visited per root when searching for glob matches. */
+  val MaxEntries: Int = 50_000
+
+  /** The command line prefix that runs a command under `plan`. The command's
+    * temporary directory is the sandbox's own `/tmp`. */
+  def prefix(plan: SandboxPlan): List[String] =
+    val args = List.newBuilder[String]
+    args ++= List("bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+    if Files.isDirectory(plan.home) then args ++= List("--tmpfs", plan.home.toString)
+    val binds =
+      plan.readable.filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
+        (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
+    for (flag, path) <- binds.sortBy(_._2.getNameCount) do args ++= List(flag, path.toString, path.toString)
+    for (level, path) <- masks(plan).sortBy(_._2.getNameCount) do args ++= mask(level, path)
+    for socket <- agentSockets if Files.exists(socket, LinkOption.NOFOLLOW_LINKS) do args ++= mask(Level.Hidden, socket)
+    args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
+    if !plan.network then args += "--unshare-net"
+    args ++= List("--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
+    args.result()
+
+  /** Where agents and daemons that act for the user listen. */
+  private def agentSockets: List[Path] =
+    Option(System.getenv("XDG_RUNTIME_DIR")).map(Paths.get(_).nn).toList ++
+      List(Paths.get("/run/docker.sock").nn, Paths.get("/var/run/docker.sock").nn)
+
+  private def mask(level: Level, path: Path): List[String] =
+    val shown = path.toString
+    level match
+      case Level.ReadOnly => List("--ro-bind", shown, shown)
+      case _ if Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) => List("--tmpfs", shown, "--remount-ro", shown)
+      case _ => List("--ro-bind", "/dev/null", shown)
+
+  /** The existing paths each restriction covers, outermost first. */
+  def masks(plan: SandboxPlan): List[(Level, Path)] =
+    val exact = plan.restrictions.collect:
+      case Restriction(level, Target.Exact(path)) if Files.exists(path, LinkOption.NOFOLLOW_LINKS) => (level, path)
+    val globs = plan.restrictions.collect:
+      case Restriction(level, Target.Component(glob)) =>
+        val pattern = PathGlob.pattern(glob)
+        (level, (p: Path) => Option(p.getFileName).exists(name => pattern.matcher(name.toString).matches()))
+      case Restriction(level, Target.Anchored(root, glob)) =>
+        val pattern = PathGlob.pattern(glob)
+        (
+          level,
+          (p: Path) =>
+            p.startsWith(root) && p != root && pattern.matcher(PlatformPath.portable(root.relativize(p).nn)).matches()
+        )
+    val found =
+      if globs.isEmpty then Nil
+      else
+        (plan.writable ++
+          plan.readable.filter(r => plan.writable.exists(r.startsWith(_)) || r.startsWith(plan.project)))
+          .distinct.flatMap(root => search(root, globs))
+    (exact ++ found).distinct
+
+  /** Walk `root` and return the paths a glob restriction matches, without descending below a match. */
+  private def search(root: Path, globs: List[(Level, Path => Boolean)]): List[(Level, Path)] =
+    val found = List.newBuilder[(Level, Path)]
+    var visited = 0
+    def check(path: Path): Boolean =
+      val hits = globs.filter(_._2(path))
+      // The strictest level wins when several globs match one path.
+      hits.map(_._1).minByOption(_.ordinal).foreach(level => found += ((level, path)))
+      hits.nonEmpty
+    try
+      Files.walkFileTree(
+        root,
+        new SimpleFileVisitor[Path]:
+          override def preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult =
+            visited += 1
+            if visited > MaxEntries then FileVisitResult.TERMINATE
+            else if dir != root && (check(dir) || SkippedDirs.contains(dir.getFileName.toString)) then
+              FileVisitResult.SKIP_SUBTREE
+            else FileVisitResult.CONTINUE
+          override def visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult =
+            visited += 1
+            check(file)
+            if visited > MaxEntries then FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+          override def visitFileFailed(file: Path, e: java.io.IOException): FileVisitResult = FileVisitResult.CONTINUE
+      )
+    catch case NonFatal(_) => ()
+    found.result()

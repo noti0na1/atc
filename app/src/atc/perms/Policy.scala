@@ -177,6 +177,9 @@ final class Policy(
     s.chain.flatMap(_.fileGrants).collect { case (granted, access) if p == granted || p.startsWith(granted) => access }
       .reduceOption(_.max(_)).getOrElse(Access.None)
 
+  /** The file grants in force in `scopeId`: its own, its ancestors' and the session's. */
+  def fileGrants(scopeId: ScopeId): List[(Path, Access)] = scope(scopeId).chain.flatMap(_.fileGrants)
+
   /** Effective permission in `scopeId`. `p` must be canonical. */
   def effective(scopeId: ScopeId, p: Path): Perm =
     val currentScope = scope(scopeId)

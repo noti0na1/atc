@@ -117,6 +117,7 @@ requests are echoed. It needs no API key or network connection.
 | `platform/` | OS behavior, path normalization and portable path globs |
 | `sandbox/` | Compiler setup, REPL evaluation, validation, class loading and interruption |
 | `checkpoint/` | Snapshots of the project in a git store outside it, turn records and `/undo` |
+| `confine/` | OS sandboxes for commands: the plan derived from the policy, Seatbelt and bubblewrap |
 | `ui/` | JLine input, streaming output, Markdown and syntax highlighting |
 
 One turn follows this path:
@@ -374,8 +375,9 @@ resources are hidden so REPL instrumentation does not redefine the shared API cl
 
 The host checks permissions at each operation. Scope checks apply even when a locked rule
 already determines access. Command and host deny rules remain effective inside temporary
-scopes and after session grants. External commands run with the user's OS privileges;
-ATC's file and HTTP permissions do not constrain the internals of those commands.
+scopes and after session grants. External commands run in the OS sandbox described under
+[Command sandbox](#command-sandbox) where the platform provides one, and with the user's
+privileges otherwise.
 
 ## The sandbox
 
@@ -609,6 +611,70 @@ response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400
 `httpRequest` returns raw status and body. Classified request handling retains subsequent
 transport and response failures within `Classified`.
 
+## Command sandbox
+
+`CommandSandbox` confines every stage of every command the agent starts: under
+`/usr/bin/sandbox-exec` with a generated Seatbelt profile on macOS, under bubblewrap on Linux.
+`commandSandbox` chooses `auto` (the default: confine where the platform can, otherwise run
+unconfined and name the reason in the banner), `required` (refuse every command where it
+cannot) or `off`; a project layer may only make it stricter. `CommandSandbox.detect` probes
+the backend once at start: `sandbox-exec` fails inside another Seatbelt sandbox, and
+bubblewrap needs unprivileged user namespaces, which Ubuntu 24.04 restricts. Windows has no
+backend yet; [the isolation design](isolation.md) plans the Anthropic sandbox runtime there.
+
+`HostProcesses.prepare` builds a `SandboxPlan` for each command from the policy, the scope of
+the file system capability passed to `exec` or `spawn`, and the mode, and the backend
+rewrites each stage's command line and environment. The plan lists concrete paths:
+
+- Readable roots: exact-path rules that grant read access, the scope's file grants, and a
+  toolchain bundle (JDKs, build tool homes, dependency caches, version managers and the
+  directories on the `PATH`, when they exist under the home directory, plus `java.home` and
+  `JAVA_HOME`). Everything else under the home directory is unreadable; system directories
+  are the backend's.
+- Writable roots: the same sources with write access, and a cache directory the sandbox owns
+  (`~/Library/Caches/atc-sandbox`, `~/.cache/atc-sandbox`). Tool caches in the home
+  directory stay read-only, because unsandboxed tools later load code from them.
+- Restrictions, applied after the roots: every rule without access hides its paths, every
+  classified rule hides their content, every read ceiling makes them read-only. An exact
+  path is evaluated in the scope, so a grant can lift its read ceiling; a glob keeps its
+  restriction regardless, so the plan never grants more than the policy. `.git` is
+  read-only unless the policy lets it be written, in which case only its hooks and
+  configuration are; `.atc`, `.vscode`, `.idea` and `.envrc` in every writable root are
+  read-only; the home directory's credential files and agent sockets are hidden.
+
+The Seatbelt profile denies by default, imports `system.sb`, and allows `stat` everywhere,
+which canonicalization needs. Its rules match the real path on disk, so a symbolic link or a
+differently cased spelling resolves before a rule applies, and a hard link to a file outside
+the writable roots cannot be created. Glob restrictions become case-insensitive regular
+expressions where file names are; dependency directories (`node_modules`, `.venv`, `venv`,
+`site-packages`) are exempt from them, since packages ship certificate bundles that `*.pem`
+would otherwise hide. A renamed parent could swap a protected path out, so parents of
+protected paths inside writable roots cannot be unlinked. Launch Services, the pasteboard
+and the keychain services stay unreachable. Each command gets a private temporary
+directory under `/private/tmp`, short because sbt's socket path must fit 104 bytes, and JVMs
+get it as `java.io.tmpdir`, since the macOS JVM ignores `TMPDIR`.
+
+bubblewrap mounts the root file system read-only, replaces `/tmp` and the home directory with
+empty file systems, mounts the roots back, and then the restrictions: an empty read-only file
+system over a hidden directory, `/dev/null` over a hidden file, a read-only mount over a
+read-only path. Mounts need existing paths, so glob restrictions apply to the matches found
+by a walk of the writable roots when the command starts (at most 50000 entries, skipping
+dependency and build directories), and a restricted path that does not exist yet is not
+covered. New user, PID and IPC namespaces, `--die-with-parent` and `--new-session` end the
+process tree with the command. Linux delivers the parent-death signal when the *thread* that
+started the process exits, so `CommandSandbox` starts processes on one long-lived thread.
+
+Networking follows the mode. Without network permission, Seatbelt denies all networking and
+bubblewrap adds a network namespace. With it, Seatbelt still denies Unix sockets (except the
+DNS resolver's) and loopback connections, since a daemon outside the sandbox, such as a Mill
+or Gradle server, an IDE or a credential agent, acts with the user's full authority; build
+tools therefore run without their daemon (`./mill --no-daemon`), and the system prompt says
+so. On Linux a command with network permission shares the host's network namespace until the
+proxy that enforces `hosts` for commands lands. Every confined command loses `SSH_AUTH_SOCK`,
+`GPG_AGENT_INFO` and `DOCKER_HOST`, and gets `TMPDIR`, `TMPPREFIX`, and cache locations for
+matplotlib, uv and sbt inside the sandbox. `ConfinementSuite` checks the plan and runs real
+commands under the platform's backend.
+
 ## Checkpoints
 
 `Checkpoints` records what the agent changes in the project so that `/undo` can revert it;
@@ -681,7 +747,7 @@ paths retain their first role. Project rules are anchored to the directory conta
 | Commands, hosts | Concatenate across layers |
 | File rules | Retain each rule and its layer base |
 | Deny commands, deny hosts | Accumulate across layers |
-| Mode and numeric limits | Granting layers set values; project layers may only tighten them |
+| Mode, `commandSandbox` and numeric limits | Granting layers set values; project layers may only tighten them |
 | Safe mode, gitignore visibility, checkpoints | Project layers may enable, but cannot disable, an enabled restriction |
 
 A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,
@@ -1569,7 +1635,9 @@ Unicode application arguments through private `ATC_INTERNAL_*` environment varia
 ATC removes those variables from tool-process environments.
 
 CI builds distributions and runs application tests on Linux, macOS and Windows. Linux
-checks formatting; Unix jobs run the Bash wrapper tests, and the Windows job runs the
+checks formatting and installs bubblewrap with unprivileged user namespaces allowed, so that
+`ConfinementSuite` runs commands confined there as on macOS; Unix jobs run the Bash wrapper
+tests, and the Windows job runs the
 PowerShell wrapper tests under Windows PowerShell and PowerShell 7. Published release tags must match
 `Versions.atc` (with an optional `v` prefix). The release job builds and uploads the two
 JARs and Windows launchers after the platform jobs succeed.

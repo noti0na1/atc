@@ -456,6 +456,10 @@ and the configured permissions.
   a one-bit oracle.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
+- **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
+  from your file rules: it writes only where the agent may write, never into `.git` hooks or
+  configuration, `.atc` or editor settings, cannot read classified files or your credentials,
+  and has no network in local mode.
 
 ### Assumptions and limits
 
@@ -463,12 +467,12 @@ and the configured permissions.
   prompt-injected *model* exceeding the access you granted. It does not defend the machine
   against *you*: a permissive configuration, `--approve-all`, or a permission granted in a
   pop-up is applied as specified.
-- **An allowed command is arbitrary code, run with your privileges, outside the sandbox.**
-  The capability system governs the Scala the model writes, not what a program you
-  permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
-  runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
-  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill app.test`); never
-  grant an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
+- **An allowed command is arbitrary code.** The OS sandbox bounds what it can touch, not what
+  it computes: within the project it can change any file the agent may write, and in full
+  mode it can use the network. On Windows, or where the sandbox is unavailable, commands run
+  with your privileges and ATC says so at start. **Pre-approve narrow, specific subcommands
+  (`git status`, `./mill app.test`); avoid granting an interpreter, a shell, or a wildcard
+  like `git *` over a tool that can run code.**
 - **Allowed hosts can receive data.** The agent may send any non-classified data available
   to it to an allowed host. The type system prevents this only for `classified` content.
   Allow only hosts you trust to receive project data.
