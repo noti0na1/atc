@@ -132,9 +132,10 @@ abstract class FileEntry private[atc] () extends Cap:
   /** All descendant paths, including inside classified directories (`/` separators on Windows). */
   def walkClassified(): Classified[List[String]]
 
-/** Capability to run commands (`given ex`), available in local and full modes.
- *  It has no read-only view. `exec`, `execOutput` and `spawn` additionally
- *  require `FileSystem^`. */
+/** Capability to run commands (`given ex`), available in every mode. It has no
+ *  read-only view. `exec`, `execOutput` and `spawn` additionally require
+ *  `FileSystem^`; `execReadOnly` needs only a read-only `FileSystem`. Commands
+ *  have no network unless their `Exec` comes from `withNetwork`. */
 @assumeSafe
 abstract class Exec private[atc] () extends caps.ExclusiveCapability
 
@@ -512,7 +513,11 @@ trait Interface:
    *  implicitly in the working directory; use `./program` to select one there.
    *  Quote arguments containing spaces (on Windows, `\` is a path separator).
    *  A timeout throws with the output so far. Requires both `Exec^` and
-   *  `FileSystem^`. */
+   *  `FileSystem^`.
+   *
+   *  Where the platform provides one, the command runs in an OS sandbox that
+   *  matches your capabilities: it writes only where `fs` may write, cannot read
+   *  classified files, and has no network unless `ex` comes from `withNetwork`. */
   def exec(command: String)(using Exec^, FileSystem^): ProcessResult
   def exec(command: String, args: Seq[String])(using Exec^, FileSystem^): ProcessResult
   def exec(command: String, args: Seq[String], workingDir: String)(using Exec^, FileSystem^): ProcessResult
@@ -532,6 +537,25 @@ trait Interface:
   def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem^): Process^{ex}
   /** The processes you started that are still running (to find a handle again). */
   def runningProcesses(using ex: Exec^): List[Process^{ex}]
+
+  /** Run a command that reads what your file system may read and writes nothing but a
+   *  private temporary directory (`TMPDIR`), deleted afterwards. The OS sandbox
+   *  enforces this, so a read-only `FileSystem` is enough: this is how read-only mode
+   *  runs commands (`git log`, `rg`, a test runner that writes nothing). Grammar as for
+   *  `exec`, except that `>`/`>>` redirections are refused. It is refused where
+   *  commands cannot be sandboxed. */
+  def execReadOnly(command: String)(using Exec^, FileSystem): ProcessResult
+  def execReadOnly(command: String, args: Seq[String])(using Exec^, FileSystem): ProcessResult
+  def execReadOnly(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): ProcessResult
+
+  /** Run `op` with an `Exec` whose commands may use the network, through a proxy that
+   *  admits the hosts `net` may reach and asks the user about others (full mode).
+   *
+   *  {{{
+   *  withNetwork { exec("./mill", List("--no-daemon", "app.compile")) }   // may download dependencies
+   *  }}}
+   */
+  def withNetwork[T](op: Exec^ ?=> T)(using Exec^, Network^): T
 
   // ── Network ─────────────────────────────────────────────────────
 

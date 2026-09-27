@@ -138,6 +138,7 @@ object ReplSession:
           "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
           "@assumeSafe given fs: (FileSystem^{io.rd}) = atc.lib.Runtime.readOnlyFileSystem",
+          "@assumeSafe given ex: (Exec^{io.rd}) = atc.lib.Runtime.readOnlyProcesses",
         )
     base :: givens
 

@@ -24,8 +24,9 @@ object Prompts:
     case Mode.Full =>
       """|Sandbox mode: FULL. In scope: `given io: IOCap^` (the full root capability), `given fs: FileSystem^{io}`
          |(read + write), `given ex: Exec^{io}` (commands), `given net: Network^{io}` (network), each within the
-         |permissions below. The separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`;
-         |`request*` blocks widen the relevant capability.""".stripMargin
+         |permissions below. Commands get the network only inside `withNetwork { ... }`. The separate
+         |`given user: UserIO^` handles reporting, questions, TODOs and `chat`; `request*` blocks widen the
+         |relevant capability.""".stripMargin
     case Mode.Local =>
       """|Sandbox mode: LOCAL, meaning files and commands but no network. In scope: `given io: IOCap^` (the full machine-effect
          |root), `given fs: FileSystem^{io}` (read + write), and `given ex: Exec^{io}` (commands). The sandbox deliberately
@@ -34,9 +35,11 @@ object Prompts:
          |switch to full mode (`/mode full`) if the task needs the network.""".stripMargin
     case Mode.ReadOnly =>
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the
-         |machine-effect root) and `given fs: FileSystem^{io.rd}` (read-only). The separate `given user: UserIO^` handles
-         |reporting, questions, TODOs and `chat`. Writes, `exec`, network and writes inside `requestFiles` do not compile
-         |("... cannot subsume a read-only capture set" / "Cannot call update method");
+         |machine-effect root), `given fs: FileSystem^{io.rd}` (read-only) and `given ex: Exec^{io.rd}`, which runs
+         |commands only through `execReadOnly` (they read, but write nothing outside their temporary directory). The
+         |separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`. Writes, `exec`, `spawn`, network
+         |and writes inside `requestFiles` do not compile ("... cannot subsume a read-only capture set" / "Cannot call
+         |update method");
          |`requestFiles(path, Access.Read, reason) { ... }` can still ask to read more (it grants a read-only file system here,
          |matching your `fs`).
          |Do not try to work around this: explain what you would change and let the user switch to local or
@@ -73,7 +76,9 @@ object Prompts:
       if !environment.commandsConfined then ""
       else
         val network =
-          if policy.mode.allowsNetwork then "network access but no connections to local servers or Unix sockets"
+          if policy.mode.allowsNetwork then
+            "no network unless started inside `withNetwork { ... }`, which admits the allowed hosts through a proxy" +
+              " and never local servers or Unix sockets"
           else "no network access"
         "\n- commands (`exec`, `spawn`) run in an OS sandbox: they read the project, system and toolchain" +
           " directories, write only where your file permissions allow (never `.git` hooks or config, `.atc` or" +

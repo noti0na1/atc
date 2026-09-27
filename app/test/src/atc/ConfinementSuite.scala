@@ -17,8 +17,9 @@ class ConfinementSuite extends munit.FunSuite:
   private val home = PlatformPath.canonical(PlatformPath.userHome)
   private def cache = Files.createTempDirectory("atc-sandbox-cache").nn.toRealPath().nn
 
-  private def plan(env: TestEnv, network: Boolean = false, scope: ScopeId = ScopeId.Base): SandboxPlan =
-    SandboxPlan(env.policy, scope, env.root, home, network, cache)
+  private def plan(env: TestEnv, network: Boolean = false, scope: ScopeId = ScopeId.Base, mayWrite: Boolean = true)
+    : SandboxPlan =
+    SandboxPlan(env.policy, scope, env.root, home, network, mayWrite, cache)
 
   private val secretsAndGit: Path => List[FileRule] = root =>
     TestEnv.withSecrets(root) ++ List(
@@ -105,6 +106,39 @@ class ConfinementSuite extends munit.FunSuite:
     given Exec = env.host.processes
     given FileSystem = env.host.fileSystem
     env.host.exec("sh", List("-c", script))
+
+  /** `sh -c script` through `execReadOnly`. */
+  private def shReadOnly(env: TestEnv, script: String): lib.ProcessResult =
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    env.host.execReadOnly("sh", List("-c", script))
+
+  /** `sh -c script` inside `withNetwork`. */
+  private def shNetwork(env: TestEnv, script: String): lib.ProcessResult =
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    given lib.Network = env.host.network
+    env.host.withNetwork(env.host.exec("sh", List("-c", script)))
+
+  test("a read-only plan keeps the policy's writable roots readable only"):
+    val env = TestEnv()
+    val p = plan(env, mayWrite = false)
+    assertEquals(p.writable, Nil)
+    assert(p.readable.contains(env.root))
+
+  test("a read-only command reads the project, writes only its temporary directory, and works in read-only mode"):
+    val env = confined(Mode.ReadOnly)
+    env.file("open.txt", "open")
+    assertEquals(shReadOnly(env, "cat open.txt").stdout, "open")
+    assertEquals(shReadOnly(env, "echo t > \"$TMPDIR/t\" && cat \"$TMPDIR/t\"").stdout, "t\n")
+    assertNotEquals(shReadOnly(env, "echo x > made.txt").exitCode, 0)
+    assert(!env.existsOnDisk("made.txt"))
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    intercept[IllegalArgumentException](env.host.execReadOnly("sh -c true > out.txt"))
 
   test("a confined command writes in the project and nowhere else"):
     val env = confined()
@@ -243,5 +277,10 @@ class ConfinementSuite extends munit.FunSuite:
     val env = TestEnv(commands = List("sh"), hosts = List("127.0.0.1"), commandSandbox = sandbox)
     env.policy.mode = Mode.Full
     val url = s"http://127.0.0.1:$webPort/"
-    assertEquals(sh(env, s"/usr/bin/curl -s -m 10 --noproxy '' $url").stdout, "hello")
-    assertNotEquals(sh(env, s"/usr/bin/curl -s -m 5 --noproxy '*' $url").exitCode, 0, "a direct connection")
+    assertEquals(shNetwork(env, s"/usr/bin/curl -s -m 10 --noproxy '' $url").stdout, "hello")
+    assertNotEquals(shNetwork(env, s"/usr/bin/curl -s -m 5 --noproxy '*' $url").exitCode, 0, "a direct connection")
+    assertNotEquals(
+      sh(env, s"/usr/bin/curl -s -m 5 $url").exitCode,
+      0,
+      "a plain Exec has no network, even in full mode"
+    )

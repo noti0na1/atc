@@ -191,15 +191,17 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 `io` is the common capture root for every published machine capability. Local and full mode
 expose it as `IOCap^`. The derivations are sandbox-internal, so
 holding the root does not create a capability omitted by the current mode.
-Command operations require both full capabilities, `Exec^` and `FileSystem^`; every mode that
-publishes `ex` also publishes a full `fs` under the same root.
+`exec` and `spawn` require both full capabilities, `Exec^` and `FileSystem^`; `execReadOnly`
+needs only a read-only `FileSystem`, and the OS sandbox keeps such a command from writing.
+A command gets the network only through `withNetwork`, which needs `Network^`, so a
+snippet's capture set shows whether its commands can reach a host.
 
 | Capability | What it authorises | Where one comes from |
 |---|---|---|
 | `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
 | `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | the preamble's `fs` (derived from `io` by the sandbox; `val ro: FileSystem^{fs.rd} = fs` is a read-only view) |
 | `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
-| `Exec` | running commands, together with a full `FileSystem^` | the preamble's `ex` (local and full mode) |
+| `Exec` | running commands: `exec`/`spawn` with a full `FileSystem^`, `execReadOnly` with a read-only one; `withNetwork` adds the network | the preamble's `ex` (every mode; read-only mode's runs only `execReadOnly`) |
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
 
@@ -330,8 +332,8 @@ agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|
-| **read-only** | read files, report, ask |
-| **local** | also write files and run commands |
+| **read-only** | read files, report, ask, and run commands that write nothing |
+| **local** | also write files and run commands that write |
 | **full** | also reach the network, and let the model's provider search the web |
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
@@ -459,7 +461,8 @@ and the configured permissions.
 - **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
   from your file rules: it writes only where the agent may write, never into `.git` hooks or
   configuration, `.atc` or editor settings, cannot read classified files or your credentials,
-  and has no network in local mode; in full mode it reaches only the hosts you allow.
+  and has no network unless the agent starts it inside `withNetwork` (full mode), which lets
+  it reach only the hosts you allow.
 
 ### Assumptions and limits
 

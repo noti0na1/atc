@@ -25,13 +25,17 @@ sealed trait CommandSandbox:
   /** What the banner should warn about, if anything. */
   def notice: Option[String] = Option.unless(confined)(describe)
 
-  /** Rewrite each stage of `line`, a command started with capabilities of `scope`, to
-    * run confined, and return how to start the stages and what to clean up after the
-    * process tree has exited. */
+  /** Rewrite each stage of `line` to run confined, and return how to start the stages
+    * and what to clean up after the process tree has exited. `scope` is the file
+    * system capability's scope, `network` the scope of the `Network` a `withNetwork`
+    * block lent the command (none: no network), and `writable` whether it may write
+    * where the file system may, or only its temporary directory. */
   def prepare(
     stages: List[ProcessBuilder],
     policy: Policy,
     scope: ScopeId,
+    network: Option[ScopeId],
+    writable: Boolean,
     cwd: Path,
     line: String
   ): CommandSandbox.Launch
@@ -48,14 +52,30 @@ object CommandSandbox:
   final class Unconfined(reason: String) extends CommandSandbox:
     def confined: Boolean = false
     def describe: String = s"not sandboxed ($reason)"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
+    def prepare(
+      stages: List[ProcessBuilder],
+      policy: Policy,
+      scope: ScopeId,
+      network: Option[ScopeId],
+      writable: Boolean,
+      cwd: Path,
+      line: String,
+    ): Launch =
       Launch(startHere, () => ())
 
   /** `required` without a usable sandbox: every command is refused. */
   final class Refusing(reason: String) extends CommandSandbox:
     def confined: Boolean = false
     def describe: String = s"refused: the sandbox is required but $reason"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
+    def prepare(
+      stages: List[ProcessBuilder],
+      policy: Policy,
+      scope: ScopeId,
+      network: Option[ScopeId],
+      writable: Boolean,
+      cwd: Path,
+      line: String,
+    ): Launch =
       throw SecurityException(
         s"Access denied: commands must run in the OS sandbox (\"commandSandbox\": \"required\"), but $reason. Tell the user."
       )
@@ -105,8 +125,14 @@ object CommandSandbox:
       catch case NonFatal(_) => ()
     PlatformPath.canonical(dir)
 
-  private def plan(policy: Policy, scope: ScopeId, cwd: Path): SandboxPlan =
-    SandboxPlan(policy, scope, PlatformPath.canonical(cwd), home, policy.mode.allowsNetwork, cacheDir)
+  private def plan(
+    policy: Policy,
+    scope: ScopeId,
+    network: Option[ScopeId],
+    writable: Boolean,
+    cwd: Path
+  ): SandboxPlan =
+    SandboxPlan(policy, scope, PlatformPath.canonical(cwd), home, network.isDefined, writable, cacheDir)
 
   /** Settings that keep common tools inside their temporary directory and the sandbox's
     * cache, and send their traffic to the proxy at `proxy` (`127.0.0.1:port`) when the
@@ -152,9 +178,17 @@ object CommandSandbox:
   private final class SeatbeltSandbox extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with Seatbelt"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
-      val sandboxPlan = plan(policy, scope, cwd)
-      val proxy = Option.when(sandboxPlan.network)(CommandProxy.tcp(policy, scope, line))
+    def prepare(
+      stages: List[ProcessBuilder],
+      policy: Policy,
+      scope: ScopeId,
+      network: Option[ScopeId],
+      writable: Boolean,
+      cwd: Path,
+      line: String,
+    ): Launch =
+      val sandboxPlan = plan(policy, scope, network, writable, cwd)
+      val proxy = network.map(CommandProxy.tcp(policy, _, line))
       // A short path: sbt's socket path is the temporary directory plus about 49 bytes, within a 104-byte limit.
       val tmp = PlatformPath.canonical(Files.createTempDirectory(Paths.get("/private/tmp").nn, "atc-").nn)
       val prefix = Seatbelt.prefix(sandboxPlan, tmp, proxy.map(_.port))
@@ -172,11 +206,20 @@ object CommandSandbox:
       Option.when(socat.isEmpty)(
         "sandboxed with bubblewrap; in full mode commands reach the network unfiltered (socat is missing)"
       )
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
-      val sandboxPlan = plan(policy, scope, cwd)
-      val bridge = socat.filter(_ => sandboxPlan.network).map: socatPath =>
-        val dir = Files.createTempDirectory("atc-proxy").nn
-        (socatPath, dir, CommandProxy.unix(dir.resolve("proxy.sock").nn, policy, scope, line))
+    def prepare(
+      stages: List[ProcessBuilder],
+      policy: Policy,
+      scope: ScopeId,
+      network: Option[ScopeId],
+      writable: Boolean,
+      cwd: Path,
+      line: String,
+    ): Launch =
+      val sandboxPlan = plan(policy, scope, network, writable, cwd)
+      val bridge =
+        for socatPath <- socat; netScope <- network yield
+          val dir = Files.createTempDirectory("atc-proxy").nn
+          (socatPath, dir, CommandProxy.unix(dir.resolve("proxy.sock").nn, policy, netScope, line))
       val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)))
       stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort)))
       Launch(Launcher.start, closing(bridge.map(_._3), bridge.foreach((_, dir, _) => deleteTree(dir))))

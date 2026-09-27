@@ -38,11 +38,11 @@ object ToolOutput:
     ),
     Hint(
       out => out.contains("cannot subsume a read-only capture set") || out.contains("Cannot call update method"),
-      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write, run commands or use the network. Say so and let the user switch modes (/mode) instead of working around it."
+      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write or use the network, and commands run only through `execReadOnly`. Say so and let the user switch modes (/mode) instead of working around it."
     ),
     Hint(
       out => List("Network", "Exec").exists(name => out.contains(s"No given instance of type atc.lib.$name")),
-      "that capability does not exist in the current sandbox mode (local: no network; read-only: no commands, no network); tell the user which mode the task needs (/mode local, /mode full)."
+      "that capability does not exist in the current sandbox mode (local and read-only: no network); tell the user which mode the task needs (/mode full)."
     ),
   )
 

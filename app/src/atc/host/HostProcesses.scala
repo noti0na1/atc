@@ -28,7 +28,19 @@ private[host] trait HostProcesses:
 
   def requestExec[T](commands: Iterable[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
     val patterns = commands.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted
-    inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id)))
+    inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id, networkOf(parent))))
+
+  def withNetwork[T](op: Exec ?=> T)(using ex: Exec, net: Network): T =
+    if !policy.mode.allowsNetwork then
+      throw SecurityException(
+        s"Access denied: the sandbox is in ${policy.mode.label} mode; commands cannot use the network"
+      )
+    op(using ExecImpl(scopeOf(ex), Some(scopeOf(net))))
+
+  /** The network scope an `Exec` carries, if it came from `withNetwork`. */
+  private def networkOf(ex: Exec): Option[ScopeId] = ex match
+    case impl: ExecImpl => impl.network
+    case _ => None
 
   def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, ExecOptions())
 
@@ -107,11 +119,26 @@ private[host] trait HostProcesses:
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
 
-  private def prepare(command: String, args: Seq[String], options: ExecOptions)(using
+  /** `writable`: whether the command may write where `fs` may (`exec`, `spawn`) or
+    * only its temporary directory (`execReadOnly`). */
+  private def prepare(command: String, args: Seq[String], options: ExecOptions, writable: Boolean)(using
     ex: Exec,
     fs: FileSystem
   ): Prepared =
     val pipeline = withArgs(command, args)
+    if writable && !policy.mode.allowsWrite then
+      throw SecurityException(
+        s"Access denied: the sandbox is in ${policy.mode.label} mode; run commands with execReadOnly"
+      )
+    if !writable then
+      if !commandSandbox.confined then
+        throw SecurityException(
+          s"Access denied: execReadOnly needs the OS sandbox to keep the command read-only, and commands here are ${commandSandbox.describe}"
+        )
+      if pipeline.stdoutFile.isDefined then
+        throw IllegalArgumentException(
+          "execReadOnly: a `>`/`>>` redirection writes a file; use exec, or print and write the output from Scala"
+        )
     if options.stdin.nonEmpty && pipeline.stdinFile.isDefined then
       throw IllegalArgumentException(
         "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
@@ -127,14 +154,27 @@ private[host] trait HostProcesses:
       val file = path.toFile
       pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
     // File grants travel with the file system capability, so its scope decides what the command may touch.
-    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), dir, pipeline.line)
+    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), networkOf(ex), writable, dir, pipeline.line)
     Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
     if options.timeoutMs <= 0 then
       throw IllegalArgumentException(s"exec: timeoutMs must be positive (got ${options.timeoutMs})")
-    val prepared = prepare(command, args, options)
+    val prepared = prepare(command, args, options, writable = true)
     noteCommand()
+    run(prepared, options)
+
+  def execReadOnly(command: String)(using Exec, FileSystem): ProcessResult = execReadOnly(command, Nil, ExecOptions())
+
+  def execReadOnly(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
+    execReadOnly(command, args, ExecOptions())
+
+  def execReadOnly(command: String, args: Seq[String], options: ExecOptions)(using Exec, FileSystem): ProcessResult =
+    if options.timeoutMs <= 0 then
+      throw IllegalArgumentException(s"execReadOnly: timeoutMs must be positive (got ${options.timeoutMs})")
+    run(prepare(command, args, options, writable = false), options)
+
+  private def run(prepared: Prepared, options: ExecOptions): ProcessResult =
     val port = output
     val live = new Processes.LiveOutput:
       def begin(): Unit = port.commandRunning(prepared.line)
@@ -160,7 +200,7 @@ private[host] trait HostProcesses:
   def spawn(command: String)(using Exec, FileSystem): Process = spawn(command, ExecOptions())
 
   def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
-    val prepared = prepare(command, Nil, options)
+    val prepared = prepare(command, Nil, options, writable = true)
     noteCommand()
     spawned.synchronized:
       reapProcesses()

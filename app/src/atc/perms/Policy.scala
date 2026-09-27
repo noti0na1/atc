@@ -216,13 +216,11 @@ final class Policy(
     denyCommands.find(GlobMatcher.matchesCommand(commandLine, _))
 
   def commandAllowed(scopeId: ScopeId, commandLine: String): Boolean =
-    mode.allowsExec && commandDenied(commandLine).isEmpty &&
+    commandDenied(commandLine).isEmpty &&
       commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
 
   def requestExec(parentId: ScopeId, commands: List[String], reason: String): ScopeId =
     val parent = scope(parentId)
-    if !mode.allowsExec then
-      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; commands cannot be run")
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then

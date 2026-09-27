@@ -47,8 +47,18 @@ object SandboxPlan:
   final case class Restriction(level: Level, target: Target)
 
   /** Build the plan for a command started with capabilities of `scope`. `project`
-    * and `home` are canonical; `network` is whether the command may use it. */
-  def apply(policy: Policy, scope: ScopeId, project: Path, home: Path, network: Boolean, cache: Path): SandboxPlan =
+    * and `home` are canonical; `network` is whether the command may use it, and
+    * `mayWrite` whether it may write where the policy lets the agent write (otherwise
+    * those roots are only readable). */
+  def apply(
+    policy: Policy,
+    scope: ScopeId,
+    project: Path,
+    home: Path,
+    network: Boolean,
+    mayWrite: Boolean,
+    cache: Path,
+  ): SandboxPlan =
     val granted =
       policy.rules.flatMap: rule =>
         rule.pattern.form match
@@ -56,8 +66,10 @@ object SandboxPlan:
           case _ => None
       ++ policy.fileGrants(scope).collect { case (path, access) if access != Access.None => path }
     val roots = granted.distinct.map(path => path -> policy.effective(scope, path))
-    val writable = roots.collect { case (path, perm) if perm.canWrite && !perm.classified => path }
-    val readable = roots.collect { case (path, perm) if perm.canRead && !perm.canWrite && !perm.classified => path }
+    val writableRoots = roots.collect { case (path, perm) if perm.canWrite && !perm.classified => path }
+    val writable = if mayWrite then writableRoots else Nil
+    val readable = roots.collect:
+      case (path, perm) if perm.canRead && !perm.classified && !writable.contains(path) => path
     val fromRules = policy.rules.flatMap: rule =>
       val level =
         if rule.access.contains(Access.None) then Some(Level.Hidden)

@@ -220,6 +220,16 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertFails(run("""val fn: () -> String = requestFiles("/tmp") { () => read("/tmp/x") }"""))
     assertFails(run("""val fn2 = requestFiles("/tmp") { fs2 ?=> () => read("/tmp/x")(using fs2) }"""))
 
+  test("the network-enabled Exec of a withNetwork block cannot escape it"):
+    assertFails(run("""val leaked = withNetwork { summon[Exec^] }"""), "leak")
+    assertFails(run(s"""val later = withNetwork { () => exec(${ujson.write(echoCommand)}) }"""), "leak")
+
+  test("withNetwork cannot run inside a pure Classified.map"):
+    assertFails(
+      run(s"""classify("s").map(s => withNetwork { exec(${ujson.write(echoCommand)}, List(s)).stdout })"""),
+      "not included in the allowed capture set",
+    )
+
   test("requestFiles hands the block a file system as capable as the caller's"):
     // Full mode: the caller's `fs` is full, so the block's is too and may write.
     assertOk(run(s"""requestFiles(${env.scalaString(

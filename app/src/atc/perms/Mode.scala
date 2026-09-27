@@ -6,15 +6,14 @@ import java.util.Locale
   * (type level, `ReplSession.preambleChunks`) and, as defence in depth, what the
   * policy lets through at run time. Ordered from least to most permissive. */
 enum Mode(val label: String, val description: String):
-  /** `io` and `fs` are read-only views: the agent can only read files. */
-  case ReadOnly extends Mode("read-only", "files can only be read; no commands, no network")
+  /** `io` and `fs` are read-only views: the agent reads files and runs commands read-only. */
+  case ReadOnly extends Mode("read-only", "files can only be read; commands run read-only; no network")
   /** Full `io` grouping writable `fs` and `ex`; the mode provides no `net`. */
   case Local extends Mode("local", "files can be read and written, commands run; no network")
   /** Full `io` grouping `fs`, `ex`, and `net`. */
   case Full extends Mode("full", "files, commands and network")
 
   def allowsWrite: Boolean = this != ReadOnly
-  def allowsExec: Boolean = this != ReadOnly
   def allowsNetwork: Boolean = this == Full
   /** One line naming the mode and what it allows, for the banner and `/mode`. */
   def describe: String = s"$label: $description"

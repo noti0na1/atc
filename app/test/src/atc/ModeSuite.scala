@@ -7,11 +7,11 @@ import atc.sandbox.*
   * hands the agent, so most of what a mode forbids is a *compile* error; the
   * policy then refuses the same things at run time as defence in depth.
   *
-  * | mode      | read | write | exec | network | talk to the user |
-  * |-----------|------|-------|------|---------|------------------|
-  * | read-only | yes  | no    | no   | no      | yes              |
-  * | local     | yes  | yes   | yes  | no      | yes              |
-  * | full      | yes  | yes   | yes  | yes     | yes              |
+  * | mode      | read | write | exec      | network | talk to the user |
+  * |-----------|------|-------|-----------|---------|------------------|
+  * | read-only | yes  | no    | read-only | no      | yes              |
+  * | local     | yes  | yes   | yes       | no      | yes              |
+  * | full      | yes  | yes   | yes       | yes     | yes              |
   *
   * The capability *typing* rules behind this (read-only views, `update`
   * methods, escapes, the `Classified.map` contract) live in
@@ -91,7 +91,8 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     assert(readOnlyChunks.contains(
       "@assumeSafe given fs: (FileSystem^{io.rd}) = atc.lib.Runtime.readOnlyFileSystem"
     ))
-    assert(!readOnlyChunks.exists(chunk => chunk.contains("given ex:") || chunk.contains("given net:")))
+    assert(readOnlyChunks.contains("@assumeSafe given ex: (Exec^{io.rd}) = atc.lib.Runtime.readOnlyProcesses"))
+    assert(!readOnlyChunks.exists(_.contains("given net:")))
 
   // ── Reading and reporting work everywhere ───────────────────────
 
@@ -149,14 +150,26 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     onlyIn(canExec, s"""execOutput($echo).length""")
     onlyIn(canExec, s"""exec($echoLine).stdout""") // split like a shell line
     onlyIn(canExec, s"""val p: Process^{ex} = spawn($spawned); p.readUntil("spawned", 5000).length""")
-    onlyIn(canExec, """runningProcesses.size""")
+    onlyIn(allModes.toSet, """runningProcesses.size""")
     onlyIn(canExec, s"""exec($echo, Seq("a"), ExecOptions(stdin = "")).exitCode""")
     onlyIn(canExec, s"""requestExec(List($pattern)) { exec($echo, Vector("x")).exitCode }""") // Iterable / Seq
     onlyIn(canExec, s"""requestExec(Set($pattern)) { exec($echo, List("x")).exitCode }""")
 
-  test("read-only mode: there is no Exec capability, and the derivation is out of reach"):
-    assertFails(readOnly.run("""val x: Exec^ = ex; 1"""))
+  test("read-only mode: its Exec runs nothing that writes, and the full derivation is out of reach"):
+    assertOk(readOnly.run("""val x: Exec^ = ex; 1"""))
+    assertFails(readOnly.run(s"""exec(${ujson.write(echoCommand)}).exitCode"""))
     assertFails(readOnly.run("""val x: Exec^ = atc.lib.Runtime.processes; 1"""))
+
+  test("execReadOnly compiles in every mode and needs the OS sandbox at run time"):
+    val echo = ujson.write(echoCommand)
+    onlyIn(allModes.toSet, s"""def r(): ProcessResult = execReadOnly($echo, List("hi")); 1""")
+    // The suite's hosts run commands unconfined, where a read-only command cannot be kept read-only.
+    for m <- allModes do assertFails(of(m).run(s"""execReadOnly($echo).exitCode"""), "OS sandbox")
+
+  test("withNetwork compiles only in full mode"):
+    val echo = ujson.write(echoCommand)
+    onlyIn(Set(Mode.Full), s"""def f(): Int = withNetwork { exec($echo, List("x")).exitCode }; 1""")
+    onlyIn(Set(Mode.Full), s"""withNetwork { exec($echo, List("x")).exitCode }""")
 
   // ── Network: full only ──────────────────────────────────────────
 
@@ -210,11 +223,16 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     val p = e.host.canonical("a.txt")
     e.policy.mode = Mode.ReadOnly
     intercept[SecurityException](e.host.writeFile(ScopeId.Base, p, "x", append = false))
-    assert(!e.policy.commandAllowed(ScopeId.Base, "echo hi"))
+    assert(e.policy.commandAllowed(ScopeId.Base, "echo hi"), "read-only commands are still commands")
     assert(!e.policy.hostAllowed(ScopeId.Base, "example.com"))
     intercept[SecurityException](e.policy.requestFile(ScopeId.Base, p, Access.Write, "why"))
-    intercept[SecurityException](e.policy.requestExec(ScopeId.Base, List("ls"), "why"))
     intercept[SecurityException](e.policy.requestNet(ScopeId.Base, List("x.com"), "why"))
+    locally:
+      import e.given
+      given lib.Exec = e.host.processes
+      given lib.FileSystem = e.host.fileSystem
+      val refused = intercept[SecurityException](e.host.exec("echo", List("hi")))
+      assert(refused.getMessage.contains("execReadOnly"), refused.getMessage)
     e.policy.mode = Mode.Local
     assert(e.policy.commandAllowed(ScopeId.Base, "echo hi"), "local mode allows commands")
     assert(!e.policy.hostAllowed(ScopeId.Base, "example.com"), "local mode still has no network")
@@ -276,5 +294,4 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     assertEquals(Mode.Local.next, Mode.Full)
     assertEquals(Mode.Full.next, Mode.ReadOnly)
     assertEquals(allModes.map(_.allowsWrite), List(false, true, true))
-    assertEquals(allModes.map(_.allowsExec), List(false, true, true))
     assertEquals(allModes.map(_.allowsNetwork), List(false, false, true))

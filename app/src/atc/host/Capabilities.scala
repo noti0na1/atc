@@ -19,7 +19,9 @@ sealed trait Scoped:
 final class FileSystemImpl(val scope: ScopeId, val host: Host) extends FileSystem, Scoped:
   def access(path: String): FileEntry = FileEntryImpl(this, host.canonical(path))
 
-final class ExecImpl(val scope: ScopeId) extends Exec, Scoped
+/** `network` is the scope of the `Network` a `withNetwork` block derived it from: the
+  * hosts its commands may reach. A plain `Exec` gives commands no network. */
+final class ExecImpl(val scope: ScopeId, val network: Option[ScopeId] = None) extends Exec, Scoped
 
 final class NetworkImpl(val scope: ScopeId) extends Network, Scoped
 

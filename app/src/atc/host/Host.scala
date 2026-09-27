@@ -65,6 +65,8 @@ final class Host(
 
   def processes(using IOCap): Exec = ExecImpl(ScopeId.Base)
 
+  def readOnlyProcesses(using IOCap): Exec = ExecImpl(ScopeId.Base)
+
   def network(using IOCap): Network = NetworkImpl(ScopeId.Base)
 
   /** Run the tasks on up to [[Host.MaxParallel]] daemon threads of a pool that lives for

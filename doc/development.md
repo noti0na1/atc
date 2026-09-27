@@ -293,14 +293,24 @@ interface and host together, then verify their required capabilities.
 
 | Mode | Machine capabilities supplied by the preamble |
 |---|---|
-| `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}` |
+| `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}`, `ex: Exec^{io.rd}` |
 | `local` | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}` |
 | `full` | the local capabilities plus `net: Network^{io}` |
 
 Every mode also supplies `user: UserIO^`, which is independent of the machine root, so
 output, questions, TODO updates and normal `chat` calls remain available in read-only mode.
-`Exec` and `Network` have no read-only view. Command operations require both `Exec^` and
-`FileSystem^`, including when redirection writes a file.
+`Exec` and `Network` have no read-only view. `exec`, `execOutput` and `spawn` require both
+`Exec^` and `FileSystem^`, including when redirection writes a file; `execReadOnly` requires
+`Exec^` and a read-only `FileSystem`, which is how read-only mode runs commands. Read-only
+views are erased at run time (`fs` and `fs.rd` are the same object), so the host cannot tell
+from the capability whether a command may write; the method decides instead: `exec` asks the
+OS sandbox for the file system's writable roots, `execReadOnly` for none, and `execReadOnly`
+is refused where commands are not sandboxed, since its type promises what only the sandbox
+can keep. `withNetwork` derives an `ExecImpl` that carries the `Network`'s scope; only
+commands started with it get the network, through the proxy, and the proxy decides hosts in
+that scope, so a `requestNetwork` grant reaches the commands inside its block and ends with
+it. A plain `Exec` gives commands no network in any mode. `requestExec` keeps the network
+scope of the `Exec` it widens.
 
 Capability constructors are private to ATC. `Runtime` and `Derivations` provide the
 sandbox's internal bootstrap API and are marked `@rejectSafe`. Agent code cannot derive
@@ -526,7 +536,7 @@ the tool result so the model knows whether approval was temporary, session-wide 
 
 `requestFiles` works in every mode: the file system it lends the block is exactly as
 capable as the one the caller already holds, so read-only callbacks remain read-only, and
-command execution, which needs `FileSystem^`, still compiles only in local and full mode.
+`exec`, which needs `FileSystem^`, still compiles only in local and full mode.
 `requestExec` widens only `Exec^`; a command that also needs a file permission that is not
 configured needs a nested `requestFiles` block. The result of a request tells the agent
 what the user decided, so "once" needs another request next time while "for the session"
@@ -623,8 +633,10 @@ bubblewrap needs unprivileged user namespaces, which Ubuntu 24.04 restricts. Win
 backend yet; [the isolation design](isolation.md) plans the Anthropic sandbox runtime there.
 
 `HostProcesses.prepare` builds a `SandboxPlan` for each command from the policy, the scope of
-the file system capability passed to `exec` or `spawn`, and the mode, and the backend
-rewrites each stage's command line and environment. The plan lists concrete paths:
+the file system capability passed to `exec`, `spawn` or `execReadOnly`, whether the command
+may write (not for `execReadOnly`, whose writable roots become readable ones) and whether its
+`Exec` came from `withNetwork`, and the backend rewrites each stage's command line and
+environment. The plan lists concrete paths:
 
 - Readable roots: exact-path rules that grant read access, the scope's file grants, and a
   toolchain bundle (JDKs, build tool homes, dependency caches, version managers and the
@@ -664,11 +676,12 @@ covered. New user, PID and IPC namespaces, `--die-with-parent` and `--new-sessio
 process tree with the command. Linux delivers the parent-death signal when the *thread* that
 started the process exits, so `CommandSandbox` starts processes on one long-lived thread.
 
-Networking follows the mode. Without network permission, Seatbelt denies all networking and
-bubblewrap adds a network namespace. With it, the command's only way out is a `CommandProxy`,
+A command started with a plain `Exec` has no network: Seatbelt denies all networking and
+bubblewrap adds a network namespace. One started inside `withNetwork` (full mode only)
+reaches the network through a `CommandProxy`,
 one per command: an HTTP proxy that opens `CONNECT` tunnels and forwards absolute-form HTTP
-requests to the hosts the policy allows in the command's scope (`hosts`, `denyHosts` and the
-session and scope grants, as for `httpGet`). A host not allowed yet goes through
+requests to the hosts the policy allows in the scope of the `Network` the block was given
+(`hosts`, `denyHosts` and the session and scope grants, as for `httpGet`). A host not allowed yet goes through
 `Policy.requestNet`, so an interactive session asks and records the decision in the tool
 result; a "once" approval lasts until the command ends, and a `-p` run refuses. The proxy
 resolves names itself and refuses a name that resolves only to loopback, link-local
