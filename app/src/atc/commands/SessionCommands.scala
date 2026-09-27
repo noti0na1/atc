@@ -68,6 +68,32 @@ final class SessionCommands(app: App):
       tui.endTurn()
       predictor.start()
 
+  /** `/undo`: revert the file changes of the last recorded turn, or only the given
+    * paths of it. The agent hears what was reverted, since its view of those files
+    * is now out of date. */
+  def undo(arg: String): Unit =
+    app.checkpoints match
+      case None => tui.info("Checkpoints are off: the \"checkpoints\" setting is false.")
+      case Some(checkpoints) =>
+        predictor.invalidate()
+        checkpoints.undo(arg.split("\\s+").toList.filter(_.nonEmpty)) match
+          case Left(message) => tui.info(message)
+          case Right(report) =>
+            // What the user reads, and what the agent is told, about each group of paths.
+            val groups = List(
+              ("Restored", "Restored", report.restored),
+              ("Deleted", "Deleted", report.deleted),
+              ("Reverted, keeping your later edits in", "Reverted, keeping the user's later edits in", report.merged),
+            ).filter(_._3.nonEmpty)
+            groups.foreach((label, _, paths) => tui.success(s"$label: ${paths.mkString(", ")}"))
+            report.conflicts.foreach((path, reason) => tui.warn(s"Left unchanged: $path ($reason)"))
+            if groups.isEmpty && report.conflicts.isEmpty then tui.info("The files already match their earlier state.")
+            else
+              val outcome =
+                (groups.map((_, label, paths) => s"$label: ${paths.mkString(", ")}.") ++
+                  report.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
+              agent.noteFilesReverted(outcome)
+
   /** `/mode`: cycle (no argument) or set the sandbox mode. A new REPL starts
     * with only that mode's capabilities; its definitions are gone, the
     * conversation stays. */

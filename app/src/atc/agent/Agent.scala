@@ -130,6 +130,8 @@ final class Agent(
 
   def noteProcessesKilled(what: String): Unit = conversation.queueNote(AgentMessages.processesKilled(what))
 
+  def noteFilesReverted(outcome: String): Unit = conversation.queueNote(AgentMessages.filesReverted(outcome))
+
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
     * continues in, and the result may be what the next request is about. */
@@ -227,8 +229,13 @@ final class Agent(
       Agent.CompactOutcome.Compacted
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
-  def turn(session: => ReplSession, input: String, cancelled: () => Boolean): TurnOutcome =
-    runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars), input, cancelled)
+  def turn(
+    session: => ReplSession,
+    input: String,
+    cancelled: () => Boolean,
+    hooks: ToolCallHooks = ToolCallHooks.None,
+  ): TurnOutcome =
+    runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars, hooks), input, cancelled)
 
   /** Core entry point, with concrete tool execution supplied by the host adapter. */
   private[atc] def runTurn(runner: ToolRunner, input: String, cancelled: () => Boolean): TurnOutcome =

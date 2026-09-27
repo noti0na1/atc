@@ -10,12 +10,23 @@ private[atc] trait ToolRunner:
   def tools: List[ToolSpec]
   def run(call: ToolCall): ToolResult
 
+/** Work done around each Scala tool call of a turn, such as recording the files it changes. */
+private[atc] trait ToolCallHooks:
+  def beforeCall(): Unit
+  def afterCall(): Unit
+
+private[atc] object ToolCallHooks:
+  val None: ToolCallHooks = new ToolCallHooks:
+    def beforeCall(): Unit = ()
+    def afterCall(): Unit = ()
+
 /** The model's Scala REPL tool, bound to the sandbox session for one turn. */
 private[atc] final class ScalaToolRunner(
   session: => ReplSession,
   policy: Policy,
   ui: AgentUI,
   maxOutputChars: Int,
+  hooks: ToolCallHooks = ToolCallHooks.None,
 ) extends ToolRunner:
   val tools: List[ToolSpec] = ScalaToolRunner.tools
   private lazy val repl = session
@@ -35,7 +46,10 @@ private[atc] final class ScalaToolRunner(
     else
       ui.toolStart(code)
       val current = repl // may start the sandbox first: not part of the snippet's time
-      val (result, decisions) = ScalaToolRunner.evaluate(current, policy, ui, code)
+      hooks.beforeCall()
+      val (result, decisions) =
+        try ScalaToolRunner.evaluate(current, policy, ui, code)
+        finally hooks.afterCall()
       val rendered = ToolOutput.renderForModel(result, maxOutputChars, decisions, code)
       val needsReplan = decisions.exists {
         case (Decision.Revise(_), _) => true

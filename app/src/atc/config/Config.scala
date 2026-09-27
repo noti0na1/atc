@@ -186,6 +186,9 @@ final case class Config(
     * listings and searches; default true. Reading such a path by name still
     * works. This only keeps build output and dependencies out of the way. */
   respectGitignore: Boolean = true,
+  /** Record the files the agent changes in each turn so that `/undo` can revert them
+    * (interactive sessions; needs `git`). A project layer may turn it on but not off. */
+  checkpoints: Boolean = true,
   /** Compile agent code with `import language.experimental.safe`. On unless a
     * *granting* layer turns it off explicitly: it is a latch, so a narrowing
     * layer can switch it on and never back off. */

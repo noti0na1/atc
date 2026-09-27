@@ -49,6 +49,11 @@ object AgentMessages:
   def processesKilled(what: String): String =
     s"[processes] The user $what with /kill. Those Process handles no longer work."
 
+  /** The user reverted file changes of an earlier turn with `/undo`; `outcome` lists what happened per file. */
+  def filesReverted(outcome: String): String =
+    s"[files reverted] The user undid file changes you made in an earlier turn with /undo. $outcome " +
+      "Read these files again before relying on their content."
+
   /** Closes the assistant side of an exchange that queued user input interrupts. */
   val pausedForUpdate: String = "[paused to apply the user's update]"
 

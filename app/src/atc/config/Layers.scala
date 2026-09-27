@@ -134,7 +134,7 @@ object Configuration:
     * which every layer may add to) merges in layer order. */
   private val PolicyKeys =
     Set("files", "denyCommands", "denyHosts") ++
-      Set("mode", "safeMode", "respectGitignore") ++
+      Set("mode", "safeMode", "respectGitignore", "checkpoints") ++
       Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
 
   /** Combine the layers.
@@ -149,8 +149,8 @@ object Configuration:
     *    it may open its own files. Deny rules restrict all grants.
     *  - **policy settings** come from the *granting* layers (global, `-c`)
     *    merged the same way, and are then narrowed by the project layer:
-    *    limits and the sandbox mode by the stricter value, `safeMode` /
-    *    `respectGitignore` only towards "on".
+    *    limits and the sandbox mode by the stricter value, `safeMode`,
+    *    `respectGitignore` and `checkpoints` only towards "on".
     *  - **file rules** from every layer are kept with their anchor: a project
     *    layer's rules grant only inside its own folder, and clamp everywhere
     *    (see [[LayeredRule]] and `Policy.configPerm`).
@@ -208,6 +208,7 @@ object Configuration:
       mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
       safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
       respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
+      checkpoints = base.checkpoints || (layer.defines("checkpoints") && n.checkpoints),
       // A missing timeout means "no limit", so it is the *least* strict value.
       executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
         (base.executionTimeoutMs, n.executionTimeoutMs) match

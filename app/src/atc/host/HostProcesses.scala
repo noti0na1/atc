@@ -126,6 +126,7 @@ private[host] trait HostProcesses:
     if options.timeoutMs <= 0 then
       throw IllegalArgumentException(s"exec: timeoutMs must be positive (got ${options.timeoutMs})")
     val prepared = prepare(command, args, options)
+    noteCommand()
     val port = output
     val live = new Processes.LiveOutput:
       def begin(): Unit = port.commandRunning(prepared.line)
@@ -149,6 +150,7 @@ private[host] trait HostProcesses:
 
   def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
     val prepared = prepare(command, Nil, options)
+    noteCommand()
     spawned.synchronized:
       reapProcesses()
       if spawned.size >= Host.MaxProcesses then
@@ -172,6 +174,11 @@ private[host] trait HostProcesses:
       spawned(id) = handle
       output.processStarted(id, prepared.line)
       handle
+
+  /** Whether a process the agent spawned is still running. */
+  private[atc] def hasRunningProcesses: Boolean = spawned.synchronized:
+    reapProcesses()
+    spawned.nonEmpty
 
   /** Return the live processes visible from the caller's scope. */
   def runningProcesses(using ex: Exec): List[Process] = spawned.synchronized:

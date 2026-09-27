@@ -116,6 +116,7 @@ requests are echoed. It needs no API key or network connection.
 | `perms/` | Policy, permission scopes, path patterns, modes and gitignore visibility |
 | `platform/` | OS behavior, path normalization and portable path globs |
 | `sandbox/` | Compiler setup, REPL evaluation, validation, class loading and interruption |
+| `checkpoint/` | Snapshots of the project in a git store outside it, turn records and `/undo` |
 | `ui/` | JLine input, streaming output, Markdown and syntax highlighting |
 
 One turn follows this path:
@@ -608,6 +609,64 @@ response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400
 `httpRequest` returns raw status and body. Classified request handling retains subsequent
 transport and response failures within `Classified`.
 
+## Checkpoints
+
+`Checkpoints` records what the agent changes in the project so that `/undo` can revert it;
+[the isolation design](isolation.md) places it as the recovery layer. It runs in interactive
+sessions when `checkpoints` is true (the default; a project layer cannot turn it off), and
+not in read-only mode, where nothing can change. `App.runTurn` calls `beginTurn` and
+`endTurn` around a turn and passes it to `Agent.turn` as the `ToolCallHooks` that
+`ScalaToolRunner` calls around every Scala tool call.
+
+`CheckpointStore` keeps one git repository per canonical project path under
+`~/.atc/checkpoints/<SHA-256 of the path>`. Its index is a stat cache and its `HEAD` follows
+the latest snapshot, so `git status` lists only what changed since. When the project is the
+root of a git work tree, `objects/info/alternates` borrows the project's objects, which makes
+the first snapshot of a large repository cheap (1.6 s instead of 14 to 16 s for 25k files).
+The store is found by reading `.git` and `commondir`, not by running git in the project:
+every git command runs with the store as its directory and never loads the project's
+repository configuration, which the agent may have written. Commands lose every `GIT_`
+environment variable and run with `core.fsmonitor=false`, since a file system monitor is a
+program. The store's configuration turns off case folding, so a case-only rename shows up,
+and `info/attributes` turns off filters and line-ending conversion, so blobs are the exact
+bytes on disk.
+
+A snapshot records tracked and untracked files that git does not ignore. It leaves out new
+files over 2 MiB, nested repositories and submodules, classified paths, paths under a locked
+rule without access (such as `.atc`), and everything under `~/.atc`. More than 100000 new
+files turn checkpoints off: such a directory is probably not a project. Above 200 files a
+snapshot writes one pack through bulk check-in, since a loose object costs about half a
+millisecond on macOS. The paths the agent's own file operations wrote
+(`Host.takeWrittenPaths`) are hashed again even when their size and time match, because git
+compares timestamps in whole seconds.
+
+Each tool call gets a snapshot before and after; the second is skipped when the call ran no
+command and wrote nothing (`Host.effects`) and no spawned process is running. The agent's
+changes are the union of the differences within its calls; changes between calls are the
+user's, except that while a process the agent spawned is running, the next call starts from
+the previous call's end snapshot. `endTurn` records, per changed path, the state before the
+agent's first change and after its last, keeps the snapshots under `refs/atc/turns/`, and
+copies the earlier contents into a pack of the store's own, so that a revert does not depend
+on the project keeping them. The store keeps the newest 50 turns and prunes unreachable
+objects older than a day when a session starts; it never runs automatic garbage collection.
+
+`/undo` reverts the most recent turn that still has changes, or only the paths named. Per
+path it compares the current state with the agent's last state: when they match it restores
+the earlier state or deletes a file the agent created; when the file already has its earlier
+state nothing happens; a text file the user edited since is merged with `git merge-file`,
+with the agent's state as the base, and written only when the merge is clean; everything
+else is reported and left alone. Deletions go first, directories the revert emptied are
+removed unless the turn's first snapshot has them, and nothing is written through a
+symbolically linked parent directory. Files are replaced through a temporary file in the
+same directory, with the executable bit restored and a current modification time, so that
+builds notice the change. The model receives a notice of what was reverted.
+
+The first failure (no `git` on the `PATH`, too many files, a git error) turns checkpoints off
+for the session, and the turn summary says why; the turn itself is not disturbed. A project
+that is a subdirectory of a repository gets a store of its own without alternates, and the
+`.gitignore` files above it do not apply. A user edit made while a command runs counts as the
+agent's; the merge rule limits the damage. `CheckpointSuite` covers the store and the session.
+
 ## Configuration semantics
 
 Layers load in this order: global, nearest project, explicit `-c` file. A project is the
@@ -623,7 +682,7 @@ paths retain their first role. Project rules are anchored to the directory conta
 | File rules | Retain each rule and its layer base |
 | Deny commands, deny hosts | Accumulate across layers |
 | Mode and numeric limits | Granting layers set values; project layers may only tighten them |
-| Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
+| Safe mode, gitignore visibility, checkpoints | Project layers may enable, but cannot disable, an enabled restriction |
 
 A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,
 reach beyond its own files, and a cloned repository can ship them. `ProjectTrust` records a

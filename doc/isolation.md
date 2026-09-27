@@ -190,7 +190,7 @@ work tree, and keeps its own index as a stat cache.
   system monitor, which could run a configured program. Paths ATC's own file operations wrote
   are rehashed regardless of stat data, since git compares timestamps at one-second
   granularity.
-- Old turns are pruned; the store never runs automatic garbage collection.
+- The store keeps the newest 50 turns and never runs automatic garbage collection.
 
 Linux can go further: a bubblewrap overlay at the project's real path keeps a command's
 writes in an upper directory until they are applied. Build output directories and `.git` must
@@ -223,7 +223,7 @@ installs would test the original sources.
 |---|---|---|
 | 0 | This document | Done |
 | 1 | Spikes: macOS profiles, Linux bubblewrap, checkpoint store, evaluator process | Done (September 2026) |
-| 2 | L3 checkpoints, turn summary, `/undo` | In progress |
+| 2 | L3 checkpoints, turn summary, `/undo` | Done; see [Checkpoints](development.md#checkpoints) |
 | 3 | L2 on macOS and Linux, local mode without network for commands, protected paths, proxy | Planned |
 | 4 | Capability-derived process authority in the API | Planned |
 | 5 | L1 evaluator on macOS, then Linux | Planned |

@@ -86,7 +86,9 @@ private[host] trait HostPaths:
   /** Run `body` and report what it changed at `path` through [[HostOutput.fileChanged]]. */
   private[host] def withFileChange[A](path: Path, operation: String)(body: => A): A =
     val before = FileChange.snapshot(path)
-    val result = body
+    val result =
+      try body
+      finally noteWrite(path)
     try
       FileChange.between(display(PlatformPath.portable(path)), operation, before, FileChange.snapshot(path))
         .foreach(output.fileChanged)

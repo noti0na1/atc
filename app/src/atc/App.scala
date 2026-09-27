@@ -1,6 +1,7 @@
 package atc
 
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, TurnOutcome}
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, ToolCallHooks, TurnOutcome}
+import atc.checkpoint.Checkpoints
 import atc.commands.{Commands, SlashCommand}
 import atc.config.{Config, Configuration}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
@@ -92,6 +93,13 @@ final class App(args: Cli.Args, val tui: Tui):
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
   val host: Host = Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables)
 
+  /** Records the files the agent changes in each turn, for `/undo` (config
+    * `checkpoints`). A `-p` run has nobody to undo anything. */
+  val checkpoints: Option[Checkpoints] =
+    if config.checkpoints && args.prompt.isEmpty then
+      Some(Checkpoints(PlatformPath.canonical(cwd), Config.globalDir, host, policy))
+    else None
+
   // ── agent ─────────────────────────────────────────────────────────
 
   val agent: Agent = Agent(
@@ -166,6 +174,7 @@ final class App(args: Cli.Args, val tui: Tui):
           models.catalog.refresh()
           if tui.menusAvailable then commands.sessionCommands.offerResume()
           sandbox.warm() // after the resume offer: restoring would only discard it
+          checkpoints.foreach(_.warm())
           interactive()
           if tui.menusAvailable then commands.sessionCommands.saveOnExit()
           0
@@ -195,8 +204,9 @@ final class App(args: Cli.Args, val tui: Tui):
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
     var outcome = TurnOutcome.Failed
+    checkpoints.foreach(_.beginTurn())
     try
-      outcome = agent.turn(sandbox.ensure(), input, () => tui.isInterrupted)
+      outcome = agent.turn(sandbox.ensure(), input, () => tui.isInterrupted, checkpoints.getOrElse(ToolCallHooks.None))
       outcome
     catch
       case e: Exception =>
@@ -214,7 +224,19 @@ final class App(args: Cli.Args, val tui: Tui):
         context.window,
         outcome,
       )))
+      showChanges()
       predictor.start()
+
+  /** After a turn: what the agent changed, which `/undo` can revert. */
+  private def showChanges(): Unit =
+    for c <- checkpoints do
+      val changes = c.endTurn()
+      c.takeFailure().foreach(reason => tui.warn(s"Checkpoints are off for this session: $reason"))
+      if changes.nonEmpty then
+        val shown = changes.take(App.ChangesShown).map(Checkpoints.describe).mkString(", ")
+        val more = if changes.size > App.ChangesShown then s" and ${changes.size - App.ChangesShown} more" else ""
+        val files = if changes.size == 1 then "1 file" else s"${changes.size} files"
+        tui.info(s"Changed $files: $shown$more. /undo reverts them.")
 
   private def interactive(): Unit =
     var running = true
@@ -246,6 +268,9 @@ final class App(args: Cli.Args, val tui: Tui):
 object App:
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
+
+  /** Changed files named after a turn; the rest are counted. */
+  private val ChangesShown = 6
 
   /** Bare lines that quit like `/quit`: what shells and editors use. */
   private val QuitWords: Set[String] = Set(":q", "exit", "quit")

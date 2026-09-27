@@ -21,6 +21,7 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")
   case Reset extends SlashCommand("/reset", "restart the REPL; keep the conversation")
   case Compact extends SlashCommand("/compact [focus]", "summarize conversation context; keep the REPL")
+  case Undo extends SlashCommand("/undo [path...]", "revert the file changes of the last turn that made any")
   case Todos extends SlashCommand("/todos", "show tasks and progress", "/todo")
   case Ps extends SlashCommand("/ps", "list background processes", "/processes")
   case Kill extends SlashCommand("/kill [id|all]", "stop one or all background processes")
