@@ -227,7 +227,7 @@ installs would test the original sources.
 | 3 | L2 on macOS and Linux, local mode without network for commands, protected paths | Done; see [Command sandbox](development.md#command-sandbox) |
 | 3b | Host proxy that enforces `hosts` for commands in full mode | Done |
 | 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` planned |
-| 5 | L1 evaluator on macOS, then Linux | Planned |
+| 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
 
 ## Spike measurements

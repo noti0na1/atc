@@ -118,6 +118,7 @@ requests are echoed. It needs no API key or network connection.
 | `sandbox/` | Compiler setup, REPL evaluation, validation, class loading and interruption |
 | `checkpoint/` | Snapshots of the project in a git store outside it, turn records and `/undo` |
 | `confine/` | OS sandboxes for commands: the plan derived from the policy, Seatbelt and bubblewrap |
+| `evaluator/` | The REPL in a separate, confined process: the call channel and the forwarding `Interface` |
 | `ui/` | JLine input, streaming output, Markdown and syntax highlighting |
 
 One turn follows this path:
@@ -387,7 +388,9 @@ The host checks permissions at each operation. Scope checks apply even when a lo
 already determines access. Command and host deny rules remain effective inside temporary
 scopes and after session grants. External commands run in the OS sandbox described under
 [Command sandbox](#command-sandbox) where the platform provides one, and with the user's
-privileges otherwise.
+privileges otherwise. Where the OS sandbox exists, the compiler, the REPL and the agent's
+code also run in a separate, confined process ([Evaluator process](#evaluator-process)), so
+a hole in safe mode or capture checking yields the runtime policy and nothing more.
 
 ## The sandbox
 
@@ -422,7 +425,8 @@ Evaluation temporarily replaces `System.out` and `System.err`, so a process-wide
 serializes capture. The same lock protects selection of the session's host in `Runtime`,
 including lazy preamble initialization. Lock acquisition has a timeout: an evaluation that
 cannot stop must not block every subsequent request indefinitely. Such a stuck evaluation
-requires restarting ATC.
+requires restarting ATC when the REPL runs in ATC's JVM; an evaluator process is ended
+instead.
 
 After interruption or timeout, the stopped wrapper is excluded from future imports while
 earlier definitions remain available. The driver may already have advanced `objectIndex`;
@@ -625,7 +629,7 @@ transport and response failures within `Classified`.
 
 `CommandSandbox` confines every stage of every command the agent starts: under
 `/usr/bin/sandbox-exec` with a generated Seatbelt profile on macOS, under bubblewrap on Linux.
-`commandSandbox` chooses `auto` (the default: confine where the platform can, otherwise run
+`osSandbox` chooses `auto` (the default: confine where the platform can, otherwise run
 unconfined and name the reason in the banner), `required` (refuse every command where it
 cannot) or `off`; a project layer may only make it stricter. `CommandSandbox.detect` probes
 the backend once at start: `sandbox-exec` fails inside another Seatbelt sandbox, and
@@ -703,6 +707,55 @@ inside the sandbox. The project template lists common package registries among i
 so dependency downloads work without a prompt. `ConfinementSuite` checks the plan, the
 proxy, and real commands under the platform's backend.
 
+## Evaluator process
+
+Where `CommandSandbox` confines commands (`osSandbox` on a platform that provides a
+sandbox), `SandboxRepl` starts the REPL in a separate JVM, `EvaluatorSession`, instead of in
+ATC's own. The evaluator runs `EvaluatorMain`: the unchanged `ReplSession`, over
+`RemoteHost`, an `Interface` whose every effect is a call to the host. `HostDispatch`
+decodes each call, rebuilds the capabilities from their scope ids and runs the unchanged
+`Host`, so the policy checks each call exactly as for an in-process session. Without the
+OS sandbox, or with `osSandbox` off, the REPL stays in ATC's JVM; `required` refuses to start
+it. [The isolation design](isolation.md) explains the layer.
+
+The evaluator is started with an empty environment and `-Xlog` sending the JVM's warnings to
+stderr, since the channel is its stdout: a JVM warning printed there was once read as a
+1.5 GB frame length. On macOS its profile denies by default, allows reading the JDK, ATC's
+class path entries and its working directory, and metadata of the directories above them
+(the JVM stats them at start and crashes without); it allows executing nothing but `java`,
+writing nothing, and no network. On Linux bubblewrap mounts the root file system read-only
+with the home directory and `/tmp` emptied, binds the same entries back, and unshares every
+namespace. Keys, the configuration and the model clients never enter the process. It starts
+from the long-lived launcher thread, as commands do, and costs about 150 ms more than an
+in-process REPL and 250 to 450 MB of memory.
+
+`Channel` is a symmetric call channel over the evaluator's stdin and stdout; it opens with
+a greeting that marks where frames begin. A conversation is one logical call stack across
+both processes: the host thread blocked in `eval` serves the evaluator's calls of that
+evaluation, and an evaluator thread blocked in a host call serves the host's callbacks, so a
+`requestFiles` block runs on the thread that interruption and the REPL's stop flag reach.
+Each thread of a `parallel` call is its own conversation. Frames are capped at 64 MiB and
+any malformed frame closes the channel. Host code that prints for the model (`cat`) reaches
+the evaluator's capture through `printAgent`, in order with the snippet's output; the
+evaluator's own prints come back to the host only to be shown (`HostOutput.show`).
+
+Capabilities cross as scope ids and each call is honoured only while its scope is open;
+`FileSystem` and `FileSystem^{fs.rd}` look the same on the wire, which is why the method,
+never the capability, decides what a command may write. A process handle is honoured only
+from a scope that may see it. `Classified` values live in the evaluator, because `map`
+closures run there, and their content crosses only at sinks and as classified results: a
+compromised evaluator sees every classified value the agent touched, so classified
+confidentiality still rests on the compiler.
+
+The evaluator's `ReplSession` enforces the execution timeout as in-process, pausing its
+clock around calls that wait for the user, a command or a model. Interruption sends a
+cancellation, which raises the stop flag and interrupts the host thread serving the
+evaluation; the host's `clock` subtracts its own pauses from the reported time. A run that
+does not stop within five seconds of an interruption, or that exceeds its limit plus five
+seconds, is ended together with its process; the result says the REPL's definitions are
+gone, and the next tool call starts a new evaluator. `EvaluatorSuite` runs sessions against
+a test host and checks the evaluator's own confinement.
+
 ## Checkpoints
 
 `Checkpoints` records what the agent changes in the project so that `/undo` can revert it;
@@ -775,7 +828,7 @@ paths retain their first role. Project rules are anchored to the directory conta
 | Commands, hosts | Concatenate across layers |
 | File rules | Retain each rule and its layer base |
 | Deny commands, deny hosts | Accumulate across layers |
-| Mode, `commandSandbox` and numeric limits | Granting layers set values; project layers may only tighten them |
+| Mode, `osSandbox` and numeric limits | Granting layers set values; project layers may only tighten them |
 | Safe mode, gitignore visibility, checkpoints | Project layers may enable, but cannot disable, an enabled restriction |
 
 A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,

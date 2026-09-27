@@ -134,7 +134,7 @@ object Configuration:
     * which every layer may add to) merges in layer order. */
   private val PolicyKeys =
     Set("files", "denyCommands", "denyHosts") ++
-      Set("mode", "safeMode", "respectGitignore", "checkpoints", "commandSandbox") ++
+      Set("mode", "safeMode", "respectGitignore", "checkpoints", "osSandbox") ++
       Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
 
   /** Combine the layers.
@@ -149,7 +149,7 @@ object Configuration:
     *    it may open its own files. Deny rules restrict all grants.
     *  - **policy settings** come from the *granting* layers (global, `-c`)
     *    merged the same way, and are then narrowed by the project layer:
-    *    limits, the sandbox mode and `commandSandbox` by the stricter value,
+    *    limits, the sandbox mode and `osSandbox` by the stricter value,
     *    `safeMode`, `respectGitignore` and `checkpoints` only towards "on".
     *  - **file rules** from every layer are kept with their anchor: a project
     *    layer's rules grant only inside its own folder, and clamp everywhere
@@ -209,8 +209,8 @@ object Configuration:
       safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
       respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
       checkpoints = base.checkpoints || (layer.defines("checkpoints") && n.checkpoints),
-      commandSandbox =
-        onlyIfSet("commandSandbox")(stricterSandbox(base.commandSandbox, n.commandSandbox))(base.commandSandbox),
+      osSandbox =
+        onlyIfSet("osSandbox")(stricterSandbox(base.osSandbox, n.osSandbox))(base.osSandbox),
       // A missing timeout means "no limit", so it is the *least* strict value.
       executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
         (base.executionTimeoutMs, n.executionTimeoutMs) match
@@ -232,7 +232,7 @@ object Configuration:
     def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
     Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
 
-  /** The stricter of two `commandSandbox` values: off < auto < required. An unknown
+  /** The stricter of two `osSandbox` values: off < auto < required. An unknown
     * value is left for validation to report. */
   private def stricterSandbox(a: String, b: String): String =
     val order = List("off", "auto", "required")

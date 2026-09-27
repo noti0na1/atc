@@ -19,6 +19,11 @@ object ScopeId:
   val Base: ScopeId = 0L
   private[perms] def apply(id: Long): ScopeId = id
 
+  /** A scope id as it crosses to the evaluator process and back. Only an open scope grants
+    * anything: every check looks the scope up first. */
+  private[atc] def fromLong(id: Long): ScopeId = id
+  extension (id: ScopeId) private[atc] def toLong: Long = id
+
 /** One configured file rule. Missing fields mean "no constraint from this rule".
   *
   * `grantsWithin` marks a rule from a project config and names the folder its

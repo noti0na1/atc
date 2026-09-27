@@ -12,7 +12,7 @@ import scala.util.Using
 import scala.util.control.NonFatal
 
 /** How the commands the agent runs are confined: under Seatbelt on macOS, under
-  * bubblewrap on Linux, or not at all. The `commandSandbox` setting chooses
+  * bubblewrap on Linux, or not at all. The `osSandbox` setting chooses
   * between confining when the platform can (`auto`), refusing commands when it
   * cannot (`required`) and not confining (`off`). */
 sealed trait CommandSandbox:
@@ -24,6 +24,10 @@ sealed trait CommandSandbox:
 
   /** What the banner should warn about, if anything. */
   def notice: Option[String] = Option.unless(confined)(describe)
+
+  /** How to run the evaluator process confined, reading only `readable` (the JDK and ATC's
+    * classes) besides the system's libraries; `None` where there is no OS sandbox. */
+  def evaluator(java: Path, readable: List[Path]): Option[CommandSandbox.EvaluatorLaunch] = None
 
   /** Rewrite each stage of `line` to run confined, and return how to start the stages
     * and what to clean up after the process tree has exited. `scope` is the file
@@ -43,6 +47,9 @@ sealed trait CommandSandbox:
 object CommandSandbox:
   final case class Launch(start: List[ProcessBuilder] => List[java.lang.Process], cleanup: () => Unit)
 
+  /** The command line prefix of the evaluator process and how to start it. */
+  final case class EvaluatorLaunch(prefix: List[String], start: ProcessBuilder => java.lang.Process)
+
   /** Starts the stages on the calling thread, as ProcessBuilder does. */
   val startHere: List[ProcessBuilder] => List[java.lang.Process] = stages =>
     if stages.lengthIs == 1 then List(stages.head.start().nn)
@@ -51,7 +58,7 @@ object CommandSandbox:
   /** Commands run as they are, with the user's authority. */
   final class Unconfined(reason: String) extends CommandSandbox:
     def confined: Boolean = false
-    def describe: String = s"not sandboxed ($reason)"
+    def describe: String = s"off ($reason): commands run with your privileges and the REPL runs inside ATC"
     def prepare(
       stages: List[ProcessBuilder],
       policy: Policy,
@@ -66,7 +73,7 @@ object CommandSandbox:
   /** `required` without a usable sandbox: every command is refused. */
   final class Refusing(reason: String) extends CommandSandbox:
     def confined: Boolean = false
-    def describe: String = s"refused: the sandbox is required but $reason"
+    def describe: String = s"required but $reason: commands and the REPL are refused"
     def prepare(
       stages: List[ProcessBuilder],
       policy: Policy,
@@ -77,7 +84,7 @@ object CommandSandbox:
       line: String,
     ): Launch =
       throw SecurityException(
-        s"Access denied: commands must run in the OS sandbox (\"commandSandbox\": \"required\"), but $reason. Tell the user."
+        s"Access denied: commands must run in the OS sandbox (\"osSandbox\": \"required\"), but $reason. Tell the user."
       )
 
   /** The sandbox the setting asks for, as far as this platform provides it. */
@@ -92,11 +99,11 @@ object CommandSandbox:
           "bubblewrap is missing or user namespaces are off"
         )
     Setting.parse(setting) match
-      case Setting.Off => Unconfined("the commandSandbox setting is off")
+      case Setting.Off => Unconfined("the osSandbox setting is off")
       case Setting.Auto => backend.fold(Unconfined(_), identity)
       case Setting.Required => backend.fold(Refusing(_), identity)
 
-  /** The values of `commandSandbox`, from least to most strict. */
+  /** The values of `osSandbox`, from least to most strict. */
   enum Setting(val label: String):
     case Off extends Setting("off")
     case Auto extends Setting("auto")
@@ -105,7 +112,7 @@ object CommandSandbox:
   object Setting:
     def parse(value: String): Setting =
       values.find(_.label == value.trim.toLowerCase(Locale.ROOT)).getOrElse(
-        throw IllegalArgumentException(s"Unknown commandSandbox '$value' (expected auto|required|off)")
+        throw IllegalArgumentException(s"Unknown osSandbox '$value' (expected auto|required|off)")
       )
 
   /** Variables removed from every confined command: they point at agents that act for the user. */
@@ -178,6 +185,8 @@ object CommandSandbox:
   private final class SeatbeltSandbox extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with Seatbelt"
+    override def evaluator(java: Path, readable: List[Path]): Option[EvaluatorLaunch] =
+      Some(EvaluatorLaunch(Seatbelt.evaluatorPrefix(java, readable), _.start().nn))
     def prepare(
       stages: List[ProcessBuilder],
       policy: Policy,
@@ -202,9 +211,11 @@ object CommandSandbox:
   private final class BubblewrapSandbox(socat: Option[Path]) extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with bubblewrap"
+    override def evaluator(java: Path, readable: List[Path]): Option[EvaluatorLaunch] =
+      Some(EvaluatorLaunch(Bubblewrap.evaluatorPrefix(home, readable), stage => Launcher.start(List(stage)).head))
     override def notice: Option[String] =
       Option.when(socat.isEmpty)(
-        "sandboxed with bubblewrap; in full mode commands reach the network unfiltered (socat is missing)"
+        "sandboxed with bubblewrap; commands inside withNetwork reach the network unfiltered (socat is missing)"
       )
     def prepare(
       stages: List[ProcessBuilder],

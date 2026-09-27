@@ -12,7 +12,7 @@ final case class AgentEnvironment(
   operatingSystem: String,
   /** Whether someone is at the terminal to answer `ask` and permission prompts (false for a `-p` run). */
   userPresent: Boolean = true,
-  /** Whether commands run in an OS sandbox (config `commandSandbox`). */
+  /** Whether commands run in an OS sandbox (config `osSandbox`). */
   commandsConfined: Boolean = false,
 )
 

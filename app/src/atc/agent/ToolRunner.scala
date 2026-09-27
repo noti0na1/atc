@@ -2,7 +2,7 @@ package atc.agent
 
 import atc.llm.{Json, ToolCall, ToolResult, ToolSpec}
 import atc.perms.{Decision, Policy}
-import atc.sandbox.{ExecutionResult, ReplSession}
+import atc.sandbox.{ExecutionResult, SandboxSession}
 
 /** Executes the tools exposed to the model. The agent loop owns when a tool may
   * run; a runner owns the tool-specific decoding and effects. */
@@ -22,7 +22,7 @@ private[atc] object ToolCallHooks:
 
 /** The model's Scala REPL tool, bound to the sandbox session for one turn. */
 private[atc] final class ScalaToolRunner(
-  session: => ReplSession,
+  session: => SandboxSession,
   policy: Policy,
   ui: AgentUI,
   maxOutputChars: Int,
@@ -66,7 +66,7 @@ private[atc] object ScalaToolRunner:
     * with the evaluation time, minus the time spent waiting for the user at prompts, and
     * return it with what the user decided at those prompts. Shared with the user's `/run`. */
   def evaluate(
-    session: ReplSession,
+    session: SandboxSession,
     policy: Policy,
     ui: AgentUI,
     code: String

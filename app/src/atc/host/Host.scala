@@ -21,7 +21,7 @@ final class Host(
   private[host] val gitIgnore: GitIgnore = GitIgnore.Disabled,
   /** The environment variables holding provider keys, removed from every command's environment. */
   private[host] val keyVariables: () => Set[String] = () => Set.empty,
-  /** How commands are confined at the OS level (config `commandSandbox`). */
+  /** How commands are confined at the OS level (config `osSandbox`). */
   val commandSandbox: CommandSandbox = CommandSandbox.Unconfined("not configured"),
 ) extends Interface, Derivations, HostPaths, HostFiles, HostProcesses, HostNetwork, HostInteraction:
 

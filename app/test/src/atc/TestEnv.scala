@@ -5,7 +5,7 @@ import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.sandbox.{ReplSession, Sandbox, SandboxConfig}
+import atc.sandbox.{ReplSession, Sandbox, SandboxConfig, SandboxSession}
 
 import java.io.IOException
 import java.nio.file.{Files, Path}
@@ -54,7 +54,7 @@ final class TestEnv(
   var answers: List[Option[String]] = Nil
   var shownTodos: List[Todo] = Nil
 
-  @volatile var session: Option[ReplSession] = None
+  @volatile var session: Option[SandboxSession] = None
 
   /** Commands that ran long enough to be shown live, and what they wrote while live. */
   val liveCommands: ListBuffer[String] = ListBuffer()
@@ -67,7 +67,7 @@ final class TestEnv(
   val output: HostOutput = new HostOutput:
     def print(agentText: String, userText: String): Unit = agentOut.synchronized:
       agentOut.append(agentText)
-      session.foreach(_.printStream.print(agentText))
+      session.foreach(_.printAgent(agentText))
       userOut.append(if agentText == userText then userText else s"<$userText>")
     override def commandRunning(commandLine: String): Unit = liveCommands += commandLine
     override def whileCommandRuns[T](body: => T): T =

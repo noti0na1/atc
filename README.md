@@ -458,6 +458,9 @@ and the configured permissions.
   a one-bit oracle.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
+- **Agent code runs apart.** On macOS and Linux the compiler and the agent's code run in a
+  separate process that the OS sandbox keeps from your files, keys and network, so it acts
+  only through ATC's checked operations even if the compiler's checks were bypassed.
 - **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
   from your file rules: it writes only where the agent may write, never into `.git` hooks or
   configuration, `.atc` or editor settings, cannot read classified files or your credentials,

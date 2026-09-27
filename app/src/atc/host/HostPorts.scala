@@ -12,6 +12,8 @@ trait HostOutput:
     * the current tool result); `userText` is what the human sees. They differ
     * only for classified values (`Classified(***)` vs. the content). */
   def print(agentText: String, userText: String): Unit
+  /** A print the evaluator process has already added to the tool result: only the user sees it here. */
+  def show(agentText: String, userText: String): Unit = print(agentText, userText)
   /** A command the agent runs (`exec`) has been running for a while
     * ([[Processes.LiveAfterMs]]): from now on what it writes is shown to the
     * human as it happens, through [[commandOutput]]. Shown only: the tool

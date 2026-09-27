@@ -33,6 +33,27 @@ private[atc] object Seatbelt:
   def prefix(plan: SandboxPlan, tmp: Path, proxyPort: Option[Int]): List[String] =
     List(Executable.toString, "-p", profile(plan, tmp, proxyPort))
 
+  /** The prefix that runs the evaluator process: it may read `readable` (the JDK, ATC's
+    * classes, its working directory) and the system's libraries, run nothing but `java`,
+    * write nothing, and use no network. The JVM needs to stat every directory above what it
+    * reads, so those directories get metadata access and nothing more. */
+  def evaluatorPrefix(java: Path, readable: List[Path]): List[String] =
+    val ancestors = readable.flatMap(p =>
+      Iterator.iterate(p.getParent)(q => if q == null then null else q.getParent)
+        .takeWhile(_ != null).map(_.nn)
+    ).distinct.sortBy(_.toString)
+    val profile = List(
+      "(version 1)",
+      "(deny default)",
+      "(import \"system.sb\")",
+      s"(allow process-exec ${literal(java)})",
+      s"(allow file-read* ${readable.map(subpath).mkString(" ")} " +
+        "(literal \"/dev/urandom\") (literal \"/dev/random\") (literal \"/dev/null\"))",
+      s"(allow file-read-metadata ${ancestors.map(literal).mkString(" ")})",
+      "(allow file-write-data (literal \"/dev/null\"))",
+    ).mkString("\n")
+    List(Executable.toString, "-p", profile)
+
   /** System directories every command may read. */
   private val SystemRoots = List(
     "/usr",

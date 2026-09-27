@@ -326,12 +326,12 @@ class LayerSuite extends munit.FunSuite:
 
   test("a project layer may make the command sandbox stricter, never weaker"):
     def sandbox(global: String, project: String = "") =
-      World(global = global, project = project).settings.commandSandbox
+      World(global = global, project = project).settings.osSandbox
     assertEquals(sandbox(""), "auto")
-    assertEquals(sandbox(GrantCwd, """{ "commandSandbox": "required" }"""), "required")
-    assertEquals(sandbox(GrantCwd, """{ "commandSandbox": "off" }"""), "auto")
-    assertEquals(sandbox("""{ "commandSandbox": "off" }"""), "off")
-    assertEquals(sandbox("""{ "commandSandbox": "off" }""", """{ "commandSandbox": "auto" }"""), "auto")
+    assertEquals(sandbox(GrantCwd, """{ "osSandbox": "required" }"""), "required")
+    assertEquals(sandbox(GrantCwd, """{ "osSandbox": "off" }"""), "auto")
+    assertEquals(sandbox("""{ "osSandbox": "off" }"""), "off")
+    assertEquals(sandbox("""{ "osSandbox": "off" }""", """{ "osSandbox": "auto" }"""), "auto")
 
   test("the starting project config grants the project and protects its history"):
     val w = World(global = Config.globalTemplate, project = Config.projectTemplate)

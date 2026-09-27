@@ -37,7 +37,7 @@ final class App(args: Cli.Args, val tui: Tui):
       tui.warn(s"$message. Classified data is not sent to any model until /classifiedmodel chooses one.")
   )
 
-  val sandbox: SandboxRepl = SandboxRepl(config, policy, host, tui)
+  val sandbox: SandboxRepl = SandboxRepl(config, policy, host, tui, osSandbox)
 
   // ── permission policy ─────────────────────────────────────────────
 
@@ -60,8 +60,9 @@ final class App(args: Cli.Args, val tui: Tui):
   private val output: HostOutput = new HostOutput:
     override def fileChanged(change: FileChange): Unit = tui.fileChanged(change)
     def print(agentText: String, userText: String): Unit =
-      sandbox.session.foreach(_.printStream.print(agentText)) // into the tool result, in order with REPL output
+      sandbox.session.foreach(_.printAgent(agentText)) // into the tool result, in order with REPL output
       tui.agentPrint(agentText, userText)
+    override def show(agentText: String, userText: String): Unit = tui.agentPrint(agentText, userText)
     override def commandRunning(commandLine: String): Unit = tui.commandRunning(commandLine)
     override def commandOutput(text: String): Unit = tui.commandOutput(text)
     override def whileCommandRuns[T](body: => T): T = withClockPaused(body)
@@ -92,10 +93,10 @@ final class App(args: Cli.Args, val tui: Tui):
     def showTodos(items: List[Todo]): Unit = tui.showTodos(items)
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
-  /** How commands run: confined by the platform's sandbox, refused, or unconfined (config `commandSandbox`). */
-  val commandSandbox: CommandSandbox = CommandSandbox.detect(config.commandSandbox)
+  /** How commands run: confined by the platform's sandbox, refused, or unconfined (config `osSandbox`). */
+  val osSandbox: CommandSandbox = CommandSandbox.detect(config.osSandbox)
   val host: Host =
-    Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, commandSandbox)
+    Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, osSandbox)
 
   /** Records the files the agent changes in each turn, for `/undo` (config
     * `checkpoints`). A `-p` run has nobody to undo anything. */
@@ -108,7 +109,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   val agent: Agent = Agent(
     config,
-    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty, commandsConfined = commandSandbox.confined),
+    AgentEnvironment.current(cwd, userPresent = args.prompt.isEmpty, commandsConfined = osSandbox.confined),
     policy,
     tui,
     initialModel,
@@ -195,7 +196,7 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ commandSandbox.notice.map("commands" -> _)
+      ) ++ osSandbox.notice.map("OS sandbox" -> _)
         ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
         ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")

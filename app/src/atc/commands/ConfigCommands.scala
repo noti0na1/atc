@@ -51,7 +51,7 @@ final class ConfigCommands(app: App):
       "maxToolCalls" -> policy.maxToolCalls.toString,
       "respectGitignore" -> policy.respectGitignore.toString,
       "checkpoints" -> policy.checkpoints.toString,
-      "commandSandbox" -> policy.commandSandbox,
+      "osSandbox" -> policy.osSandbox,
     ) ++ Setting.values.map(s => s.key -> s.current(current.settings))
     tui.println(settings.map((key, value) => s"$key=$value").mkString(" "))
     tui.println(s"open permission scopes: ${app.policy.openScopeCount}")

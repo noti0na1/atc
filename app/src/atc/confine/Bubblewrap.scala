@@ -96,6 +96,19 @@ private[atc] object Bubblewrap:
       args ++= List("/bin/sh", "-c", script, "atc-proxy")
     args.result()
 
+  /** The prefix that runs the evaluator process: the root file system read-only, the home
+    * directory and `/tmp` empty except for what `readable` names (the JDK, ATC's classes),
+    * and every namespace unshared, so it has no network and sees no other process. */
+  def evaluatorPrefix(home: Path, readable: List[Path]): List[String] =
+    val args = List.newBuilder[String]
+    args ++= List("bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+    if Files.isDirectory(home) then args ++= List("--tmpfs", home.toString)
+    for path <- readable.filter(Files.exists(_)).sortBy(_.getNameCount) do
+      args ++= List("--ro-bind", path.toString, path.toString)
+    for socket <- agentSockets if Files.exists(socket, LinkOption.NOFOLLOW_LINKS) do args ++= mask(Level.Hidden, socket)
+    args ++= List("--chdir", "/tmp", "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
+    args.result()
+
   /** Where agents and daemons that act for the user listen. */
   private def agentSockets: List[Path] =
     Option(System.getenv("XDG_RUNTIME_DIR")).map(Paths.get(_).nn).toList ++

@@ -189,10 +189,11 @@ final case class Config(
   /** Record the files the agent changes in each turn so that `/undo` can revert them
     * (interactive sessions; needs `git`). A project layer may turn it on but not off. */
   checkpoints: Boolean = true,
-  /** How commands are confined at the OS level: `auto` (confine where the platform
-    * can, else run them unconfined with a notice), `required` (refuse commands
-    * where it cannot) or `off`. A project layer may make it stricter only. */
-  commandSandbox: String = "auto",
+  /** How ATC uses the OS sandbox for commands and for the evaluator process that runs
+    * the agent's code: `auto` (where the platform provides one, else unconfined with a
+    * notice), `required` (refuse commands and the REPL where it cannot) or `off`. A
+    * project layer may make it stricter only. */
+  osSandbox: String = "auto",
   /** Compile agent code with `import language.experimental.safe`. On unless a
     * *granting* layer turns it off explicitly: it is a latch, so a narrowing
     * layer can switch it on and never back off. */

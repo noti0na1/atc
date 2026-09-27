@@ -5,7 +5,7 @@ import atc.config.Config
 import atc.lib.{TaskNotes, Todo}
 import atc.llm.*
 import atc.perms.{Decision, Policy}
-import atc.sandbox.{ExecutionResult, ReplSession}
+import atc.sandbox.{ExecutionResult, SandboxSession}
 import atc.ui.Format
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -230,7 +230,7 @@ final class Agent(
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
   def turn(
-    session: => ReplSession,
+    session: => SandboxSession,
     input: String,
     cancelled: () => Boolean,
     hooks: ToolCallHooks = ToolCallHooks.None,
