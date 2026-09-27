@@ -214,4 +214,6 @@ try {
 
 Write-Host ''
 Write-Host "Passed: $script:passed, failed: $script:failed"
-if ($script:failed -gt 0) { exit 1 }
+# Always exit: the dispatch tests leave $LASTEXITCODE at the fake launcher's 7, and a caller
+# such as a CI step that runs this script in its own session reports $LASTEXITCODE.
+if ($script:failed -gt 0) { exit 1 } else { exit 0 }
