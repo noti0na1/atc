@@ -27,8 +27,11 @@ private[atc] object Seatbelt:
         process.waitFor(10, TimeUnit.SECONDS) && process.exitValue == 0
       catch case NonFatal(_) => false)
 
-  /** The command line prefix that runs a command under `plan`, with `tmp` as its private temporary directory. */
-  def prefix(plan: SandboxPlan, tmp: Path): List[String] = List(Executable.toString, "-p", profile(plan, tmp))
+  /** The command line prefix that runs a command under `plan`, with `tmp` as its private
+    * temporary directory and, when the plan allows the network, the proxy on `proxyPort`
+    * as its only way out. */
+  def prefix(plan: SandboxPlan, tmp: Path, proxyPort: Option[Int]): List[String] =
+    List(Executable.toString, "-p", profile(plan, tmp, proxyPort))
 
   /** System directories every command may read. */
   private val SystemRoots = List(
@@ -62,8 +65,9 @@ private[atc] object Seatbelt:
     * would otherwise hide. */
   val DependencyDirs: List[String] = List(".venv", "venv", "node_modules", "site-packages")
 
-  def profile(plan: SandboxPlan, tmp: Path): String =
-    val readRoots = plan.readable ++ plan.writable ++ List(tmp, plan.cache)
+  def profile(plan: SandboxPlan, tmp: Path, proxyPort: Option[Int]): String =
+    val policyRoots = plan.readable ++ plan.writable
+    val readRoots = policyRoots ++ plan.toolchain ++ List(tmp, plan.cache)
     val writeRoots = plan.writable ++ List(tmp, plan.cache)
     val (globs, exact) = plan.restrictions.partition(_.target match
       case Target.Exact(_) => false
@@ -84,37 +88,33 @@ private[atc] object Seatbelt:
     lines += s"(allow file-read* ${SystemRoots.map(r => subpath(Paths.get(r).nn)).mkString(" ")})"
     lines += s"(allow file-read* ${readRoots.map(subpath).mkString(" ")})"
     lines +=
-      s"(allow file-map-executable ${(plan.readable ++ writeRoots ++ ExecutableRoots.map(Paths.get(_).nn)).map(subpath).mkString(" ")})"
+      s"(allow file-map-executable ${(plan.readable ++ plan.toolchain ++ writeRoots ++ ExecutableRoots.map(Paths.get(_).nn)).map(subpath).mkString(" ")})"
     // configd: JVM network interface queries; FSEvents: file watchers. Launch Services, the
     // pasteboard and the keychain stay denied: `open` would start programs outside the sandbox.
-    val mach = List("com.apple.SystemConfiguration.configd", "com.apple.FSEvents") ++
-      Option.when(plan.network)("com.apple.trustd.agent")
+    val mach = List("com.apple.SystemConfiguration.configd", "com.apple.FSEvents")
     lines += s"(allow mach-lookup ${mach.map(name => s"(global-name ${string(name)})").mkString(" ")})"
     val locks = SbtLocks.map(name => literal(plan.home.resolve(name).nn))
     lines += s"(allow file-write* ${(writeRoots.map(subpath) ++ locks).mkString(" ")} " +
       "(literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (regex #\"^/dev/ttys[0-9]+$\") " +
       "(literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))"
-    globs.foreach(r => lines += deny(r.level, filter(r.target, plan)))
+    globs.foreach(r => lines += deny(r.level, filter(r.target, policyRoots)))
     if globs.nonEmpty then
       val dependencies = s"(${DependencyDirs.map(escapeRegex).mkString("|")})"
-      lines += s"(allow file-read-data ${readRoots.map(root =>
+      lines += s"(allow file-read-data ${policyRoots.map(root =>
           regex(s"^${escapeRegex(root.toString)}/(.*/)?$dependencies(/.*)?$$")
         ).mkString(" ")})"
       lines += s"(allow file-write* ${writeRoots.map(root =>
           regex(s"^${escapeRegex(root.toString)}/(.*/)?$dependencies(/.*)?$$")
         ).mkString(" ")})"
-    exact.foreach(r => lines += deny(r.level, filter(r.target, plan)))
+    exact.foreach(r => lines += deny(r.level, filter(r.target, policyRoots)))
     // A protected path inside a writable parent could be swapped out by renaming the parent.
     for case Restriction(Level.ReadOnly, Target.Exact(path)) <- exact; parent <- protectedParents(path, plan) do
       lines += s"(deny file-write-unlink ${literal(parent)})"
-    if plan.network then
-      lines += "(allow network*)"
-      // No Unix sockets and no loopback: a daemon outside the sandbox (a build server, an
-      // IDE, a credential agent) acts with the user's full authority.
-      lines += "(deny network* (local unix) (remote unix))"
-      lines += "(deny network-outbound (remote ip \"localhost:*\"))"
-      lines += "(allow network-outbound (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))"
-    else lines += "(deny network*)"
+    // No Unix sockets and no other loopback port: a daemon outside the sandbox (a build
+    // server, an IDE, a credential agent) acts with the user's full authority. Names are
+    // resolved by the proxy, so the command needs no resolver either.
+    lines += "(deny network*)"
+    for port <- proxyPort if plan.network do lines += s"(allow network-outbound (remote ip \"localhost:$port\"))"
     lines.result().mkString("\n")
 
   private def deny(level: Level, filter: String): String = level match
@@ -122,10 +122,14 @@ private[atc] object Seatbelt:
     case Level.Secret => s"(deny file-read-data file-write* $filter)"
     case Level.ReadOnly => s"(deny file-write* $filter)"
 
-  private def filter(target: Target, plan: SandboxPlan): String = target match
+  /** The paths a restriction covers; a name glob applies below the policy's `roots` only. */
+  private def filter(target: Target, roots: List[Path]): String = target match
     case Target.Exact(path) => subpath(path)
     case Target.Anchored(root, glob) => regex(s"^${escapeRegex(root.toString)}/${globRegex(glob)}(/.*)?$$")
-    case Target.Component(glob) => regex(s"/${globRegex(glob)}(/.*)?$$")
+    case Target.Component(glob) =>
+      val names = s"(.*/)?${globRegex(glob)}(/.*)?$$"
+      if roots.isEmpty then "(literal \"/nonexistent\")"
+      else roots.map(root => regex(s"^${escapeRegex(root.toString)}/$names")).mkString(" ")
 
   /** Directories between a writable root and `path` that a rename could swap out. */
   private def protectedParents(path: Path, plan: SandboxPlan): List[Path] =

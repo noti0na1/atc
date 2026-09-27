@@ -22,10 +22,19 @@ sealed trait CommandSandbox:
   /** One line for the banner: how commands run. */
   def describe: String
 
-  /** Rewrite each stage of a command started with capabilities of `scope` to run
-    * confined, and return how to start the stages and what to clean up after the
+  /** What the banner should warn about, if anything. */
+  def notice: Option[String] = Option.unless(confined)(describe)
+
+  /** Rewrite each stage of `line`, a command started with capabilities of `scope`, to
+    * run confined, and return how to start the stages and what to clean up after the
     * process tree has exited. */
-  def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path): CommandSandbox.Launch
+  def prepare(
+    stages: List[ProcessBuilder],
+    policy: Policy,
+    scope: ScopeId,
+    cwd: Path,
+    line: String
+  ): CommandSandbox.Launch
 
 object CommandSandbox:
   final case class Launch(start: List[ProcessBuilder] => List[java.lang.Process], cleanup: () => Unit)
@@ -39,14 +48,14 @@ object CommandSandbox:
   final class Unconfined(reason: String) extends CommandSandbox:
     def confined: Boolean = false
     def describe: String = s"not sandboxed ($reason)"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path): Launch =
+    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
       Launch(startHere, () => ())
 
   /** `required` without a usable sandbox: every command is refused. */
   final class Refusing(reason: String) extends CommandSandbox:
     def confined: Boolean = false
     def describe: String = s"refused: the sandbox is required but $reason"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path): Launch =
+    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
       throw SecurityException(
         s"Access denied: commands must run in the OS sandbox (\"commandSandbox\": \"required\"), but $reason. Tell the user."
       )
@@ -56,7 +65,12 @@ object CommandSandbox:
     val backend: Either[String, CommandSandbox] =
       if Platform.isMac then Either.cond(Seatbelt.available, SeatbeltSandbox(), "sandbox-exec cannot run here")
       else if Platform.isWindows then Left("Windows has no command sandbox yet")
-      else Either.cond(Bubblewrap.available, BubblewrapSandbox(), "bubblewrap is missing or user namespaces are off")
+      else
+        Either.cond(
+          Bubblewrap.available,
+          BubblewrapSandbox(Bubblewrap.socat),
+          "bubblewrap is missing or user namespaces are off"
+        )
     Setting.parse(setting) match
       case Setting.Off => Unconfined("the commandSandbox setting is off")
       case Setting.Auto => backend.fold(Unconfined(_), identity)
@@ -94,8 +108,16 @@ object CommandSandbox:
   private def plan(policy: Policy, scope: ScopeId, cwd: Path): SandboxPlan =
     SandboxPlan(policy, scope, PlatformPath.canonical(cwd), home, policy.mode.allowsNetwork, cacheDir)
 
-  /** Settings that keep common tools inside their temporary directory and the sandbox's cache. */
-  private def configure(stage: ProcessBuilder, command: List[String], tmp: String, cache: Path): Unit =
+  /** Settings that keep common tools inside their temporary directory and the sandbox's
+    * cache, and send their traffic to the proxy at `proxy` (`127.0.0.1:port`) when the
+    * command may use the network. */
+  private def configure(
+    stage: ProcessBuilder,
+    command: List[String],
+    tmp: String,
+    cache: Path,
+    proxy: Option[Int]
+  ): Unit =
     stage.command((command ++ stage.command().nn.asScala).asJava)
     val environment = stage.environment().nn
     AgentVariables.foreach(environment.remove)
@@ -104,35 +126,60 @@ object CommandSandbox:
     environment.put("MPLCONFIGDIR", cache.resolve("matplotlib").toString)
     environment.put("UV_CACHE_DIR", cache.resolve("uv").toString)
     val sbt = s"-Dsbt.global.staging=${cache.resolve("sbt-staging")} -Dsbt.server.forcestart=true"
-    environment.put("SBT_OPTS", Option(environment.get("SBT_OPTS")).fold(sbt)(existing => s"$existing $sbt"))
+    appendOption(environment, "SBT_OPTS", sbt)
+    for port <- proxy do
+      val url = s"http://127.0.0.1:$port"
+      for name <- List("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") do
+        environment.put(name, url)
+        environment.put(name.toLowerCase(Locale.ROOT), url)
+      environment.put("NO_PROXY", "localhost,127.0.0.1,::1")
+      environment.put("no_proxy", "localhost,127.0.0.1,::1")
+      // The JVM ignores the variables above; its proxy comes from system properties.
+      appendOption(
+        environment,
+        "JAVA_TOOL_OPTIONS",
+        s"-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=$port -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=$port " +
+          "-Dhttp.nonProxyHosts=localhost|127.0.0.1",
+      )
+
+  private def appendOption(environment: java.util.Map[String, String], name: String, value: String): Unit =
+    environment.put(name, Option(environment.get(name)).fold(value)(existing => s"$existing $value"))
+
+  private def closing(proxy: Option[CommandProxy], more: => Unit): () => Unit = () =>
+    proxy.foreach(_.close())
+    more
 
   private final class SeatbeltSandbox extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with Seatbelt"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path): Launch =
+    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
       val sandboxPlan = plan(policy, scope, cwd)
+      val proxy = Option.when(sandboxPlan.network)(CommandProxy.tcp(policy, scope, line))
       // A short path: sbt's socket path is the temporary directory plus about 49 bytes, within a 104-byte limit.
       val tmp = PlatformPath.canonical(Files.createTempDirectory(Paths.get("/private/tmp").nn, "atc-").nn)
-      val prefix = Seatbelt.prefix(sandboxPlan, tmp)
+      val prefix = Seatbelt.prefix(sandboxPlan, tmp, proxy.map(_.port))
       stages.foreach: stage =>
-        configure(stage, prefix, tmp.toString, sandboxPlan.cache)
+        configure(stage, prefix, tmp.toString, sandboxPlan.cache, proxy.map(_.port))
         // The JVM on macOS ignores TMPDIR and would write into the user's shared temporary directory.
-        val environment = stage.environment().nn
-        val option = s"-Djava.io.tmpdir=$tmp"
-        environment.put(
-          "JAVA_TOOL_OPTIONS",
-          Option(environment.get("JAVA_TOOL_OPTIONS")).fold(option)(o => s"$o $option")
-        )
-      Launch(startHere, () => deleteTree(tmp))
+        appendOption(stage.environment().nn, "JAVA_TOOL_OPTIONS", s"-Djava.io.tmpdir=$tmp")
+      Launch(startHere, closing(proxy, deleteTree(tmp)))
 
-  private final class BubblewrapSandbox extends CommandSandbox:
+  /** `socat`, when present, forwards the sandbox's loopback proxy port to the host's proxy. */
+  private final class BubblewrapSandbox(socat: Option[Path]) extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with bubblewrap"
-    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path): Launch =
+    override def notice: Option[String] =
+      Option.when(socat.isEmpty)(
+        "sandboxed with bubblewrap; in full mode commands reach the network unfiltered (socat is missing)"
+      )
+    def prepare(stages: List[ProcessBuilder], policy: Policy, scope: ScopeId, cwd: Path, line: String): Launch =
       val sandboxPlan = plan(policy, scope, cwd)
-      val prefix = Bubblewrap.prefix(sandboxPlan)
-      stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache))
-      Launch(Launcher.start, () => ())
+      val bridge = socat.filter(_ => sandboxPlan.network).map: socatPath =>
+        val dir = Files.createTempDirectory("atc-proxy").nn
+        (socatPath, dir, CommandProxy.unix(dir.resolve("proxy.sock").nn, policy, scope, line))
+      val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)))
+      stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort)))
+      Launch(Launcher.start, closing(bridge.map(_._3), bridge.foreach((_, dir, _) => deleteTree(dir))))
 
   /** Starts processes on one long-lived thread. `--die-with-parent` kills the sandbox
     * when the thread that started it ends, not the JVM, and agent code runs on

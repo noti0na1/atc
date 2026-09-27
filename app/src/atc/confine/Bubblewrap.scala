@@ -58,21 +58,42 @@ private[atc] object Bubblewrap:
   /** Entries visited per root when searching for glob matches. */
   val MaxEntries: Int = 50_000
 
-  /** The command line prefix that runs a command under `plan`. The command's
-    * temporary directory is the sandbox's own `/tmp`. */
-  def prefix(plan: SandboxPlan): List[String] =
+  /** The loopback port inside the sandbox that `socat` forwards to the host's proxy. */
+  val ProxyPort: Int = 3128
+
+  /** Where the host's proxy socket appears inside the sandbox. */
+  private val ProxyDir = "/tmp/.atc-proxy"
+
+  /** `socat` on the `PATH`, which the network bridge needs. */
+  def socat: Option[Path] =
+    Option(System.getenv("PATH")).toList.flatMap(_.split(java.io.File.pathSeparator).toList)
+      .filter(_.nonEmpty).map(dir => Paths.get(dir, "socat").nn).find(Files.isExecutable(_))
+
+  /** The command line prefix that runs a command under `plan`. The command's temporary
+    * directory is the sandbox's own `/tmp`. With `bridge` (`socat` and the directory
+    * holding the host's proxy socket), a command that may use the network keeps its own
+    * network namespace and reaches only the proxy, through `socat` listening on
+    * [[ProxyPort]]; without it, such a command shares the host's network. */
+  def prefix(plan: SandboxPlan, bridge: Option[(Path, Path)]): List[String] =
     val args = List.newBuilder[String]
     args ++= List("bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+    for (_, dir) <- bridge do args ++= List("--bind", dir.toString, ProxyDir)
     if Files.isDirectory(plan.home) then args ++= List("--tmpfs", plan.home.toString)
-    val binds =
-      plan.readable.filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
-        (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
+    val binds = (plan.readable ++ plan.toolchain).filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
+      (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
     for (flag, path) <- binds.sortBy(_._2.getNameCount) do args ++= List(flag, path.toString, path.toString)
     for (level, path) <- masks(plan).sortBy(_._2.getNameCount) do args ++= mask(level, path)
     for socket <- agentSockets if Files.exists(socket, LinkOption.NOFOLLOW_LINKS) do args ++= mask(Level.Hidden, socket)
     args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
-    if !plan.network then args += "--unshare-net"
+    if !plan.network || bridge.isDefined then args += "--unshare-net"
     args ++= List("--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
+    for (socat, _) <- bridge do
+      // Start the forwarder, wait until it accepts connections, then become the command.
+      val script =
+        s"$socat TCP-LISTEN:$ProxyPort,bind=127.0.0.1,reuseaddr,fork UNIX-CONNECT:$ProxyDir/proxy.sock >/dev/null 2>&1 & " +
+          s"i=0; while [ $$i -lt 100 ] && ! $socat -u OPEN:/dev/null TCP:127.0.0.1:$ProxyPort >/dev/null 2>&1; " +
+          "do i=$((i+1)); sleep 0.02; done; exec \"$@\""
+      args ++= List("/bin/sh", "-c", script, "atc-proxy")
     args.result()
 
   /** Where agents and daemons that act for the user listen. */

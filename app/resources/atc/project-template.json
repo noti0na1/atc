@@ -36,6 +36,10 @@
 
     "www.postgresql.org", "dev.mysql.com", "www.sqlite.org",
 
+    "repo1.maven.org", "repo.maven.apache.org", "repo.scala-lang.org", "plugins.gradle.org",
+    "services.gradle.org", "downloads.gradle.org", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org",
+    "crates.io", "index.crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org", "rubygems.org",
+
     "arxiv.org", "*.arxiv.org", "openreview.net", "aclanthology.org",
     "proceedings.mlr.press", "proceedings.neurips.cc", "papers.nips.cc", "openaccess.thecvf.com",
     "www.jmlr.org", "jmlr.org", "dl.acm.org", "ieeexplore.ieee.org", "link.springer.com",

@@ -459,7 +459,7 @@ and the configured permissions.
 - **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
   from your file rules: it writes only where the agent may write, never into `.git` hooks or
   configuration, `.atc` or editor settings, cannot read classified files or your credentials,
-  and has no network in local mode.
+  and has no network in local mode; in full mode it reaches only the hosts you allow.
 
 ### Assumptions and limits
 
@@ -469,7 +469,7 @@ and the configured permissions.
   pop-up is applied as specified.
 - **An allowed command is arbitrary code.** The OS sandbox bounds what it can touch, not what
   it computes: within the project it can change any file the agent may write, and in full
-  mode it can use the network. On Windows, or where the sandbox is unavailable, commands run
+  mode it can send data to any host you allow. On Windows, or where the sandbox is unavailable, commands run
   with your privileges and ATC says so at start. **Pre-approve narrow, specific subcommands
   (`git status`, `./mill app.test`); avoid granting an interpreter, a shell, or a wildcard
   like `git *` over a tool that can run code.**

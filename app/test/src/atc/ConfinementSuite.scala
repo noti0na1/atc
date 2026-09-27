@@ -1,11 +1,16 @@
 package atc
 
-import atc.confine.{Bubblewrap, CommandSandbox, SandboxPlan, Seatbelt}
+import atc.confine.{Bubblewrap, CommandProxy, CommandSandbox, SandboxPlan, Seatbelt}
 import atc.confine.SandboxPlan.{Level, Restriction, Target}
 import atc.lib.{Exec, FileSystem}
 import atc.perms.*
 import atc.platform.{Platform, PlatformPath}
 
+import com.sun.net.httpserver.HttpServer
+
+import java.io.{BufferedReader, InputStreamReader}
+import java.net.{InetAddress, InetSocketAddress, Socket}
+import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.{Files, Path}
 
 class ConfinementSuite extends munit.FunSuite:
@@ -139,7 +144,104 @@ class ConfinementSuite extends munit.FunSuite:
     val env = TestEnv(mkRules = secretsAndGit)
     for network <- List(false, true) do
       val tmp = Files.createTempDirectory("atc-profile").nn.toRealPath().nn
-      val process = ProcessBuilder(Seatbelt.prefix(plan(env, network), tmp) :+ "/usr/bin/true"*)
+      val process = ProcessBuilder(Seatbelt.prefix(plan(env, network), tmp, Some(40000)) :+ "/usr/bin/true"*)
         .redirectErrorStream(true).start().nn
       val output = String(process.getInputStream.nn.readAllBytes().nn)
       assertEquals(process.waitFor(), 0, output)
+
+  // ── the network proxy ───────────────────────────────────────────
+
+  /** A local web server answering every request with `hello`. */
+  private lazy val web: HttpServer =
+    val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress, 0), 0).nn
+    server.createContext(
+      "/",
+      exchange =>
+        val body = "hello".getBytes(UTF_8)
+        exchange.sendResponseHeaders(200, body.length.toLong)
+        exchange.getResponseBody.nn.write(body)
+        exchange.close()
+    )
+    server.start()
+    server
+  private def webPort: Int = web.getAddress.nn.getPort
+
+  override def afterAll(): Unit = web.stop(0)
+
+  /** Send `request` to the proxy and return everything it answers. */
+  private def through(proxy: CommandProxy, request: String, afterwards: Option[String] = None): String =
+    val socket = Socket(InetAddress.getLoopbackAddress, proxy.port)
+    try
+      socket.setSoTimeout(10_000)
+      val out = socket.getOutputStream.nn
+      out.write(request.getBytes(UTF_8))
+      out.flush()
+      val in = BufferedReader(InputStreamReader(socket.getInputStream.nn, UTF_8))
+      afterwards match
+        case None => Iterator.continually(in.readLine()).takeWhile(_ != null).mkString("\n")
+        case Some(next) =>
+          val status = in.readLine()
+          Iterator.continually(in.readLine()).takeWhile(line => line != null && line.nonEmpty).foreach(_ => ())
+          out.write(next.getBytes(UTF_8))
+          out.flush()
+          (status +: Iterator.continually(in.readLine()).takeWhile(_ != null).toList).mkString("\n")
+    finally socket.close()
+
+  private def networkEnv(hosts: List[String]): TestEnv =
+    val env = TestEnv(hosts = hosts)
+    env.policy.mode = Mode.Full
+    env
+
+  private def get(host: String) = s"GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n"
+
+  test("the proxy forwards requests and opens tunnels to allowed hosts"):
+    val env = networkEnv(List("127.0.0.1"))
+    val proxy = CommandProxy.tcp(env.policy, ScopeId.Base, "curl")
+    try
+      val direct =
+        through(proxy, s"GET http://127.0.0.1:$webPort/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+      assert(direct.startsWith("HTTP/1.1 200") && direct.endsWith("hello"), direct)
+      val tunneled = through(proxy, s"CONNECT 127.0.0.1:$webPort HTTP/1.1\r\n\r\n", Some(get("127.0.0.1")))
+      assert(tunneled.startsWith("HTTP/1.1 200 Connection Established") && tunneled.endsWith("hello"), tunneled)
+    finally proxy.close()
+
+  test("the proxy asks about a host the policy does not allow, and refuses it when denied"):
+    val env = networkEnv(Nil)
+    val proxy = CommandProxy.tcp(env.policy, ScopeId.Base, "curl")
+    try
+      val refused = through(proxy, s"CONNECT 127.0.0.1:$webPort HTTP/1.1\r\n\r\n")
+      assert(refused.startsWith("HTTP/1.1 403"), refused)
+      assertEquals(env.requests.size, 1, "one question")
+      through(proxy, s"CONNECT 127.0.0.1:$webPort HTTP/1.1\r\n\r\n")
+      assertEquals(env.requests.size, 1, "the answer holds for the rest of the command")
+    finally proxy.close()
+
+  test("a host approved once is reachable until the command ends"):
+    val env = networkEnv(Nil)
+    env.decisions = List(Decision.AllowOnce)
+    val proxy = CommandProxy.tcp(env.policy, ScopeId.Base, "curl")
+    val answer = through(proxy, s"CONNECT 127.0.0.1:$webPort HTTP/1.1\r\n\r\n", Some(get("127.0.0.1")))
+    assert(answer.endsWith("hello"), answer)
+    proxy.close()
+    assertEquals(env.policy.openScopeCount, 0, "the once-grant's scope closes with the command")
+    assert(!env.policy.hostAllowed(ScopeId.Base, "127.0.0.1"))
+
+  test("an allowed name that resolves to this machine is refused"):
+    val env = networkEnv(List("localhost"))
+    val proxy = CommandProxy.tcp(env.policy, ScopeId.Base, "curl")
+    try
+      val answer = through(proxy, s"CONNECT localhost:$webPort HTTP/1.1\r\n\r\n")
+      assert(answer.startsWith("HTTP/1.1 403") && answer.contains("local"), answer)
+    finally proxy.close()
+
+  test("a confined command with network permission gets out only through the proxy"):
+    assume(
+      sandbox.confined && !sandbox.notice.exists(_.contains("socat")),
+      s"no filtered network here: ${sandbox.describe}"
+    )
+    assume(Files.isExecutable(Path.of("/usr/bin/curl")), "no curl")
+    val env = TestEnv(commands = List("sh"), hosts = List("127.0.0.1"), commandSandbox = sandbox)
+    env.policy.mode = Mode.Full
+    val url = s"http://127.0.0.1:$webPort/"
+    assertEquals(sh(env, s"/usr/bin/curl -s -m 10 --noproxy '' $url").stdout, "hello")
+    assertNotEquals(sh(env, s"/usr/bin/curl -s -m 5 --noproxy '*' $url").exitCode, 0, "a direct connection")

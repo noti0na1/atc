@@ -195,7 +195,7 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ Option.unless(commandSandbox.confined)("commands" -> commandSandbox.describe)
+      ) ++ commandSandbox.notice.map("commands" -> _)
         ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
         ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")

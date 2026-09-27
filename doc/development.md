@@ -665,15 +665,30 @@ process tree with the command. Linux delivers the parent-death signal when the *
 started the process exits, so `CommandSandbox` starts processes on one long-lived thread.
 
 Networking follows the mode. Without network permission, Seatbelt denies all networking and
-bubblewrap adds a network namespace. With it, Seatbelt still denies Unix sockets (except the
-DNS resolver's) and loopback connections, since a daemon outside the sandbox, such as a Mill
-or Gradle server, an IDE or a credential agent, acts with the user's full authority; build
-tools therefore run without their daemon (`./mill --no-daemon`), and the system prompt says
-so. On Linux a command with network permission shares the host's network namespace until the
-proxy that enforces `hosts` for commands lands. Every confined command loses `SSH_AUTH_SOCK`,
-`GPG_AGENT_INFO` and `DOCKER_HOST`, and gets `TMPDIR`, `TMPPREFIX`, and cache locations for
-matplotlib, uv and sbt inside the sandbox. `ConfinementSuite` checks the plan and runs real
-commands under the platform's backend.
+bubblewrap adds a network namespace. With it, the command's only way out is a `CommandProxy`,
+one per command: an HTTP proxy that opens `CONNECT` tunnels and forwards absolute-form HTTP
+requests to the hosts the policy allows in the command's scope (`hosts`, `denyHosts` and the
+session and scope grants, as for `httpGet`). A host not allowed yet goes through
+`Policy.requestNet`, so an interactive session asks and records the decision in the tool
+result; a "once" approval lasts until the command ends, and a `-p` run refuses. The proxy
+resolves names itself and refuses a name that resolves only to loopback, link-local
+(cloud metadata included), wildcard or multicast addresses, unless that address is an allowed
+host in its own right. On macOS the profile allows outbound connections only to the proxy's
+loopback port, so no Unix socket and no other local server is reachable: a daemon outside
+the sandbox, such as a Mill or Gradle server, an IDE or a credential agent, acts with the
+user's full authority. Build tools therefore run without their daemon (`./mill --no-daemon`),
+and the system prompt says so. On Linux the proxy listens on a Unix socket that is mounted
+into the sandbox, and `socat` inside the sandbox forwards `127.0.0.1:3128` to it; without
+`socat` a command with network permission shares the host's network, and the banner says so.
+The command gets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (and their lowercase forms),
+`NO_PROXY=localhost,127.0.0.1,::1`, and for JVMs the proxy system properties in
+`JAVA_TOOL_OPTIONS`, since the JVM ignores the variables; the proxy needs no credentials, so
+no Java agent is involved. Tools that ignore proxy settings fail to connect instead of going
+around the proxy. Every confined command loses `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` and
+`DOCKER_HOST`, and gets `TMPDIR`, `TMPPREFIX`, and cache locations for matplotlib, uv and sbt
+inside the sandbox. The project template lists common package registries among its hosts,
+so dependency downloads work without a prompt. `ConfinementSuite` checks the plan, the
+proxy, and real commands under the platform's backend.
 
 ## Checkpoints
 

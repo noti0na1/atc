@@ -7,9 +7,12 @@ import java.nio.file.{Files, Path, Paths}
 
 /** What a command may reach, as concrete paths: the input a sandbox backend renders.
   *
-  * `readable` and `writable` are roots (a root covers its subtree); `restrictions`
-  * narrow them and are applied after them. System directories are the backend's
-  * concern. A plan never grants more than the policy: roots come from rules and
+  * `readable` and `writable` are the roots the policy grants and `toolchain` the
+  * toolchain directories (a root covers its subtree); `restrictions` narrow them and
+  * are applied after them. Glob restrictions come from the user's file rules and
+  * apply within the policy's roots only, not to system or toolchain directories,
+  * which hold certificate bundles that `*.pem` would otherwise hide. System
+  * directories are the backend's concern. A plan never grants more than the policy: roots come from rules and
   * grants that give access, and every rule that takes access away becomes a
   * restriction, whatever grant might widen it. */
 final case class SandboxPlan(
@@ -17,6 +20,7 @@ final case class SandboxPlan(
   home: Path,
   readable: List[Path],
   writable: List[Path],
+  toolchain: List[Path],
   restrictions: List[SandboxPlan.Restriction],
   network: Boolean,
   /** A directory owned by the sandbox, where tools keep caches between commands. */
@@ -53,8 +57,7 @@ object SandboxPlan:
       ++ policy.fileGrants(scope).collect { case (path, access) if access != Access.None => path }
     val roots = granted.distinct.map(path => path -> policy.effective(scope, path))
     val writable = roots.collect { case (path, perm) if perm.canWrite && !perm.classified => path }
-    val readable = roots.collect { case (path, perm) if perm.canRead && !perm.canWrite && !perm.classified => path } ++
-      toolchain(home)
+    val readable = roots.collect { case (path, perm) if perm.canRead && !perm.canWrite && !perm.classified => path }
     val fromRules = policy.rules.flatMap: rule =>
       val level =
         if rule.access.contains(Access.None) then Some(Level.Hidden)
@@ -77,6 +80,7 @@ object SandboxPlan:
       home,
       readable.distinct,
       writable,
+      toolchain(home),
       (fromRules ++ protectedPaths ++ homeRules).distinct,
       network,
       cache

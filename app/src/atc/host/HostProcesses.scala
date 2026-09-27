@@ -127,7 +127,7 @@ private[host] trait HostProcesses:
       val file = path.toFile
       pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
     // File grants travel with the file system capability, so its scope decides what the command may touch.
-    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), dir)
+    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), dir, pipeline.line)
     Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
