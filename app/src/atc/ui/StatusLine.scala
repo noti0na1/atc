@@ -7,7 +7,7 @@ import scala.jdk.CollectionConverters.*
 
 /** The footer (JLine `Status`) and the window title. The footer shows what the turn is
   * doing, an unsent correction, or the keys a pop-up takes; between turns it shows the
-  * model, mode and directory. The title is `atc · <directory>`, marked while a turn runs
+  * mode, model and directory. The title is `atc · <directory>`, marked while a turn runs
   * (`●`) or a pop-up waits during one (`?`), so a tab that needs the user stands out. The
   * terminal's own title is saved first (xterm's title stack) and restored by `close`.
   *

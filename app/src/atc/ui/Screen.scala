@@ -228,7 +228,7 @@ object Screen:
     * advances to the next multiple of 8, wide (CJK) code points count 2, other
     * controls 0. `String.length` counts UTF-16 units and undercounts all of these,
     * which would let "one row" lines wrap and corrupt the live regions. */
-  private[ui] def cellWidth(cp: Int, col: Int): Int =
+  private[ui] inline def cellWidth(cp: Int, col: Int): Int =
     if cp == '\t' then 8 - (col % 8) else math.max(0, WCWidth.wcwidth(cp))
 
   /** `text` with a line break wherever it would pass `room` cells, for a row that already

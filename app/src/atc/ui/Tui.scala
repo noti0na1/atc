@@ -136,10 +136,10 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
     else if line.nonEmpty && !line.startsWith(" ") then styled(line, Bold)
     else line
 
-  def setContext(model: String, mode: String, directory: String): Unit = screen.synchronized:
+  def setContext(mode: String, model: String, directory: String): Unit = screen.synchronized:
     val title = s"atc ${g.dot} $directory"
     alerts.title = title
-    statusLine.setContext(s"$model ${g.dot} $mode ${g.dot} $directory", title)
+    statusLine.setContext(s"$mode ${g.dot} $model ${g.dot} $directory", title)
 
   override def inputAccepted(text: String): Unit = frame:
     beginBlock()

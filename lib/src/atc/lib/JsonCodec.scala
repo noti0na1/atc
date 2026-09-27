@@ -114,7 +114,7 @@ private[atc] object JsonCodec:
         case c if c == '-' || (c >= '0' && c <= '9') => number()
         case c => fail(s"unexpected character '$c'")
 
-    private def nested(parse: => Json): Json =
+    private inline def nested(inline parse: Json): Json =
       depth += 1
       if depth > MaxDepth then fail(s"nested deeper than $MaxDepth levels")
       try parse

@@ -35,6 +35,14 @@ jobs:
       if: runner.os != 'Windows'
       shell: bash
       run: bash tests/atc_test.sh
+    - name: Test the Windows wrapper script (Windows PowerShell)
+      if: runner.os == 'Windows'
+      shell: powershell
+      run: ./tests/atc_test.ps1
+    - name: Test the Windows wrapper script (PowerShell 7)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./tests/atc_test.ps1
     - name: Set up JDK 17
       uses: actions/setup-java@v6
       with:

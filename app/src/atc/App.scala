@@ -131,11 +131,11 @@ final class App(args: Cli.Args, val tui: Tui):
     predictor.enabled = settings.predictInput && canPredict
     if !predictor.enabled then predictor.invalidate()
 
-  /** Show the model, its effort, the mode and the directory in the status line. */
+  /** Show the mode, the model with its effort and the directory in the status line. */
   def updateStatus(): Unit =
     val directory = Option(cwd.getFileName).fold(PlatformPath.display(cwd))(_.toString)
     val effort = agent.model.effort.fold("")(e => s" ($e)")
-    tui.setContext(models.catalog.label(models.catalog.find(agent.model.ref)) + effort, policy.mode.label, directory)
+    tui.setContext(policy.mode.label, models.catalog.label(models.catalog.find(agent.model.ref)) + effort, directory)
   updateStatus()
 
   // ── commands ──────────────────────────────────────────────────────
