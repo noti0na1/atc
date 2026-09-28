@@ -4,7 +4,7 @@ import atc.agent.{Agent, AgentEnvironment, InputPredictor, ToolCallHooks, TurnOu
 import atc.checkpoint.Checkpoints
 import atc.commands.{Commands, SlashCommand}
 import atc.confine.CommandSandbox
-import atc.config.{Config, Configuration}
+import atc.config.{Config, Configuration, ProjectRules}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
@@ -14,6 +14,7 @@ import atc.ui.{Notifier, Tui}
 
 import java.nio.file.Path
 import java.util.Locale
+import scala.util.control.NonFatal
 
 /** The running application: wires configuration, models, permission policy,
   * host, sandbox, agent loop and terminal UI together, then runs either one
@@ -46,12 +47,27 @@ final class App(args: Cli.Args, val tui: Tui):
       configuration.fileRules(cwd),
       config.commands,
       config.hosts,
-      App.permissionPrompter(args, request => withClockPaused(tui.askPermission(request))),
+      App.permissionPrompter(args, request => askPermission(request)),
       config.denyCommands,
       config.denyHosts
     )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
   models.useMode(policy.mode)
+
+  /** The permission pop-up, offering to save the grant to the project config where it can
+    * be written there, and saving it when the user chooses that. */
+  private def askPermission(request: PermissionRequest): Decision =
+    val here = PlatformPath.canonical(cwd)
+    val target = ProjectRules.plan(cwd, request).map: plan =>
+      if plan.config.startsWith(here) then PlatformPath.portable(here.relativize(plan.config).nn)
+      else PlatformPath.display(plan.config)
+    val decision = withClockPaused(tui.askPermission(request, target))
+    if decision == Decision.AllowAlways then
+      try tui.info(ProjectRules.save(cwd, request))
+      catch
+        case NonFatal(e) =>
+          tui.error(s"The grant holds for this session but could not be saved: ${Debug.message(e)}")
+    decision
 
   // ── host (the sandbox API implementation) and its ports ───────────
 

@@ -109,6 +109,8 @@ object ToolOutput:
       case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
       case (Decision.AllowSession, what) =>
         s"the user allowed $what for the rest of this session (no request needed from now on)"
+      case (Decision.AllowAlways, what) =>
+        s"the user allowed $what and saved it to the project config (no request needed from now on, nor in later sessions)"
       case (Decision.Deny, what) =>
         s"the user denied $what (this request was not approved; do not repeat it unchanged or infer a permanent ban on every item)"
       case (Decision.Revise(instructions), what) =>

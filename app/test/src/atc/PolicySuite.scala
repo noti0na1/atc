@@ -112,6 +112,19 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(PlatformPath.portable(Path.of("a", "b", "c")), "a/b/c")
     if !Platform.isWindows then assertEquals(PlatformPath.portable(Path.of("a\\b")), "a\\b")
 
+  test("always allowing grants for the session, and a file request carries the configured ceiling"):
+    val prompter = ScriptedPrompter(List(Decision.AllowAlways))
+    val p = Policy(
+      rules((".", Some(Access.Write), None, false), (".git", Some(Access.Read), None, false)),
+      Nil,
+      Nil,
+      prompter
+    )
+    val hook = root.resolve(".git/hooks/pre-commit")
+    p.closeScope(p.requestFile(ScopeId.Base, hook, Access.Write, "hook"))
+    assertEquals(p.effective(ScopeId.Base, hook).access, Access.Write, "a standing grant, like the session's")
+    assertEquals(prompter.asked.collect { case f: FileRequest => f.ceiling }, List(Access.Read))
+
   test("requests widen access once or for the session, deny throws"):
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.Deny, Decision.AllowSession))
     val p = Policy(rules((".", Some(Access.Read), None, false)), Nil, Nil, prompter)

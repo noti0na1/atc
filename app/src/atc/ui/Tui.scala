@@ -472,8 +472,8 @@ final class Tui(historyFile: Path, nonInteractive: Boolean = false) extends Agen
       popupBlock(dialogs.checkboxIndices(Ansi.sanitize(title), options.map(Ansi.sanitize), checked, escape = "back"))
         .map(_.toSet)
 
-  def askPermission(req: PermissionRequest): Decision =
-    statusLine.withOperation("waiting for permission")(popupBlock(dialogs.permission(req)))
+  def askPermission(req: PermissionRequest, saveTarget: Option[String] = None): Decision =
+    statusLine.withOperation("waiting for permission")(popupBlock(dialogs.permission(req, saveTarget)))
 
   /** A yes/no question from the app itself (see [[Dialogs.confirm]]). */
   def confirm(question: String): Boolean = popupBlock(dialogs.confirm(question))

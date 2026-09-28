@@ -497,7 +497,18 @@ open originating scope; `runningProcesses` filters by scope visibility.
 
 At runtime, a request resolves its parent scope, checks mode and deny restrictions, and
 asks only for permissions not already held. `AllowOnce` applies to the child scope;
-`AllowSession` also records the grant on `ScopeId.Base`. The callback runs through
+`AllowSession` also records the grant on `ScopeId.Base`. `AllowAlways` does the same and
+saves the grant to the project config: `App` offers it where `ProjectRules.plan` finds a way to
+write it, and `ProjectRules.save` writes it after the user chooses it. Commands and hosts join
+the config's lists; a file grant becomes a `./`-anchored rule, offered only inside the
+project (a project rule grants nowhere else), for a path without glob characters, and when
+no configured rule caps the path below the request (`FileRequest.ceiling`), since the saved
+rule would grant nothing. The config is created in the working directory when the project
+has none; in the home directory, where the project config is the global one, nothing is
+offered. `ObjectText.withAppended` adds the entries after a list's last one, so a
+hand-formatted list keeps its layout. A project whose commands and hosts were trusted is
+trusted again with the addition; an untrusted one stays untrusted, so the saved command or
+host applies only for this session until the user trusts the project. The callback runs through
 `Host.inScope`, whose `finally` block terminates scoped processes and closes the scope.
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.

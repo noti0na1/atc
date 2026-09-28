@@ -165,6 +165,10 @@ final class Policy(
         computed
       case found => found
 
+  /** The lowest access any configured rule matching `p` allows: no rule saved for `p` can
+    * grant more. `p` must be canonical. */
+  def ceiling(p: Path): Access = matchingRules(p).flatMap(_.access).reduceOption(_.min(_)).getOrElse(Access.Write)
+
   /** Permission from the configuration only. `p` must be canonical. */
   def configPerm(p: Path): Perm =
     val matching = matchingRules(p)
@@ -205,7 +209,7 @@ final class Policy(
     if !(current.access >= access) then
       if current.locked then
         throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
-      decide(FileRequest(p, access, current, reason), s"${access.label} on '$shown'") {
+      decide(FileRequest(p, access, current, reason, ceiling(p)), s"${access.label} on '$shown'") {
         base.synchronized(base.fileGrants ::= (p -> access))
       }
     openScope(parent, fileGrants = List(p -> access))
@@ -300,7 +304,7 @@ final class Policy(
       case Decision.Revise(_) =>
         throw SecurityException(s"Permission request not approved: $what. The user supplied instructions to revise it.")
       case Decision.AllowOnce => ()
-      case Decision.AllowSession => remember
+      case Decision.AllowSession | Decision.AllowAlways => remember
 
   /** Every decision the user made at a prompt, in order, with what it was
     * about as a phrase (`write on '/tmp/x'`, `commands npm *`). The agent

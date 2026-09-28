@@ -360,9 +360,10 @@ requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-The pop-up offers **Allow once**, **Allow for this session**, **Deny this request**, and
-**Tell the agent what to change**. The last one sends your instructions back instead of a
-grant: "request only the first four commands; skip the deployment" makes the agent revise
+The pop-up offers **Allow once**, **Allow for this session**, **Always allow in this
+project**, which also saves the grant to the project's `.atc/config.json`, **Deny this
+request**, and **Tell the agent what to change**. The last one sends your instructions back
+instead of a grant: "request only the first four commands; skip the deployment" makes the agent revise
 its request. The granted capability cannot leave the block, and the host closes the scope
 when the block exits. `locked` rules cannot be widened at all, and a `denyCommands` or
 `denyHosts` match is refused without a pop-up.
