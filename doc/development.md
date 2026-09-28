@@ -389,8 +389,9 @@ already determines access. Command and host deny rules remain effective inside t
 scopes and after session grants. External commands run in the OS sandbox described under
 [Command sandbox](#command-sandbox) where the platform provides one, and with the user's
 privileges otherwise. Where the OS sandbox exists, the compiler, the REPL and the agent's
-code also run in a separate, confined process ([Evaluator process](#evaluator-process)), so
-a hole in safe mode or capture checking yields the runtime policy and nothing more.
+code also run in a separate, confined process ([Evaluator process](#evaluator-process)): the
+OS then holds the agent's code to the permission policy as well, a coarser level of
+protection alongside the compiler's.
 
 ## The sandbox
 

@@ -17,9 +17,13 @@ interface, persistent REPL sessions, multiple model providers and layered permis
   only through supported output methods.
 - **Permission rules:** access is denied by default; configuration, temporary grants and
   session grants determine which operations are permitted. Deny rules take precedence.
+- **OS sandbox:** on macOS and Linux, the commands the agent runs and the process that runs
+  its code are confined to what the permission rules allow.
+- **Undo:** the files a turn changes are recorded, and `/undo` reverts them.
 
-The compiler and host are part of the trusted implementation. External commands run with
-the user's OS privileges. See [Security model](#security-model) for the assumptions and limits.
+These are different levels of protection, each resting on different parts of the system;
+the compiler, the host and the OS are all part of the trusted implementation. See
+[Security model](#security-model) for what each level guarantees and for the limits.
 
 ## Example
 
@@ -322,7 +326,8 @@ therefore also checks the permission policy for the relevant path, command, or h
 capability from a `request*` block is refused once that block has closed. Underneath sit a
 validator that rejects the obvious escape hatches (`java.io`, reflection, the application's
 own packages) before compilation, and a class loader that shows agent code only the JDK,
-`scala.*` and the agent library. The details are in
+`scala.*` and the agent library. On macOS and Linux the OS sandbox adds a further level; see
+[Levels of protection](#levels-of-protection). The details are in
 [doc/development.md](doc/development.md#defence-in-depth).
 
 ## Modes: read-only, local, full
@@ -441,8 +446,26 @@ Windows notes are in [doc/development.md](doc/development.md#file-rules-and-comm
 
 ## Security model
 
-The following restrictions depend on safe mode, the compiler, the host implementation
-and the configured permissions.
+### Levels of protection
+
+ATC protects your machine at several levels. They differ in what they can tell apart and in
+the parts of the system they rest on:
+
+| Level | What it guarantees | What it covers | Rests on |
+|---|---|---|---|
+| **Types** (capture checking, safe mode) | a snippet uses only the capabilities in scope; secrets stay inside `Classified`; a lent capability does not outlive its block | the Scala the agent writes | the compiler and the agent library |
+| **Permission policy** | every file, command and host access matches your rules, grants and deny lists | every operation the agent's code performs | ATC's host implementation |
+| **OS sandbox** (macOS, Linux) | commands write only where your rules allow, read only granted paths, system files and toolchains, never your credentials or classified files, and reach only allowed hosts; the agent's code runs in a separate process that holds no keys and reaches the machine only through ATC | commands and the programs they start, and the process running the agent's code | the OS sandbox (Seatbelt, bubblewrap) |
+| **Undo** | the files a turn changed can be listed and reverted | changes made by the agent's code and by commands | git and ATC's store in `~/.atc` |
+
+The type level is the most precise: it knows which snippet or closure holds which
+capability and separates classified values from ordinary ones, which no OS mechanism can.
+The OS level is coarser (it knows paths and hosts, not values), but it also covers code the
+types never see, such as a build or test suite a permitted command runs. Where levels
+overlap, each one limits what a fault in another can reach: the policy is checked on every
+operation whatever the types allowed, and the OS sandbox enforces the same rules on
+processes. Undo covers what no rule can prevent, a change that the rules allow but you did
+not want.
 
 ### Enforced restrictions
 
@@ -458,14 +481,18 @@ and the configured permissions.
   a one-bit oracle.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
-- **Agent code runs apart.** On macOS and Linux the compiler and the agent's code run in a
-  separate process that the OS sandbox keeps from your files, keys and network, so it acts
-  only through ATC's checked operations even if the compiler's checks were bypassed.
 - **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
   from your file rules: it writes only where the agent may write, never into `.git` hooks or
   configuration, `.atc` or editor settings, cannot read classified files or your credentials,
   and has no network unless the agent starts it inside `withNetwork` (full mode), which lets
-  it reach only the hosts you allow.
+  it reach only the hosts you allow, through a proxy that asks you about others. A command
+  run with `execReadOnly` writes nothing, which is how read-only mode runs commands.
+- **Agent code runs apart.** On macOS and Linux the compiler and the agent's code run in a
+  separate process that the OS sandbox keeps from your files, keys and network: it reaches
+  the machine only through ATC's operations, which apply the permission policy.
+- **Changes can be undone.** After a turn ATC lists the files it changed, whether the agent's
+  code or a command changed them, and `/undo` restores them, keeping edits you made since
+  where it can.
 
 ### Assumptions and limits
 
@@ -474,11 +501,18 @@ and the configured permissions.
   against *you*: a permissive configuration, `--approve-all`, or a permission granted in a
   pop-up is applied as specified.
 - **An allowed command is arbitrary code.** The OS sandbox bounds what it can touch, not what
-  it computes: within the project it can change any file the agent may write, and in full
-  mode it can send data to any host you allow. On Windows, or where the sandbox is unavailable, commands run
-  with your privileges and ATC says so at start. **Pre-approve narrow, specific subcommands
-  (`git status`, `./mill app.test`); avoid granting an interpreter, a shell, or a wildcard
-  like `git *` over a tool that can run code.**
+  it computes: within the project it can change any file the agent may write, and inside
+  `withNetwork` it can send data to any host you allow. **Pre-approve narrow, specific
+  subcommands (`git status`, `./mill app.test`); avoid granting an interpreter, a shell, or a
+  wildcard like `git *` over a tool that can run code.**
+- **The OS sandbox is not everywhere.** On Windows, or where the sandbox is unavailable (for
+  example Linux without bubblewrap or with unprivileged user namespaces disabled), commands
+  run with your privileges and the agent's code runs inside ATC; the banner says so. Set
+  `"osSandbox": "required"` to refuse commands and the REPL instead.
+- **The OS sandbox works on paths.** A copy of a secret under an unclassified name is not
+  recognised as classified, by commands or by ATC. Commands cannot reach local servers or
+  Unix sockets, so build tools must run without their background server
+  (`./mill --no-daemon`), and tool caches in your home directory are read-only to them.
 - **Allowed hosts can receive data.** The agent may send any non-classified data available
   to it to an allowed host. The type system prevents this only for `classified` content.
   Allow only hosts you trust to receive project data.
@@ -490,10 +524,17 @@ and the configured permissions.
   `Classified.map`, but arbitrary pure code can still vary its running time, resource use,
   or termination with the secret. Do not treat timeouts or timing as a declassification
   mechanism; ATC does not claim resistance to those side channels.
+- **Undo has limits.** It works in interactive sessions and restores tracked and untracked
+  files that git does not ignore. Ignored files, new files over 2 MiB and classified files
+  are not recorded, and a command's effects outside the project (a network request, for
+  example) cannot be undone.
 - **The trusted computing base.** The JVM, the Scala compiler and its capture checker, the
-  OS, the terminal library, the agent library's host implementation, and ATC itself are
-  trusted; a bug in any of them (or in your config) can break a guarantee. Capture
-  checking and safe mode are experimental compiler features.
+  OS and its sandbox, the terminal library, the agent library's host implementation, and ATC
+  itself are trusted; a bug in any of them (or in your config) can break a guarantee.
+  Guarantees rest on different parts: `Classified` confidentiality and the per-snippet
+  capability discipline rest on the compiler, including when the agent's code runs in its
+  own process, while command confinement rests on the OS sandbox. Capture checking and safe
+  mode are experimental compiler features.
 
 ### Permission configuration
 
@@ -503,7 +544,7 @@ and the configured permissions.
 - Keep the configuration concise and auditable. Prefer several specific rules to one broad
   rule.
 - Keep credentials behind `classified`, keep `.atc` out of the agent's reach (the templates
-  do both), and keep `safeMode` on.
+  do both), and keep `safeMode`, `checkpoints` and the OS sandbox (`osSandbox`) on.
 - Use `denyCommands` and `denyHosts` to prohibit operations regardless of other permissions.
 - For risky operations, prefer a one-time grant in the pop-up to a broad standing grant.
   Reserve `--approve-all` for trusted sandboxes and CI environments.

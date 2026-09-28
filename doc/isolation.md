@@ -9,9 +9,9 @@ into the [README](../README.md) and its implementation notes into the
 ## Goal
 
 ATC currently guarantees that the Scala the model writes can perform only the effects its
-capabilities allow, on the files, commands and hosts the policy permits. The target is a
-stronger statement that holds for everything the agent does, through Scala or through any
-process it starts, and even when the compiler's checks fail:
+capabilities allow, on the files, commands and hosts the policy permits. The target adds
+levels of protection that hold for everything the agent does, through Scala or through any
+process it starts, each resting on different parts of the system:
 
 1. The agent cannot act outside the authority the user granted.
 2. Every change it makes to the workspace can be reviewed and undone.
@@ -24,9 +24,10 @@ The model is untrusted, together with everything that reaches its context: file 
 web pages, command output, dependencies, and the build and test code it runs. The user, the
 configuration, the host process, the JVM and the kernel are trusted.
 
-The compiler moves out of the trusted base. Capture checking and safe mode remain the first
-layer and the only one that gives per-snippet precision, but a hole in them must not give the
-agent the host's authority.
+The compiler stays in the trusted base: capture checking and safe mode give the precise
+guarantees (per-snippet capability use, `Classified` purity, scoped capabilities) that no
+other level can. The other levels give coarser guarantees that rest on other parts, the host
+and the OS sandbox, so that where levels overlap, a fault in one is limited by the others.
 
 Out of scope: kernel exploits, hardware side channels, timing and termination channels of
 classified computations (already excluded for `Classified.map`), and a configuration that
@@ -43,7 +44,7 @@ external accounts reachable over the network; and availability (disk, CPU, stray
 |---|---|
 | Damage to files | `FileChange` shows bounded previews of the agent's own file operations. Nothing records changes made by commands, and nothing can undo a change the policy allowed. |
 | Commands | A permitted command runs with the user's full authority. Arguments are not checked as paths, so a permitted command can read classified files. Local mode offers no network to Scala, but commands keep full network access. Build files and tests are arbitrary code. |
-| Compiler bypass | The REPL runs in the host JVM beside the API keys, the configuration and the terminal. JDK classes such as `ProcessBuilder` resolve through the platform loader; safe mode and the lexical validator are the only barriers. |
+| One level for agent code | The REPL runs in the host JVM beside the API keys, the configuration and the terminal. JDK classes such as `ProcessBuilder` resolve through the platform loader; safe mode and the lexical validator are the only barriers, so the language level alone stands between agent code and the host's authority. |
 | Path races | The host checks a canonical path and then operates on it. Once processes change the workspace concurrently, a check can be raced while the host holds full authority. |
 
 ## Layers
@@ -51,15 +52,16 @@ external accounts reachable over the network; and availability (disk, CPU, stray
 | Layer | Property | Covers | Relies on |
 |---|---|---|---|
 | L0 static capabilities (existing) | A snippet or closure performs effects only through the capabilities it holds; `Classified` stays pure; scoped capabilities do not escape | Precision per snippet and closure, secrets, lifetimes | Compiler soundness |
-| L1 evaluator process | Machine effects stay within the runtime policy even without L0 | Compiler and safe-mode holes | Host correctness |
+| L1 evaluator process | The agent's code reaches the machine only through the host's checked operations, enforced by the OS as well | A fault at the language level | The OS sandbox and the host |
 | L2 command confinement | A process has at most the authority of the capabilities passed to `exec`, intersected with the policy | Commands, interpreters, build and test code | The kernel sandbox |
 | L3 checkpoints | Every workspace change is recorded and can be reverted | Mistakes, and damage the policy permits | The checkpoint store |
 
 L0 is the specification and gives precision; L1 and L2 enforce it, including for code the
 type system does not see; L3 covers what a policy cannot prevent. With L2, every OS-level
 effect of a snippet, including those of the processes it starts, is contained in the
-authority of its capture set intersected with the policy. With L1, that bound falls back to
-the whole policy when the static check is bypassed.
+authority of its capture set intersected with the policy. With L1, the OS also holds the
+agent's code to the policy, so a fault at the language level is limited to what the policy
+allows.
 
 SHILL (OSDI 2014) is the closest precedent: its `exec` takes capabilities and the child's
 sandbox is exactly their image. The TACIT paper names the combination with system sandboxing
@@ -77,9 +79,9 @@ network proxy. The child's `Interface` implementation forwards every call to the
 pipe, and the host checks each request as it does today.
 
 The child runs under a fixed deny-by-default OS profile: it may read the JDK, ATC's jars and
-its own temporary directory, write only that directory, and it has no network, no process
-creation and an empty environment. The compiler belongs in the child because code that runs
-at compile time and compiler bugs are exactly what the layer stops trusting.
+its own working directory, it writes nothing, it has no network, and it starts with an empty
+environment. The compiler runs in the child too, so that code executed at compile time is
+confined like the rest.
 
 Design rules:
 
@@ -199,11 +201,11 @@ Windows have no unprivileged equivalent at the real path, and staging in a copy 
 path is rejected: it forced a full Mill rebuild (21 s against 1.9 s) and editable Python
 installs would test the original sources.
 
-## What holds when a layer fails
+## What limits a fault in one level
 
-| Failure | Still holds |
+| Fault | Still holds |
 |---|---|
-| A compiler or safe-mode hole | L1 policy, L2, L3 |
+| A fault in capture checking or safe mode | L1 policy, L2, L3 |
 | A malicious permitted command or test | L2, L3 |
 | A policy that grants too much | L3 review and revert, protected paths |
 | No OS sandbox (Windows before `srt`, Linux without user namespaces) | L0, L1, L3; commands run unconfined and ATC says so |
