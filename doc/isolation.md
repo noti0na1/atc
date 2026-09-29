@@ -149,7 +149,7 @@ readable too. Narrowing both to the directories tools need is planned.
 API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
 variant lets read-only mode run commands that write nothing; network comes from a derived
 block such as `withNetwork { exec(...) }` whose runtime object carries the flag and whose
-capture set records `net`. Commands on classified input run inside a `sealed` block
+capture set records `net`. Commands on classified input run inside a `classified` block
 ([The agent API with the sandbox](#the-agent-api-with-the-sandbox)).
 
 Backends:
@@ -223,12 +223,13 @@ function whose signature states what it grants (`requestFiles`, `withNetwork`,
 `execReadOnly`). The signature fixes the most a call may do; the runtime object fixes what it
 does.
 
-### Sealed classified computations
+### Classified blocks
 
-`sealed { ... }` runs a block and returns its result as `Classified[T]`:
+`classified { ... }` runs a block and returns its result as `Classified[T]`. (`sealed`, the
+first name, is a Scala keyword.)
 
 ```scala
-val digest: Classified[String] = sealed {
+val digest: Classified[String] = classified {
   val env  = read(".env")                                  // plain text inside the block
   val keys = exec("jq -r .token secrets/ci.json").stdout   // a sealed command
   classifiedChat(s"Which of these tokens are expired? $env $keys")
@@ -236,26 +237,42 @@ val digest: Classified[String] = sealed {
 println(digest)   // the user sees it; the model sees Classified(***)
 ```
 
-- The block receives a sealed `FileSystem^` and `Exec^` as context parameters, which take
-  precedence over the ambient ones, as in `requestFiles`. From outside it may capture only
-  read-only views, so printing, asking, the normal model, public writes and the network do
-  not compile.
-- `c.reveal` opens a `Classified` value inside the block. It needs a token that exists only
-  in the block and cannot escape it.
+```scala
+def classified[T, C^](using FileSystem^{C}, Exec^)
+                     (op: (Sealed^, FileSystem^{any.rd, C}, Exec^) ?->{any.rd} T): Classified[T]
+extension [T](c: Classified[T]) def reveal(using Sealed^): T
+```
+
+- The block receives a sealed file system, as capable as the caller's, and a sealed `Exec^`
+  as context parameters, which take precedence over the ambient ones, as in `requestFiles`.
+  From outside it may capture only read-only views, so printing, asking, the normal model,
+  permission requests, public writes and the network do not compile.
+- `c.reveal` opens a `Classified` value inside the block, through a `Sealed` token that exists
+  only there.
 - The sealed file system reads classified files as plain text and writes only classified
   paths.
 - A sealed command may read classified files, has no network, writes only a scratch
-  directory, and is killed when the block ends. `spawn` is not available.
-- An exception that leaves the block becomes a classified failure.
+  directory, and is killed when the block ends. The host refuses `spawn` on a sealed `Exec`,
+  which the types cannot exclude.
+- An exception that leaves the block becomes a classified failure; fatal errors and
+  interruption escape it.
 - Classified content never gets network access. Its destinations are the user (`println`),
   classified files and the classified model (`classifiedChat`).
 
 The block replaces `readClassified`, `writeClassified`, `childrenClassified`,
 `walkClassified`, `flatMap`, `zip` and the planned `execClassified`. `httpPostClassified`
 and the `secretHeaders` overloads are removed. Where commands cannot be confined, sealed
-commands are refused and pure sealed code still runs. The typing is prototyped before the
-API changes: precedence of the block's givens, escape of `reveal`, writes to outer mutable
-state, and exceptions.
+commands are refused and pure code in the block still runs.
+
+The typing was prototyped in the real REPL, with a stub runtime, in full and read-only mode.
+Accepted: reads through the block's file system, `reveal`, `execReadOnly`, `exec` and
+`writeClassified` (full and local mode), local mutable state, a nested block and `parallel`.
+Rejected: `println`, `ask`, `chat`, `httpGet` and `requestFiles` in the block; writes or
+commands through the ambient `fs` and `ex`, and capturing `ex` at all; assigning an outer
+`var` or writing an outer array; returning the token, the block's file system or a closure
+over it ("outlives its scope"); `reveal` outside a block or inside `Classified.map`; the
+block inside `Classified.map`; and in read-only mode `exec` and writes in the block, whose
+file system is then read-only. Only `spawn` compiled where it should not.
 
 ### Interface cleanup
 
@@ -290,11 +307,17 @@ policy, commands outside the allowlist, and hosts outside `hosts`, which the com
 rejects as well. The agent is told why; the rejected requests are listed for the user at the
 end of the turn, to grant for the next one. Deny lists and locked rules are unchanged.
 
-Open for isolate: where the copy lives. A copy at another path (an APFS clone, a reflink or a
-git worktree) isolates on every platform but rebuilds caches keyed by path (Mill 21 s against
-1.9 s) and breaks editable installs. A bubblewrap overlay at the real path avoids both on
-Linux, but covers only commands, so the host's own file operations would have to write to the
-overlay as well. Applying uses the checkpoint merge, so edits the user made meanwhile are kept.
+Isolate keeps one copy per project at a fixed location (an APFS clone on macOS, a reflink or
+plain copy on Linux), kept between sessions so that build caches stay warm, and ATC's own file
+operations map original paths to it. On Linux, commands see the copy at the original path
+through a bubblewrap bind. macOS gives unprivileged programs no per-process view of the file
+system: there are no mount namespaces and no bind mounts, Seatbelt only allows or denies, and
+`DYLD_INSERT_LIBRARIES` is removed for system programs and ignored by hardened ones. So macOS
+commands run at the copy's path and are denied the original, and caches keyed by path rebuild
+once there (Mill 21 s against 1.9 s). No other agent keeps the real path on macOS either:
+AgentFS mounts its overlay through a localhost NFS server at a separate path, and worktree
+tools accept the new path. Applying uses the checkpoint merge, so edits the user made
+meanwhile are kept. The approach is to be confirmed.
 
 ## Platform support
 
@@ -313,14 +336,14 @@ overlay as well. Applying uses the checkpoint merge, so edits the user made mean
 | 2 | L3 checkpoints, turn summary, `/undo` | Done; see [Checkpoints](development.md#checkpoints) |
 | 3 | L2 on macOS and Linux, local mode without network for commands, protected paths | Done; see [Command sandbox](development.md#command-sandbox) |
 | 3b | Host proxy that enforces `hosts` for commands in full mode | Done |
-| 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` becomes `sealed` (phase 8) |
+| 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` becomes the `classified` block (phase 8) |
 | 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
 | 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
-| 8 | `sealed` classified computations, prototyped first; classified network paths removed | Planned |
-| 9 | Interface cleanup | Planned |
-| 10 | Isolate mode | Planned; where the copy lives is open |
-| 11 | Commands read only the system and toolchain directories they need (Linux mounts, `/opt/homebrew/var`) | Planned |
+| 8 | `classified` blocks; classified network paths removed | Typing prototyped; implementation planned |
+| 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs (Linux mounts, `/opt/homebrew/var`) | Next |
+| 10 | Interface cleanup | Planned |
+| 11 | Isolate mode: one copy per project; commands see it at the original path on Linux, at its own path on macOS | Planned; the approach is to be confirmed |
 
 ## Spike measurements
 
@@ -345,7 +368,7 @@ Desktop for Linux.
 - Committed classified files remain readable through git objects by any process that may
   read `.git`.
 - Confined commands read system and toolchain directories the file API refuses, and on
-  Linux every world-readable path outside the home directory (phase 11).
+  Linux every world-readable path outside the home directory (phase 9).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
 - Host file operations remain check-then-use; mitigations are no-follow opens, a check after
