@@ -29,7 +29,10 @@ private[host] trait HostPaths:
       throw IllegalArgumentException(
         s"UNC path ${ScalaSource.stringLiteral(path)} is not supported outside the working directory's share"
       )
-    PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
+    val resolved = PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
+    rebase match
+      case Some((project, copy)) if resolved.startsWith(project) => copy.resolve(project.relativize(resolved)).nn
+      case _ => resolved
 
   /** `operation` carries its own preposition, so that it reads as a phrase in
     * front of the path (`read '/x'`, `running a command in '/x'`). */
@@ -46,7 +49,14 @@ private[host] trait HostPaths:
   private[host] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
     requireAccess(scope, path, operation, write = false)
 
+  /** A `classified` block changes nothing: a change would outlast it, and whether it
+    * happened could depend on the block's content (even a classified file's existence
+    * is visible outside). */
   private[host] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
+    if policy.sealedScope(scope) then
+      throw SecurityException(
+        s"Access denied: a classified block changes no file ('${PlatformPath.portable(path)}'); keep its result with writeClassified after the block."
+      )
     requireAccess(scope, path, operation, write = true)
 
   private def requireAccess(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
@@ -57,28 +67,26 @@ private[host] trait HostPaths:
       throw denied(path, operation, permission, s"Use requestFiles($shown, $access, reason) { ... } to ask the user.")
     permission
 
-  private def requireNotClassified(permission: Perm, path: Path, operation: String, alternative: String): Unit =
-    if permission.classified then
+  /** Refuse to reveal classified content, except inside a `classified` block, whose results stay classified. */
+  private def requireNotClassified(scope: ScopeId, permission: Perm, path: Path, operation: String): Unit =
+    if permission.classified && !policy.sealedScope(scope) then
       throw SecurityException(
-        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
+        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Do it inside a classified { ... } block, whose result stays classified."
       )
 
-  /** Require read access and that the content is not classified. `alternative`
-    * names what to use instead on a classified path. */
-  private[host] def requireReadable(scope: ScopeId, path: Path, operation: String, alternative: String): Perm =
+  /** Require read access and that the content is not classified. */
+  private[host] def requireReadable(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = requireRead(scope, path, operation)
-    requireNotClassified(permission, path, operation, alternative)
+    requireNotClassified(scope, permission, path, operation)
     permission
 
   /** Require write access and that the target is not classified. */
-  private[host] def requireWritable(
-    scope: ScopeId,
-    path: Path,
-    operation: String,
-    alternative: String = "writeClassified(path, classify(content))"
-  ): Perm =
+  private[host] def requireWritable(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = requireWrite(scope, path, operation)
-    requireNotClassified(permission, path, operation, alternative)
+    if permission.classified then
+      throw SecurityException(
+        s"Access denied: '${PlatformPath.portable(path)}' is classified; write a classified value there with writeClassified(path, value)."
+      )
     permission
 
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
@@ -86,7 +94,9 @@ private[host] trait HostPaths:
   /** Run `body` and report what it changed at `path` through [[HostOutput.fileChanged]]. */
   private[host] def withFileChange[A](path: Path, operation: String)(body: => A): A =
     val before = FileChange.snapshot(path)
-    val result = body
+    val result =
+      try body
+      finally noteWrite(path)
     try
       FileChange.between(display(PlatformPath.portable(path)), operation, before, FileChange.snapshot(path))
         .foreach(output.fileChanged)
@@ -100,6 +110,7 @@ private[host] trait HostPaths:
       if append then
         Files.writeString(path, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
       else Files.writeString(path, content, StandardCharsets.UTF_8)
+    ()
 
   private[host] def writeFileBytes(scope: ScopeId, path: Path, content: Array[Byte]): Unit =
     requireWritable(scope, path, "writeBytes")
@@ -156,14 +167,14 @@ private[host] trait HostPaths:
 
   private[host] def visibleChildren(scope: ScopeId, dir: Path): List[Path] = visibleEntries(scope, dir).map(_._1)
 
-  /** Visible descendants in pre-order. Classified trees require an explicit
-    * classified traversal, and symlinked directories are never followed. */
-  private[host] def walkPaths(scope: ScopeId, dir: Path, intoClassified: Boolean): List[Path] =
-    iteratePaths(scope, dir, intoClassified).toList
+  /** Visible descendants in pre-order. Classified trees are entered only in a `classified`
+    * block, and symlinked directories are never followed. */
+  private[host] def walkPaths(scope: ScopeId, dir: Path): List[Path] = iteratePaths(scope, dir).toList
 
-  private[host] def iteratePaths(scope: ScopeId, dir: Path, intoClassified: Boolean): Iterator[Path] =
+  private[host] def iteratePaths(scope: ScopeId, dir: Path): Iterator[Path] =
+    val intoAll = policy.sealedScope(scope)
     def descendInto(child: Path, isLink: Boolean): Boolean =
-      !isLink && Files.isDirectory(child) && (intoClassified || !policy.effective(scope, child).classified)
+      !isLink && Files.isDirectory(child) && (intoAll || !policy.effective(scope, child).classified)
     def visit(current: Path): Iterator[Path] =
       visibleEntries(scope, current).iterator.flatMap: (child, isLink) =>
         Iterator.single(child) ++ (if descendInto(child, isLink) then visit(child) else Iterator.empty)

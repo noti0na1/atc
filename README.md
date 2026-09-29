@@ -17,31 +17,33 @@ interface, persistent REPL sessions, multiple model providers and layered permis
   only through supported output methods.
 - **Permission rules:** access is denied by default; configuration, temporary grants and
   session grants determine which operations are permitted. Deny rules take precedence.
+- **OS sandbox:** on macOS and Linux, the commands the agent runs and the process that runs
+  its code are confined to what the permission rules allow.
+- **Undo:** the files a turn changes are recorded, and `/undo` reverts them.
 
-The compiler and host are part of the trusted implementation. External commands run with
-the user's OS privileges. See [Security model](#security-model) for the assumptions and limits.
+These are different levels of protection, each resting on different parts of the system;
+the compiler, the host and the OS are all part of the trusted implementation. See
+[Security model](#security-model) for what each level guarantees and for the limits.
 
 ## Example
 
 Here is a request, the Scala code the agent wrote, the program output, and the final answer:
 
 ```scala
-> which methods in the library can mutate a file?
+> which API methods can change a file?
 
 ● run_scala
-  │ grepRecursive("lib/src", "^\\s+update def", "*.scala")
-  │   .foreach(m => println(s"${m.lineNumber}  ${m.line.trim}"))
-  ├ output
-  │ 114  update def write(content: String): Unit
-  │ 115  update def writeBytes(content: Array[Byte]): Unit
-  │ 116  update def append(content: String): Unit
-  │ 117  update def delete(): Unit
-  │ 119  update def mkdir(): Unit
-  │ 129  update def writeClassified(content: Classified[String]): Unit
-  └ ok 121 ms
+  │ grepRecursive("lib/src", "using FileSystem\\^", "*.scala")
+  │   .map(m => m.line.trim.stripPrefix("def ").takeWhile(_ != '('))
+  │   .mkString(", ")
+  ├ result
+  │ val res0: String = write, writeBytes, move, copy, sed, replaceExact, replaceLines,
+  │   insertLines, append, mkdir, delete, writeClassified
+  └ ok 118 ms
 
-● Six of them: write, writeBytes, append, delete, mkdir and writeClassified. They are
-  declared `update`, so they can only be called through a full `FileSystem^`.
+● Twelve: write, writeBytes, move, copy, sed, replaceExact, replaceLines, insertLines,
+  append, mkdir, delete and writeClassified. Each asks for a full `FileSystem^`, so none
+  of them can be called through a read-only one.
 ```
 
 `grepRecursive` and `println` are not strings ATC parses: they are methods of
@@ -50,8 +52,8 @@ The snippet was compiled before it ran. The REPL keeps its state between snippet
 `val` defined in one turn is still there in the next.
 
 In **read-only mode** the same agent cannot express the write. The sandbox provides a
-read-only file system, and `write` is an `update` method that requires a full view. The
-compiler rejects the call, and the agent explains why:
+read-only file system, and `append` asks for a full one. The compiler rejects the call,
+and the agent explains why:
 
 ```scala
 read-only > add a "review the tests" item to TODO.md
@@ -148,7 +150,7 @@ the read-only git commands and a set of documentation hosts. Review it to choose
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
 Scala in the sandbox, and asks before touching anything the config does not grant. `/help`
 lists the slash commands, Ctrl-C interrupts a turn, Ctrl-D quits. The most useful flags are
-`-m <alias>` to pick a model, `--mode readonly|local|full` to pick a sandbox mode, and
+`-m <alias>` to pick a model, `--mode isolate|readonly|local|full` to pick a sandbox mode, and
 `-p "<request>"` to run one turn from the shell and exit:
 
 ```bash
@@ -191,15 +193,16 @@ Runtime.rootUser ──► user: UserIO^                  println · print · as
 `io` is the common capture root for every published machine capability. Local and full mode
 expose it as `IOCap^`. The derivations are sandbox-internal, so
 holding the root does not create a capability omitted by the current mode.
-Command operations require both full capabilities, `Exec^` and `FileSystem^`; every mode that
-publishes `ex` also publishes a full `fs` under the same root.
+`exec` and `spawn` require both full capabilities, `Exec^` and `FileSystem^`; `execReadOnly`
+needs only a read-only `FileSystem`, and the OS sandbox keeps such a command from writing.
+A command gets the network only through `withNetwork`, which needs `Network^`, so a
+snippet's capture set shows whether its commands can reach a host.
 
 | Capability | What it authorises | Where one comes from |
 |---|---|---|
 | `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
 | `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | the preamble's `fs` (derived from `io` by the sandbox; `val ro: FileSystem^{fs.rd} = fs` is a read-only view) |
-| `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
-| `Exec` | running commands, together with a full `FileSystem^` | the preamble's `ex` (local and full mode) |
+| `Exec` | running commands: `exec`/`spawn` with a full `FileSystem^`, `execReadOnly` with a read-only one; `withNetwork` adds the network | the preamble's `ex` (every mode; read-only mode's runs only `execReadOnly`) |
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
 
@@ -211,21 +214,22 @@ conversation, not on the machine, so it survives when the agent may touch nothin
 Each capability type has two views, following the nightly compiler's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html):
 the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view; `^`, or `^{io}` ("as
-capable as `io`"), is the **full** view. The mutating operations are declared `update def`
-in the library, and an `update` method can only be called through a full capture set. This
-rule turns "read-only" from a runtime check into a typing rule:
+capable as `io`"), is the **full** view. An operation that changes something asks for the
+full view in its signature (`write(path, text)(using FileSystem^)`), and a read-only view
+cannot be passed there. This rule turns "read-only" from a runtime check into a typing rule:
 
 ```scala
-val e: FileEntry^{fs} = fs.access("notes.md")   // as capable as `fs` itself
-e.read()                                       // fine through either view
-e.write("hello")                               // only if `fs` is the full view
+val ro: FileSystem^{fs.rd} = fs         // a read-only view of `fs`
+read("notes.md")(using ro)              // fine through either view
+write("notes.md", "hello")(using ro)    // does not compile
 ```
 
-With a read-only `fs`, the compiler rejects the final line directly:
+The compiler rejects the final line directly:
 
 ```
-Cannot call update method write of e
-since its capture set {e} is read-only.
+Found:    (ro : FileSystem^{fs.rd})
+Required: FileSystem^{any}
+… it cannot subsume a read-only capture set of the stateful type
 ```
 
 The restriction also propagates into your own helpers, so a `def` that writes must declare
@@ -243,18 +247,18 @@ that escapes it.
 ### Classified data
 
 Capabilities constrain *effects*. Confidential content follows a second, independent set
-of rules: `readClassified(path)` returns a `Classified[String]`, whose `map` and `flatMap`
-take a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
-untrusted outward channel needs a *full* one (`println`/`ask`/normal-model `chat` need
-`UserIO^`, `write` needs `FileSystem^`, `exec` needs both `Exec^` and `FileSystem^`, and
-`httpGet` needs `Network^`), so none of them can appear inside a `map`. The agent can compute
-on a secret but never see it; `toString` is
-`Classified(***)`. The output paths are `println` (you see the
-value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
-`writeClassified` into a classified path, `classifiedChat` with the configured classified
-model, and `httpPostClassified` / `secretHeaders` to an allow-listed host. A response to a
-request carrying classified content stays `Classified`, so a peer cannot reflect a secret
-header or body back into a plain model-visible value.
+of rules. A `classified { ... }` block works on secrets and returns its result as a
+`Classified` value: inside it the agent reads classified files, opens other classified
+values with `reveal`, and runs commands with `execReadOnly` that may read classified files
+but reach no network and write nothing. The block may capture only **read-only**
+capabilities from outside, and every untrusted outward channel needs a *full* one
+(`println`/`ask`/normal-model `chat` need `UserIO^`, `write` needs `FileSystem^`, `httpGet`
+needs `Network^`), so none of them can appear inside; nothing the block does persists.
+`map` computes on a value with a pure function. The agent can compute on a secret but never
+see it; `toString` is `Classified(***)`. The output paths are `println` (you see the value
+in the terminal, marked `[classified]`; the model sees `Classified(***)`), `writeClassified`
+into a classified path, and `classifiedChat` with the configured classified model;
+classified content never reaches the network.
 
 In this example `secrets/` is classified in the project config, and the agent is asked a
 question about a key it must never see:
@@ -263,7 +267,7 @@ question about a key it must never see:
 > secrets/api.env holds our vendor key. Is it a live key? They start with "sk-live".
 
 ● run_scala
-  │ val key = readClassified("secrets/api.env")
+  │ val key = classified { read("secrets/api.env") }
   │ val live = key.map(_.trim.stripPrefix("API_KEY=").startsWith("sk-live"))
   ├ result
   │ val key: Classified[String] = Classified(***)
@@ -311,7 +315,7 @@ Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 In read-only mode `fs` is `FileSystem^{io.rd}`, so the identical line is accepted. Reading
 cannot leak the secret, whereas writing could, and the capability view distinguishes the
 two. The agent can always route a secret to an authorized channel: the terminal, a
-classified file, the classified model, or an allow-listed host.
+classified file or the classified model.
 
 ### Runtime permissions
 
@@ -320,25 +324,27 @@ therefore also checks the permission policy for the relevant path, command, or h
 capability from a `request*` block is refused once that block has closed. Underneath sit a
 validator that rejects the obvious escape hatches (`java.io`, reflection, the application's
 own packages) before compilation, and a class loader that shows agent code only the JDK,
-`scala.*` and the agent library. The details are in
+`scala.*` and the agent library. On macOS and Linux the OS sandbox adds a further level; see
+[Levels of protection](#levels-of-protection). The details are in
 [doc/development.md](doc/development.md#defence-in-depth).
 
-## Modes: read-only, local, full
+## Modes: isolate, read-only, local, full
 
 A **mode** decides which capabilities the preamble puts in scope, and therefore what the
 agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|
-| **read-only** | read files, report, ask |
-| **local** | also write files and run commands |
+| **isolate** | work on a copy of the project with more freedom: write any readable file there, `.git` included, and run any command without asking, but write nothing outside it; `/apply` shows the changes and writes them into the project, `/discard` drops them |
+| **read-only** | read files, report, ask, and run commands that write nothing (any command, without asking, where the OS sandbox confines them) |
+| **local** | also write files and run commands that write |
 | **full** | also reach the network, and let the model's provider search the web |
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
-explain what it *would* have done. The policy enforces the same three levels again at run
-time. Switch with `/mode` (cycles the three), **Shift-Tab** on an empty prompt, `--mode`,
-or `"mode"` in the config; switching starts a fresh REPL but keeps the conversation. The
-default is full.
+explain what it *would* have done. The policy enforces the mode again at run time. Switch with `/mode`, which opens a menu (or `/mode <name>`), **Shift-Tab** on an empty
+prompt, which cycles read-only, local and full, `--mode`, or `"mode"` in the config;
+switching starts a fresh REPL but keeps the conversation. `/mode isolate` moves the session to the project's copy, which needs the OS
+sandbox and stays between sessions. The default is full.
 
 ## Asking for more
 
@@ -353,12 +359,17 @@ requestExec(Set("npm *"), "install deps") { exec("npm", List("install")) }
 requestNetwork(Set("api.github.com"), "check PRs") { httpGet("https://api.github.com/...") }
 ```
 
-The pop-up offers **Allow once**, **Allow for this session**, **Deny this request**, and
-**Tell the agent what to change**. The last one sends your instructions back instead of a
-grant: "request only the first four commands; skip the deployment" makes the agent revise
+The pop-up offers **Allow once**, **Allow for this session**, **Always allow in this
+project**, which also saves the grant to the project's `.atc/config.json`, **Deny this
+request**, and **Tell the agent what to change**. The last one sends your instructions back
+instead of a grant: "request only the first four commands; skip the deployment" makes the agent revise
 its request. The granted capability cannot leave the block, and the host closes the scope
 when the block exits. `locked` rules cannot be widened at all, and a `denyCommands` or
 `denyHosts` match is refused without a pop-up.
+
+To work without interruptions, turn on **auto** with `/auto` (or `--auto`, or `"auto": true`
+in the config): every request is rejected without a pop-up, and after the turn
+`/perms grant` allows what was rejected.
 
 ## Configuration
 
@@ -432,15 +443,35 @@ whole subtree, effective access is the minimum over matching rules, and no match
 access. `commands` are patterns over the whole command line (`"git status"` also allows
 `git status --short`; `*` is a wildcard); `hosts` are glob patterns on host names.
 `denyCommands` and `denyHosts` use the same syntax and override every allow, session grant
-and open scope. A pre-approved command runs with your privileges and outside the file
-rules, so pre-approve the subcommands you mean rather than `git *`, and check their options:
-`git diff` and `git blame` can print any file, and `git log --output` can write one. Pattern details and
+and open scope. Where the OS sandbox is unavailable, a pre-approved command runs with your
+privileges and outside the file rules; on macOS and Linux the sandbox holds it to them, but
+it can still read and change whatever they allow. So pre-approve the subcommands you mean
+rather than `git *`, and check their options: `git diff` and `git blame` can print any file
+the rules let them read, and `git log --output` can write one. Pattern details and
 Windows notes are in [doc/development.md](doc/development.md#file-rules-and-command-patterns).
 
 ## Security model
 
-The following restrictions depend on safe mode, the compiler, the host implementation
-and the configured permissions.
+### Levels of protection
+
+ATC protects your machine at several levels. They differ in what they can tell apart and in
+the parts of the system they rest on:
+
+| Level | What it guarantees | What it covers | Rests on |
+|---|---|---|---|
+| **Types** (capture checking, safe mode) | a snippet uses only the capabilities in scope; secrets stay inside `Classified`; a lent capability does not outlive its block | the Scala the agent writes | the compiler and the agent library |
+| **Permission policy** | every file, command and host access matches your rules, grants and deny lists | every operation the agent's code performs | ATC's host implementation |
+| **OS sandbox** (macOS, Linux) | commands write only where your rules allow, read only granted paths, system files and toolchains, never your credentials, nor classified files outside a `classified` block, and reach only allowed hosts; the agent's code runs in a separate process that holds no keys and reaches the machine only through ATC | commands and the programs they start, and the process running the agent's code | the OS sandbox (Seatbelt, bubblewrap) |
+| **Undo** | the files a turn changed can be listed and reverted | changes made by the agent's code and by commands | git and ATC's store in `~/.atc` |
+
+The type level is the most precise: it knows which snippet or closure holds which
+capability and separates classified values from ordinary ones, which no OS mechanism can.
+The OS level is coarser (it knows paths and hosts, not values), but it also covers code the
+types never see, such as a build or test suite a permitted command runs. Where levels
+overlap, each one limits what a fault in another can reach: the policy is checked on every
+operation whatever the types allowed, and the OS sandbox enforces the same rules on
+processes. Undo covers what no rule can prevent, a change that the rules allow but you did
+not want.
 
 ### Enforced restrictions
 
@@ -456,6 +487,19 @@ and the configured permissions.
   a one-bit oracle.
 - **Deny wins.** `denyCommands`/`denyHosts` override every allow, every session grant, every
   open scope, and `--approve-all`.
+- **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
+  from your file rules: it writes only where the agent may write, never into `.git` hooks or
+  configuration, `.atc` or editor settings, cannot read your credentials, nor classified files
+  outside a `classified` block,
+  and has no network unless the agent starts it inside `withNetwork` (full mode), which lets
+  it reach only the hosts you allow, through a proxy that asks you about others. A command
+  run with `execReadOnly` writes nothing, which is how read-only mode runs commands.
+- **Agent code runs apart.** On macOS and Linux the compiler and the agent's code run in a
+  separate process that the OS sandbox keeps from your files, keys and network: it reaches
+  the machine only through ATC's operations, which apply the permission policy.
+- **Changes can be undone.** After a turn ATC lists the files it changed, whether the agent's
+  code or a command changed them, and `/undo` restores them, keeping edits you made since
+  where it can.
 
 ### Assumptions and limits
 
@@ -463,12 +507,19 @@ and the configured permissions.
   prompt-injected *model* exceeding the access you granted. It does not defend the machine
   against *you*: a permissive configuration, `--approve-all`, or a permission granted in a
   pop-up is applied as specified.
-- **An allowed command is arbitrary code, run with your privileges, outside the sandbox.**
-  The capability system governs the Scala the model writes, not what a program you
-  permitted then does. A permitted `bash`, `sh`, `python`, `node`, `make`, or a `git` that
-  runs hooks can do anything you can, unconstrained by capabilities, classified data, or the
-  mode. **Pre-approve narrow, specific subcommands (`git status`, `./mill app.test`); never
-  grant an interpreter, a shell, or a wildcard like `git *` over a tool that can run code.**
+- **An allowed command is arbitrary code.** The OS sandbox bounds what it can touch, not what
+  it computes: within the project it can change any file the agent may write, and inside
+  `withNetwork` it can send data to any host you allow. **Pre-approve narrow, specific
+  subcommands (`git status`, `./mill app.test`); avoid granting an interpreter, a shell, or a
+  wildcard like `git *` over a tool that can run code.**
+- **The OS sandbox is not everywhere.** On Windows, or where the sandbox is unavailable (for
+  example Linux without bubblewrap or with unprivileged user namespaces disabled), commands
+  run with your privileges and the agent's code runs inside ATC; the banner says so. Set
+  `"osSandbox": "required"` to refuse commands and the REPL instead.
+- **The OS sandbox works on paths.** A copy of a secret under an unclassified name is not
+  recognised as classified, by commands or by ATC. Commands cannot reach local servers or
+  Unix sockets, so build tools must run without their background server
+  (`./mill --no-daemon`), and tool caches in your home directory are read-only to them.
 - **Allowed hosts can receive data.** The agent may send any non-classified data available
   to it to an allowed host. The type system prevents this only for `classified` content.
   Allow only hosts you trust to receive project data.
@@ -480,10 +531,17 @@ and the configured permissions.
   `Classified.map`, but arbitrary pure code can still vary its running time, resource use,
   or termination with the secret. Do not treat timeouts or timing as a declassification
   mechanism; ATC does not claim resistance to those side channels.
+- **Undo has limits.** It works in interactive sessions and restores tracked and untracked
+  files that git does not ignore. Ignored files, new files over 2 MiB and classified files
+  are not recorded, and a command's effects outside the project (a network request, for
+  example) cannot be undone.
 - **The trusted computing base.** The JVM, the Scala compiler and its capture checker, the
-  OS, the terminal library, the agent library's host implementation, and ATC itself are
-  trusted; a bug in any of them (or in your config) can break a guarantee. Capture
-  checking and safe mode are experimental compiler features.
+  OS and its sandbox, the terminal library, the agent library's host implementation, and ATC
+  itself are trusted; a bug in any of them (or in your config) can break a guarantee.
+  Guarantees rest on different parts: `Classified` confidentiality and the per-snippet
+  capability discipline rest on the compiler, including when the agent's code runs in its
+  own process, while command confinement rests on the OS sandbox. Capture checking and safe
+  mode are experimental compiler features.
 
 ### Permission configuration
 
@@ -493,7 +551,7 @@ and the configured permissions.
 - Keep the configuration concise and auditable. Prefer several specific rules to one broad
   rule.
 - Keep credentials behind `classified`, keep `.atc` out of the agent's reach (the templates
-  do both), and keep `safeMode` on.
+  do both), and keep `safeMode`, `checkpoints` and the OS sandbox (`osSandbox`) on.
 - Use `denyCommands` and `denyHosts` to prohibit operations regardless of other permissions.
 - For risky operations, prefer a one-time grant in the pop-up to a broad standing grant.
   Reserve `--approve-all` for trusted sandboxes and CI environments.
@@ -505,8 +563,9 @@ Tab fills in, Enter runs). Ctrl-C interrupts the turn. Finished code runs fold
 to a summary (`/output <n>` shows one in full), and Ctrl-O switches to writing code, output
 and reasoning out in full, Shift-Tab cycles the mode, and Shift+Enter adds a line. While the
 agent is working, type a correction and press Enter: it reaches the agent before its next
-tool call. Sessions are saved when you leave, and the next start in the same directory
-offers to resume. ATC notifies you when a turn ends or the agent waits for you.
+tool call. After a turn that changed files, ATC lists them, and `/undo` reverts them.
+Sessions are saved when you leave, and the next start in the same directory
+offers to resume, in the mode the session was in (unless `--mode` names one). ATC notifies you when a turn ends or the agent waits for you.
 
 Without a terminal (`-p` in a pipe) nothing asks: a permission the configuration does not
 grant fails instead of waiting, so use `--approve-all` only in a trusted setup.

@@ -14,7 +14,7 @@ object ToolOutput:
     ),
     Hint(
       _.contains("needs an explicit type because the inferred type does not conform"),
-      "top-level vals that hold capabilities (FileEntry, closures using println/fs) need an explicit type, e.g. `val e: FileEntry^{fs} = access(...)`, or use a `def` / inline expression."
+      "top-level vals that hold capabilities (a Process, closures using println/fs) need an explicit type, e.g. `val p: Process^{ex} = spawn(...)`, or use a `def` / inline expression."
     ),
     Hint(
       out => out.contains("Mutable variable") && out.contains("does not extend") && out.contains("Stateful"),
@@ -38,11 +38,11 @@ object ToolOutput:
     ),
     Hint(
       out => out.contains("cannot subsume a read-only capture set") || out.contains("Cannot call update method"),
-      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write, run commands or use the network. Say so and let the user switch modes (/mode) instead of working around it."
+      "you only have read-only access there: a bare `FileSystem`/`IOCap` type is the read-only view (write `FileSystem^` / `IOCap^` for the full one in your own signatures), and in read-only sandbox mode nothing can write or use the network, and commands run only through `execReadOnly`. Say so and let the user switch modes (/mode) instead of working around it."
     ),
     Hint(
       out => List("Network", "Exec").exists(name => out.contains(s"No given instance of type atc.lib.$name")),
-      "that capability does not exist in the current sandbox mode (local: no network; read-only: no commands, no network); tell the user which mode the task needs (/mode local, /mode full)."
+      "that capability does not exist in the current sandbox mode (local and read-only: no network); tell the user which mode the task needs (/mode full)."
     ),
   )
 
@@ -109,6 +109,8 @@ object ToolOutput:
       case (Decision.AllowOnce, what) => s"the user allowed $what once (this call only; a later call must ask again)"
       case (Decision.AllowSession, what) =>
         s"the user allowed $what for the rest of this session (no request needed from now on)"
+      case (Decision.AllowAlways, what) =>
+        s"the user allowed $what and saved it to the project config (no request needed from now on, nor in later sessions)"
       case (Decision.Deny, what) =>
         s"the user denied $what (this request was not approved; do not repeat it unchanged or infer a permanent ban on every item)"
       case (Decision.Revise(instructions), what) =>

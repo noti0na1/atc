@@ -186,13 +186,25 @@ final case class Config(
     * listings and searches; default true. Reading such a path by name still
     * works. This only keeps build output and dependencies out of the way. */
   respectGitignore: Boolean = true,
+  /** Record the files the agent changes in each turn so that `/undo` can revert them
+    * (interactive sessions; needs `git`). A project layer may turn it on but not off. */
+  checkpoints: Boolean = true,
+  /** How ATC uses the OS sandbox for commands and for the evaluator process that runs
+    * the agent's code: `auto` (where the platform provides one, else unconfined with a
+    * notice), `required` (refuse commands and the REPL where it cannot) or `off`. A
+    * project layer may make it stricter only. */
+  osSandbox: String = "auto",
   /** Compile agent code with `import language.experimental.safe`. On unless a
     * *granting* layer turns it off explicitly: it is a latch, so a narrowing
     * layer can switch it on and never back off. */
   safeMode: Boolean = true,
-  /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
-    * files, run commands) or `full` (also network). `/mode` switches at run time. */
+  /** Initial sandbox mode: `isolate` (work on a copy of the project), `readonly` (read files,
+    * run read-only commands), `local` (read and write files, run commands) or `full` (also
+    * network). `/mode` switches at run time. */
   mode: Option[String] = None,
+  /** Reject every permission request without asking; `/auto` switches it at run time.
+    * A project layer may turn it on but not off. */
+  auto: Boolean = false,
   /** Wall-clock limit for one snippet, excluding time spent waiting for the user
     * or for a command (`exec` has its own `ExecOptions.timeoutMs`). */
   executionTimeoutMs: Option[Long] = Some(300000L),

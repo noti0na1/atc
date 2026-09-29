@@ -47,9 +47,12 @@ final class ConfigCommands(app: App):
     val policy = app.config
     val settings = List(
       "safeMode" -> policy.safeMode.toString,
+      "auto" -> app.policy.auto.toString,
       "executionTimeoutMs" -> policy.executionTimeoutMs.fold("none")(_.toString),
       "maxToolCalls" -> policy.maxToolCalls.toString,
       "respectGitignore" -> policy.respectGitignore.toString,
+      "checkpoints" -> policy.checkpoints.toString,
+      "osSandbox" -> policy.osSandbox,
     ) ++ Setting.values.map(s => s.key -> s.current(current.settings))
     tui.println(settings.map((key, value) => s"$key=$value").mkString(" "))
     tui.println(s"open permission scopes: ${app.policy.openScopeCount}")

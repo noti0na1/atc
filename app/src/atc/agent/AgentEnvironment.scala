@@ -12,13 +12,16 @@ final case class AgentEnvironment(
   operatingSystem: String,
   /** Whether someone is at the terminal to answer `ask` and permission prompts (false for a `-p` run). */
   userPresent: Boolean = true,
+  /** Whether commands run in an OS sandbox (config `osSandbox`). */
+  commandsConfined: Boolean = false,
 )
 
 object AgentEnvironment:
   /** Capture the process environment once when an agent is constructed. */
-  def current(cwd: Path, userPresent: Boolean = true): AgentEnvironment =
+  def current(cwd: Path, userPresent: Boolean = true, commandsConfined: Boolean = false): AgentEnvironment =
     AgentEnvironment(
       workingDirectory = PlatformPath.portable(cwd),
       operatingSystem = Platform.description,
       userPresent = userPresent,
+      commandsConfined = commandsConfined,
     )

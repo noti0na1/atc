@@ -46,8 +46,28 @@ object AgentMessages:
   def permissionRevoked(grant: String): String =
     s"[permissions] The user revoked the session grant for $grant. Do not assume it remains available."
 
+  def permissionGranted(what: String): String =
+    s"[permissions] The user allowed $what for the rest of this session, after auto rejected it. No request is needed for it now."
+
+  def autoSwitched(on: Boolean): String =
+    if on then
+      "[permissions] The user turned auto on: every permission request is now rejected without asking them. " +
+        "Work within the current permissions and say what you need."
+    else "[permissions] The user turned auto off: permission requests reach them again."
+
+  def isolationApplied(outcome: String): String =
+    s"[isolate] The user applied the copy's changes to the project. $outcome"
+
+  def isolationDiscarded(outcome: String): String =
+    s"[isolate] The user discarded the copy's changes; its files are back to the project's state. $outcome"
+
   def processesKilled(what: String): String =
     s"[processes] The user $what with /kill. Those Process handles no longer work."
+
+  /** The user reverted file changes of an earlier turn with `/undo`; `outcome` lists what happened per file. */
+  def filesReverted(outcome: String): String =
+    s"[files reverted] The user undid file changes you made in an earlier turn with /undo. $outcome " +
+      "Read these files again before relying on their content."
 
   /** Closes the assistant side of an exchange that queued user input interrupts. */
   val pausedForUpdate: String = "[paused to apply the user's update]"

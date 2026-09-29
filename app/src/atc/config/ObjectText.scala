@@ -62,6 +62,30 @@ object ObjectText:
           case None =>
             text.substring(0, obj.open + 1) + s"${obj.separator}$entry," + text.substring(obj.open + 1)
 
+  /** `text` (a JSON object) with `values` appended to its top-level array `key`, after the
+    * last element and on its line, so a hand-formatted list keeps its layout; a missing
+    * `key` is added as a one-line array after the first of `after` that is present. */
+  def withAppended(
+    text: String,
+    key: String,
+    values: List[ujson.Value],
+    after: List[String] = Nil,
+    where: String = "config"
+  ): String =
+    val parsed = parse(text, where)
+    if values.isEmpty then text
+    else
+      scan(text).members.findLast(_.key == key) match
+        case None => withAppended(withTopLevel(text, key, ujson.Arr(), after, where), key, values, after, where)
+        case Some(m) =>
+          if !parsed.value.get(key).exists(_.arrOpt.isDefined) then
+            throw IllegalArgumentException(s"Config $where: \"$key\" is not a list")
+          val close = m.valueEnd - 1 // the closing bracket
+          val last = text.lastIndexWhere(!_.isWhitespace, close - 1)
+          val entries = values.map(oneLine).mkString(", ")
+          if last == m.valueStart then text.substring(0, close) + entries + text.substring(close)
+          else text.substring(0, last + 1) + ", " + entries + text.substring(last + 1)
+
   /** `text` (a JSON object) with the member at `path` set to `value`, or removed
     * when `value` is `None`. Objects missing on the way are created, and a new
     * member goes last in its object, written on one line. Everything else keeps

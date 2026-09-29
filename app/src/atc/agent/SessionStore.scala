@@ -22,6 +22,8 @@ private[atc] final case class SessionSnapshot(
   task: TaskNotes,
   todos: List[Todo],
   model: String,
+  /** The sandbox mode the session was in (`Mode.label`); older saves have none. */
+  mode: Option[String] = None,
 ):
   def nonEmpty: Boolean =
     history.nonEmpty || pendingNotes.nonEmpty || userRequests.nonEmpty || task != TaskNotes() || todos.nonEmpty
@@ -78,7 +80,7 @@ private[atc] object SessionStore:
         val entries =
           results.map(result => ujson.Obj("id" -> result.callId, "output" -> result.output, "error" -> result.isError))
         ujson.Obj("role" -> "tools", "results" -> ujson.Arr.from(entries))
-    ujson.write(
+    val saved =
       ujson.Obj(
         "version" -> 1,
         "model" -> session.model,
@@ -93,9 +95,9 @@ private[atc] object SessionStore:
         ),
         "todos" ->
           ujson.Arr.from(session.todos.map(todo => ujson.Obj("text" -> todo.text, "status" -> todo.status.toString))),
-      ),
-      indent = 2
-    )
+      )
+    session.mode.foreach(mode => saved("mode") = mode)
+    ujson.write(saved, indent = 2)
 
   private[atc] def decode(text: String): SessionSnapshot =
     val data = ujson.read(text)
@@ -141,5 +143,6 @@ private[atc] object SessionStore:
       requests,
       notes,
       data("todos").arr.toList.map(t => Todo(t("text").str, TodoStatus.valueOf(t("status").str))),
-      data("model").str
+      data("model").str,
+      data.obj.get("mode").flatMap(_.strOpt),
     )

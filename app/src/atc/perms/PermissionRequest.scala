@@ -5,6 +5,8 @@ import java.nio.file.Path
 /** What the user answers to a permission prompt. */
 enum Decision:
   case AllowOnce, AllowSession, Deny
+  /** Allow for the session and save the grant to the project config, so later sessions have it. */
+  case AllowAlways
   /** Do not grant the request; return the user's instructions to the agent. */
   case Revise(instructions: String)
 
@@ -47,7 +49,9 @@ object PermissionRequest:
       else out.appendAll(Character.toChars(cp))
     out.toString
 
-final case class FileRequest(path: Path, access: Access, current: Perm, reason: String) extends PermissionRequest:
+/** `ceiling` is the most that configured rules allow at `path`: a rule saved for it can grant no more. */
+final case class FileRequest(path: Path, access: Access, current: Perm, reason: String, ceiling: Access = Access.Write)
+    extends PermissionRequest:
   def title: String = s"File access: ${access.label}"
   protected def fields: List[(String, String)] = List("path" -> path.toString, "current" -> current.describe)
 

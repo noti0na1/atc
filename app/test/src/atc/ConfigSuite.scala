@@ -501,6 +501,22 @@ class ConfigSuite extends munit.FunSuite:
     assertEquals(edited, template.replace("\"safeMode\": true", "\"safeMode\": false"))
     assertEquals(upickle.default.read[Config](ujson.read(edited)).safeMode, false)
 
+  test("withAppended adds entries after the last one and keeps the list's layout"):
+    val text = "{\n  \"hosts\": [\n    \"a.org\",\n\n    \"b.org\"\n  ]\n}\n"
+    assertEquals(
+      ObjectText.withAppended(text, "hosts", List(ujson.Str("c.org"))),
+      "{\n  \"hosts\": [\n    \"a.org\",\n\n    \"b.org\", \"c.org\"\n  ]\n}\n"
+    )
+    assertEquals(
+      ObjectText.withAppended("""{ "hosts": [] }""", "hosts", List(ujson.Str("x"))),
+      """{ "hosts": ["x"] }"""
+    )
+    assertEquals(
+      ObjectText.withAppended("""{ "a": 1 }""", "files", List(ujson.Obj("path" -> "./src"))),
+      """{ "files": [{ "path": "./src" }], "a": 1 }"""
+    )
+    intercept[IllegalArgumentException](ObjectText.withAppended("""{ "hosts": "x" }""", "hosts", List(ujson.Str("y"))))
+
   test("withTopLevel rejects text that is not a JSON object"):
     intercept[IllegalArgumentException](ObjectText.withTopLevel("[1, 2]", "model", ujson.Str("x")))
     intercept[IllegalArgumentException](ObjectText.withTopLevel("{ oops", "model", ujson.Str("x")))

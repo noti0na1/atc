@@ -15,6 +15,9 @@ trait Derivations:
   def network(using io: IOCap^): Network^{io}
   /** The configured file system as read-only, whatever `io` is (read-only mode's `fs`). */
   def readOnlyFileSystem(using io: IOCap): FileSystem^{io.rd}
+  /** The configured command permissions for read-only mode, whose commands can only
+    * run read-only because `exec` needs a full `FileSystem^`. */
+  def readOnlyProcesses(using io: IOCap): Exec^{io.rd}
 
 /** The sandbox's injection point. It is not part of the agent API and is never
   * bundled into the system prompt. The host installs its [[Interface]] implementation
@@ -40,6 +43,7 @@ object Runtime:
   def processes(using io: IOCap^): Exec^{io} = host.processes
   def network(using io: IOCap^): Network^{io} = host.network
   def readOnlyFileSystem(using io: IOCap): FileSystem^{io.rd} = host.readOnlyFileSystem
+  def readOnlyProcesses(using io: IOCap): Exec^{io.rd} = host.readOnlyProcesses
 
   /** The root-capability labels. They carry no authority of their own: every check
     * is made per call against the policy, so one shared instance of each serves

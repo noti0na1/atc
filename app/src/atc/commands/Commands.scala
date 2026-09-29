@@ -28,7 +28,8 @@ final class Commands(app: App):
     case "/effort" :: _ :: Nil => modelCommands.effortChoices
     case "/classifiedmodel" :: _ :: Nil => "none" +: models.catalog.labels
     case "/mode" :: _ :: Nil => Mode.values.toList.map(_.label)
-    case "/perms" :: _ :: Nil => List("revoke")
+    case "/auto" :: _ :: Nil => List("on", "off")
+    case "/perms" :: _ :: Nil => List("grant", "revoke")
     case "/config" :: _ :: Nil => "show" :: ConfigCommands.Setting.values.toList.map(_.key)
     case "/config" :: key :: _ :: Nil => ConfigCommands.Setting.named(key).fold(Nil)(_.choices)
     case "/config" :: key :: _ :: _ :: Nil if ConfigCommands.Setting.named(key).isDefined => ConfigCommands.ScopeNames
@@ -57,6 +58,9 @@ final class Commands(app: App):
     case Cmd.Effort => modelCommands.switchEffort(arg)
     case Cmd.Providers => providersMenu.run()
     case Cmd.Mode => sessionCommands.switchMode(arg)
+    case Cmd.Auto => sessionCommands.switchAuto(arg)
+    case Cmd.Apply => sessionCommands.applyIsolated()
+    case Cmd.Discard => sessionCommands.discardIsolated()
     case Cmd.Perms => statusCommands.permissions(arg)
     case Cmd.Config => configCommands.run(arg)
     case Cmd.Interface => tui.println(Prompts.interfaceSource)
@@ -64,6 +68,7 @@ final class Commands(app: App):
     case Cmd.New => sessionCommands.newSession()
     case Cmd.Reset => sessionCommands.reset()
     case Cmd.Compact => sessionCommands.compact(arg)
+    case Cmd.Undo => sessionCommands.undo(arg)
     case Cmd.Todos => tui.showTodosNow(host.currentTodos)
     // Both commands display model-generated process names, so strip terminal controls.
     case Cmd.Ps => tui.println(Ansi.sanitize(host.processSummary))

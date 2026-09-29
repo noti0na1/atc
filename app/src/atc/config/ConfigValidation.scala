@@ -10,6 +10,7 @@ import java.util.Locale
 object ConfigValidation:
   private val ReasoningSummaries = Set("auto", "concise", "detailed")
   private val NotificationChoices = Set("auto", "system", "terminal", "bell", "off")
+  private val OsSandboxChoices = Set("auto", "required", "off")
   private val ProviderApis = Set(
     "anthropic",
     "claude",
@@ -41,6 +42,7 @@ object ConfigValidation:
     )
     config.executionTimeoutMs.foreach(requirePositive("executionTimeoutMs", _))
     validateChoice("notifications", config.notifications, NotificationChoices)
+    validateChoice("osSandbox", config.osSandbox, OsSandboxChoices)
     config.effort.foreach(validateChoice("effort", _, ModelConfig.ReasoningEfforts :+ ModelConfig.DefaultEffort))
     config.mode.foreach: m =>
       try Mode.parse(m)

@@ -30,6 +30,22 @@ object ExecutionResult:
 /** Wall-clock accounting for the execution timeout: time spent waiting for the
   * user (permission prompts, questions) or for a command the agent runs does not
   * count. Pauses nest: the clock runs again when the outermost one ends. */
+/** A REPL session the agent's code runs in: in this JVM ([[ReplSession]]) or in a separate,
+  * sandboxed evaluator process ([[atc.evaluator.EvaluatorSession]]). */
+trait SandboxSession:
+  /** Compile and run `code`; the result carries what the model sees. */
+  def run(code: String): ExecutionResult
+  /** The time the current run spent waiting for the user, a command or a model. */
+  def clock: ExecutionClock
+  /** Add text printed by host code to the current run's result, in order with its output. */
+  def printAgent(text: String): Unit
+  /** Stop the current run (best effort). */
+  def interrupt(): Unit
+  /** End the session. */
+  def close(): Unit
+  /** Whether the session can still run code; an evaluator process that stopped cannot. */
+  def alive: Boolean = true
+
 final class ExecutionClock:
   private var pausedNanos: Long = 0L
   /** When the current pause began, or -1 while the clock is running. */

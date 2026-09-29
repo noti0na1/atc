@@ -3,7 +3,7 @@ package atc.commands
 import atc.App
 import atc.lib.TaskNotes
 import atc.llm.TokenUsage
-import atc.perms.SessionGrant
+import atc.perms.{PermissionRequest, SessionGrant}
 import atc.ui.Format
 
 /** `/perms`, `/cost` and `/task`: what the session has been granted, has
@@ -11,22 +11,48 @@ import atc.ui.Format
 final class StatusCommands(app: App):
   import app.{agent, policy, tui}
 
-  /** `/perms`: session grant selection and revocation; configured policy is unchanged. */
+  /** `/perms`: the permissions, granting requests `auto` rejected, and revoking session
+    * grants; the configured policy is unchanged. */
   def permissions(arg: String): Unit =
     val grants = policy.sessionGrants
+    val rejected = policy.rejected
     def list(): Unit =
       if grants.isEmpty then tui.info("No session grants.")
       else grants.zipWithIndex.foreach((grant, index) => tui.println(s"  ${index + 1}. ${grant.describe}"))
+    def listRejected(): Unit =
+      if rejected.isEmpty then tui.info("No requests rejected by auto.")
+      else rejected.zipWithIndex.foreach((entry, index) => tui.println(s"  ${index + 1}. ${entry._2}"))
     def revoke(grant: SessionGrant): Unit =
       app.predictor.invalidate()
       policy.revoke(grant)
       agent.notePermissionRevoked(grant.describe)
       tui.success(s"Revoked ${grant.describe} for future operations.")
+    def grant(request: PermissionRequest, what: String): Unit =
+      app.predictor.invalidate()
+      policy.grant(request)
+      agent.notePermissionGranted(what)
+      tui.success(s"Allowed $what for the rest of the session.")
     arg.trim.split("\\s+", 2).toList match
       case "" :: Nil =>
         tui.println(policy.summary)
         list()
-        if grants.nonEmpty then tui.info("Use /perms revoke to remove a session grant; /kill stops existing processes.")
+        if rejected.nonEmpty then
+          tui.println("Rejected by auto:")
+          listRejected()
+        if grants.nonEmpty || rejected.nonEmpty then
+          tui.info("Use /perms grant to allow a rejected request, /perms revoke to remove a session grant.")
+      case "grant" :: "all" :: Nil =>
+        if rejected.isEmpty then listRejected() else rejected.foreach((request, what) => grant(request, what))
+      case "grant" :: number :: Nil =>
+        number.toIntOption.flatMap(n => rejected.lift(n - 1)) match
+          case Some((request, what)) => grant(request, what)
+          case None => tui.error("Unknown request number. Run /perms to list the rejected requests.")
+      case "grant" :: Nil =>
+        if !tui.menusAvailable || rejected.isEmpty then listRejected()
+        else
+          val rows = rejected.zipWithIndex.map((entry, index) => s"${index + 1}. ${entry._2}")
+          tui.choose("Allow a rejected request for the session", rows).flatMap(row => rejected.lift(rows.indexOf(row)))
+            .foreach((request, what) => grant(request, what))
       case "revoke" :: "all" :: Nil => if grants.isEmpty then list() else grants.foreach(revoke)
       case "revoke" :: number :: Nil =>
         number.toIntOption.flatMap(n => grants.lift(n - 1)) match
@@ -37,7 +63,7 @@ final class StatusCommands(app: App):
         else
           val rows = grants.zipWithIndex.map((grant, index) => s"${index + 1}. ${grant.describe}")
           tui.choose("Revoke a session grant", rows).flatMap(row => grants.lift(rows.indexOf(row))).foreach(revoke)
-      case _ => tui.error("Usage: /perms [revoke [number|all]]")
+      case _ => tui.error("Usage: /perms [grant|revoke [number|all]]")
 
   /** `/cost`: token usage in total and, when there is more than one purpose, by purpose. */
   def showCost(): Unit =

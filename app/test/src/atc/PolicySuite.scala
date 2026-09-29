@@ -112,6 +112,19 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(PlatformPath.portable(Path.of("a", "b", "c")), "a/b/c")
     if !Platform.isWindows then assertEquals(PlatformPath.portable(Path.of("a\\b")), "a\\b")
 
+  test("always allowing grants for the session, and a file request carries the configured ceiling"):
+    val prompter = ScriptedPrompter(List(Decision.AllowAlways))
+    val p = Policy(
+      rules((".", Some(Access.Write), None, false), (".git", Some(Access.Read), None, false)),
+      Nil,
+      Nil,
+      prompter
+    )
+    val hook = root.resolve(".git/hooks/pre-commit")
+    p.closeScope(p.requestFile(ScopeId.Base, hook, Access.Write, "hook"))
+    assertEquals(p.effective(ScopeId.Base, hook).access, Access.Write, "a standing grant, like the session's")
+    assertEquals(prompter.asked.collect { case f: FileRequest => f.ceiling }, List(Access.Read))
+
   test("requests widen access once or for the session, deny throws"):
     val prompter = ScriptedPrompter(List(Decision.AllowOnce, Decision.Deny, Decision.AllowSession))
     val p = Policy(rules((".", Some(Access.Read), None, false)), Nil, Nil, prompter)
@@ -391,3 +404,78 @@ class PolicySuite extends munit.FunSuite:
     assert(!rows.exists(_.exists(c => c == '\n' || c == '\r')), rows.toString)
     assert(rows(2).contains("ls\\n    command 3: git status"), rows(2))
     assertEquals(PermissionRequest.visible("a​b‮c\td"), "a\\u200bb\\u202ec\\td")
+
+  test("auto rejects every request without asking, keeps it for a later grant, and leaves deny lists final"):
+    val env = TestEnv(denyCommands = List("rm *"))
+    env.policy.auto = true
+    val outside = TestEnv.outsideDir()
+    val file = intercept[SecurityException](env.policy.requestFile(ScopeId.Base, outside, Access.Read, "look"))
+    assert(file.getMessage.nn.contains("auto is on"), file.getMessage)
+    val before = env.policy.rejectionCount
+    intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("npm test"), "test"))
+    intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("npm test"), "again"))
+    val denied = intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("rm -rf x"), "clean"))
+    assert(denied.getMessage.nn.contains("configuration"), denied.getMessage)
+    assert(env.requests.isEmpty, "nobody was asked")
+    assertEquals(env.policy.rejectedSince(before).map(_._2), List("commands npm test"), "once, as the turn lists it")
+    assertEquals(
+      env.policy.rejected.map(_._2),
+      List(s"read on '${PlatformPath.portable(outside)}'", "commands npm test")
+    )
+    env.policy.grant(env.policy.rejected(1)._1)
+    assert(env.policy.commandAllowed(ScopeId.Base, "npm test"), "granted for the session")
+    assertEquals(env.policy.rejected.size, 1, "a granted request is no longer offered")
+    env.policy.auto = false
+    env.decisions = List(Decision.AllowOnce)
+    env.policy.requestFile(ScopeId.Base, outside, Access.Read, "look")
+    assertEquals(env.requests.size, 1, "asked again once auto is off")
+    env.policy.resetSession()
+    assert(env.policy.rejected.isEmpty)
+
+  test("in isolate mode nothing outside the copy may be written, and inside it every readable path may"):
+    val outside = TestEnv.outsideDir()
+    val env = TestEnv(mkRules =
+      root =>
+        TestEnv.defaultRules(root) ++ List(
+          FileRule(PathPattern(outside.toString, root), Some(Access.Write), None),
+          FileRule(PathPattern("./vendor", root), Some(Access.Read), None),
+          FileRule(PathPattern("./hidden", root), Some(Access.None), None),
+          FileRule(PathPattern("./locked", root), Some(Access.Read), None, locked = true),
+          FileRule(PathPattern("./secrets", root), None, Some(true)),
+        )
+    )
+    def access(p: Path) = env.policy.effective(ScopeId.Base, p).access
+    assertEquals(access(outside), Access.Write)
+    assertEquals(access(env.root.resolve("vendor").nn), Access.Read)
+    env.policy.copyRoot = Some(env.root)
+    assertEquals(access(outside), Access.Read, "outside the copy: read at most")
+    assertEquals(access(env.root.resolve("vendor").nn), Access.Write, "a read-only path in the copy is writable")
+    assertEquals(access(env.root.resolve("hidden").nn), Access.None)
+    assertEquals(access(env.root.resolve("locked").nn), Access.Read)
+    assert(env.policy.effective(ScopeId.Base, env.root.resolve("secrets/k").nn).classified)
+    val refused = intercept[SecurityException](env.policy.requestFile(ScopeId.Base, outside, Access.Write, "w"))
+    assert(refused.getMessage.nn.contains("isolate mode"), refused.getMessage)
+    assert(env.requests.isEmpty, "nobody was asked")
+
+  test("in isolate mode a rule for a path in the project, or for all of it, holds in the copy too"):
+    val project = java.nio.file.Files.createTempDirectory("atc-rules-project").nn.toRealPath().nn
+    val copy = java.nio.file.Files.createTempDirectory("atc-rules-copy").nn.toRealPath().nn
+    val above = project.getParent.nn
+    val rules = FileRule.forCopy(
+      List(
+        FileRule(PathPattern(s"$above", project), Some(Access.Write), None),
+        FileRule(PathPattern(s"$project/secret", project), None, Some(true)),
+        FileRule(PathPattern(s"$project/keys/*.pem", project), Some(Access.None), None),
+        FileRule(PathPattern("*.log", project), Some(Access.Read), None),
+      ),
+      project,
+      copy
+    )
+    val p = Policy(rules, Nil, Nil, _ => Decision.Deny)
+    assert(
+      p.effective(ScopeId.Base, copy.resolve("src/a.scala").nn).canWrite,
+      "the grant above the project covers the copy"
+    )
+    assert(p.effective(ScopeId.Base, copy.resolve("secret").nn).classified)
+    assert(!p.effective(ScopeId.Base, copy.resolve("keys/a.pem").nn).canRead)
+    assertEquals(rules.count(_.pattern.toString == "*.log"), 1, "a name rule applies everywhere already")

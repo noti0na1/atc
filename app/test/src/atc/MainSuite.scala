@@ -107,3 +107,19 @@ class MainSuite extends munit.FunSuite:
     val normal = App.permissionPrompter(Cli.Args(), interactive)
     assertEquals(normal.ask(request), Decision.AllowOnce)
     assertEquals(asked, 1)
+
+  test("--auto sets the switch and contradicts --approve-all"):
+    assert(parse("--auto").auto && !parse().auto)
+    val e = intercept[IllegalArgumentException](Cli.validate(parse("--auto", "--approve-all")))
+    assert(e.getMessage.nn.contains("pick one"), e.getMessage)
+
+  test("isolate mode parses, stays out of the Shift-Tab cycle, and runs on local mode's capabilities"):
+    assertEquals(Mode.parse("isolate"), Mode.Isolate)
+    assertEquals(parse("--mode", "isolate").mode, Some(Mode.Isolate))
+    assertEquals(Mode.Full.next, Mode.ReadOnly)
+    assertEquals(Mode.Isolate.next, Mode.ReadOnly)
+    assert(Mode.Isolate.allowsWrite && !Mode.Isolate.allowsNetwork)
+    assertEquals(
+      atc.sandbox.ReplSession.preambleChunks(Mode.Isolate),
+      atc.sandbox.ReplSession.preambleChunks(Mode.Local)
+    )

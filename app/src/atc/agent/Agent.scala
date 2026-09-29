@@ -5,7 +5,7 @@ import atc.config.Config
 import atc.lib.{TaskNotes, Todo}
 import atc.llm.*
 import atc.perms.{Decision, Policy}
-import atc.sandbox.{ExecutionResult, ReplSession}
+import atc.sandbox.{ExecutionResult, SandboxSession}
 import atc.ui.Format
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -67,7 +67,15 @@ final class Agent(
 
   def snapshot: SessionSnapshot =
     val (notes, todos) = taskState()
-    SessionSnapshot(history, conversation.notes, conversation.userRequests, notes, todos, model.ref)
+    SessionSnapshot(
+      history,
+      conversation.notes,
+      conversation.userRequests,
+      notes,
+      todos,
+      model.ref,
+      Some(policy.mode.label)
+    )
 
   def restore(saved: SessionSnapshot): Unit =
     clear()
@@ -128,7 +136,17 @@ final class Agent(
   def notePermissionRevoked(grant: String): Unit =
     conversation.queueNote(AgentMessages.permissionRevoked(grant))
 
+  def notePermissionGranted(what: String): Unit = conversation.queueNote(AgentMessages.permissionGranted(what))
+
+  def noteAutoSwitched(on: Boolean): Unit = conversation.queueNote(AgentMessages.autoSwitched(on))
+
+  def noteIsolationApplied(outcome: String): Unit = conversation.queueNote(AgentMessages.isolationApplied(outcome))
+
+  def noteIsolationDiscarded(outcome: String): Unit = conversation.queueNote(AgentMessages.isolationDiscarded(outcome))
+
   def noteProcessesKilled(what: String): Unit = conversation.queueNote(AgentMessages.processesKilled(what))
+
+  def noteFilesReverted(outcome: String): Unit = conversation.queueNote(AgentMessages.filesReverted(outcome))
 
   /** Tell the model what the user ran in the shared REPL (`/run`) and what came
     * of it: the user's definitions are now part of the session the model
@@ -227,8 +245,13 @@ final class Agent(
       Agent.CompactOutcome.Compacted
 
   /** Run one user turn; returns when the model gives its final answer or the user interrupts. */
-  def turn(session: => ReplSession, input: String, cancelled: () => Boolean): TurnOutcome =
-    runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars), input, cancelled)
+  def turn(
+    session: => SandboxSession,
+    input: String,
+    cancelled: () => Boolean,
+    hooks: ToolCallHooks = ToolCallHooks.None,
+  ): TurnOutcome =
+    runTurn(ScalaToolRunner(session, policy, ui, config.maxToolOutputChars, hooks), input, cancelled)
 
   /** Core entry point, with concrete tool execution supplied by the host adapter. */
   private[atc] def runTurn(runner: ToolRunner, input: String, cancelled: () => Boolean): TurnOutcome =

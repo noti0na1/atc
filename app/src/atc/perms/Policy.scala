@@ -19,6 +19,11 @@ object ScopeId:
   val Base: ScopeId = 0L
   private[perms] def apply(id: Long): ScopeId = id
 
+  /** A scope id as it crosses to the evaluator process and back. Only an open scope grants
+    * anything: every check looks the scope up first. */
+  private[atc] def fromLong(id: Long): ScopeId = id
+  extension (id: ScopeId) private[atc] def toLong: Long = id
+
 /** One configured file rule. Missing fields mean "no constraint from this rule".
   *
   * `grantsWithin` marks a rule from a project config and names the folder its
@@ -47,6 +52,22 @@ final case class FileRule(
     val note = grantsWithin.map(root => s"from the project config, granting only inside ${PlatformPath.portable(root)}")
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(n => s" ($n)")}"
 
+object FileRule:
+  /** `rules` for a session in isolate mode's `copy` of `project`: a rule that names a path in
+    * the project, or covers all of it, names the copy's path the same way too, so that a
+    * global rule written for the project keeps its effect there (a classified file stays
+    * classified in the copy). */
+  def forCopy(rules: List[FileRule], project: Path, copy: Path): List[FileRule] =
+    def inCopy(path: Path) = PlatformPath.portable(copy.resolve(project.relativize(path)).nn)
+    rules.flatMap: rule =>
+      val moved = rule.pattern.form match
+        case PathPattern.Form.Component(_) => None
+        case PathPattern.Form.Exact(path) if path.startsWith(project) => Some(PathPattern(inCopy(path), copy))
+        case PathPattern.Form.Anchored(root, glob) if root.startsWith(project) =>
+          Some(PathPattern(s"${inCopy(root)}/$glob", copy))
+        case _ => Option.when(rule.pattern.matches(project))(PathPattern(".", copy))
+      rule :: moved.map(pattern => rule.copy(pattern = pattern)).toList
+
 /** A grant the user made for the session, as `/perms` lists it and `/perms revoke` removes it. */
 enum SessionGrant:
   case File(path: Path, access: Access)
@@ -59,8 +80,9 @@ enum SessionGrant:
     case Host(pattern) => s"hosts: $pattern"
 
 /** A permission scope opened by a `request*` call. Its grants add to those
-  * of its ancestors; the base scope holds the session grants. */
-private[perms] final class Scope(val id: ScopeId, val parent: Option[Scope]):
+  * of its ancestors; the base scope holds the session grants. A sealed scope
+  * belongs to a `classified` block (see [[Policy.openSealedScope]]). */
+private[perms] final class Scope(val id: ScopeId, val parent: Option[Scope], val sealedBlock: Boolean = false):
   @volatile var fileGrants: List[(Path, Access)] = Nil
   @volatile var commands: List[String] = Nil
   @volatile var hosts: List[String] = Nil
@@ -102,6 +124,13 @@ final class Policy(
     * (the preamble hands out only the mode's capabilities); the checks below
     * make the host refuse it too, so nothing depends on the REPL alone. */
   @volatile var mode: Mode = Mode.Full
+  /** The `auto` switch: every permission request is rejected without asking the user.
+    * The rejected requests are kept, so the user can grant them after the turn. */
+  @volatile var auto: Boolean = false
+  /** In isolate mode, the project's copy: nothing outside it may be written, and inside it every
+    * path the rules let the agent read may be written too, since changes reach the project
+    * only when the user applies them. Locked, hidden and classified paths keep their rules. */
+  @volatile var copyRoot: Option[Path] = None
 
   private def scope(id: ScopeId): Scope =
     scopes.getOrElse(
@@ -160,6 +189,10 @@ final class Policy(
         computed
       case found => found
 
+  /** The lowest access any configured rule matching `p` allows: no rule saved for `p` can
+    * grant more. `p` must be canonical. */
+  def ceiling(p: Path): Access = matchingRules(p).flatMap(_.access).reduceOption(_.min(_)).getOrElse(Access.Write)
+
   /** Permission from the configuration only. `p` must be canonical. */
   def configPerm(p: Path): Perm =
     val matching = matchingRules(p)
@@ -177,29 +210,45 @@ final class Policy(
     s.chain.flatMap(_.fileGrants).collect { case (granted, access) if p == granted || p.startsWith(granted) => access }
       .reduceOption(_.max(_)).getOrElse(Access.None)
 
+  /** The file grants in force in `scopeId`: its own, its ancestors' and the session's. */
+  def fileGrants(scopeId: ScopeId): List[(Path, Access)] = scope(scopeId).chain.flatMap(_.fileGrants)
+
   /** Effective permission in `scopeId`. `p` must be canonical. */
   def effective(scopeId: ScopeId, p: Path): Perm =
     val currentScope = scope(scopeId)
     val configured = configPerm(p)
-    val perm =
+    val granted =
       if configured.locked then configured
       else configured.copy(access = configured.access.max(grantedAccess(currentScope, p)))
+    val perm = copyRoot match
+      case Some(copy) if !p.startsWith(copy) => granted.copy(access = granted.access.min(Access.Read))
+      case Some(_) if !granted.locked && !granted.classified && granted.canRead => granted.copy(access = Access.Write)
+      case _ => granted
     if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
+  /** A classified block asks for nothing: the answer would carry what it read out. The types
+    * keep `request*` out of a block; this holds even without them. */
+  private def unsealed(parentId: ScopeId): Scope =
+    if sealedScope(parentId) then
+      throw SecurityException("Access denied: a classified block cannot ask for permissions")
+    scope(parentId)
+
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
-    val parent = scope(parentId)
+    val parent = unsealed(parentId)
     val shown = PlatformPath.portable(p)
     if access == Access.Write && !mode.allowsWrite then
       throw SecurityException(
         s"Access denied: the sandbox is in ${mode.label} mode; writing '$shown' cannot be granted"
       )
+    if access == Access.Write && copyRoot.exists(copy => !p.startsWith(copy)) then
+      throw SecurityException(
+        s"Access denied: isolate mode writes only the project's copy, so writing '$shown' cannot be granted"
+      )
     val current = effective(parentId, p)
     if !(current.access >= access) then
       if current.locked then
         throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
-      decide(FileRequest(p, access, current, reason), s"${access.label} on '$shown'") {
-        base.synchronized(base.fileGrants ::= (p -> access))
-      }
+      decide(FileRequest(p, access, current, reason, ceiling(p)), s"${access.label} on '$shown'")
     openScope(parent, fileGrants = List(p -> access))
 
   // ── commands ──────────────────────────────────────────────────────
@@ -213,19 +262,15 @@ final class Policy(
     denyCommands.find(GlobMatcher.matchesCommand(commandLine, _))
 
   def commandAllowed(scopeId: ScopeId, commandLine: String): Boolean =
-    mode.allowsExec && commandDenied(commandLine).isEmpty &&
+    commandDenied(commandLine).isEmpty &&
       commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
 
   def requestExec(parentId: ScopeId, commands: List[String], reason: String): ScopeId =
-    val parent = scope(parentId)
-    if !mode.allowsExec then
-      throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; commands cannot be run")
+    val parent = unsealed(parentId)
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
-      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") {
-        base.synchronized(base.commands ++= missing)
-      }
+      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}")
     openScope(parent, commands = commands)
 
   // ── network ───────────────────────────────────────────────────────
@@ -240,7 +285,7 @@ final class Policy(
       hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
 
   def requestNet(parentId: ScopeId, hosts: List[String], reason: String): ScopeId =
-    val parent = scope(parentId)
+    val parent = unsealed(parentId)
     if !mode.allowsNetwork then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; the network is not reachable")
     refuseDenied("host", hosts, denyHosts, GlobMatcher.matchesHost)
@@ -249,9 +294,7 @@ final class Policy(
     // an exact `::1` grant covers the equivalent expanded IPv6 spelling.
     val missing = hosts.filterNot(host => hostPatterns(parent).exists(GlobMatcher.matchesHost(host, _)))
     if missing.nonEmpty then
-      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") {
-        base.synchronized(base.hosts ++= missing)
-      }
+      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}")
     openScope(parent, hosts = hosts)
 
   /** Refuse a `request*` whose patterns collide with the deny list, before the
@@ -282,10 +325,18 @@ final class Policy(
 
   // ── scopes ────────────────────────────────────────────────────────
 
-  /** Put `request` to the user. Denial throws (`what` names what was refused);
-    * "allow for the session" also runs `remember`, which records the grant on
-    * the base scope. Returns normally when the caller may open its scope. */
-  private def decide(request: PermissionRequest, what: String)(remember: => Unit): Unit =
+  /** Put `request` to the user, or with `auto` reject it without asking. Denial
+    * throws (`what` names what was refused); "allow for the session" also
+    * records the grant on the base scope. Returns normally when the caller may
+    * open its scope. */
+  private def decide(request: PermissionRequest, what: String): Unit =
+    if auto then
+      rejections.synchronized:
+        rejections += (request -> what)
+      throw SecurityException(
+        s"Access denied: auto is on, so permission requests are rejected without asking the user: $what. " +
+          "Do not retry it; work within the current permissions and say what you need."
+      )
     val decision = prompter.ask(request)
     decisionLog.synchronized:
       decisionLog += (decision -> what)
@@ -294,7 +345,33 @@ final class Policy(
       case Decision.Revise(_) =>
         throw SecurityException(s"Permission request not approved: $what. The user supplied instructions to revise it.")
       case Decision.AllowOnce => ()
-      case Decision.AllowSession => remember
+      case Decision.AllowSession | Decision.AllowAlways => remember(request)
+
+  /** Record `request`'s grant on the base scope, for the rest of the session. */
+  private def remember(request: PermissionRequest): Unit = base.synchronized:
+    request match
+      case FileRequest(path, access, _, _, _) => base.fileGrants ::= (path -> access)
+      case ExecRequest(commands, _) => base.commands ++= commands
+      case NetRequest(hosts, _) => base.hosts ++= hosts
+
+  /** The requests `auto` rejected, in order, with what each was about. */
+  private val rejections = mutable.ListBuffer[(PermissionRequest, String)]()
+  def rejectionCount: Int = rejections.synchronized(rejections.length)
+
+  /** The requests rejected since there were `count`, once each. */
+  def rejectedSince(count: Int): List[(PermissionRequest, String)] = rejections.synchronized:
+    rejections.drop(count).toList.distinctBy(_._2)
+
+  /** The rejected requests the user has not granted since, once each. */
+  def rejected: List[(PermissionRequest, String)] = rejectedSince(0)
+
+  /** Grant a request `auto` rejected for the rest of the session, as "allow for the session" would have. */
+  def grant(request: PermissionRequest): Unit =
+    remember(request)
+    rejections.synchronized:
+      // The same request rejected again with another reason is granted too.
+      val granted = rejections.collect { case (r, what) if r == request => what }.toSet
+      rejections.filterInPlace((_, what) => !granted.contains(what))
 
   /** Every decision the user made at a prompt, in order, with what it was
     * about as a phrase (`write on '/tmp/x'`, `commands npm *`). The agent
@@ -325,9 +402,22 @@ final class Policy(
 
   def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
 
+  /** Open the scope of a `classified` block below `parentId`. Everything done in it stays
+    * classified: its file system reads classified content and writes nothing, its commands
+    * run sealed (no network, writes only to their temporary directory), and it asks for
+    * nothing. */
+  def openSealedScope(parentId: ScopeId): ScopeId =
+    val s = Scope(ScopeId(nextId.getAndIncrement()), Some(scope(parentId)), sealedBlock = true)
+    scopes.put(s.id, s)
+    s.id
+
+  /** Whether `id` is a `classified` block's scope or lies inside one. */
+  def sealedScope(id: ScopeId): Boolean = scope(id).chain.exists(_.sealedBlock)
+
   /** Forget everything decided during the session: the "allow for the session"
-    * grants and every scope still open (a `request*` block whose capability
-    * outlived it). The configured rules, the deny lists and the mode stay. */
+    * grants, the requests `auto` rejected and every scope still open (a `request*`
+    * block whose capability outlived it). The configured rules, the deny lists,
+    * the mode and the `auto` switch stay. */
   def resetSession(): Unit =
     scopes.clear()
     scopes.put(ScopeId.Base, base)
@@ -337,6 +427,8 @@ final class Policy(
       base.hosts = Nil
     decisionLog.synchronized:
       decisionLog.clear()
+    rejections.synchronized:
+      rejections.clear()
     matchingRulesCache.synchronized:
       matchingRulesCache.clear()
 
@@ -376,6 +468,7 @@ final class Policy(
       if !withSession || patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
     val lines = List.newBuilder[String]
     lines += s"Mode: ${mode.label} (${mode.description})"
+    if withSession && auto then lines += "Auto: permission requests are rejected without asking"
     lines += "File rules (strictest matching rule wins; unmatched paths are inaccessible):"
     lines ++= explicit.map(r => s"  ${r.describe}")
     if classifiedOnly.nonEmpty then

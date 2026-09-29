@@ -1,10 +1,11 @@
 package atc
 
+import atc.confine.CommandSandbox
 import atc.host.*
 import atc.lib.{IOCap, Todo, UserIO}
 import atc.perms.*
 import atc.platform.PlatformPath
-import atc.sandbox.{ReplSession, Sandbox, SandboxConfig}
+import atc.sandbox.{ReplSession, Sandbox, SandboxConfig, SandboxSession}
 
 import java.io.IOException
 import java.nio.file.{Files, Path}
@@ -23,8 +24,11 @@ final class TestEnv(
   prefix: String = "atc-test",
   denyCommands: List[String] = Nil,
   denyHosts: List[String] = Nil,
+  commandSandbox: CommandSandbox = CommandSandbox.Unconfined("tests"),
+  /** An existing directory to use as the root instead of a new temporary one. */
+  at: Option[Path] = None,
 ):
-  val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
+  val root: Path = at.getOrElse(Files.createTempDirectory(prefix).nn).toRealPath().nn
 
   // ── permission prompter (scripted; unanswered requests are denied) ──
   var decisions: List[Decision] = Nil
@@ -52,7 +56,7 @@ final class TestEnv(
   var answers: List[Option[String]] = Nil
   var shownTodos: List[Todo] = Nil
 
-  @volatile var session: Option[ReplSession] = None
+  @volatile var session: Option[SandboxSession] = None
 
   /** Commands that ran long enough to be shown live, and what they wrote while live. */
   val liveCommands: ListBuffer[String] = ListBuffer()
@@ -65,7 +69,7 @@ final class TestEnv(
   val output: HostOutput = new HostOutput:
     def print(agentText: String, userText: String): Unit = agentOut.synchronized:
       agentOut.append(agentText)
-      session.foreach(_.printStream.print(agentText))
+      session.foreach(_.printAgent(agentText))
       userOut.append(if agentText == userText then userText else s"<$userText>")
     override def commandRunning(commandLine: String): Unit = liveCommands += commandLine
     override def whileCommandRuns[T](body: => T): T =
@@ -104,7 +108,7 @@ final class TestEnv(
         case Nil => None
     def showTodos(items: List[Todo]): Unit = shownTodos = items
 
-  val host: Host = Host(policy, root, output, llm, ui)
+  val host: Host = Host(policy, root, output, llm, ui, commandSandbox = commandSandbox)
 
   /** Root capabilities for calling the host directly from tests. */
   given io: IOCap = new IOCap()

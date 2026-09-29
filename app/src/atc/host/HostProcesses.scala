@@ -1,6 +1,7 @@
 package atc.host
 
 import atc.{LauncherEnvironment, ScalaSource}
+import atc.confine.CommandSandbox
 import atc.lib.*
 import atc.perms.ScopeId
 import atc.platform.Platform
@@ -27,19 +28,35 @@ private[host] trait HostProcesses:
 
   def requestExec[T](commands: Iterable[String], reason: String)(op: Exec ?=> T)(using user: UserIO, parent: Exec): T =
     val patterns = commands.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted
-    inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id)))
+    inScope(policy.requestExec(scopeOf(parent), patterns, reason))(id => op(using ExecImpl(id, networkOf(parent))))
+
+  def withNetwork[T](op: Exec ?=> T)(using ex: Exec, net: Network): T =
+    if !policy.mode.allowsNetwork then
+      throw SecurityException(
+        s"Access denied: the sandbox is in ${policy.mode.label} mode; commands cannot use the network"
+      )
+    op(using ExecImpl(scopeOf(ex), Some(scopeOf(net))))
+
+  /** The network scope an `Exec` carries, if it came from `withNetwork`. */
+  private def networkOf(ex: Exec): Option[ScopeId] = ex match
+    case impl: ExecImpl => impl.network
+    case _ => None
 
   def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, ExecOptions())
 
   def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
     exec(command, args, ExecOptions())
 
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec, FileSystem): ProcessResult =
-    exec(command, args, ExecOptions(workingDir = workingDir))
-
   /** A command line ready to start: parsed, authorized, and represented as one
-    * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
-  private final case class Prepared(pbs: List[ProcessBuilder], stageLines: List[String], line: String)
+    * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. `sealedBlock`: started
+    * in a `classified` block, whose output stays classified. */
+  private final case class Prepared(
+    pbs: List[ProcessBuilder],
+    stageLines: List[String],
+    line: String,
+    launch: CommandSandbox.Launch,
+    sealedBlock: Boolean,
+  )
 
   private def withArgs(command: String, args: Seq[String]): CommandLine.Pipeline =
     val pipeline = CommandLine.parsePipeline(command)
@@ -52,13 +69,18 @@ private[host] trait HostProcesses:
         "exec(command, args, ...): `command` must be one program when args are given; write a pipeline or redirection in the one-line form exec(\"...\")"
       )
 
-  private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId): Unit =
+  /** The deny list applies to every command. The allowlist does not apply to a command the OS
+    * sandbox contains, without network (`anyProgram`): read-only, sealed, or confined in isolate
+    * mode, it can change nothing but the copy and reach nothing, and the allowlist would not
+    * narrow what it reads, since any reader it admits reads all of it. */
+  private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId, anyProgram: Boolean): Unit =
     for stage <- pipeline.stages; pattern <- policy.commandDenied(stage.line) do
       throw SecurityException(
         s"Access denied: command '${stage.line}' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
       )
 
-    val missing = pipeline.stages.filterNot(stage => policy.commandAllowed(scope, stage.line))
+    val missing =
+      if anyProgram then Nil else pipeline.stages.filterNot(stage => policy.commandAllowed(scope, stage.line))
     if missing.nonEmpty then
       val target =
         if pipeline.stages.lengthIs == 1 then s"command '${missing.head.line}'"
@@ -72,17 +94,17 @@ private[host] trait HostProcesses:
 
   private def commandDirectory(path: String, fs: FileSystem): Path =
     val dir = canonical(path)
-    requireReadable(scopeOf(fs), dir, "running a command in", "a working directory outside it")
+    requireReadable(scopeOf(fs), dir, "running a command in")
     dir
 
   private def inputRedirect(path: String, fs: FileSystem): Path =
     val input = canonical(path)
-    requireReadable(scopeOf(fs), input, "feeding a command from", "an unclassified file")
+    requireReadable(scopeOf(fs), input, "feeding a command from")
     input
 
   private def outputRedirect(path: String, fs: FileSystem): Path =
     val target = canonical(path)
-    requireWritable(scopeOf(fs), target, "redirecting a command's output to", "an unclassified file")
+    requireWritable(scopeOf(fs), target, "redirecting a command's output to")
     ensureParent(target)
     target
 
@@ -101,16 +123,47 @@ private[host] trait HostProcesses:
       if stage.mergeErr then builder.redirectErrorStream(true)
       builder
 
-  private def prepare(command: String, args: Seq[String], options: ExecOptions)(using
+  /** `writable`: whether the command may write where `fs` may (`exec`, `spawn`) or
+    * only its temporary directory (`execReadOnly`). */
+  private def prepare(command: String, args: Seq[String], options: ExecOptions, writable: Boolean)(using
     ex: Exec,
     fs: FileSystem
   ): Prepared =
     val pipeline = withArgs(command, args)
+    // A command in a classified block may read classified files, so it runs sealed: it writes
+    // only its temporary directory and reaches nothing, whatever `fs` could write.
+    val sealedBlock = policy.sealedScope(scopeOf(ex)) || policy.sealedScope(scopeOf(fs))
+    if sealedBlock then
+      if !commandSandbox.confined then
+        throw SecurityException(
+          s"Access denied: a command in a classified block needs the OS sandbox to keep it sealed, and commands here are ${commandSandbox.describe}"
+        )
+      if pipeline.stdoutFile.isDefined then
+        throw IllegalArgumentException(
+          "a command in a classified block cannot redirect to a file; write its output from Scala instead"
+        )
+    else if writable && !policy.mode.allowsWrite then
+      throw SecurityException(
+        s"Access denied: the sandbox is in ${policy.mode.label} mode; run commands with execReadOnly"
+      )
+    if !writable then
+      if !commandSandbox.confined then
+        throw SecurityException(
+          s"Access denied: execReadOnly needs the OS sandbox to keep the command read-only, and commands here are ${commandSandbox.describe}"
+        )
+      if pipeline.stdoutFile.isDefined then
+        throw IllegalArgumentException(
+          "execReadOnly: a `>`/`>>` redirection writes a file; use exec, or print and write the output from Scala"
+        )
     if options.stdin.nonEmpty && pipeline.stdinFile.isDefined then
       throw IllegalArgumentException(
         "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
       )
-    authorizeCommands(pipeline, scopeOf(ex))
+    val network = if sealedBlock then None else networkOf(ex)
+    // In isolate mode a confined command can change only the project's copy, as a read-only
+    // command can change nothing: neither needs a command pattern.
+    val contained = !writable || sealedBlock || (policy.copyRoot.isDefined && commandSandbox.confined)
+    authorizeCommands(pipeline, scopeOf(ex), anyProgram = contained && network.isEmpty)
 
     val dir = commandDirectory(options.workingDir, fs)
     val stdinFile = pipeline.stdinFile.map(inputRedirect(_, fs))
@@ -120,26 +173,70 @@ private[host] trait HostProcesses:
     stdoutFile.foreach: path =>
       val file = path.toFile
       pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
-    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line)
+    // File grants travel with the file system capability, so its scope decides what the command may touch.
+    val launch =
+      commandSandbox.prepare(pbs, policy, scopeOf(fs), network, writable && !sealedBlock, dir, pipeline.line)
+    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch, sealedBlock)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
     if options.timeoutMs <= 0 then
       throw IllegalArgumentException(s"exec: timeoutMs must be positive (got ${options.timeoutMs})")
-    val prepared = prepare(command, args, options)
+    val prepared = prepare(command, args, options, writable = true)
+    noteCommand()
+    run(prepared, options)
+
+  def execReadOnly(command: String)(using Exec, FileSystem): ProcessResult = execReadOnly(command, Nil, ExecOptions())
+
+  def execReadOnly(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
+    execReadOnly(command, args, ExecOptions())
+
+  def execReadOnly(command: String, args: Seq[String], options: ExecOptions)(using Exec, FileSystem): ProcessResult =
+    if options.timeoutMs <= 0 then
+      throw IllegalArgumentException(s"execReadOnly: timeoutMs must be positive (got ${options.timeoutMs})")
+    run(prepare(command, args, options, writable = false), options)
+
+  /** On macOS a command can read the arguments of the user's other processes, which a secret
+    * can reach: a sealed command may put classified content there, and in read-only mode
+    * `Classified.map` may pass a value to `execReadOnly`. Such a command therefore runs alone
+    * among the agent's commands, and a sealed one not while a spawned process runs. On Linux
+    * every command has its own PID namespace. */
+  private val alone = java.util.concurrent.locks.ReentrantReadWriteLock(true)
+
+  private def run(prepared: Prepared, options: ExecOptions): ProcessResult =
+    val exclusive = Platform.isMac && (prepared.sealedBlock || policy.mode == atc.perms.Mode.ReadOnly)
+    val lock = if exclusive then alone.writeLock() else alone.readLock()
+    try lock.lockInterruptibly()
+    catch
+      case e: InterruptedException =>
+        prepared.launch.cleanup()
+        throw e
+    try
+      if prepared.sealedBlock && Platform.isMac && hasRunningProcesses then
+        prepared.launch.cleanup()
+        throw SecurityException(
+          "Access denied: on macOS a command in a classified block does not run while a spawned process runs, which could read its arguments; kill() it first"
+        )
+      runAlone(prepared, options)
+    finally lock.unlock()
+
+  private def runAlone(prepared: Prepared, options: ExecOptions): ProcessResult =
     val port = output
     val live = new Processes.LiveOutput:
       def begin(): Unit = port.commandRunning(prepared.line)
       def output(text: String): Unit = port.commandOutput(text)
-    output.whileCommandRuns(
-      Processes.run(
-        prepared.pbs,
-        prepared.stageLines,
-        prepared.line,
-        options.timeoutMs,
-        Some(live),
-        options.stdin
+    try
+      output.whileCommandRuns(
+        Processes.run(
+          prepared.pbs,
+          prepared.stageLines,
+          prepared.line,
+          options.timeoutMs,
+          Option.unless(prepared.sealedBlock)(live),
+          options.stdin,
+          prepared.launch.start,
+        )
       )
-    )
+    finally prepared.launch.cleanup()
 
   // The registry is per host; ids are never reused within a session.
   private val spawned = mutable.LinkedHashMap[Int, ProcessImpl]()
@@ -148,36 +245,67 @@ private[host] trait HostProcesses:
   def spawn(command: String)(using Exec, FileSystem): Process = spawn(command, ExecOptions())
 
   def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
-    val prepared = prepare(command, Nil, options)
+    if policy.sealedScope(scopeOf(ex)) || policy.sealedScope(scopeOf(fs)) then
+      throw SecurityException("spawn is not available in a classified block: a process may not outlive it")
+    val prepared = prepare(command, Nil, options, writable = true)
+    noteCommand()
+    // Not while a command that must run alone runs.
+    try alone.readLock().lockInterruptibly()
+    catch
+      case e: InterruptedException =>
+        prepared.launch.cleanup()
+        throw e
+    try spawnPrepared(prepared, options)
+    finally alone.readLock().unlock()
+
+  private def spawnPrepared(prepared: Prepared, options: ExecOptions)(using ex: Exec): Process =
     spawned.synchronized:
       reapProcesses()
       if spawned.size >= Host.MaxProcesses then
+        prepared.launch.cleanup()
         throw IllegalStateException(
           s"spawn: ${Host.MaxProcesses} processes are already running (${spawned.keys.map(id => s"p$id").mkString(", ")}); kill() one first"
         )
       nextProcessId += 1
       val id = nextProcessId
       val port = output
-      val managed = Processes.ManagedProcess.start(
-        prepared.pbs,
-        prepared.stageLines,
-        prepared.line,
-        options.stdin,
-        closeStdinAfter = false,
-        live = None,
-        keepHead = false,
-        onExit = code => port.processExited(id, code),
-      )
+      val managed =
+        try
+          Processes.ManagedProcess.start(
+            prepared.pbs,
+            prepared.stageLines,
+            prepared.line,
+            options.stdin,
+            closeStdinAfter = false,
+            live = None,
+            keepHead = false,
+            onExit = code =>
+              port.processExited(id, code)
+              prepared.launch.cleanup()
+            ,
+            starter = prepared.launch.start,
+          )
+        catch
+          case e: Throwable =>
+            prepared.launch.cleanup()
+            throw e
       val handle = ProcessImpl(id, managed, output, scopeOf(ex), policy)
       spawned(id) = handle
       output.processStarted(id, prepared.line)
       handle
 
-  /** Return the live processes visible from the caller's scope. */
+  /** Whether a process the agent spawned is still running. */
+  private[atc] def hasRunningProcesses: Boolean = spawned.synchronized:
+    reapProcesses()
+    spawned.nonEmpty
+
+  /** Return the live processes visible from the caller's scope. None is visible from a
+    * classified block: a process started outside it could carry what the block reads out. */
   def runningProcesses(using ex: Exec): List[Process] = spawned.synchronized:
     reapProcesses()
     val caller = scopeOf(ex)
-    spawned.values.toList.filter(process => policy.scopeVisibleFrom(caller, process.scope))
+    if policy.sealedScope(caller) then Nil
+    else spawned.values.toList.filter(process => policy.scopeVisibleFrom(caller, process.scope))
 
   private def reapProcesses(): Unit = spawned.filterInPlace((_, process) => process.managed.isAlive)
 

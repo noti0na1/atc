@@ -126,7 +126,7 @@ object ReplSession:
           "@assumeSafe given ex: (Exec^{io}) = atc.lib.Runtime.processes",
           "@assumeSafe given net: (Network^{io}) = atc.lib.Runtime.network",
         )
-      case Mode.Local =>
+      case Mode.Local | Mode.Isolate =>
         List(
           "@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
@@ -138,6 +138,7 @@ object ReplSession:
           "@assumeSafe given io: IOCap = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",
           "@assumeSafe given fs: (FileSystem^{io.rd}) = atc.lib.Runtime.readOnlyFileSystem",
+          "@assumeSafe given ex: (Exec^{io.rd}) = atc.lib.Runtime.readOnlyProcesses",
         )
     base :: givens
 
@@ -167,7 +168,8 @@ object ReplSession:
   private val NoResultMessage = "Execution failed (no result; possible fatal error)"
 
 /** One persistent REPL with its own sandbox class loader and host. */
-final class ReplSession(config: SandboxConfig, host: Interface & Derivations, preambleOverride: Option[String] = None):
+final class ReplSession(config: SandboxConfig, host: Interface & Derivations, preambleOverride: Option[String] = None)
+    extends SandboxSession:
   import ReplSession.*
 
   private val outputCapture = BoundedOutputStream(MaxOutputBytes)
@@ -175,6 +177,8 @@ final class ReplSession(config: SandboxConfig, host: Interface & Derivations, pr
     * host's `print`) the agent's own `println` calls. */
   val printStream: PrintStream = PrintStream(outputCapture, true, StandardCharsets.UTF_8)
   val clock: ExecutionClock = ExecutionClock()
+
+  def printAgent(text: String): Unit = printStream.print(text)
 
   private val classpath = Sandbox.libraryClasspath.map(_.toString).mkString(Platform.pathListSeparator)
   private val driver =

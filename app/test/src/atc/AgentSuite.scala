@@ -105,14 +105,14 @@ class AgentSuite extends munit.FunSuite:
     assert(lastToolText.contains("HELLO WORLD"), lastToolText)
 
   test("compile error is reported to the model, not executed"):
-    agent.turn(session, """run: val leaked = requestFiles("/tmp") { access("/tmp") }""", () => false)
+    agent.turn(session, """run: val leaked = requestFiles("/tmp") { summon[FileSystem] }""", () => false)
     assert(!lastResult.success)
     assert(lastToolText.toLowerCase.contains("leak"), lastToolText)
 
   test("classified: model sees mask, user sees content, classified model used"):
     agent.turn(
       session,
-      """run: val c = readClassified("secrets/token.txt"); println(c); println(classifiedChat(c.map(_ + "?")))""",
+      """run: val c = classified { read("secrets/token.txt") }; println(c); println(classified { classifiedChat(c.reveal + "?") })""",
       () => false
     )
     assert(lastResult.success, lastResult.toString)
@@ -124,7 +124,7 @@ class AgentSuite extends munit.FunSuite:
   test("denied plain read of classified path explains the alternative"):
     agent.turn(session, """run: read("secrets/token.txt")""", () => false)
     assert(!lastResult.success)
-    assert(lastToolText.contains("readClassified"), lastToolText)
+    assert(lastToolText.contains("classified { ... } block"), lastToolText)
 
   test("permission request flow: denied then granted"):
     val outside = Files.createTempDirectory("atc-agent-out").toRealPath()

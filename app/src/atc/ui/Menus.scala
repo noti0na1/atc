@@ -29,6 +29,8 @@ private[ui] final class Menus(screen: Screen, alerts: Alerts, status: StatusLine
 private[atc] object Menus:
   val AllowOnce = "Allow once"
   val AllowSession = "Allow for this session"
+  /** Saving to the project config; `target` is the config shown to the user. */
+  def allowAlways(target: String): String = s"Always allow in this project (save to $target)"
   val DenyLabel = "Deny this request"
   val ReviseLabel = "Tell the agent what to change"
   val OtherLabel = "Write a different answer"
@@ -40,12 +42,14 @@ private[atc] object Menus:
   /** The last row of a sub-menu: back to the menu that opened it. */
   val BackLabel = "Back"
 
-  /** Plain permission prompts accept exact approvals; every other answer is feedback. */
-  private[atc] def permissionReply(answer: Option[String]): Decision =
+  /** Plain permission prompts accept exact approvals; every other answer is feedback.
+    * `always` (or `a`) saves the grant only where the prompt offered it (`canSave`). */
+  private[atc] def permissionReply(answer: Option[String], canSave: Boolean = false): Decision =
     answer.map(_.trim).filter(_.nonEmpty) match
       case None => Decision.Deny
       case Some(text) => text.toLowerCase(Locale.ROOT) match
           case "y" | "yes" => Decision.AllowOnce
           case "s" | "session" => Decision.AllowSession
+          case "a" | "always" if canSave => Decision.AllowAlways
           case "n" | "no" => Decision.Deny
           case _ => Decision.Revise(text)

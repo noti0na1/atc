@@ -76,6 +76,10 @@ class TuiSuite extends munit.FunSuite:
       assertEquals(Menus.permissionReply(answer), Decision.Deny)
     for answer <- List("yes, except the fifth command", "skip deployment", "session only for tests", "只运行测试") do
       assertEquals(Menus.permissionReply(Some(answer)), Decision.Revise(answer))
+    // `always` saves the grant only where the prompt offered it.
+    assertEquals(Menus.permissionReply(Some("a"), canSave = true), Decision.AllowAlways)
+    assertEquals(Menus.permissionReply(Some(" Always "), canSave = true), Decision.AllowAlways)
+    assertEquals(Menus.permissionReply(Some("always")), Decision.Revise("always"))
 
   test("escape sequences stop at their final byte, timeout or EOF"):
     val expired = org.jline.utils.NonBlockingReader.READ_EXPIRED

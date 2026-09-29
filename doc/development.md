@@ -116,6 +116,9 @@ requests are echoed. It needs no API key or network connection.
 | `perms/` | Policy, permission scopes, path patterns, modes and gitignore visibility |
 | `platform/` | OS behavior, path normalization and portable path globs |
 | `sandbox/` | Compiler setup, REPL evaluation, validation, class loading and interruption |
+| `checkpoint/` | Snapshots of the project in a git store outside it, turn records and `/undo` |
+| `confine/` | OS sandboxes for commands: the plan derived from the policy, Seatbelt and bubblewrap |
+| `evaluator/` | The REPL in a separate, confined process: the call channel and the forwarding `Interface` |
 | `ui/` | JLine input, streaming output, Markdown and syntax highlighting |
 
 One turn follows this path:
@@ -123,7 +126,8 @@ One turn follows this path:
 ```text
 App → Agent → ChatModel.complete → CompletionPolicy
                   ↓ tool calls
-          ScalaToolRunner → ReplSession → Host
+          ScalaToolRunner → ReplSession → Host      (in ATC's JVM)
+          ScalaToolRunner → EvaluatorSession ⇄ Channel ⇄ HostDispatch → Host
                   ↑ execution result and permission decisions
 ```
 
@@ -145,7 +149,9 @@ snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
 traits; `HostPaths` holds the path resolution and permission checks they share. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
-The REPL shares library classes with the application, so calls need no serialization layer.
+In ATC's JVM the REPL shares library classes with the application and calls `Host`
+directly; in the evaluator process ([Evaluator process](#evaluator-process)) `RemoteHost`
+sends each call over `Channel` to `HostDispatch`.
 
 ## Type-system background
 
@@ -166,8 +172,8 @@ A write in read-only mode fails before the policy receives an operation.
 
 `T^{c}` describes a value that may retain capability `c`; `T^{c, d}` permits both.
 Subcapturing expresses coverage: `{c}` is covered by `{c, d}`. Coverage can also follow a
-reference's declared captures, so a handle typed `FileEntry^{fs}` is accounted for by
-`fs`. For ordinary capturing types, a smaller permitted capture set gives a more specific
+reference's declared captures, so a handle typed `Process^{ex}` is accounted for by
+`ex`. For ordinary capturing types, a smaller permitted capture set gives a more specific
 type. Capture sets describe possible dependencies, not a list of operations already run.
 
 Function types make the distinction explicit:
@@ -253,9 +259,13 @@ this distinction internally with a reader qualifier. See
 
 ```scala
 val ro: FileSystem^{fs.rd} = fs
-ro.access("notes.txt").read()           // permitted when the file policy allows it
-ro.access("notes.txt").write("changed") // compile error: read-only receiver
+read("notes.txt")(using ro)             // permitted when the file policy allows it
+write("notes.txt", "changed")(using ro) // compile error: a read-only set cannot be subsumed
 ```
+
+The file system has no methods of its own: every operation is an `Interface` method whose
+signature asks for the view it needs, and the host works through its internal
+`FileEntryImpl` handle.
 
 `Exec` and `Network` extend only `ExclusiveCapability`. They do not support `.rd`; a bare
 `Exec` is already a full capability. The bare-`FileSystem` convention does not extend to
@@ -291,14 +301,29 @@ interface and host together, then verify their required capabilities.
 
 | Mode | Machine capabilities supplied by the preamble |
 |---|---|
-| `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}` |
+| `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}`, `ex: Exec^{io.rd}` |
 | `local` | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}` |
+| `isolate` | as `local`, on the project's copy |
 | `full` | the local capabilities plus `net: Network^{io}` |
 
 Every mode also supplies `user: UserIO^`, which is independent of the machine root, so
 output, questions, TODO updates and normal `chat` calls remain available in read-only mode.
-`Exec` and `Network` have no read-only view. Command operations require both `Exec^` and
-`FileSystem^`, including when redirection writes a file.
+`Exec` and `Network` have no read-only view. `exec`, `execOutput` and `spawn` require both
+`Exec^` and `FileSystem^`, including when redirection writes a file; `execReadOnly` requires
+`Exec^` and a read-only `FileSystem`, which is how read-only mode runs commands. Read-only
+views are erased at run time (`fs` and `fs.rd` are the same object), so the host cannot tell
+from the capability whether a command may write; the method decides instead: `exec` asks the
+OS sandbox for the file system's writable roots, `execReadOnly` for none, and `execReadOnly`
+is refused where commands are not sandboxed, since its type promises what only the sandbox
+can keep. A command started with `execReadOnly` and a plain `Exec` needs no command pattern
+(`HostProcesses.authorizeCommands`): it can neither write nor reach anything, and a pattern
+would not narrow what it reads, since any reader a pattern admits reads everything the
+sandbox allows. `denyCommands` still refuses it, and one started inside `withNetwork` needs a
+pattern as `exec` does. `withNetwork` derives an `ExecImpl` that carries the `Network`'s scope; only
+commands started with it get the network, through the proxy, and the proxy decides hosts in
+that scope, so a `requestNetwork` grant reaches the commands inside its block and ends with
+it. A plain `Exec` gives commands no network in any mode. `requestExec` keeps the network
+scope of the `Exec` it widens.
 
 Capability constructors are private to ATC. `Runtime` and `Derivations` provide the
 sandbox's internal bootstrap API and are marked `@rejectSafe`. Agent code cannot derive
@@ -312,10 +337,25 @@ checking behavior.
 ### Classified data
 
 `ClassifiedImpl` stores a `Try`: non-fatal computation failures remain confidential.
-HTTP calls with classified headers or bodies return classified responses, preventing a
-server from reflecting a secret into ordinary output. Validate public parameters and
-permissions before inspecting classified values, and keep subsequent failures inside the
-classified result or user-only output.
+Classified content never reaches the network: no HTTP call takes a classified header or
+body. Validate public parameters and permissions before inspecting classified values, and
+keep subsequent failures inside the classified result or user-only output.
+
+A `classified { ... }` block (`HostInteraction.classified`) runs in a sealed permission
+scope (`Policy.openSealedScope`) below the caller's file system, closed with its processes
+when the block ends. The host's checks key on the scope: `requireReadable` lets classified
+content through, walks descend into classified directories and searches include classified
+files, and `requireWrite` refuses every change, since a change would outlast the block and
+whether it happened could depend on the content (a classified file's existence is visible
+outside). The block's file system is typed read-only for the same reason, so `write` and
+`exec` do not compile in it; `writeClassified` stays the one way to keep a classified value
+(it creates its file whether or not the value failed). Commands in a sealed scope run with
+a read-only plan in which classified roots are readable and `Secret` restrictions are
+dropped, need no command pattern, get no network, do not stream their output and need the
+OS sandbox; `spawn` and `>` redirections are refused, since the types cannot exclude them.
+`reveal` opens a value through a `Sealed` token that only the block's context supplies. In
+the evaluator the block runs as a callback in the scope the host opened, so its value and
+any failure stay in the evaluator.
 
 The data-flow argument relies on both parts of the API. `map` does not expose a plain
 result, and its callback cannot capture a full output capability. Deriving a Boolean from a
@@ -341,10 +381,30 @@ handle failures in user-defined rendering, including `toString` and `getMessage`
 letting the exception reach the model. Fatal errors must abort evaluation rather than
 becoming a condition the agent can catch and inspect.
 
+Each way out of a block or a `map` callback is closed by one part, and a test checks it:
+
+- Output, asking, the normal model, the network, writes and permission requests: the callback
+  may capture only read-only capabilities (`CapabilitySuite`), and the host refuses writes
+  and permission requests from a sealed scope all the same (`ClassifiedSuite`).
+- A failure stays in the `Try`: `writeClassified` creates its file either way, and the
+  evaluator sends a failure without its message (`ClassifiedSuite`, `EvaluatorSuite`).
+- Control flow: a non-local `return` or `Breaks.break` becomes a classified failure
+  (`ClassifiedImpl.attempt`; `ClassifiedSuite`, `EvaluatorSuite`).
+- Processes: a block sees no process started outside it and cannot spawn one
+  (`ClassifiedSuite`, `ConfinementSuite`).
+- Sealed commands: no network, no cache, no POSIX shared memory, writes only to a temporary
+  directory deleted afterwards, and no child outlives them (`ConfinementSuite`). On macOS a
+  command can read the arguments of the user's other processes, so a sealed command runs
+  alone among the agent's commands and not while a spawned process runs, and in read-only
+  mode, where `map` can pass a value to `execReadOnly`, every command runs alone.
+
+Still open: timing, termination and resource use, and on macOS the size and times of a
+classified file, so the length of what `writeClassified` writes, which a directory listing
+returns in bulk whatever the profile says.
+
 `classifiedChat(String)` is treated as pure. This assumes the configured endpoint is
 isolated and has no observable effects beyond its result; ATC cannot establish that about
-an arbitrary endpoint. Timing, termination and resource-consumption side channels are
-outside the classified-data guarantees.
+an arbitrary endpoint.
 
 **Use overloads instead of default arguments on capability-taking API methods.** Default
 arguments have allowed method wrappers to lose required captures when passed to
@@ -373,8 +433,12 @@ resources are hidden so REPL instrumentation does not redefine the shared API cl
 
 The host checks permissions at each operation. Scope checks apply even when a locked rule
 already determines access. Command and host deny rules remain effective inside temporary
-scopes and after session grants. External commands run with the user's OS privileges;
-ATC's file and HTTP permissions do not constrain the internals of those commands.
+scopes and after session grants. External commands run in the OS sandbox described under
+[Command sandbox](#command-sandbox) where the platform provides one, and with the user's
+privileges otherwise. Where the OS sandbox exists, the compiler, the REPL and the agent's
+code also run in a separate, confined process ([Evaluator process](#evaluator-process)): the
+OS then holds the agent's code to the permission policy as well, a coarser level of
+protection alongside the compiler's.
 
 ## The sandbox
 
@@ -395,7 +459,8 @@ imported after the trusted preamble. Compiler diagnostics and runtime results ar
 as `ExecutionResult`; an exception recorded by `CappedRendering` marks evaluation failure.
 A string containing the word `error` in ordinary output does not determine run success.
 
-With an execution timeout configured, evaluation runs on a daemon worker. `ExecutionClock`
+In ATC's JVM, with an execution timeout configured, evaluation runs on a daemon worker; the
+evaluator process keeps no timeout of its own ([Evaluator process](#evaluator-process)). `ExecutionClock`
 excludes nested waits for user input, external commands and model calls that have their own
 timeouts. Interrupts set the compiler's REPL stop flag and interrupt blocking operations.
 `skipInvalidWrapper` advances past a potentially incomplete wrapper class. Completed file,
@@ -409,7 +474,8 @@ Evaluation temporarily replaces `System.out` and `System.err`, so a process-wide
 serializes capture. The same lock protects selection of the session's host in `Runtime`,
 including lazy preamble initialization. Lock acquisition has a timeout: an evaluation that
 cannot stop must not block every subsequent request indefinitely. Such a stuck evaluation
-requires restarting ATC.
+requires restarting ATC when the REPL runs in ATC's JVM; an evaluator process is ended
+instead.
 
 After interruption or timeout, the stopped wrapper is excluded from future imports while
 earlier definitions remain available. The driver may already have advanced `objectIndex`;
@@ -455,8 +521,9 @@ config(p)  = min(grant(p), ceiling(p))
 scoped(s,p) = maximum matching file grant in s and its ancestors, default None
 access(s,p) = config(p)                         when p is locked
               max(config(p), scoped(s,p))       otherwise
-effective(s,p) = min(access(s,p), Read)          in read-only mode
-                 access(s,p)                    in other modes
+effective(s,p) = min(access(s,p), Read)          in read-only mode, and outside the copy in isolate mode
+                 Write                          inside the copy where access(s,p) reads, unlocked and unclassified
+                 access(s,p)                    otherwise
 ```
 
 A missing rule access field imposes no access ceiling; it may independently set
@@ -479,10 +546,31 @@ open originating scope; `runningProcesses` filters by scope visibility.
 
 At runtime, a request resolves its parent scope, checks mode and deny restrictions, and
 asks only for permissions not already held. `AllowOnce` applies to the child scope;
-`AllowSession` also records the grant on `ScopeId.Base`. The callback runs through
+`AllowSession` also records the grant on `ScopeId.Base`. `AllowAlways` does the same and
+saves the grant to the project config: `App` offers it where `ProjectRules.plan` finds a way to
+write it, and `ProjectRules.save` writes it after the user chooses it. Commands and hosts join
+the config's lists; a file grant becomes a `./`-anchored rule, offered only inside the
+project (a project rule grants nowhere else), for a path without glob characters, and when
+no configured rule caps the path below the request (`FileRequest.ceiling`), since the saved
+rule would grant nothing. The config is created in the working directory when the project
+has none; in the home directory, where the project config is the global one, nothing is
+offered. `ObjectText.withAppended` adds the entries after a list's last one, so a
+hand-formatted list keeps its layout. A project whose commands and hosts were trusted is
+trusted again with the addition; an untrusted one stays untrusted, so the saved command or
+host applies only for this session until the user trusts the project. The callback runs through
 `Host.inScope`, whose `finally` block terminates scoped processes and closes the scope.
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
+
+`Policy.auto` (the `auto` switch: `/auto`, `--auto`, config `auto`, which a project layer
+may turn on but not off) makes `Policy.decide` reject every request without calling the
+prompter, including the command proxy's host requests. The exception tells the agent that
+nobody was asked, and the system prompt's user line says so while the switch is on;
+`/auto` also queues a note when it changes. Rejected requests are kept: `App` lists those of
+a turn after it (`rejectedSince`), and `/perms grant` passes one to `Policy.grant`, which
+records it on `ScopeId.Base` as "allow for the session" would have and queues a note for the
+model. Deny lists, locked rules and mode checks come before `decide`, so they refuse as
+before and nothing is kept for them. `--auto` and `--approve-all` together are rejected.
 
 Permission requests display numbered command or host rows, and a `note` row when a command
 pattern holds `*`, which allows any arguments and so, for an interpreter, any code. The host
@@ -523,7 +611,7 @@ the tool result so the model knows whether approval was temporary, session-wide 
 
 `requestFiles` works in every mode: the file system it lends the block is exactly as
 capable as the one the caller already holds, so read-only callbacks remain read-only, and
-command execution, which needs `FileSystem^`, still compiles only in local and full mode.
+`exec`, which needs `FileSystem^`, still compiles only in local, isolate and full mode.
 `requestExec` widens only `Exec^`; a command that also needs a file permission that is not
 configured needs a nested `requestFiles` block. The result of a request tells the agent
 what the user decided, so "once" needs another request next time while "for the session"
@@ -603,10 +691,303 @@ process registry lock their mutable state, and `Tui.popupBlock` takes a lock so 
 questions and permission prompts from several tasks reach the terminal one at a time (a
 waiter interrupted meanwhile never shows its pop-up).
 
-HTTP operations validate the scheme, host and headers (secret header names too; only their values stay inside the classified boundary), do not follow redirects, and cap
+HTTP operations validate the scheme, host and headers, do not follow redirects, and cap
 response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400 or higher;
-`httpRequest` returns raw status and body. Classified request handling retains subsequent
-transport and response failures within `Classified`.
+`httpRequest` returns raw status and body.
+
+## Command sandbox
+
+`CommandSandbox` confines every stage of every command the agent starts: under
+`/usr/bin/sandbox-exec` with a generated Seatbelt profile on macOS, under bubblewrap on Linux.
+`osSandbox` chooses `auto` (the default: confine where the platform can, otherwise run
+unconfined and name the reason in the banner), `required` (refuse every command where it
+cannot) or `off`; a project layer may only make it stricter. `CommandSandbox.detect` probes
+the backend once at start: `sandbox-exec` fails inside another Seatbelt sandbox, and
+bubblewrap needs unprivileged user namespaces, which Ubuntu 24.04 restricts. Windows has no
+backend yet; [the isolation design](isolation.md) plans the Anthropic sandbox runtime there.
+
+`HostProcesses.prepare` builds a `SandboxPlan` for each command from the policy, the scope of
+the file system capability passed to `exec`, `spawn` or `execReadOnly`, whether the command
+may write (not for `execReadOnly`, whose writable roots become readable ones) and whether its
+`Exec` came from `withNetwork`, and the backend rewrites each stage's command line and
+environment. The plan lists concrete paths:
+
+- Readable roots: exact-path rules that grant read access, the scope's file grants, and a
+  toolchain bundle (JDKs, build tool homes, dependency caches, version managers, git's
+  configuration and the directories on the `PATH`, when they exist under the home
+  directory, plus `java.home` and `JAVA_HOME`). Everything else under the home directory is
+  unreadable; system directories are the backend's. A read-only plan (`execReadOnly`) keeps
+  a `PATH` directory under the home directory only inside a named toolchain root and hides
+  git's user configuration (`GitConfig`), which can hold tokens; its commands get
+  `GIT_CONFIG_GLOBAL=/dev/null`, since git stops at a configuration file it cannot read.
+- Writable roots: the same sources with write access, and a cache directory the sandbox owns
+  (`~/Library/Caches/atc-sandbox`, `~/.cache/atc-sandbox`; in isolate mode `<copy>.cache`
+  beside the copy, so that nothing outside it keeps what its commands write). A read-only or
+  sealed plan has no cache: its tools keep their caches in the temporary directory, which is
+  deleted with the command. Tool caches in the home directory stay read-only, because
+  unsandboxed tools later load code from them; sbt's launcher locks there (`ToolLocks`) are
+  writable only for a plan that may write outside isolate mode.
+- Restrictions, applied after the roots: every rule without access hides its paths, every
+  classified rule hides their content, every read ceiling makes them read-only. An exact
+  path is evaluated in the scope, so a grant can lift its read ceiling; a glob keeps its
+  restriction regardless, so the plan never grants more than the policy. `.git` is
+  read-only unless the policy lets it be written, in which case only its hooks and
+  configuration are; `.atc`, `.vscode`, `.idea` and `.envrc` in every writable root are
+  read-only; the home directory's credential files (`HomeSecrets`) and agent sockets are hidden, and so is
+  the service data package managers keep in system directories (`/opt/homebrew/var`,
+  `/usr/local/var`) unless a policy root lies inside it.
+
+The Seatbelt profile denies by default, imports `system.sb`, and allows `stat` everywhere,
+which canonicalization needs. Its rules match the real path on disk, so a symbolic link or a
+differently cased spelling resolves before a rule applies, and a hard link to a file outside
+the writable roots cannot be created. Glob restrictions become case-insensitive regular
+expressions where file names are; dependency directories (`node_modules`, `.venv`, `venv`,
+`site-packages`) are exempt from them, since packages ship certificate bundles that `*.pem`
+would otherwise hide. A renamed parent could swap a protected path out, so parents of
+protected paths inside writable roots cannot be unlinked. Launch Services, the pasteboard
+and the keychain services stay unreachable. A command may use the terminals it opens itself,
+which the kernel marks with the `com.apple.sandbox.pty` extension, and no other: not
+`/dev/tty` and not the user's other terminals, since reading one captures what the user
+types there and writing one bypasses ATC's display. macOS starts commands in ATC's session,
+and the sandbox refuses the `TIOCSTI` ioctl that would inject input into it. Each command gets a private temporary
+directory under `/private/tmp`, short because sbt's socket path must fit 104 bytes, and JVMs
+get it as `java.io.tmpdir`, since the macOS JVM ignores `TMPDIR`. POSIX semaphores and shared
+memory are allowed only for a plan with a cache, since named ones outlive the command. The
+command runs under a small `sh` wrapper (`Seatbelt.Reaper`) that puts it in its own process
+group and kills what is left of that group when it exits, as the end of a PID namespace does
+on Linux; a process that leaves the group itself survives, still confined.
+
+bubblewrap mounts the system directories read-only (`/usr`, `/etc`, `/opt`, `/sys`, `/nix`,
+`/gnu` and `/snap` where they exist, and `/bin`, `/sbin` and `/lib*` as the links a merged
+`/usr` makes or as directories), not the whole root: other users' homes, `/srv`, `/mnt`,
+`/var` and the sockets under `/run` stay absent, since a read-only mount does not stop a
+`connect` to a Unix socket. The evaluator gets the same mounts. It replaces `/tmp` and the
+home directory with empty file systems, mounts the roots back, and then the restrictions: an empty read-only file
+system over a hidden directory, `/dev/null` over a hidden file, a read-only mount over a
+read-only path. Mounts need existing paths, so glob restrictions apply to the matches found
+by a walk when the command starts (at most 50000 entries): a name glob is searched for in
+the writable roots, skipping dependency, build and `.git` directories, and a glob below a
+path from its leading literal names, so that `.git/modules/**/{config,hooks}` is found. A
+restricted path that does not exist yet is not covered. New user, PID and IPC namespaces, `--die-with-parent` and `--new-session` end the
+process tree with the command. Linux delivers the parent-death signal when the *thread* that
+started the process exits, so `CommandSandbox` starts processes on one long-lived thread.
+
+A command started with a plain `Exec` has no network: Seatbelt denies all networking and
+bubblewrap adds a network namespace. One started inside `withNetwork` (full mode only)
+reaches the network through a `CommandProxy`,
+one per command: an HTTP proxy that opens `CONNECT` tunnels and forwards absolute-form HTTP
+requests to the hosts the policy allows in the scope of the `Network` the block was given
+(`hosts`, `denyHosts` and the session and scope grants, as for `httpGet`). A host not allowed yet goes through
+`Policy.requestNet`, so an interactive session asks and records the decision in the tool
+result; a "once" approval lasts until the command ends, and a `-p` run refuses. The proxy
+resolves names itself and refuses a name that resolves only to loopback, link-local
+(cloud metadata included), wildcard or multicast addresses, unless that address is an allowed
+host in its own right. On macOS the profile allows outbound connections only to the proxy's
+loopback port, so no Unix socket and no other local server is reachable: a daemon outside
+the sandbox, such as a Mill or Gradle server, an IDE or a credential agent, acts with the
+user's full authority. Build tools therefore run without their daemon (`./mill --no-daemon`),
+and the system prompt says so. On Linux the proxy listens on a Unix socket that is mounted
+into the sandbox, and `socat` inside the sandbox forwards `127.0.0.1:3128` to it; without
+`socat` a command with network permission shares the host's network, and the banner says so.
+The command gets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` (and their lowercase forms),
+`NO_PROXY=localhost,127.0.0.1,::1`, and for JVMs the proxy system properties in
+`JAVA_TOOL_OPTIONS`, since the JVM ignores the variables; the proxy needs no credentials, so
+no Java agent is involved. Tools that ignore proxy settings fail to connect instead of going
+around the proxy. Every confined command loses `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` and
+`DOCKER_HOST`, and gets `TMPDIR`, `TMPPREFIX`, and cache locations for matplotlib, uv and sbt
+inside the sandbox. The project template lists common package registries among its hosts,
+so dependency downloads work without a prompt. `ConfinementSuite` checks the plan, the
+proxy, and real commands under the platform's backend.
+
+## Evaluator process
+
+Where `CommandSandbox` confines commands (`osSandbox` on a platform that provides a
+sandbox), `SandboxRepl` starts the REPL in a separate JVM, `EvaluatorSession`, instead of in
+ATC's own. The evaluator runs `EvaluatorMain`: the unchanged `ReplSession`, over
+`RemoteHost`, an `Interface` whose every effect is a call to the host. `HostDispatch`
+decodes each call, rebuilds the capabilities from their scope ids and runs the unchanged
+`Host`, so the policy checks each call exactly as for an in-process session. Without the
+OS sandbox, or with `osSandbox` off, the REPL stays in ATC's JVM; `required` refuses to start
+it. [The isolation design](isolation.md) explains the layer.
+
+The evaluator is started with an empty environment and `-Xlog` sending the JVM's warnings to
+stderr, since the channel is its stdout: a JVM warning printed there was once read as a
+1.5 GB frame length. On macOS its profile denies by default, allows reading the JDK, ATC's
+class path entries and its working directory, and metadata of the directories above them
+(the JVM stats them at start and crashes without); it allows executing nothing but `java`,
+writing nothing, and no network. On Linux bubblewrap mounts the system directories
+read-only, empties the home directory and `/tmp`, binds the same entries back, and unshares
+every namespace; the process starts from the long-lived launcher thread, as commands do.
+Keys, the configuration and the model clients never enter the process. It costs about 150 ms
+more than an in-process REPL and 250 to 450 MB of memory.
+
+`Channel` is a symmetric call channel over the evaluator's stdin and stdout; it opens with
+a greeting that marks where frames begin. A conversation is one logical call stack across
+both processes: the host thread blocked in `eval` serves the evaluator's calls of that
+evaluation, and an evaluator thread blocked in a host call serves the host's callbacks, so a
+`requestFiles` block runs on the thread that interruption and the REPL's stop flag reach.
+Each thread of a `parallel` call is its own conversation. A thread that stops waiting for a
+reply cancels its conversation, and a cancellation interrupts the thread serving a call of
+it on the other side, so an interrupted `parallel` task stops the host's work for it too.
+Frames are capped at 64 MiB: a larger message fails at its sender and a larger result
+becomes an error, while a malformed frame closes the channel. The host serves at most 64
+calls at once and refuses a call on a conversation of its own that nobody waits in any
+more. Host code that prints for the model (`cat`) reaches
+the evaluator's capture through `printAgent`, in order with the snippet's output; the
+evaluator's own prints come back to the host only to be shown (`HostOutput.show`).
+
+Capabilities cross as scope ids and each call is honoured only while its scope is open;
+`FileSystem` and `FileSystem^{fs.rd}` look the same on the wire, which is why the method,
+never the capability, decides what a command may write. A process handle is honoured only
+from a scope that may see it. `Classified` values live in the evaluator, because `map`
+closures run there, and their content crosses only at sinks and as classified results: a
+compromised evaluator sees every classified value the agent touched, so classified
+confidentiality still rests on the compiler.
+
+The host keeps the execution timeout, on its own `clock`, which pauses for prompts, commands
+and model calls exactly as for an in-process session; the evaluator's `ReplSession` runs
+without one, on the thread that serves `eval`. At the limit, or on an interruption, the host
+cancels the evaluation: the evaluator raises the stop flag, and the thread serving the
+evaluation is interrupted on both sides, so a command the host runs for it stops too. A
+result after the limit says the run timed out. A run that does not stop within five seconds
+is ended together with its process; the result says the REPL's definitions are gone, and the
+next tool call starts a new evaluator. `EvaluatorSuite` runs sessions against
+a test host and checks the evaluator's own confinement; it is skipped on Windows, where ATC
+does not start an evaluator.
+
+## Checkpoints
+
+`Checkpoints` records what the agent changes in the project so that `/undo` can revert it;
+[the isolation design](isolation.md) places it as the recovery layer. It runs in interactive
+sessions when `checkpoints` is true (the default; a project layer cannot turn it off), and
+not in read-only mode, where nothing can change. `App.runTurn` calls `beginTurn` and
+`endTurn` around a turn and passes it to `Agent.turn` as the `ToolCallHooks` that
+`ScalaToolRunner` calls around every Scala tool call.
+
+`CheckpointStore` keeps one git repository per canonical project path under
+`~/.atc/checkpoints/<SHA-256 of the path>`. Its index is a stat cache and its `HEAD` follows
+the latest snapshot, so `git status` lists only what changed since. When the project is the
+root of a git work tree, `objects/info/alternates` borrows the project's objects, which makes
+the first snapshot of a large repository cheap (1.6 s instead of 14 to 16 s for 25k files).
+The store is found by reading `.git` and `commondir`, not by running git in the project:
+every git command runs with the store as its directory and never loads the project's
+repository configuration, which the agent may have written. Commands lose every `GIT_`
+environment variable and run with `core.fsmonitor=false`, since a file system monitor is a
+program. The store's configuration turns off case folding, so a case-only rename shows up,
+and `info/attributes` turns off filters and line-ending conversion, so blobs are the exact
+bytes on disk.
+
+A snapshot records tracked and untracked files that git does not ignore. It leaves out new
+files over 2 MiB, nested repositories and submodules, classified paths, paths under a locked
+rule without access (such as `.atc`), and everything under `~/.atc`. More than 100000 new
+files turn checkpoints off: such a directory is probably not a project. Above 200 files a
+snapshot writes one pack through bulk check-in, since a loose object costs about half a
+millisecond on macOS. The paths the agent's own file operations wrote
+(`Host.takeWrittenPaths`) are hashed again even when their size and time match, because git
+compares timestamps in whole seconds.
+
+Each tool call gets a snapshot before and after; the second is skipped when the call ran no
+command and wrote nothing (`Host.effects`) and no spawned process is running. The agent's
+changes are the union of the differences within its calls; changes between calls are the
+user's, except that while a process the agent spawned is running, the next call starts from
+the previous call's end snapshot. `endTurn` records, per changed path, the state before the
+agent's first change and after its last, keeps the snapshots under `refs/atc/turns/`, and
+copies the earlier contents into a pack of the store's own, so that a revert does not depend
+on the project keeping them. The store keeps the newest 50 turns and prunes unreachable
+objects older than a day when a session starts; it never runs automatic garbage collection.
+
+`/undo` reverts the most recent turn that still has changes, or only the paths named. Per
+path it compares the current state with the agent's last state: when they match it restores
+the earlier state or deletes a file the agent created; when the file already has its earlier
+state nothing happens; a text file the user edited since is merged with `git merge-file`,
+with the agent's state as the base, and written only when the merge is clean; everything
+else is reported and left alone. Deletions go first, directories the revert emptied are
+removed unless the turn's first snapshot has them, and nothing is written through a
+symbolically linked parent directory. Files are replaced through a temporary file in the
+same directory, with the executable bit restored and a current modification time, so that
+builds notice the change. The model receives a notice of what was reverted.
+
+The first failure (no `git` on the `PATH`, too many files, a git error) turns checkpoints off
+for the session, and the turn summary says why; the turn itself is not disturbed. A project
+that is a subdirectory of a repository gets a store of its own without alternates, and the
+`.gitignore` files above it do not apply. A user edit made while a command runs counts as the
+agent's; the merge rule limits the damage. `CheckpointSuite` covers the store and the session.
+
+## Isolate mode
+
+`/mode isolate` (or the mode at start) moves the session to a copy of the project: the
+project root its config belongs to (`App.projectOf`), or the working directory when it has
+none; a directory that holds the home directory is refused. `App.isolatedArgs` makes the
+copy current and returns the arguments; `SessionCommands.move` saves the conversation (a
+quit at the copy's trust prompt would otherwise lose it) and throws `App.Restart`, a control
+throwable that `Main` catches to start a new `App` in the copy, at the same offset below its root (made there if the copy lacks it),
+carrying the conversation (`SessionCommands.resumeFrom`), the model, its effort and the
+`auto` switch; leaving the mode does the same the other way, after offering to apply, keep
+or discard the copy's changes. The session saves to and resumes from the project's session
+file (`App.sessionRoot`). The REPL starts afresh, as for any mode change.
+
+`Isolation` keeps the copy in the platform's application data directory (outside `~/.atc`,
+which the OS sandbox hides from commands), one per project, made with `cp -c` (an APFS
+clone) on macOS or `cp -a --reflink=auto` on Linux and kept between sessions, so ignored
+build output stays warm in it. One process at a time uses a copy: `enter` takes a file lock
+that the process keeps until it exits. Two checkpoint stores under
+`~/.atc/isolate/<project>` record the project and the copy. Each reads the project
+repository's objects and the other store's through `alternates`, never the copy's `.git`,
+where the agent could plant an object under the id of a file's content and change what
+`/apply` writes; they record files of any size, since an unrecorded change would not be
+applied. `base` is the tree both sides last agreed on, and the pending changes are the
+copy's differences from it. `apply` takes the copy tree the preview showed, so a process
+still running cannot slip in a change nobody saw, and is the project store's `revert` with
+that tree's entries as targets and `base` as the expected state: where the project still
+holds `base` it takes the copy's version, a text file changed on both sides gets a clean
+three-way merge or is left alone and reported. Every path the project then agrees on takes
+the copy's entry in `base` (`CheckpointStore.edited`), so a change the user undoes in the
+project afterwards is not applied again. The copy takes the project's changes since `base`
+(`sync`) only while the project holds every change of the copy, so none is lost: on entry,
+and after `discard` has reverted the copy to `base`. The sync also gives the copy the
+project's `.git` when its `HEAD`, index, packed references or `HEAD` log changed, since a
+stale index would let `git checkout` or `git stash` in the copy bring back old content that
+`/apply` would then write; the copy's commits do not reach the project, only its files do.
+After a sync `base` is the copy's tree, so a path the copy could not take counts as the
+project's change, not the copy's; a new copy's `base` is the clone's own tree, recorded before
+it moves into place, for the same reason. `enter` copies `.atc/config.json` and
+`keys.properties` each time, and removes them from the copy when the project no longer has
+them, since the stores do not record `.atc`. Classified and no-access paths are not recorded
+either, so they are neither applied nor taken; nor are ignored files, nested repositories and
+submodules, which `/apply` says.
+
+The copy session's policy adds a locked no-access rule for the original project, so neither
+the file API nor a command reaches it, whatever a global rule grants there; the rule becomes
+a hidden path in the OS sandbox plan. A global or `-c` rule that names a path in the
+project, or covers all of it, names the copy's path the same way too (`FileRule.forCopy`), so
+a classified file stays classified in the copy and a grant above the project covers the copy;
+the project's own rules come from the copy's config. `Policy.copyRoot` sets the copy's bounds: every path
+outside it is read-only at most, whatever a rule or grant says, and a write request for one
+is refused without asking, so the copy is the only writable root; inside it, every path the
+rules let the agent read is writable, `.git` included, while locked, hidden and classified
+paths keep their rules and commands still cannot change the protected paths (`.git` hooks
+and config, `.atc`, `.vscode`, `.idea`, `.envrc`). The sandbox plan drops read-only glob
+restrictions accordingly, except locked ones. A confined command in isolate mode needs no
+command pattern (`HostProcesses.authorizeCommands`), since it can change only the copy;
+`denyCommands` still refuses. A grant saved with "Always allow in this project" goes to the
+project's own config, for the project's path the copy's path stands for, and the copy takes
+it on entry. Isolate mode therefore needs a confining OS sandbox and
+is refused without one. The copy's config is trusted when the project's config is its own and
+trusted. The mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
+is left out of the Shift-Tab cycle, which does not leave it either. After each turn the
+terminal says how many files differ from the project (`Isolation.unapplied`). `/apply` first
+lists what it would write (`Isolation.preview`), marking a path the project changed too,
+which is merged, a path the project config keeps read-only, a symbolic link, and a file
+editors or shells act on (`.vscode`, `.idea`, `.envrc`), then asks; leaving the mode shows
+the same list before its choices, and leaves the changes in the copy when the list cannot be
+made. `/apply` and `/discard` report per path and queue a note for the model. The host maps a path under the project to the copy
+(`Host.rebase`), so either spelling works with the file API. On Linux, commands see the copy
+at the project's path too, and start at the matching directory (`CommandSandbox.detect`'s
+`mirror`), so path-keyed caches and editable installs keep working. bubblewrap takes a
+mount's source from outside the sandbox, so that mount shows the copy unrestricted; the
+copy's restrictions are mounted again at the project's path after it. macOS has no way to show
+a directory at another path, so its commands see the copy's own path and the project stays
+hidden from them.
 
 ## Configuration semantics
 
@@ -622,8 +1003,8 @@ paths retain their first role. Project rules are anchored to the directory conta
 | Commands, hosts | Concatenate across layers |
 | File rules | Retain each rule and its layer base |
 | Deny commands, deny hosts | Accumulate across layers |
-| Mode and numeric limits | Granting layers set values; project layers may only tighten them |
-| Safe mode, gitignore visibility | Project layers may enable, but cannot disable, an enabled restriction |
+| Mode, `osSandbox` and numeric limits | Granting layers set values; project layers may only tighten them |
+| Safe mode, gitignore visibility, checkpoints | Project layers may enable, but cannot disable, an enabled restriction |
 
 A project layer's `commands`, `hosts` and `classifiedModel`, and its `keys.properties`,
 reach beyond its own files, and a cloned repository can ship them. `ProjectTrust` records a
@@ -637,8 +1018,11 @@ the offered starter config) are trusted as they are written, and a `/model`, `/e
 `/classifiedmodel` save keeps a trusted project trusted. Other edits, such as a new
 `model`, do not change the fingerprint.
 
-Only explicitly defined project settings narrow a value. `executionTimeoutMs` defaults to
-300000; a JSON `null` clears it and means no limit.
+Only explicitly defined project settings narrow a value. A later `mode` narrows in the order
+`readonly`, `isolate`, `local`, `full`: isolate writes a copy and runs any confined command
+there, so it is less strict than read-only, and leaves the project untouched, so it is
+stricter than local. `executionTimeoutMs` defaults to 300000; a JSON `null` clears it and
+means no limit.
 `Configuration.rules` is the complete rule list; do not build policy from `settings.files`,
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.
@@ -761,7 +1145,7 @@ warning. `/model` starts the new model at its configured effort and removes `eff
 
 **Web search.** A model's `webSearch` turns on the provider's own search tool; the
 top-level `webSearch` does so for every model that does not set its own. It applies in full
-mode only (`Models.useMode`), since read-only and local mode keep the agent off the network. It is best effort:
+mode only (`Models.useMode`), since the other modes keep the agent off the network. It is best effort:
 when a provider rejects the tool, the model continues without it for the session.
 
 **Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
@@ -784,8 +1168,8 @@ classified or locked if any matching rule says so, and a deeper rule can only ma
 more restrictive.
 
 **Classified** content is only observable as `Classified[String]`, and a classified
-directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
-`walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
+directory's structure is classified too (listing it needs a `classified` block;
+`walk`/`grepRecursive`/`find` do not descend into it outside one). A plain `write` to a classified path
 is refused, and so is `writeClassified` to a non-classified path. **Locked** means no prompt
 can widen the rule. `"respectGitignore": true` (the default) additionally hides what git
 ignores from listings; that is visibility, not permission, so an ignored file is still
@@ -793,8 +1177,9 @@ readable by name.
 
 `commands` contains patterns matched against the complete command line. `*` is a wildcard,
 and a pattern without `*` matches by word prefix (`"git status"` allows `git status --short`
-but not `git statusx`). A command also needs read access to the directory it runs in. A
-pre-approved command runs with the user's privileges and is *not* subject to the file rules.
+but not `git statusx`). A command also needs read access to the directory it runs in. Where
+the OS sandbox is unavailable, a pre-approved command runs with the user's privileges and is
+*not* subject to the file rules; on macOS and Linux the sandbox holds it to them.
 `hosts` are glob patterns on host names; only `http`/`https` URLs are accepted and redirects
 are not followed. `denyCommands` and `denyHosts` use the same syntax: a deny rule overrides
 every allow rule, including a session grant, an open `request*` scope, and `--approve-all`.
@@ -1105,11 +1490,17 @@ interrupts the turn instead, queued text goes back to the prompt as a draft
 request therefore sees the correction before choosing another operation.
 
 `SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
-state and TODOs. It excludes SDK replay payloads, REPL definitions and permission grants.
+state, TODOs and the mode (absent in older saves). It excludes SDK replay payloads, REPL definitions and permission grants.
 Files are limited to 8 MiB, created exclusively and owner-only on POSIX systems. `/resume [file]`
 validates the file before clearing current state, checks tool-call/result pairing, creates
 fresh permission and REPL state, and adds explicit notices about lost definitions and
-grants. It retains the currently selected model and never executes saved tool calls.
+grants. It retains the currently selected model and never executes saved tool calls. It
+restores the saved mode unless the command line named one (`App.cliMode`): a mode the REPL
+takes in place is set before the fresh REPL starts, and entering or leaving isolate mode
+moves the session once the conversation is restored, so resuming an isolated session goes
+back to its copy with the changes still pending there. A conversation carried across such a
+move (`resumeFrom`) keeps the mode the move set, which `Cli.Args.sessionMode` carries apart
+from the command line's `mode`.
 
 Interactive terminal sessions save on normal exit (`/quit`, its aliases, or Ctrl-D).
 `SessionStore.autoSavePath` hashes the canonical working directory with SHA-256 to select
@@ -1417,6 +1808,8 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
   terminal helpers, retained output, rendering, prediction and error reporting.
 - `ReplInterruptionSuite`: cancellation recovery in an isolated compiler process.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
+- `ConfinementSuite`, `EvaluatorSuite`, `CheckpointSuite`, `IsolationSuite`, `ProjectRulesSuite`: the OS
+  sandbox and proxy, the evaluator process, checkpoints and `/undo`, isolate mode, saved grants.
 - `MainSuite`, `FirstRunSuite`, `commands.SlashCommandSuite`: command-line parsing, first-run setup and
   slash-command parsing.
 
@@ -1510,7 +1903,9 @@ Unicode application arguments through private `ATC_INTERNAL_*` environment varia
 ATC removes those variables from tool-process environments.
 
 CI builds distributions and runs application tests on Linux, macOS and Windows. Linux
-checks formatting; Unix jobs run the Bash wrapper tests, and the Windows job runs the
+checks formatting and installs bubblewrap with unprivileged user namespaces allowed, so that
+`ConfinementSuite` runs commands confined there as on macOS; Unix jobs run the Bash wrapper
+tests, and the Windows job runs the
 PowerShell wrapper tests under Windows PowerShell and PowerShell 7. Published release tags must match
 `Versions.atc` (with an optional `v` prefix). The release job builds and uploads the two
 JARs and Windows launchers after the platform jobs succeed.

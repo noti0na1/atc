@@ -1,11 +1,12 @@
 package atc.host
 
+import atc.confine.CommandSandbox
 import atc.lib.*
 import atc.perms.{GitIgnore, Policy, ScopeId}
 
 import java.nio.file.Path
-import java.util.concurrent.{ExecutionException, Executors, ThreadFactory}
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.{ConcurrentHashMap, ExecutionException, Executors, ThreadFactory}
+import java.util.concurrent.atomic.{AtomicInteger, AtomicLong}
 import scala.util.{Failure, Success, Try}
 import scala.util.control.NonFatal
 
@@ -20,7 +21,31 @@ final class Host(
   private[host] val gitIgnore: GitIgnore = GitIgnore.Disabled,
   /** The environment variables holding provider keys, removed from every command's environment. */
   private[host] val keyVariables: () => Set[String] = () => Set.empty,
+  /** How commands are confined at the OS level (config `osSandbox`). */
+  val commandSandbox: CommandSandbox = CommandSandbox.Unconfined("not configured"),
+  /** In isolate mode, the project and its copy: a path under the project names the copy. */
+  private[host] val rebase: Option[(Path, Path)] = None,
 ) extends Interface, Derivations, HostPaths, HostFiles, HostProcesses, HostNetwork, HostInteraction:
+
+  /** Changes the agent made, for checkpoints: the paths its file operations wrote since
+    * the last [[takeWrittenPaths]], and a count of file operations and commands started. */
+  private val writtenPaths = ConcurrentHashMap.newKeySet[Path]().nn
+  private val effectCount = AtomicLong()
+
+  private[host] def noteWrite(path: Path): Unit =
+    writtenPaths.add(path)
+    effectCount.incrementAndGet()
+
+  private[host] def noteCommand(): Unit = effectCount.incrementAndGet()
+
+  /** File operations and commands so far; unchanged means the agent changed nothing meanwhile. */
+  private[atc] def effects: Long = effectCount.get()
+
+  /** The paths written since the last call, and forget them. */
+  private[atc] def takeWrittenPaths(): Set[Path] =
+    val taken = writtenPaths.toArray(Array.empty[Path]).toSet
+    taken.foreach(writtenPaths.remove)
+    taken
 
   /** The permission scope for a capability issued by this host. */
   private[host] def scopeOf(capability: AnyRef): ScopeId = capability match
@@ -41,6 +66,8 @@ final class Host(
   def readOnlyFileSystem(using IOCap): FileSystem = FileSystemImpl(ScopeId.Base, this)
 
   def processes(using IOCap): Exec = ExecImpl(ScopeId.Base)
+
+  def readOnlyProcesses(using IOCap): Exec = ExecImpl(ScopeId.Base)
 
   def network(using IOCap): Network = NetworkImpl(ScopeId.Base)
 

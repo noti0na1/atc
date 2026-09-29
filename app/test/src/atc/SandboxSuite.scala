@@ -64,7 +64,7 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
 
   test("a classified file round-trips to the classified model without reaching the agent"):
     env.clearOutput()
-    val r = assertOk(run("""val c = classifiedChat(readClassified("secrets/s.txt")); println(c); c"""))
+    val r = assertOk(run("""val c = classified { classifiedChat(read("secrets/s.txt")) }; println(c); c"""))
     assert(env.classifiedChats.contains("secret"), env.classifiedChats.toString)
     assert(env.agentOut.toString.contains("Classified(***)"), env.agentOut.toString)
     assert(env.userOut.toString.contains("safe:secret"), env.userOut.toString)
@@ -77,14 +77,14 @@ class SandboxSuite extends munit.FunSuite, ReplAssertions:
     env.file("secrets/drill.txt", "DRILL-SECRET-42")
     env.clearOutput()
     // masked channels: println and the REPL echo show Classified(***)
-    val printed = assertOk(run("""println(readClassified("secrets/drill.txt"))"""))
+    val printed = assertOk(run("""println(classified { read("secrets/drill.txt") })"""))
     assert(printed.output.contains("Classified(***)"), printed.output)
-    val echoed = assertOk(run("""val echoed = readClassified("secrets/drill.txt"); ()"""))
+    val echoed = assertOk(run("""val echoed = classified { read("secrets/drill.txt") }; ()"""))
     assert(!echoed.output.contains("DRILL-SECRET-42"), echoed.output)
     // a failed computation over the secret prints a sanitized note, not the error
-    assertOk(run("""println(readClassified("secrets/drill.txt").map(s => throw RuntimeException(s)))"""))
+    assertOk(run("""println(classified { read("secrets/drill.txt") }.map(s => throw RuntimeException(s)))"""))
     // refused channels: declassifying write, classified redirection in and out
-    assertFails(run("""writeClassified("leak.txt", readClassified("secrets/drill.txt"))"""), "declassify")
+    assertFails(run("""writeClassified("leak.txt", classified { read("secrets/drill.txt") })"""), "declassify")
     assertFails(run("""exec("echo x < secrets/drill.txt")"""), "classified")
     assertFails(run("""exec("echo x > secrets/out.txt")"""), "classified")
     assert(!env.existsOnDisk("leak.txt"))

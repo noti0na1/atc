@@ -81,7 +81,7 @@ class ToolOutputSuite extends munit.FunSuite:
 
     val explicitType = hintFor("value e needs an explicit type because the inferred type does not conform to ...")
     assert(explicitType.contains("explicit type"), explicitType)
-    assert(explicitType.contains("FileEntry^{fs}"), explicitType)
+    assert(explicitType.contains("Process^{ex}"), explicitType)
 
     val safeMode = hintFor("Cannot refer to object ArrayBuffer ... from safe code since it is neither ...")
     assert(safeMode.contains("not available in safe mode"), safeMode)

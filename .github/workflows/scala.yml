@@ -62,6 +62,17 @@ jobs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: ./mill.bat dist
+    # The command sandbox tests run commands under bubblewrap, which needs unprivileged
+    # user namespaces (Ubuntu restricts them through AppArmor by default), and reach the
+    # network proxy through socat.
+    - name: Enable bubblewrap
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get install -y bubblewrap socat
+        if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
     - name: Run tests
       if: ${{ !cancelled() && runner.os != 'Windows' }}
       shell: bash

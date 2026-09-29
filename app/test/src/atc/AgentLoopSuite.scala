@@ -676,7 +676,8 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(ui.warnings.exists(_.contains("output limit inside a tool call")), ui.warnings.toString)
 
   test("automatic compaction failure falls back to whole-exchange trimming and is not retried at once"):
-    val big = "old findings " * 1000
+    // Large beside the system prompt, so that only the second request reaches the threshold.
+    val big = "old findings " * 4000
     val (_, session, ui, agent) = setup(ScriptedModel("m", Nil))
     val afterFirst = usageOf(agent, Msg.User("investigate"), Msg.Assistant(big, Nil, None))
     // Small enough that the second request reaches 80%, and that trimming has to drop the
@@ -1081,7 +1082,7 @@ class AgentLoopSuite extends munit.FunSuite:
       withClassified.systemPrompt.contains("used by `classifiedChat`): configured"),
       withClassified.systemPrompt
     )
-    assert(withClassified.systemPrompt.contains("deliberately capability-free"), withClassified.systemPrompt)
+    assert(withClassified.systemPrompt.contains("is capability-free"), withClassified.systemPrompt)
     assert(!withClassified.systemPrompt.contains("private-llm"), "the agent model is not told which model it is")
 
   test("the system prompt describes whether safe mode is actually enabled"):

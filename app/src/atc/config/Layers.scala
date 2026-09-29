@@ -134,7 +134,7 @@ object Configuration:
     * which every layer may add to) merges in layer order. */
   private val PolicyKeys =
     Set("files", "denyCommands", "denyHosts") ++
-      Set("mode", "safeMode", "respectGitignore") ++
+      Set("mode", "auto", "safeMode", "respectGitignore", "checkpoints", "osSandbox") ++
       Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
 
   /** Combine the layers.
@@ -149,8 +149,8 @@ object Configuration:
     *    it may open its own files. Deny rules restrict all grants.
     *  - **policy settings** come from the *granting* layers (global, `-c`)
     *    merged the same way, and are then narrowed by the project layer:
-    *    limits and the sandbox mode by the stricter value, `safeMode` /
-    *    `respectGitignore` only towards "on".
+    *    limits, the sandbox mode and `osSandbox` by the stricter value,
+    *    `auto`, `safeMode`, `respectGitignore` and `checkpoints` only towards "on".
     *  - **file rules** from every layer are kept with their anchor: a project
     *    layer's rules grant only inside its own folder, and clamp everywhere
     *    (see [[LayeredRule]] and `Policy.configPerm`).
@@ -206,8 +206,12 @@ object Configuration:
     def onlyIfSet[T](key: String)(stricter: => T)(keep: => T): T = if layer.defines(key) then stricter else keep
     base.copy(
       mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
+      auto = base.auto || (layer.defines("auto") && n.auto),
       safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
       respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
+      checkpoints = base.checkpoints || (layer.defines("checkpoints") && n.checkpoints),
+      osSandbox =
+        onlyIfSet("osSandbox")(stricterSandbox(base.osSandbox, n.osSandbox))(base.osSandbox),
       // A missing timeout means "no limit", so it is the *least* strict value.
       executionTimeoutMs = onlyIfSet("executionTimeoutMs") {
         (base.executionTimeoutMs, n.executionTimeoutMs) match
@@ -223,11 +227,20 @@ object Configuration:
       denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
     )
 
-  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an unset
-    * mode means the most permissive one. Both are already validated per layer. */
+  /** The stricter of two sandbox modes, `readonly` < `isolate` < `local` < `full`: isolate
+    * writes a copy and runs any confined command there, which read-only mode does not, and
+    * leaves the project untouched, which local mode does not. An unset mode means the most
+    * permissive one. Both are already validated per layer. */
   private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
     def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
-    Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
+    val order = List(Mode.ReadOnly, Mode.Isolate, Mode.Local, Mode.Full)
+    Some(List(parsed(a), parsed(b)).minBy(order.indexOf).label)
+
+  /** The stricter of two `osSandbox` values: off < auto < required. An unknown
+    * value is left for validation to report. */
+  private def stricterSandbox(a: String, b: String): String =
+    val order = List("off", "auto", "required")
+    if !order.contains(a) then a else if !order.contains(b) then b else order(order.indexOf(a).max(order.indexOf(b)))
 
   /** List settings extend rather than replace (a later layer can add a deny
     * pattern, and cannot drop one an earlier layer set). */

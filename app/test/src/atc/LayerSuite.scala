@@ -316,6 +316,23 @@ class LayerSuite extends munit.FunSuite:
     // an explicit -c file is the user's own choice, so it may turn it off
     assert(!World(global = """{ "safeMode": true }""", explicit = """{ "safeMode": false }""").settings.safeMode)
 
+  test("checkpoints are on unless a granting layer turns them off, and a project layer cannot"):
+    def checkpoints(global: String, project: String = "") =
+      World(global = global, project = project).settings.checkpoints
+    assert(checkpoints(""), "on when no layer mentions them")
+    assert(!checkpoints("""{ "checkpoints": false }"""), "off when the global config says so")
+    assert(checkpoints(GrantCwd, """{ "checkpoints": false }"""), "a project may not switch them off")
+    assert(checkpoints("""{ "checkpoints": false }""", """{ "checkpoints": true }"""), "a project may switch them on")
+
+  test("a project layer may make the command sandbox stricter, never weaker"):
+    def sandbox(global: String, project: String = "") =
+      World(global = global, project = project).settings.osSandbox
+    assertEquals(sandbox(""), "auto")
+    assertEquals(sandbox(GrantCwd, """{ "osSandbox": "required" }"""), "required")
+    assertEquals(sandbox(GrantCwd, """{ "osSandbox": "off" }"""), "auto")
+    assertEquals(sandbox("""{ "osSandbox": "off" }"""), "off")
+    assertEquals(sandbox("""{ "osSandbox": "off" }""", """{ "osSandbox": "auto" }"""), "auto")
+
   test("the starting project config grants the project and protects its history"):
     val w = World(global = Config.globalTemplate, project = Config.projectTemplate)
     assertEquals(w.access("src/A.scala"), Access.Write)
@@ -690,3 +707,18 @@ class LayerSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Invalid config"), e.getMessage)
     assert(e.getMessage.nn.contains("Unknown mode"), e.getMessage)
     assert(e.getMessage.nn.contains(".atc"), e.getMessage)
+
+  test("auto is off unless a layer turns it on, and a project layer cannot turn it off"):
+    def auto(global: String, project: String = "") = World(global = global, project = project).settings.auto
+    assert(!auto(""), "off when no layer mentions it")
+    assert(auto("""{ "auto": true }"""), "on when the global config says so")
+    assert(auto("""{ "auto": true }""", """{ "auto": false }"""), "a project may not switch it off")
+    assert(auto(GrantCwd, """{ "auto": true }"""), "a project may switch it on")
+
+  test("a project layer narrows the mode: read-only, then isolate, then local, then full"):
+    def mode(global: String, project: String = "") = World(global = global, project = project).settings.mode
+    assertEquals(mode("""{ "mode": "full" }""", """{ "mode": "isolate" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "local" }""", """{ "mode": "isolate" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "isolate" }""", """{ "mode": "local" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "isolate" }""", """{ "mode": "readonly" }"""), Some("read-only"))
+    assertEquals(mode("""{ "mode": "readonly" }""", """{ "mode": "isolate" }"""), Some("read-only"))

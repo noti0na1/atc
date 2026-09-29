@@ -16,32 +16,25 @@ import scala.util.{Try, Using}
 sealed trait Scoped:
   def scope: ScopeId
 
-final class FileSystemImpl(val scope: ScopeId, val host: Host) extends FileSystem, Scoped:
-  def access(path: String): FileEntry = FileEntryImpl(this, host.canonical(path))
+final class FileSystemImpl(val scope: ScopeId, val host: Host) extends FileSystem, Scoped
 
-final class ExecImpl(val scope: ScopeId) extends Exec, Scoped
+/** `network` is the scope of the `Network` a `withNetwork` block derived it from: the
+  * hosts its commands may reach. A plain `Exec` gives commands no network. */
+final class ExecImpl(val scope: ScopeId, val network: Option[ScopeId] = None) extends Exec, Scoped
 
 final class NetworkImpl(val scope: ScopeId) extends Network, Scoped
 
-final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
+/** A checked handle to one path, through which the host's file operations work. */
+final class FileEntryImpl(fs: FileSystemImpl, p: Path):
   private def host: Host = fs.host
   private def scope: ScopeId = fs.scope
   private[host] def canonicalPath: Path = p
 
-  /** Require read access for `operation` and that the content is not
-    * classified; `alternative` names the `Classified`-returning member to use
-    * instead. */
-  private def requireReadable(operation: String, alternative: String): Unit =
-    host.requireReadable(scope, p, operation, alternative)
+  /** Require read access for `operation` and that the content is not classified,
+    * outside a `classified` block. */
+  private def requireReadable(operation: String): Unit =
+    host.requireReadable(scope, p, operation)
     ()
-
-  /** Run `op` (a read of classified content) as a `Classified` result: the
-    * permission check and any failure stay inside the classified value. */
-  private def asClassified[T](operation: String)(op: => T): Classified[T] =
-    val result = Try:
-      host.requireRead(scope, p, operation)
-      op
-    ClassifiedImpl.fromTry(result)
 
   def path: String = PlatformPath.portable(p)
 
@@ -57,14 +50,13 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
 
   def isClassified: Boolean = host.requireRead(scope, p, "isClassified").classified
 
-  def size: Long =
-    requireReadable("size", "readClassified()")
-    Files.size(p)
+  /** Whether a search must skip this file: classified, outside a `classified` block. */
+  private[host] def contentHidden: Boolean = isClassified && !host.policy.sealedScope(scope)
 
   def read(): String = String(readBytes(), UTF_8)
 
   def readBytes(): Array[Byte] =
-    requireReadable("read", "readClassified()")
+    requireReadable("read")
     Files.readAllBytes(p).nn
 
   def readLines(): List[String] = read().linesIterator.toList
@@ -96,7 +88,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     maxReadChars: Long = Long.MaxValue
   )(op: (String, Long, Int) => Boolean): Boolean =
     if maxChars < 0 then throw IllegalArgumentException(s"maxChars must be non-negative (got $maxChars)")
-    requireReadable(operation, "readClassified()")
+    requireReadable(operation)
     Using.resource(InputStreamReader(Files.newInputStream(p).nn, UTF_8)): reader =>
       val input = new Array[Char](8192)
       val prefix = StringBuilder(math.min(maxChars, input.length))
@@ -142,7 +134,7 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
   /** Open this file for streaming reads; checked like `read`. The caller must
     * close the returned stream. */
   private[host] def openRead(): InputStream =
-    requireReadable("read", "readClassified()")
+    requireReadable("read")
     Files.newInputStream(p).nn
 
   /** Stream `in` into this file; checked like `writeBytes`. When source and
@@ -181,29 +173,20 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
     else host.withFileChange(p, "directory created")(Files.createDirectories(p))
     ()
 
-  def children: List[FileEntry] =
-    requireReadable("children", "childrenClassified")
+  def children: List[FileEntryImpl] =
+    requireReadable("children")
     host.visibleChildren(scope, p).map(FileEntryImpl(fs, _))
-
-  def walk(): List[FileEntry] =
-    requireReadable("walk", "walkClassified")
-    host.walkPaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
-
-  private[host] def walkIterator: Iterator[FileEntryImpl] =
-    requireReadable("walk", "walkClassified")
-    host.iteratePaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
-
-  def readClassified(): Classified[String] =
-    asClassified("readClassified")(Files.readString(p, UTF_8).nn)
-
-  def childrenClassified: Classified[List[String]] =
-    asClassified("childrenClassified")(host.visibleChildren(scope, p).map(PlatformPath.portable))
-
-  def walkClassified(): Classified[List[String]] =
-    asClassified("walkClassified")(host.walkPaths(scope, p, intoClassified = true).map(PlatformPath.portable))
 
   def writeClassified(content: Classified[String]): Unit =
     // Hand the raw `Try` to the host: it runs the permission and target checks before
     // it branches on success or failure, so neither the thrown exception nor the
     // target's existence can reveal a bit of the classified value.
     host.writeClassifiedFile(scope, p, ClassifiedImpl.unwrap(content))
+
+  def walk(): List[FileEntryImpl] =
+    requireReadable("walk")
+    host.walkPaths(scope, p).map(FileEntryImpl(fs, _))
+
+  private[host] def walkIterator: Iterator[FileEntryImpl] =
+    requireReadable("walk")
+    host.iteratePaths(scope, p).map(FileEntryImpl(fs, _))

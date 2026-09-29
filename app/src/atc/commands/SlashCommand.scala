@@ -12,15 +12,23 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Models extends SlashCommand("/models", "list configured models")
   case Providers extends SlashCommand("/providers", "turn providers and models on or off, or add a provider")
   case Effort extends SlashCommand("/effort [level]", "choose the agent model's reasoning effort")
-  case Mode extends SlashCommand("/mode [name]", "change mode and restart the REPL")
+  case Mode extends SlashCommand("/mode [name]", "choose the sandbox mode from a menu, or set the named one")
+  case Auto extends SlashCommand("/auto [on|off]", "reject permission requests without asking")
+  case Apply extends SlashCommand("/apply", "in isolate mode, write the copy's changes into the project")
+  case Discard extends SlashCommand("/discard", "in isolate mode, put the copy back to the project's state")
   case Perms
-      extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
+      extends SlashCommand(
+        "/perms [grant|revoke [number|all]]",
+        "show permissions, grant requests auto rejected, or revoke session grants",
+        "/permissions"
+      )
   case Config extends SlashCommand("/config [show|setting value]", "change a setting, or show the configuration")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run extends SlashCommand("/run [code]", "run Scala; omit code for multiline input", "/scala")
   case New extends SlashCommand("/new", "clear conversation, task state, REPL and session grants")
   case Reset extends SlashCommand("/reset", "restart the REPL; keep the conversation")
   case Compact extends SlashCommand("/compact [focus]", "summarize conversation context; keep the REPL")
+  case Undo extends SlashCommand("/undo [path...]", "revert the file changes of the last turn that made any")
   case Todos extends SlashCommand("/todos", "show tasks and progress", "/todo")
   case Ps extends SlashCommand("/ps", "list background processes", "/processes")
   case Kill extends SlashCommand("/kill [id|all]", "stop one or all background processes")

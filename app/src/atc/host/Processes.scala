@@ -1,5 +1,6 @@
 package atc.host
 
+import atc.confine.CommandSandbox
 import atc.lib.ProcessResult
 
 import java.io.{IOException, InputStream}
@@ -187,13 +188,12 @@ object Processes:
       live: Option[LiveOutput],
       keepHead: Boolean,
       onExit: Int => Unit,
+      starter: List[ProcessBuilder] => List[java.lang.Process] = CommandSandbox.startHere,
     ): ManagedProcess =
       // Enforce strict Windows quoting at the actual launch boundary too:
       // callers of this low-level API may supply ProcessBuilders directly.
       WindowsExecutable.configureProcessRuntime()
-      val procs: List[java.lang.Process] =
-        if pbs.lengthIs == 1 then List(pbs.head.start().nn)
-        else ProcessBuilder.startPipeline(pbs.asJava).nn.asScala.toList
+      val procs: List[java.lang.Process] = starter(pbs)
       val gate = live.map(LiveGate(_))
       val m = ManagedProcess(
         procs,
@@ -251,7 +251,7 @@ object Processes:
     * show the output as it comes once the command has run for [[LiveAfterMs]].
     * Single-stage convenience over the pipeline form. */
   def run(pb: ProcessBuilder, name: String, timeoutMs: Long, live: Option[LiveOutput] = None): ProcessResult =
-    run(List(pb), List(name), name, timeoutMs, live, "")
+    run(List(pb), List(name), name, timeoutMs, live, "", CommandSandbox.startHere)
 
   /** Run a pipeline to completion: start the stages (see [[ManagedProcess.start]]),
     * feed `stdin` to the first and close it, wait at most `timeoutMs` for every
@@ -266,8 +266,19 @@ object Processes:
     timeoutMs: Long,
     live: Option[LiveOutput],
     stdin: String,
+    starter: List[ProcessBuilder] => List[java.lang.Process],
   ): ProcessResult =
-    val m = ManagedProcess.start(pbs, stageLines, name, stdin, closeStdinAfter = true, live, keepHead = true, _ => ())
+    val m = ManagedProcess.start(
+      pbs,
+      stageLines,
+      name,
+      stdin,
+      closeStdinAfter = true,
+      live,
+      keepHead = true,
+      _ => (),
+      starter
+    )
     try
       val firstWait = math.min(LiveAfterMs, timeoutMs)
       if !m.awaitExit(firstWait) then

@@ -49,10 +49,12 @@ private[ui] final class Dialogs(
     TextLayout.wrap(Ansi.sanitize(question), width - 5).zipWithIndex.foreach: (line, index) =>
       write(Indent + styled((if index == 0 then "? " else "  ") + line, Cyan, Bold) + "\n")
 
-  /** A permission request: allow once, allow for the session, deny, or instructions for the
-    * agent. A cancelled menu denies, so Esc is shown as deny; empty or cancelled instructions
-    * return to the menu. A plain terminal reads a typed reply ([[Menus.permissionReply]]). */
-  def permission(req: PermissionRequest): Decision =
+  /** A permission request: allow once, allow for the session, always allow in the project
+    * (when `saveTarget`, the project config it would be saved to, is given), deny, or
+    * instructions for the agent. A cancelled menu denies, so Esc is shown as deny; empty or
+    * cancelled instructions return to the menu. A plain terminal reads a typed reply
+    * ([[Menus.permissionReply]]). */
+  def permission(req: PermissionRequest, saveTarget: Option[String] = None): Decision =
     alerts.alert(s"Permission needed: ${req.title} (${req.details.mkString(", ")})")
     // The request embeds model-chosen paths and command lines: sanitize.
     write(Indent + styled(s"${g.warn} Permission request: ${Ansi.sanitize(req.title)}", Yellow, Bold) + "\n")
@@ -62,14 +64,20 @@ private[ui] final class Dialogs(
     var cancelled = false
     val decision =
       if plain then
-        Menus.permissionReply(freeText(styled("Allow? [y]es once / [s]ession / [n]o / type instructions: ", Yellow)))
+        val always = saveTarget.fold("")(target => s" / [a]lways (save to ${Ansi.sanitize(target)})")
+        Menus.permissionReply(
+          freeText(styled(s"Allow? [y]es once / [s]ession$always / [n]o / type instructions: ", Yellow)),
+          canSave = saveTarget.isDefined,
+        )
       else
         var selected: Option[Decision] = None
         while selected.isEmpty do
-          val choices = List(Menus.AllowOnce, Menus.AllowSession, Menus.DenyLabel, Menus.ReviseLabel)
+          val always = saveTarget.map(target => Menus.allowAlways(Ansi.sanitize(target)))
+          val choices = List(Menus.AllowOnce, Menus.AllowSession) ++ always ++ List(Menus.DenyLabel, Menus.ReviseLabel)
           selected = menu(choices, escape = "deny") match
             case Some(Menus.AllowOnce) => Some(Decision.AllowOnce)
             case Some(Menus.AllowSession) => Some(Decision.AllowSession)
+            case Some(label) if always.contains(label) => Some(Decision.AllowAlways)
             case Some(Menus.ReviseLabel) =>
               note("Describe what to change. The current request will not be approved.")
               freeText(Under + styled("instructions> ", Cyan)).map(Decision.Revise(_))
@@ -86,6 +94,7 @@ private[ui] final class Dialogs(
         val label = decision match
           case Decision.AllowOnce => styled(s"${g.arrow} allowed once", Green)
           case Decision.AllowSession => styled(s"${g.arrow} allowed for this session", Green)
+          case Decision.AllowAlways => styled(s"${g.arrow} allowed, and saved to the project config", Green)
           case _ => styled(s"${g.arrow} denied", Red)
         write(Under + label + "\n")
       case _ => ()

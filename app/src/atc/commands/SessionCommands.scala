@@ -1,9 +1,11 @@
 package atc.commands
 
 import atc.{App, Debug}
+import atc.checkpoint.{Checkpoints, Isolation, RevertReport}
+import atc.confine.SandboxPlan
 import atc.agent.{Agent, ScalaToolRunner, SessionSnapshot, SessionStore}
 import atc.llm.CancelledException
-import atc.perms.Mode
+import atc.perms.{Access, Mode}
 import atc.platform.PlatformPath
 
 import java.nio.file.{FileAlreadyExistsException, Files, Path, Paths}
@@ -15,7 +17,7 @@ final class SessionCommands(app: App):
   import app.{agent, cwd, host, policy, predictor, sandbox, tui}
 
   /** Where the conversation is kept between runs in this directory. */
-  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, cwd)
+  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, app.sessionRoot)
 
   /** Clear the conversation, task state, output history and session grants; keep the models and mode. */
   private def startOver(): Boolean =
@@ -68,20 +70,56 @@ final class SessionCommands(app: App):
       tui.endTurn()
       predictor.start()
 
-  /** `/mode`: cycle (no argument) or set the sandbox mode. A new REPL starts
-    * with only that mode's capabilities; its definitions are gone, the
-    * conversation stays. */
+  /** `/undo`: revert the file changes of the last recorded turn, or only the given
+    * paths of it. The agent hears what was reverted, since its view of those files
+    * is now out of date. */
+  def undo(arg: String): Unit =
+    app.checkpoints match
+      case None => tui.info("Checkpoints are off: the \"checkpoints\" setting is false.")
+      case Some(checkpoints) =>
+        predictor.invalidate()
+        checkpoints.undo(arg.split("\\s+").toList.filter(_.nonEmpty)) match
+          case Left(message) => tui.info(message)
+          case Right(done) =>
+            report(
+              done,
+              List(
+                "Restored" -> "Restored",
+                "Deleted" -> "Deleted",
+                "Reverted, keeping your later edits in" -> "Reverted, keeping the user's later edits in"
+              ),
+              "The files already match their earlier state.",
+              agent.noteFilesReverted
+            )
+
+  /** `/mode`: choose the sandbox mode from a menu (no argument), cycle it (`next`, which
+    * Shift-Tab sends) or set the named one. A new REPL starts with only that mode's
+    * capabilities; its definitions are gone, the conversation stays. */
   def switchMode(arg: String): Unit =
-    val target =
-      if arg.isEmpty then Some(policy.mode.next)
-      else
-        try Some(Mode.parse(arg))
+    val target = arg.trim match
+      case "" => chooseMode()
+      case "next" if app.isolatedFrom.isDefined =>
+        tui.info("Shift-Tab stays in isolate mode; /mode leaves it.")
+        None
+      case "next" => Some(policy.mode.next)
+      case named =>
+        try Some(Mode.parse(named))
         catch
           case e: IllegalArgumentException =>
             tui.error(Debug.message(e))
             None
     target.foreach: m =>
       if m == policy.mode then tui.info(s"mode: ${m.describe}")
+      else if m == Mode.Isolate then
+        // The session moves to the project's copy; Main starts it there with this conversation.
+        val entered =
+          try Some(app.isolatedArgs())
+          catch
+            case e: IllegalStateException =>
+              tui.error(Debug.message(e))
+              None
+        entered.foreach(move)
+      else if app.isolatedFrom.isDefined then leaveIsolation(m)
       else
         val previous = policy.mode
         policy.mode = m
@@ -90,6 +128,150 @@ final class SessionCommands(app: App):
           app.updateStatus()
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
+
+  /** The mode the user picks from a menu opening on the current one; `None` when they leave it. */
+  private def chooseMode(): Option[Mode] =
+    val modes = Mode.values.toList
+    val width = modes.map(_.label.length).max
+    val rows = modes.map(m => s"${m.label.padTo(width, ' ')}  ${m.description}")
+    val chosen =
+      tui.choose("Choose the sandbox mode", rows, modes.indexOf(policy.mode)).map(row => modes(rows.indexOf(row)))
+    if chosen.isEmpty then
+      tui.info(s"mode: ${policy.mode.describe}" +
+        (if tui.menusAvailable then "" else s" (/mode ${modes.map(_.label).mkString("|")})"))
+    chosen
+
+  /** `/auto`: switch (no argument), or turn on or off, the rejection of every
+    * permission request without asking. The REPL and its capabilities stay. */
+  def switchAuto(arg: String): Unit =
+    val target = arg.trim.toLowerCase(java.util.Locale.ROOT) match
+      case "" => Some(!policy.auto)
+      case "on" => Some(true)
+      case "off" => Some(false)
+      case _ =>
+        tui.error("Usage: /auto [on|off]")
+        None
+    target.foreach: on =>
+      if on != policy.auto then
+        predictor.invalidate()
+        policy.auto = on
+        agent.noteAutoSwitched(on)
+        app.updateStatus()
+      tui.success(
+        if on then "auto on: permission requests are rejected without asking"
+        else "auto off: permission requests are asked again"
+      )
+
+  /** Leave isolate mode for `mode`, first offering to apply or drop what the copy changed. When
+    * the copy cannot be compared with the project, its changes stay in it. */
+  private def leaveIsolation(mode: Mode): Unit =
+    val project = app.isolatedFrom.get
+    val preview =
+      try app.isolation.map(listChanges)
+      catch
+        case NonFatal(e) =>
+          tui.warn(s"Could not compare the copy with the project, so its changes stay there: ${Debug.message(e)}")
+          None
+    val waiting = preview.fold(Nil)(_.changes)
+    val (applyIt, keep, drop) = (s"Apply them and switch to ${mode.label}", "Keep them in the copy", "Discard them")
+    val choice =
+      if waiting.isEmpty then Some(keep)
+      else
+        tui.choose(
+          s"The copy differs from the project in ${if waiting.size == 1 then "1 file" else s"${waiting.size} files"}.",
+          List(applyIt, keep, drop, "Stay here")
+        )
+    val go = choice match
+      case Some(`applyIt`) =>
+        for isolation <- app.isolation; shown <- preview do applyNow(isolation, shown)
+        true
+      case Some(`drop`) => discardIsolated(); true
+      case Some(`keep`) => true
+      case _ => false
+    if go then move(app.argsLeaving(project, mode))
+
+  /** Move the session with `args`, carrying the conversation. It is saved first, in case the
+    * session there ends before taking it (a quit at the copy's trust prompt). */
+  private def move(args: atc.Cli.Args): Nothing =
+    val saved = agent.snapshot
+    if saved.nonEmpty then
+      try SessionStore.checkpoint(autoSaveFile, saved)
+      catch case NonFatal(error) => Debug.trace(error)
+    throw App.Restart(args, Some(saved))
+
+  /** `/apply`: show what the copy would write into the project, and write it once the user agrees. */
+  def applyIsolated(): Unit =
+    app.isolation match
+      case None => tui.info("/apply works in isolate mode (/mode isolate).")
+      case Some(isolation) =>
+        val preview = listChanges(isolation)
+        val count = preview.changes.size
+        if count == 0 then tui.info("The project already holds the copy's changes.")
+        else if tui.confirm(s"Write ${if count == 1 then "this change" else s"these $count changes"} into the project?")
+        then applyNow(isolation, preview)
+        else tui.info("Nothing applied; the changes stay in the copy.")
+
+  /** Print the changes the project does not hold yet, marking those that meet the user's own
+    * edits, those the project config keeps read-only, and links and files that editors or
+    * shells act on, and return them with the state of the copy they come from. */
+  private def listChanges(isolation: Isolation): Isolation.Preview =
+    val preview = isolation.preview
+    val copy = app.isolatedRoots.map(_._2)
+    for (change, changedThere) <- preview.changes do
+      val notes = List(
+        Option.when(changedThere)("you changed it too: merged if clean"),
+        copy.filter(root => policy.ceiling(root.resolve(PlatformPath.native(change.path)).nn) != Access.Write)
+          .map(_ => "read-only in your config"),
+        Option.when(change.after.exists(_.mode == "120000"))("symbolic link"),
+        Option.when(SandboxPlan.ProjectProtected.contains(change.path.takeWhile(_ != '/')))(
+          "editors or shells act on it"
+        ),
+      ).flatten
+      tui.println(s"  ${Checkpoints.describe(change)}${notes.map(n => s" [$n]").mkString}")
+    if preview.changes.nonEmpty then tui.info("Files git ignores, nested repositories and submodules stay in the copy.")
+    preview
+
+  /** Write the changes `preview` showed, as the copy was then. */
+  private def applyNow(isolation: Isolation, preview: Isolation.Preview): Unit =
+    report(
+      isolation.apply(preview.tree),
+      List(
+        "Applied" -> "Applied",
+        "Deleted" -> "Deleted",
+        "Merged with your edits in" -> "Merged with the user's edits in"
+      ),
+      "The copy's changes are already in the project.",
+      agent.noteIsolationApplied
+    )
+
+  /** `/discard`: put the copy back to the project's state. */
+  def discardIsolated(): Unit =
+    app.isolation match
+      case None => tui.info("/discard works in isolate mode (/mode isolate).")
+      case Some(isolation) =>
+        report(
+          isolation.discard(),
+          List("Restored" -> "Restored", "Deleted" -> "Deleted", "Merged in" -> "Merged in"),
+          "The copy has no changes.",
+          agent.noteIsolationDiscarded
+        )
+
+  /** Show what an undo, apply or discard did, and tell the agent. `labels` name the restored,
+    * deleted and merged paths, as the user reads them and as the agent does. */
+  private def report(done: RevertReport, labels: List[(String, String)], nothing: String, note: String => Unit)
+    : Unit =
+    val groups = labels.zip(List(done.restored, done.deleted, done.merged)).filter(_._2.nonEmpty)
+    groups.foreach((label, paths) => tui.success(s"${label._1}: ${paths.mkString(", ")}"))
+    done.conflicts.foreach((path, reason) => tui.warn(s"Left unchanged: $path ($reason)"))
+    if groups.isEmpty && done.conflicts.isEmpty then tui.info(nothing)
+    else
+      note(
+        (groups.map((label, paths) => s"${label._2}: ${paths.mkString(", ")}.") ++
+          done.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
+      )
+
+  /** Continue a conversation carried over from the session this one replaced. */
+  def resumeFrom(saved: SessionSnapshot): Unit = restore(saved, withMode = false)
 
   /** `/run`: the user runs Scala in the sandbox with the same API, givens and
     * permissions as the agent. It is shown as a code block like an agent tool
@@ -177,8 +359,19 @@ final class SessionCommands(app: App):
           tui.error(s"Could not save the session: ${Debug.describe(error)}")
           Debug.trace(error)
 
-  private def restore(saved: SessionSnapshot): Unit =
+  /** Continue `saved`, in the mode it was in when `withMode` (unless the command line named a
+    * mode). A mode the REPL takes in place is set before the fresh REPL starts; entering or
+    * leaving isolate mode moves the session once the conversation is restored. */
+  private def restore(saved: SessionSnapshot, withMode: Boolean = true): Unit =
+    val savedMode = Option.when(withMode && app.cliMode.isEmpty)(saved.mode).flatten
+      .flatMap(label => scala.util.Try(Mode.parse(label)).toOption).filter(_ != policy.mode)
+    val inPlace = savedMode.filter(m => m != Mode.Isolate && app.isolatedFrom.isEmpty)
+    val previous = policy.mode
+    inPlace.foreach(m => policy.mode = m)
     if startOver() then
+      inPlace.foreach: m =>
+        app.models.useMode(m)
+        app.updateStatus()
       host.restoreTaskState(saved.task, saved.todos)
       agent.restore(saved)
       if saved.model != agent.model.ref then
@@ -186,3 +379,6 @@ final class SessionCommands(app: App):
       tui.success(
         s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
       )
+      inPlace.foreach(m => tui.info(s"mode -> ${m.describe}, as in the saved session"))
+      savedMode.filterNot(inPlace.contains).foreach(m => switchMode(m.label))
+    else policy.mode = previous

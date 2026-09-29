@@ -302,8 +302,8 @@ private[ui] final class PromptReader(screen: Screen, historyPath: Path, alerts: 
 
 private[atc] object PromptReader:
   /** The line `readLine` returns when the user presses Shift-Tab on an empty
-    * prompt: the app treats it as the `/mode` command (cycle the sandbox mode). */
-  val CycleModeLine: String = "/mode"
+    * prompt: `/mode next`, which cycles the sandbox mode. */
+  val CycleModeLine: String = "/mode next"
 
   /** The command a usage line names: `/model` for `/model [ref]`. */
   private[atc] def commandName(usage: String): String = usage.takeWhile(_ != ' ')

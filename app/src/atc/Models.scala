@@ -46,19 +46,22 @@ final class Models(args: Cli.Args, start: Configuration):
   def client(reference: String): ChatModel = client(catalog.find(reference))
 
   /** `-m`, else the config's `model`, else the model last chosen with `/model` (while
-    * it still resolves), else the first model, with the config's `effort`. A `-m`
+    * it still resolves), else the first model, with the config's `effort` (a moved
+    * session keeps the model and effort it had). A `-m`
     * that names no model stops the start; the config's `model` is passed over with
     * a warning, and so is an `effort` the model does not take. */
   def initial(warn: String => Unit): ChatModel =
     def last = Models.last.flatMap(ref => Try(catalog.find(ref)).toOption)
     val model = args.model.map(client).orElse(configured("model", start.settings.model, warn))
       .getOrElse(client(last.getOrElse(catalog.default)))
-    start.settings.effort.map(_.toLowerCase(Locale.ROOT)).foreach: effort =>
-      if effort == ModelConfig.DefaultEffort then model.effort = None
-      else if model.efforts.contains(effort) then model.effort = Some(effort)
-      else
-        val takes = if model.efforts.isEmpty then "no effort" else model.efforts.mkString(" | ")
-        warn(s"Ignoring effort in ${settingFile("effort")}: ${model.ref} takes $takes, not '$effort'")
+    args.sessionEffort.foreach(effort => model.effort = effort.filter(model.efforts.contains))
+    if args.sessionEffort.isEmpty then
+      start.settings.effort.map(_.toLowerCase(Locale.ROOT)).foreach: effort =>
+        if effort == ModelConfig.DefaultEffort then model.effort = None
+        else if model.efforts.contains(effort) then model.effort = Some(effort)
+        else
+          val takes = if model.efforts.isEmpty then "no effort" else model.efforts.mkString(" | ")
+          warn(s"Ignoring effort in ${settingFile("effort")}: ${model.ref} takes $takes, not '$effort'")
     model
 
   /** The client for the model `reference`, the value of a config `setting`
