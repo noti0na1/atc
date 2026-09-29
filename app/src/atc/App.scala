@@ -24,6 +24,8 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
   val cwd: Path = args.cwd
   /** In isolate mode, the project this session works on a copy of. */
   val isolatedFrom: Option[Path] = args.isolatedFrom
+  /** In isolate mode, the project and this session's copy of it. */
+  val isolatedRoots: Option[(Path, Path)] = args.isolatedRoots
   /** The mode the command line named, which a resumed session's mode does not override. */
   val cliMode: Option[Mode] = args.mode
   /** Where the session is saved and resumed: the project, in isolate mode too. */
@@ -54,9 +56,7 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
       isolatedRoots.fold(configuration.fileRules(cwd))((project, copy) =>
         FileRule.forCopy(configuration.fileRules(cwd), project, copy)
       ) ++
-        isolatedFrom.map(from =>
-          FileRule(PathPattern(".", App.projectOf(from)), Some(Access.None), None, locked = true)
-        ),
+        isolatedRoots.map((project, _) => FileRule(PathPattern(".", project), Some(Access.None), None, locked = true)),
       config.commands,
       config.hosts,
       App.permissionPrompter(args, request => askPermission(request)),
@@ -136,19 +136,7 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, osSandbox, isolatedRoots)
 
   /** The copy and its stores, in an isolated session. */
-  lazy val isolation: Option[Isolation] = isolatedFrom.map(from => isolationOf(App.projectOf(from)))
-
-  /** In isolate mode, the project and this session's copy of it: the copy's root lies as many
-    * levels above the working directory as the session started below the project. */
-  lazy val isolatedRoots: Option[(Path, Path)] = isolatedFrom.map: from =>
-    val project = App.projectOf(from)
-    val depth = project.relativize(PlatformPath.canonical(from)).nn.toString match
-      case "" => 0
-      case relative => java.nio.file.Paths.get(relative).nn.getNameCount
-    (
-      project,
-      Iterator.iterate(PlatformPath.canonical(cwd))(dir => Option(dir.getParent).getOrElse(dir)).drop(depth).next()
-    )
+  lazy val isolation: Option[Isolation] = isolatedRoots.map((project, _) => isolationOf(project))
 
   private def isolationOf(project: Path): Isolation =
     // This session's view of the project root: the project, or the copy's in isolate mode.
@@ -189,11 +177,16 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     then ProjectTrust.trust(isolation.copy, Config.globalDir)
     // A directory the copy lacks (new or ignored since the copy was made) is made there.
     val start = Files.createDirectories(isolation.copy.resolve(project.relativize(here))).nn
-    moved(args.copy(cwd = start, isolatedFrom = Some(here), sessionMode = Some(Mode.Isolate)))
+    moved(args.copy(
+      cwd = start,
+      isolatedFrom = Some(here),
+      isolatedRoots = Some((project, isolation.copy)),
+      sessionMode = Some(Mode.Isolate)
+    ))
 
   /** The arguments that run the session in `project` again, in `mode`. */
   def argsLeaving(project: Path, mode: Mode): Cli.Args =
-    moved(args.copy(cwd = project, isolatedFrom = None, sessionMode = Some(mode)))
+    moved(args.copy(cwd = project, isolatedFrom = None, isolatedRoots = None, sessionMode = Some(mode)))
 
   /** A moved session keeps its model, its effort and the `auto` switch. */
   private def moved(next: Cli.Args): Cli.Args =

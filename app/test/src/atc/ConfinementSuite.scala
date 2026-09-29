@@ -226,6 +226,23 @@ class ConfinementSuite extends munit.FunSuite:
     assert(host.ClassifiedImpl.unwrap(block(env.host.exec("cat secrets/key > out.txt"))).isFailure)
     assert(env.requests.isEmpty, "nobody was asked")
 
+  test("on macOS a command in a classified block does not run beside a spawned process"):
+    assume(Platform.isMac && sandbox.confined, s"Seatbelt: ${sandbox.describe}")
+    val env = TestEnv(mkRules = secretsAndGit, commands = List("cat"), commandSandbox = sandbox)
+    env.policy.mode = Mode.Full
+    env.file("secrets/key", "the-secret")
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    def block[T](op: (Exec, FileSystem) ?=> T) =
+      env.host.classified(using summon[FileSystem], summon[Exec])((_: lib.Sealed, f: FileSystem, e: Exec) ?=>
+        op(using e, f)
+      )
+    val watcher = env.host.spawn("cat")
+    try assert(host.ClassifiedImpl.unwrap(block(env.host.execReadOnly("cat secrets/key"))).isFailure)
+    finally watcher.kill()
+    assertEquals(host.ClassifiedImpl.get(block(env.host.execReadOnly("cat secrets/key").stdout)), "the-secret")
+
   test("in isolate mode a Linux command starts at the project's path and sees the copy there"):
     assume(!Platform.isMac && sandbox.confined, s"bubblewrap: ${sandbox.describe}")
     val project = Files.createTempDirectory("atc-mirror-project").nn.toRealPath().nn

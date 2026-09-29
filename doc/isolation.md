@@ -413,6 +413,11 @@ Desktop for Linux.
   when they know its name (phase 9).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
+- On macOS, a confined command can read the arguments (not the environment) of the user's
+  other processes through `sysctl`, which no profile rule stops. A sealed command therefore
+  runs alone among the agent's commands and not while a spawned process runs, and in
+  read-only mode every command runs alone; a process the user started is out of reach of
+  that rule.
 - On macOS, commands see the size and times of classified files: Seatbelt denies their
   content, and a directory listing returns its entries' attributes in bulk, whatever the
   profile says about each entry. The length of what `writeClassified` writes is therefore

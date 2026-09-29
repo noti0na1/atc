@@ -167,13 +167,12 @@ private[host] trait HostPaths:
 
   private[host] def visibleChildren(scope: ScopeId, dir: Path): List[Path] = visibleEntries(scope, dir).map(_._1)
 
-  /** Visible descendants in pre-order. Classified trees require an explicit
-    * classified traversal, and symlinked directories are never followed. */
-  private[host] def walkPaths(scope: ScopeId, dir: Path, intoClassified: Boolean): List[Path] =
-    iteratePaths(scope, dir, intoClassified).toList
+  /** Visible descendants in pre-order. Classified trees are entered only in a `classified`
+    * block, and symlinked directories are never followed. */
+  private[host] def walkPaths(scope: ScopeId, dir: Path): List[Path] = iteratePaths(scope, dir).toList
 
-  private[host] def iteratePaths(scope: ScopeId, dir: Path, intoClassified: Boolean): Iterator[Path] =
-    val intoAll = intoClassified || policy.sealedScope(scope)
+  private[host] def iteratePaths(scope: ScopeId, dir: Path): Iterator[Path] =
+    val intoAll = policy.sealedScope(scope)
     def descendInto(child: Path, isLink: Boolean): Boolean =
       !isLink && Files.isDirectory(child) && (intoAll || !policy.effective(scope, child).classified)
     def visit(current: Path): Iterator[Path] =

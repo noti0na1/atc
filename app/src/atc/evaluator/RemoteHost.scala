@@ -13,7 +13,7 @@ import scala.util.control.NonFatal
 // which checks it as it checks in-process calls; capabilities travel as the host's scope ids.
 // Classified values, callback results and parallel tasks stay here.
 
-private[evaluator] final class RemoteFileSystem(val scope: Long, host: RemoteHost) extends FileSystem
+private[evaluator] final class RemoteFileSystem(val scope: Long) extends FileSystem
 
 /** `network` is the scope of the `Network` a `withNetwork` block derived it from. */
 private[evaluator] final class RemoteExec(val scope: Long, val network: Option[Long]) extends Exec
@@ -49,6 +49,7 @@ private[evaluator] final class RemoteProcess(val id: Int, val commandLine: Strin
     val d = call("waitFor")(_.long(timeoutMs))
     Option.when(d.bool())(ProcessResult(d.int(), d.string(), d.string()))
   def kill(): Unit = call("kill")
+  override def toString: String = s"Process(p$id, \"$commandLine\")"
 
 private[evaluator] final class RemoteHost(val channel: Channel) extends Interface, Derivations:
   /** The session's capture stream (what the model sees); set once the session exists. */
@@ -109,8 +110,8 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     result.get
 
   // ── derivations ──
-  def fileSystem(using IOCap): FileSystem = RemoteFileSystem(0, this)
-  def readOnlyFileSystem(using IOCap): FileSystem = RemoteFileSystem(0, this)
+  def fileSystem(using IOCap): FileSystem = RemoteFileSystem(0)
+  def readOnlyFileSystem(using IOCap): FileSystem = RemoteFileSystem(0)
   def processes(using IOCap): Exec = RemoteExec(0, None)
   def readOnlyProcesses(using IOCap): Exec = RemoteExec(0, None)
   def network(using IOCap): Network = RemoteNetwork(0)
@@ -128,7 +129,7 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     parent: FileSystem
   )(op: FileSystem ?=> T): T =
     withCallback("requestFiles")(_.long(scopeOf(parent)).string(path).int(access.ordinal).string(reason)): scope =>
-      op(using RemoteFileSystem(scope, this))
+      op(using RemoteFileSystem(scope))
 
   def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
     call("writeClassified") { e => e.long(scopeOf(fs)).string(path); encodeClassified(e, content) }
@@ -352,9 +353,8 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     ex: Exec
   )(op: (Sealed, FileSystem, Exec) ?=> T)
     : Classified[T] =
-    RemoteClassified(ClassifiedImpl.attempt(withCallback("classified")(_.long(scopeOf(fs)).long(execOf(ex).scope)):
-      scope =>
-        op(using new Sealed {}, RemoteFileSystem(scope, this), RemoteExec(scope, None))))
+    RemoteClassified(ClassifiedImpl.attempt(withCallback("classified")(_.long(scopeOf(fs))): scope =>
+      op(using new Sealed {}, RemoteFileSystem(scope), RemoteExec(scope, None))))
 
   extension [T](c: Classified[T]) def reveal(using Sealed): T = RemoteClassified.unwrap(c).get
 

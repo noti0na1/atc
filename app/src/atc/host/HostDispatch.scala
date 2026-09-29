@@ -68,8 +68,9 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
           callback(id, f.asInstanceOf[Scoped])
         )
       case "classified" =>
-        val (fsScope, exScope, id) = (d.long(), d.long(), d.long())
-        host.classified(using fs(fsScope), ex(exScope, None))((_: Sealed, f: FileSystem, _: Exec) ?=>
+        val (fsScope, id) = (d.long(), d.long())
+        // The block's own capabilities come from the file system's scope; the Exec is not used.
+        host.classified(using fs(fsScope), ex(fsScope, None))((_: Sealed, f: FileSystem, _: Exec) ?=>
           callback(id, f.asInstanceOf[Scoped])
         )
       case "writeClassified" =>
@@ -109,7 +110,6 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
         matches(r, found.matches)
         r.int(found.filesScanned).bool(found.limited)
       case "find" => val s = d.long(); r.strings(host.find(d.string(), d.string())(using fs(s)))
-      // ── file entries: re-derived from the scope and path on every call ──
       // ── commands ──
       case "requestExec" =>
         val (scope, network) = (d.long(), d.optionalLong())

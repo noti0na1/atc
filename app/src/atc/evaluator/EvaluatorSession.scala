@@ -113,8 +113,8 @@ object EvaluatorSession:
   /** How long a stopped or overdue evaluation gets before its process is ended. */
   val GraceMs: Long = 5_000L
 
-  /** Start an evaluator process for `host`, confined by `sandbox` where it provides a way
-    * (unconfined otherwise), and load the preamble. */
+  /** Start an evaluator process for `host`, confined by `sandbox` when that confines commands
+    * (unconfined otherwise, as in tests), and load the preamble. */
   def start(config: SandboxConfig, host: Host, sandbox: CommandSandbox): EvaluatorSession =
     val java = PlatformPath.canonical(Paths.get(System.getProperty("java.home"), "bin", "java").nn)
     val classpath = entries(System.getProperty("java.class.path"))
@@ -122,7 +122,9 @@ object EvaluatorSession:
     val work = PlatformPath.canonical(Files.createTempDirectory(tempRoot, "atc-evaluator-").nn)
     val javaHome = PlatformPath.canonical(Paths.get(System.getProperty("java.home")).nn)
     val readable = (javaHome :: work :: classpath ++ library).distinct
-    val launch = sandbox.evaluator(java, readable).getOrElse(CommandSandbox.EvaluatorLaunch(Nil, _.start().nn))
+    val launch = sandbox.evaluator(java, readable).getOrElse:
+      if sandbox.confined then throw IllegalStateException(s"${sandbox.describe} cannot confine the evaluator")
+      CommandSandbox.EvaluatorLaunch(Nil, _.start().nn)
     val command = launch.prefix ++ List(
       java.toString,
       "-Xss4m",

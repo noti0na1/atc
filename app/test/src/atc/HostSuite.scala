@@ -554,7 +554,6 @@ class HostSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("classified { ... } block"))
     assertEquals(ClassifiedImpl.get(inBlock(read("secrets/key.txt"))), "s3cret")
     assert(handle("secrets/key.txt").isClassified)
-    intercept[SecurityException](handle("secrets/key.txt").size)
     // the classified dir itself is visible in its parent, but not enterable
     val top = ls(".").map(p => Path.of(p).getFileName.toString)
     assert(top.contains("secrets"))

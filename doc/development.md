@@ -377,10 +377,30 @@ handle failures in user-defined rendering, including `toString` and `getMessage`
 letting the exception reach the model. Fatal errors must abort evaluation rather than
 becoming a condition the agent can catch and inspect.
 
+Each way out of a block or a `map` callback is closed by one part, and a test checks it:
+
+- Output, asking, the normal model, the network, writes and permission requests: the callback
+  may capture only read-only capabilities (`CapabilitySuite`), and the host refuses writes
+  and permission requests from a sealed scope all the same (`ClassifiedSuite`).
+- A failure stays in the `Try`: `writeClassified` creates its file either way, and the
+  evaluator sends a failure without its message (`ClassifiedSuite`, `EvaluatorSuite`).
+- Control flow: a non-local `return` or `Breaks.break` becomes a classified failure
+  (`ClassifiedImpl.attempt`; `ClassifiedSuite`, `EvaluatorSuite`).
+- Processes: a block sees no process started outside it and cannot spawn one
+  (`ClassifiedSuite`, `ConfinementSuite`).
+- Sealed commands: no network, no cache, no POSIX shared memory, writes only to a temporary
+  directory deleted afterwards, and no child outlives them (`ConfinementSuite`). On macOS a
+  command can read the arguments of the user's other processes, so a sealed command runs
+  alone among the agent's commands and not while a spawned process runs, and in read-only
+  mode, where `map` can pass a value to `execReadOnly`, every command runs alone.
+
+Still open: timing, termination and resource use, and on macOS the size and times of a
+classified file, so the length of what `writeClassified` writes, which a directory listing
+returns in bulk whatever the profile says.
+
 `classifiedChat(String)` is treated as pure. This assumes the configured endpoint is
 isolated and has no observable effects beyond its result; ATC cannot establish that about
-an arbitrary endpoint. Timing, termination and resource-consumption side channels are
-outside the classified-data guarantees.
+an arbitrary endpoint.
 
 **Use overloads instead of default arguments on capability-taking API methods.** Default
 arguments have allowed method wrappers to lose required captures when passed to

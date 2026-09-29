@@ -48,8 +48,8 @@ private[host] trait HostProcesses:
     exec(command, args, ExecOptions())
 
   /** A command line ready to start: parsed, authorized, and represented as one
-    * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
-  /** `sealedBlock`: started in a `classified` block, whose output stays classified. */
+    * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. `sealedBlock`: started
+    * in a `classified` block, whose output stays classified. */
   private final case class Prepared(
     pbs: List[ProcessBuilder],
     stageLines: List[String],
@@ -194,7 +194,31 @@ private[host] trait HostProcesses:
       throw IllegalArgumentException(s"execReadOnly: timeoutMs must be positive (got ${options.timeoutMs})")
     run(prepare(command, args, options, writable = false), options)
 
+  /** On macOS a command can read the arguments of the user's other processes, which a secret
+    * can reach: a sealed command may put classified content there, and in read-only mode
+    * `Classified.map` may pass a value to `execReadOnly`. Such a command therefore runs alone
+    * among the agent's commands, and a sealed one not while a spawned process runs. On Linux
+    * every command has its own PID namespace. */
+  private val alone = java.util.concurrent.locks.ReentrantReadWriteLock(true)
+
   private def run(prepared: Prepared, options: ExecOptions): ProcessResult =
+    val exclusive = Platform.isMac && (prepared.sealedBlock || policy.mode == atc.perms.Mode.ReadOnly)
+    val lock = if exclusive then alone.writeLock() else alone.readLock()
+    try lock.lockInterruptibly()
+    catch
+      case e: InterruptedException =>
+        prepared.launch.cleanup()
+        throw e
+    try
+      if prepared.sealedBlock && Platform.isMac && hasRunningProcesses then
+        prepared.launch.cleanup()
+        throw SecurityException(
+          "Access denied: on macOS a command in a classified block does not run while a spawned process runs, which could read its arguments; kill() it first"
+        )
+      runAlone(prepared, options)
+    finally lock.unlock()
+
+  private def runAlone(prepared: Prepared, options: ExecOptions): ProcessResult =
     val port = output
     val live = new Processes.LiveOutput:
       def begin(): Unit = port.commandRunning(prepared.line)
@@ -224,6 +248,16 @@ private[host] trait HostProcesses:
       throw SecurityException("spawn is not available in a classified block: a process may not outlive it")
     val prepared = prepare(command, Nil, options, writable = true)
     noteCommand()
+    // Not while a command that must run alone runs.
+    try alone.readLock().lockInterruptibly()
+    catch
+      case e: InterruptedException =>
+        prepared.launch.cleanup()
+        throw e
+    try spawnPrepared(prepared, options)
+    finally alone.readLock().unlock()
+
+  private def spawnPrepared(prepared: Prepared, options: ExecOptions)(using ex: Exec): Process =
     spawned.synchronized:
       reapProcesses()
       if spawned.size >= Host.MaxProcesses then

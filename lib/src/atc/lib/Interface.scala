@@ -17,9 +17,9 @@ import caps.*
 //     it inside `Classified.map`, where a full `fs` may not be captured).
 //
 // `Classified.map` callbacks and `classified { ... }` blocks may capture only
-// read-only capabilities from outside. Writing, commands, network, printing and
-// asking are rejected there; use one of the classified destinations documented
-// below.
+// read-only capabilities from outside. Writing, network, printing and asking are
+// rejected there; a block runs commands only through its own sealed `Exec`, with
+// `execReadOnly`. Use one of the classified destinations documented below.
 
 // ─── Classified data ─────────────────────────────────────────────────────────
 
@@ -409,21 +409,22 @@ trait Interface:
   def ls(dir: String)(using FileSystem): List[String]
 
   /** All descendants of `dir`, parents before children (classified subtrees are
-   *  skipped); paths as in `ls`. */
+   *  skipped outside a `classified` block); paths as in `ls`. */
   def walk(dir: String)(using FileSystem): List[String]
 
   /** Search one file for a regex (`quote(text)` for literal text); the matching lines. */
   def grep(path: String, pattern: String)(using FileSystem): List[GrepMatch]
 
   /** Search the files under `dir` selected by `glob` (see `find`) for a regex
-   *  (`quote(text)` for literal text); classified files are skipped. Without a
-   *  `glob`, every file. */
+   *  (`quote(text)` for literal text); classified files are skipped outside a
+   *  `classified` block. Without a `glob`, every file. */
   def grepRecursive(dir: String, pattern: String)(using FileSystem): List[GrepMatch]
   def grepRecursive(dir: String, pattern: String, glob: String)(using FileSystem): List[GrepMatch]
 
-  /** Search readable, unclassified files, with explicit work and output limits.
-   *  Matching examines retained line prefixes only; `limited` reports any cap reached.
-   *  Glob syntax is the same as `find`. Narrow the directory or raise limits when needed. */
+  /** Search readable files (classified ones only in a `classified` block), with explicit
+   *  work and output limits. Matching examines retained line prefixes only; `limited`
+   *  reports any cap reached. Glob syntax is the same as `find`. Narrow the directory or
+   *  raise limits when needed. */
   def search(dir: String, pattern: String, glob: String, options: SearchOptions)(using FileSystem): SearchResult
 
   /** The files under `dir` selected by `glob`: a plain glob (`"*.scala"`, `"Test?.txt"`)
@@ -454,7 +455,8 @@ trait Interface:
    *  separate steps in Scala. With an explicit `args` sequence, `command` must be
    *  one program and every argument is passed verbatim.
    *
-   *  Each pipeline stage needs command permission. Redirections use the normal
+   *  Each pipeline stage needs command permission, except where the OS sandbox keeps the
+   *  command from changing anything but isolate mode's copy. Redirections use the normal
    *  file permissions and reject classified files. The result uses pipefail-style
    *  exit status and includes stdout/stderr; a non-zero exit does not throw
    *  (`execOutput` does). Pipelines have at most 16 stages.

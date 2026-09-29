@@ -15,8 +15,10 @@ private[atc] object Cli:
     prompt: Option[String] = None,
     approveAll: Boolean = false,
     auto: Boolean = false,
-    /** In isolate mode, the project whose copy `cwd` is (set when ATC moves the session). */
+    /** In isolate mode, the directory the session moved from (set when ATC moves it there). */
     isolatedFrom: Option[Path] = None,
+    /** In isolate mode, the project and the root of its copy, which holds `cwd`. */
+    isolatedRoots: Option[(Path, Path)] = None,
     /** The mode a moved session runs in; `mode` stays what the command line said. */
     sessionMode: Option[Mode] = None,
     /** The effort a moved session's model keeps, when it moved (`None` inside: the default). */

@@ -53,10 +53,6 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path):
   /** Whether a search must skip this file: classified, outside a `classified` block. */
   private[host] def contentHidden: Boolean = isClassified && !host.policy.sealedScope(scope)
 
-  def size: Long =
-    requireReadable("size")
-    Files.size(p)
-
   def read(): String = String(readBytes(), UTF_8)
 
   def readBytes(): Array[Byte] =
@@ -189,8 +185,8 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path):
 
   def walk(): List[FileEntryImpl] =
     requireReadable("walk")
-    host.walkPaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
+    host.walkPaths(scope, p).map(FileEntryImpl(fs, _))
 
   private[host] def walkIterator: Iterator[FileEntryImpl] =
     requireReadable("walk")
-    host.iteratePaths(scope, p, intoClassified = false).map(FileEntryImpl(fs, _))
+    host.iteratePaths(scope, p).map(FileEntryImpl(fs, _))

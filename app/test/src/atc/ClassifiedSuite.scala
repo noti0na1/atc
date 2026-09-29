@@ -143,7 +143,6 @@ class ClassifiedSuite extends munit.FunSuite:
         () => f.read(),
         () => f.readBytes(),
         () => f.readLines(),
-        () => f.size,
         () => f.forEachLine((_, _) => ()),
         () => read("secrets/data.txt"),
         () => readLines("secrets/data.txt"),

@@ -9,9 +9,9 @@ import java.net.http.{HttpClient, HttpRequest, HttpResponse as JHttpResponse}
 import java.nio.charset.StandardCharsets
 import java.time.Duration
 import java.util.Locale
-import scala.util.{Success, Try, Using}
+import scala.util.Using
 
-/** HTTP operations with host permissions and classified request/response handling. */
+/** HTTP operations with host permissions. */
 private[host] trait HostNetwork:
   self: Host =>
 

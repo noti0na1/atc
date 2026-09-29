@@ -112,8 +112,13 @@ final class SessionCommands(app: App):
       if m == policy.mode then tui.info(s"mode: ${m.describe}")
       else if m == Mode.Isolate then
         // The session moves to the project's copy; Main starts it there with this conversation.
-        try throw App.Restart(app.isolatedArgs(), Some(agent.snapshot))
-        catch case e: IllegalStateException => tui.error(Debug.message(e))
+        val entered =
+          try Some(app.isolatedArgs())
+          catch
+            case e: IllegalStateException =>
+              tui.error(Debug.message(e))
+              None
+        entered.foreach(move)
       else if app.isolatedFrom.isDefined then leaveIsolation(m)
       else
         val previous = policy.mode
@@ -183,7 +188,16 @@ final class SessionCommands(app: App):
       case Some(`drop`) => discardIsolated(); true
       case Some(`keep`) => true
       case _ => false
-    if go then throw App.Restart(app.argsLeaving(project, mode), Some(agent.snapshot))
+    if go then move(app.argsLeaving(project, mode))
+
+  /** Move the session with `args`, carrying the conversation. It is saved first, in case the
+    * session there ends before taking it (a quit at the copy's trust prompt). */
+  private def move(args: atc.Cli.Args): Nothing =
+    val saved = agent.snapshot
+    if saved.nonEmpty then
+      try SessionStore.checkpoint(autoSaveFile, saved)
+      catch case NonFatal(error) => Debug.trace(error)
+    throw App.Restart(args, Some(saved))
 
   /** `/apply`: show what the copy would write into the project, and write it once the user agrees. */
   def applyIsolated(): Unit =
