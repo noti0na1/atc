@@ -12,9 +12,10 @@ import java.nio.file.{Files, Path, Paths}
   * are applied after them. Glob restrictions come from the user's file rules and
   * apply within the policy's roots only, not to system or toolchain directories,
   * which hold certificate bundles that `*.pem` would otherwise hide. System
-  * directories are the backend's concern. A plan never grants more than the policy: roots come from rules and
-  * grants that give access, and every rule that takes access away becomes a
-  * restriction, whatever grant might widen it. */
+  * directories are the backend's concern. A plan never grants more than the policy: roots
+  * come from rules and grants that give access, every glob rule that takes access away
+  * becomes a restriction, an exact one takes its level in the scope, and isolate mode drops
+  * unlocked read limits inside the copy. */
 final case class SandboxPlan(
   project: Path,
   home: Path,

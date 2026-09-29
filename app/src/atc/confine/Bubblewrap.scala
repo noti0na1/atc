@@ -9,8 +9,8 @@ import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** Linux: commands run under bubblewrap with new user, PID, IPC and (without network)
-  * network namespaces. Only the system directories are mounted, read-only, so other
+/** Linux: commands run under bubblewrap with new user, PID and IPC namespaces, and a network
+  * namespace unless the command may use the network and `socat` is missing. Only the system directories are mounted, read-only, so other
   * users' homes, `/srv`, `/mnt`, `/var` and the service sockets under `/run` stay out of
   * reach; `/tmp` and the home directory are empty file systems, and the plan's roots are
   * mounted over them, read-only or writable. Restrictions are mounted last: an empty read-only

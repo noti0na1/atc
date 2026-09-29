@@ -173,8 +173,9 @@ object Prompts:
        |   *both* streams (build tools and test runners write most of their output to stderr), or end
        |   the snippet with the result so it is echoed whole. A command runs with the user's own
        |   privileges and network unless the Environment says commands run in an OS sandbox; the
-       |   `commands` patterns decide whether `exec` and `spawn` may run it, and the `hosts` list
-       |   governs your `http*` calls and, in the sandbox, commands inside `withNetwork`.
+       |   `commands` patterns decide, outside isolate mode, whether `exec` and `spawn` may run it,
+       |   and the `hosts` list governs your `http*` calls and, in the sandbox, commands inside
+       |   `withNetwork`.
        |   Every helper named here is documented in the API reference below, grammar and failure modes
        |   included: read its docstring before the first use rather than guessing.
        |5. Report results by `println`ing them; the value of the last expression is echoed too.

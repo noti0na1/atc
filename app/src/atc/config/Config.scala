@@ -198,8 +198,9 @@ final case class Config(
     * *granting* layer turns it off explicitly: it is a latch, so a narrowing
     * layer can switch it on and never back off. */
   safeMode: Boolean = true,
-  /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
-    * files, run commands) or `full` (also network). `/mode` switches at run time. */
+  /** Initial sandbox mode: `isolate` (work on a copy of the project), `readonly` (read files,
+    * run read-only commands), `local` (read and write files, run commands) or `full` (also
+    * network). `/mode` switches at run time. */
   mode: Option[String] = None,
   /** Reject every permission request without asking; `/auto` switches it at run time.
     * A project layer may turn it on but not off. */

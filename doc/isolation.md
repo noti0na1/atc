@@ -1,16 +1,16 @@
 # System isolation
 
-This document describes the planned system-level isolation for ATC: how the language-based
-capability model is combined with operating-system sandboxing and change recovery. It is a
-design document for work in progress. As each part lands, its user-facing behavior moves
-into the [README](../README.md) and its implementation notes into the
-[development guide](development.md); the [plan](#plan-and-status) records what exists.
+This document describes the system-level isolation of ATC: how the language-based
+capability model is combined with operating-system sandboxing and change recovery. Windows
+support is still planned. User-facing behavior is in the [README](../README.md) and
+implementation notes are in the [development guide](development.md); the
+[plan](#plan-and-status) records what exists.
 
 ## Goal
 
-ATC currently guarantees that the Scala the model writes can perform only the effects its
-capabilities allow, on the files, commands and hosts the policy permits. The target adds
-levels of protection that hold for everything the agent does, through Scala or through any
+Before this work ATC guaranteed that the Scala the model writes can perform only the effects
+its capabilities allow, on the files, commands and hosts the policy permits. The isolation
+adds levels of protection that hold for everything the agent does, through Scala or through any
 process it starts, each resting on different parts of the system:
 
 1. The agent cannot act outside the authority the user granted.
@@ -38,9 +38,12 @@ and cloud credentials, classified files); persistent machine state that other pr
 execute (shell startup files, VCS hooks and configuration, editor task files, tool caches);
 external accounts reachable over the network; and availability (disk, CPU, stray processes).
 
-## Gaps in the current design
+## Gaps before this work
 
-| Concern | Current behavior |
+Phases 2 to 11 closed all but the last row; path races remain (see
+[Residual risks](#residual-risks)).
+
+| Concern | Behavior before |
 |---|---|
 | Damage to files | `FileChange` shows bounded previews of the agent's own file operations. Nothing records changes made by commands, and nothing can undo a change the policy allowed. |
 | Commands | A permitted command runs with the user's full authority. Arguments are not checked as paths, so a permitted command can read classified files. Local mode offers no network to Scala, but commands keep full network access. Build files and tests are arbitrary code. |
@@ -88,15 +91,15 @@ Design rules:
 - The channel is untrusted input: frames have a size limit, the session starts with a
   handshake, and JVM logging stays off the channel (a JVM warning printed on stdout was read
   as a 1.5 GB frame length during the spike).
-- Capabilities cross as a kind and a scope ID; the host rebuilds them. Each scope is bound to
-  the conversation (the logical call stack) that opened it, so a compromised child cannot use
-  another conversation's scope. `FileSystem` and `FileSystem^{fs.rd}` are the same object at
-  run time, so authority must never be inferred from an erased view.
+- Capabilities cross as a kind and a scope ID; the host rebuilds them and honours one only
+  while its scope is open. `FileSystem` and `FileSystem^{fs.rd}` are the same object at run
+  time, so authority must never be inferred from an erased view.
 - A thread that calls out serves nested calls from the host on the same conversation, so a
   `requestFiles` callback runs on the thread that the stop flag and interruption reach.
   Parallel tasks are separate conversations.
-- Interruption first uses the existing instrumentation; after a grace period the host kills
-  the child and starts a new one, and the model is told its definitions are gone.
+- Interruption and the time limit first use the existing instrumentation; after a grace
+  period the host kills the child, the next tool call starts a new one, and the model is told
+  its definitions are gone.
 
 Residual risk: classified content has to enter the child for `Classified.map`, so a
 compromised child can print it. Classified confidentiality stays protected by the compiler
@@ -107,8 +110,8 @@ only.
 Every stage of every command runs under a sandbox generated at launch from the capabilities
 passed to `exec`, the current scope's grants and the policy. The policy is first rendered as
 concrete lists (readable roots, writable roots, masked paths, network mode), which a backend
-turns into a Seatbelt profile (macOS), bubblewrap arguments (Linux) or `srt` settings
-(Windows).
+turns into a Seatbelt profile (macOS) or bubblewrap arguments (Linux); planned for Windows:
+`srt` settings.
 
 | Capability passed to `exec` | Process authority |
 |---|---|
@@ -122,18 +125,21 @@ Rules for every process:
 
 - Reads are denied by default and allowed for the project, the policy's readable paths and a
   toolchain bundle detected from installed tools (JDK, build tool homes, dependency caches,
-  Homebrew). Classified paths, no-access paths and `~/.atc` are never readable.
+  Homebrew). Classified paths are readable only to a command in a `classified` block;
+  no-access paths and `~/.atc` never are.
 - Tool caches are readable but not writable, because unsandboxed tools later load code from
   them. Commands that may write get a cache directory owned by the sandbox (in isolate mode
   one beside the copy); read-only and sealed commands keep caches in their temporary
   directory. Each launch gets a short private `TMPDIR`, and JVMs get `java.io.tmpdir` through
   `JAVA_TOOL_OPTIONS`.
-- Unix sockets and loopback TCP are blocked, and the network namespace is always separate on
-  Linux. A daemon started outside the sandbox (a build server, an IDE server, a credential
+- Unix sockets and loopback TCP are blocked, and on Linux the network namespace is separate
+  unless a command inside `withNetwork` runs where `socat` is missing, which the banner
+  reports. A daemon started outside the sandbox (a build server, an IDE server, a credential
   agent) acts with the user's full authority, so it must be unreachable. Builds run without a
   daemon or start their own inside the sandbox.
 - Protected paths are not writable even inside writable roots: `.git` (a git grant makes it
-  writable except `hooks`, `config` and `info/attributes`), `.atc`, `.vscode`, `.idea`,
+  writable except the files that make git run programs: `hooks`, `config`,
+  `config.worktree`, `info/attributes`, and the same under `modules`), `.atc`, `.vscode`, `.idea`,
   `.envrc`, and shell startup files. Other programs execute these files outside any sandbox.
 - On macOS, LaunchServices, the pasteboard and the keychain services stay denied; a profile
   that allowed mach services by default let a sandboxed command start an application outside
@@ -155,8 +161,9 @@ Read-only audit (September 2026, macOS 27 and Ubuntu 24.04 with JDK 17), with re
 commands started through ATC's own launch path:
 
 - Denied on both: writes outside the private temporary directory, classified and hidden
-  paths, the network, loopback TCP, abstract Unix sockets, signals to and the arguments and
-  environment of other processes. macOS also denies the home directory beyond the toolchain,
+  paths, the network, loopback TCP, abstract Unix sockets, and signals to and the environment
+  of other processes; Linux also denies their arguments, which macOS does not (see
+  [Residual risks](#residual-risks)). macOS also denies the home directory beyond the toolchain,
   `/Users`, Unix sockets, the system resolver, the pasteboard, `launchctl submit`,
   `defaults write`, `log show` and Spotlight, and the `TIOCSTI` ioctl.
 - Fixed by the audit: a macOS command could open the user's other terminals, reading what
@@ -180,7 +187,7 @@ commands started through ATC's own launch path:
   isolate command could change caches a later session in the project uses.
 - Unbounded: disk (macOS) or memory (Linux) used by the private temporary directory.
 
-API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
+The API that followed from the table: `exec` keeps requiring `FileSystem^`; a read-only
 variant lets read-only mode run commands that write nothing; network comes from a derived
 block such as `withNetwork { exec(...) }` whose runtime object carries the flag and whose
 capture set records `net`. Commands on classified input run inside a `classified` block
@@ -188,19 +195,19 @@ capture set records `net`. Commands on classified input run inside a `classified
 
 Backends:
 
-- macOS: `/usr/bin/sandbox-exec -p <profile>` with parameters passed as `-D`. The profile is
-  deny-by-default and imports `system.sb`. Missing parameters fail with a misleading
-  "unsupported syntax" error.
+- macOS: `/usr/bin/sandbox-exec -p <profile>`, with paths written into the profile. The
+  profile is deny-by-default and imports `system.sb`.
 - Linux: bubblewrap with read-only mounts of the system directories, `--dev /dev`,
   `--proc /proc`, a private `/tmp`, writable binds, masks after the binds (`--tmpfs` plus `--remount-ro` for directories,
   `--ro-bind /dev/null` for files) and again at the project's path after isolate mode's mount
-  of the copy there, `--unshare-net --unshare-pid --unshare-user
-  --unshare-ipc --die-with-parent --new-session`. Protected paths that do not exist need
-  placeholder mounts, which leave empty entries to remove afterwards. A seccomp filter that
+  of the copy there, `--unshare-pid --unshare-user --unshare-ipc --die-with-parent
+  --new-session --cap-drop ALL`, and `--unshare-net` unless a networked command lacks the
+  `socat` bridge. Mounts need existing paths, so a restricted path that does not exist when
+  the command starts is not covered. A seccomp filter that
   denies `socket(AF_UNIX)` is a strict option because it breaks Python multiprocessing and
   JVM attach. The launch must come from a long-lived Java thread: the parent-death signal
   fires when the starting thread exits. ATC probes at startup whether user namespaces work.
-- Windows: Anthropic's sandbox runtime (`srt`) through one long-running helper process per
+- Windows (planned): Anthropic's sandbox runtime (`srt`) through one long-running helper process per
   session, since the `srt` CLI costs 170 to 250 ms per command (Node start-up, module loading,
   proxy and monitor set-up). It needs a one-time elevated install and runs commands as a
   dedicated user.
@@ -231,12 +238,11 @@ work tree, and keeps its own index as a stat cache.
   granularity.
 - The store keeps the newest 50 turns and never runs automatic garbage collection.
 
-Linux can go further: a bubblewrap overlay at the project's real path keeps a command's
-writes in an upper directory until they are applied. Build output directories and `.git` must
-stay outside the overlay, and renaming an existing directory fails with `EXDEV`. macOS and
-Windows have no unprivileged equivalent at the real path, and staging in a copy at another
-path is rejected: it forced a full Mill rebuild (21 s against 1.9 s) and editable Python
-installs would test the original sources.
+Staging a command's writes is isolate mode's copy (see [Modes and the auto switch](#modes-and-the-auto-switch)): on Linux commands
+see it at the project's path; on macOS they see its own path, and path-keyed caches rebuild
+once there. A bubblewrap overlay at the project's real path was considered and not built:
+build output directories and `.git` must stay outside it, and renaming an existing
+directory fails with `EXDEV`.
 
 ## What limits a fault in one level
 
@@ -245,7 +251,7 @@ installs would test the original sources.
 | A fault in capture checking or safe mode | L1 policy, L2, L3 |
 | A malicious permitted command or test | L2, L3 |
 | A policy that grants too much | L3 review and revert, protected paths |
-| No OS sandbox (Windows before `srt`, Linux without user namespaces) | L0, L1, L3; commands run unconfined and ATC says so |
+| No OS sandbox (Windows before `srt`, Linux without user namespaces) | L0, the host's policy checks, L3; commands and the REPL run unconfined in ATC, and ATC says so |
 | A damaged checkpoint store | L0 to L2 |
 
 ## The agent API with the sandbox
@@ -363,9 +369,9 @@ meanwhile are kept (see [Isolate mode](development.md#isolate-mode)).
 
 | Layer | macOS | Linux | Windows |
 |---|---|---|---|
-| L1 evaluator | Seatbelt profile | bubblewrap or Landlock (to do) | AppContainer or low integrity (unverified) |
+| L1 evaluator | Seatbelt profile | bubblewrap | AppContainer or low integrity (unverified) |
 | L2 commands | Seatbelt | bubblewrap | `srt` helper |
-| L3 checkpoints | git store | git store; overlay staging later | git store |
+| L3 checkpoints | git store; isolate mode's copy | git store; isolate mode's copy | git store |
 
 ## Plan and status
 

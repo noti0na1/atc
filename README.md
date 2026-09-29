@@ -315,7 +315,7 @@ Reference `rs$line$4` is not included in the allowed capture set {any.rd} …
 In read-only mode `fs` is `FileSystem^{io.rd}`, so the identical line is accepted. Reading
 cannot leak the secret, whereas writing could, and the capability view distinguishes the
 two. The agent can always route a secret to an authorized channel: the terminal, a
-classified file, the classified model, or an allow-listed host.
+classified file or the classified model.
 
 ### Runtime permissions
 
@@ -341,8 +341,7 @@ agent can express at all, before the permission policy applies:
 | **full** | also reach the network, and let the model's provider search the web |
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
-explain what it *would* have done. The policy enforces the same three levels again at run
-time. Switch with `/mode`, which opens a menu (or `/mode <name>`), **Shift-Tab** on an empty
+explain what it *would* have done. The policy enforces the mode again at run time. Switch with `/mode`, which opens a menu (or `/mode <name>`), **Shift-Tab** on an empty
 prompt, which cycles read-only, local and full, `--mode`, or `"mode"` in the config;
 switching starts a fresh REPL but keeps the conversation. `/mode isolate` moves the session to the project's copy, which needs the OS
 sandbox and stays between sessions. The default is full.
@@ -444,9 +443,11 @@ whole subtree, effective access is the minimum over matching rules, and no match
 access. `commands` are patterns over the whole command line (`"git status"` also allows
 `git status --short`; `*` is a wildcard); `hosts` are glob patterns on host names.
 `denyCommands` and `denyHosts` use the same syntax and override every allow, session grant
-and open scope. A pre-approved command runs with your privileges and outside the file
-rules, so pre-approve the subcommands you mean rather than `git *`, and check their options:
-`git diff` and `git blame` can print any file, and `git log --output` can write one. Pattern details and
+and open scope. Where the OS sandbox is unavailable, a pre-approved command runs with your
+privileges and outside the file rules; on macOS and Linux the sandbox holds it to them, but
+it can still read and change whatever they allow. So pre-approve the subcommands you mean
+rather than `git *`, and check their options: `git diff` and `git blame` can print any file
+the rules let them read, and `git log --output` can write one. Pattern details and
 Windows notes are in [doc/development.md](doc/development.md#file-rules-and-command-patterns).
 
 ## Security model
@@ -460,7 +461,7 @@ the parts of the system they rest on:
 |---|---|---|---|
 | **Types** (capture checking, safe mode) | a snippet uses only the capabilities in scope; secrets stay inside `Classified`; a lent capability does not outlive its block | the Scala the agent writes | the compiler and the agent library |
 | **Permission policy** | every file, command and host access matches your rules, grants and deny lists | every operation the agent's code performs | ATC's host implementation |
-| **OS sandbox** (macOS, Linux) | commands write only where your rules allow, read only granted paths, system files and toolchains, never your credentials or classified files, and reach only allowed hosts; the agent's code runs in a separate process that holds no keys and reaches the machine only through ATC | commands and the programs they start, and the process running the agent's code | the OS sandbox (Seatbelt, bubblewrap) |
+| **OS sandbox** (macOS, Linux) | commands write only where your rules allow, read only granted paths, system files and toolchains, never your credentials, nor classified files outside a `classified` block, and reach only allowed hosts; the agent's code runs in a separate process that holds no keys and reaches the machine only through ATC | commands and the programs they start, and the process running the agent's code | the OS sandbox (Seatbelt, bubblewrap) |
 | **Undo** | the files a turn changed can be listed and reverted | changes made by the agent's code and by commands | git and ATC's store in `~/.atc` |
 
 The type level is the most precise: it knows which snippet or closure holds which
@@ -488,7 +489,8 @@ not want.
   open scope, and `--approve-all`.
 - **Commands are confined.** On macOS and Linux every command runs in an OS sandbox derived
   from your file rules: it writes only where the agent may write, never into `.git` hooks or
-  configuration, `.atc` or editor settings, cannot read classified files or your credentials,
+  configuration, `.atc` or editor settings, cannot read your credentials, nor classified files
+  outside a `classified` block,
   and has no network unless the agent starts it inside `withNetwork` (full mode), which lets
   it reach only the hosts you allow, through a proxy that asks you about others. A command
   run with `execReadOnly` writes nothing, which is how read-only mode runs commands.

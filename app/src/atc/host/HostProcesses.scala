@@ -69,9 +69,10 @@ private[host] trait HostProcesses:
         "exec(command, args, ...): `command` must be one program when args are given; write a pipeline or redirection in the one-line form exec(\"...\")"
       )
 
-  /** The deny list applies to every command. The allowlist does not apply to a read-only command
-    * without network (`anyProgram`): the OS sandbox keeps it from writing or reaching anything,
-    * and the allowlist would not narrow what it reads, since any reader it admits reads all of it. */
+  /** The deny list applies to every command. The allowlist does not apply to a command the OS
+    * sandbox contains, without network (`anyProgram`): read-only, sealed, or confined in isolate
+    * mode, it can change nothing but the copy and reach nothing, and the allowlist would not
+    * narrow what it reads, since any reader it admits reads all of it. */
   private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId, anyProgram: Boolean): Unit =
     for stage <- pipeline.stages; pattern <- policy.commandDenied(stage.line) do
       throw SecurityException(

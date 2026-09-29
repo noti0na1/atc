@@ -293,7 +293,8 @@ object Json:
 
 /** Agent-facing operations. All members and the current mode's givens are
  *  already in scope. Writes need `FileSystem^`; commands need `Exec^` and
- *  `FileSystem^`; HTTP needs `Network^`; user interaction needs `UserIO^`.
+ *  `FileSystem^` (`execReadOnly` a read-only one); HTTP needs `Network^`; user
+ *  interaction needs `UserIO^`.
  *  If configured permissions deny an available effect, use its `request*`
  *  block. */
 @assumeSafe
@@ -306,7 +307,8 @@ trait Interface:
    *  the one you already have: with a full `fs` you get a full one (so you can
    *  write), with a read-only `fs` (read-only mode) you get a read-only one, so
    *  the request works in every mode. Operations inside still have to fit that
-   *  view: command execution needs `FileSystem^` and remains local/full-only.
+   *  view: `exec` and `spawn` need `FileSystem^` (local, isolate and full mode),
+   *  while `execReadOnly` works with a read-only one.
    *  The capability cannot escape the block. Throws `SecurityException` if the
    *  user denies it. */
   def requestFiles[T, C^](path: String)(using UserIO^, FileSystem^{C})
@@ -486,7 +488,8 @@ trait Interface:
    *  eight may be live. The user sees starts, input and exits. */
   def spawn(command: String)(using ex: Exec^, fs: FileSystem^): Process^{ex}
   def spawn(command: String, options: ExecOptions)(using ex: Exec^, fs: FileSystem^): Process^{ex}
-  /** The processes you started that are still running (to find a handle again). */
+  /** The processes you started that are still running (to find a handle again);
+   *  none inside a `classified` block. */
   def runningProcesses(using ex: Exec^): List[Process^{ex}]
 
   /** Run a command that reads what your file system may read and writes nothing but a
@@ -617,7 +620,8 @@ trait Interface:
    *  compile there. Nothing done in the block persists: its file system only reads,
    *  so run commands with `execReadOnly` (they may read classified files, have no
    *  network, write only their temporary directory, need no command permission,
-   *  `denyCommands` still refusing, and need the OS sandbox), and keep a result with
+   *  `denyCommands` still refusing, and need the OS sandbox; on macOS they do not run
+   *  while a process you spawned runs, so `kill()` it first), and keep a result with
    *  `writeClassified` afterwards. A failure in the block becomes a failed
    *  `Classified` value, whose message only the user sees. */
   def classified[T](using FileSystem, Exec^)(op: (Sealed^, FileSystem, Exec^) ?->{any.rd} T): Classified[T]

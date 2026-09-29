@@ -4,10 +4,11 @@ import java.util.Locale
 
 /** The sandbox mode: which capabilities the REPL preamble hands to the agent
   * (type level, `ReplSession.preambleChunks`) and, as defence in depth, what the
-  * policy lets through at run time. Ordered from least to most permissive. */
+  * policy lets through at run time. */
 enum Mode(val label: String, val description: String):
   /** Local mode's capabilities on a copy of the project (`Isolation`); its changes reach the
-    * project only when the user applies them. Listed first: the strictest for narrowing. */
+    * project only when the user applies them. Listed first, so the menu shows it first; for
+    * narrowing it sits between read-only and local (`Configuration.stricterMode`). */
   case Isolate
       extends Mode("isolate", "files and commands work on a copy of the project, applied with /apply; no network")
   /** `io` and `fs` are read-only views: the agent reads files and runs commands read-only. */

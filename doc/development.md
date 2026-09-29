@@ -126,7 +126,8 @@ One turn follows this path:
 ```text
 App → Agent → ChatModel.complete → CompletionPolicy
                   ↓ tool calls
-          ScalaToolRunner → ReplSession → Host
+          ScalaToolRunner → ReplSession → Host      (in ATC's JVM)
+          ScalaToolRunner → EvaluatorSession ⇄ Channel ⇄ HostDispatch → Host
                   ↑ execution result and permission decisions
 ```
 
@@ -148,7 +149,9 @@ snippet that prints the streams and ends with the value used to send them twice.
 
 `Host` implements `Interface` directly through file, process, network and interaction
 traits; `HostPaths` holds the path resolution and permission checks they share. `HostOutput`, `HostLlm` and `HostUi` are dependencies supplied by `App` or tests.
-The REPL shares library classes with the application, so calls need no serialization layer.
+In ATC's JVM the REPL shares library classes with the application and calls `Host`
+directly; in the evaluator process ([Evaluator process](#evaluator-process)) `RemoteHost`
+sends each call over `Channel` to `HostDispatch`.
 
 ## Type-system background
 
@@ -300,6 +303,7 @@ interface and host together, then verify their required capabilities.
 |---|---|
 | `readonly` | `io: IOCap`, `fs: FileSystem^{io.rd}`, `ex: Exec^{io.rd}` |
 | `local` | `io: IOCap^`, `fs: FileSystem^{io}`, `ex: Exec^{io}` |
+| `isolate` | as `local`, on the project's copy |
 | `full` | the local capabilities plus `net: Network^{io}` |
 
 Every mode also supplies `user: UserIO^`, which is independent of the machine root, so
@@ -455,7 +459,8 @@ imported after the trusted preamble. Compiler diagnostics and runtime results ar
 as `ExecutionResult`; an exception recorded by `CappedRendering` marks evaluation failure.
 A string containing the word `error` in ordinary output does not determine run success.
 
-With an execution timeout configured, evaluation runs on a daemon worker. `ExecutionClock`
+In ATC's JVM, with an execution timeout configured, evaluation runs on a daemon worker; the
+evaluator process keeps no timeout of its own ([Evaluator process](#evaluator-process)). `ExecutionClock`
 excludes nested waits for user input, external commands and model calls that have their own
 timeouts. Interrupts set the compiler's REPL stop flag and interrupt blocking operations.
 `skipInvalidWrapper` advances past a potentially incomplete wrapper class. Completed file,
@@ -516,8 +521,9 @@ config(p)  = min(grant(p), ceiling(p))
 scoped(s,p) = maximum matching file grant in s and its ancestors, default None
 access(s,p) = config(p)                         when p is locked
               max(config(p), scoped(s,p))       otherwise
-effective(s,p) = min(access(s,p), Read)          in read-only mode
-                 access(s,p)                    in other modes
+effective(s,p) = min(access(s,p), Read)          in read-only mode, and outside the copy in isolate mode
+                 Write                          inside the copy where access(s,p) reads, unlocked and unclassified
+                 access(s,p)                    otherwise
 ```
 
 A missing rule access field imposes no access ceiling; it may independently set
@@ -605,7 +611,7 @@ the tool result so the model knows whether approval was temporary, session-wide 
 
 `requestFiles` works in every mode: the file system it lends the block is exactly as
 capable as the one the caller already holds, so read-only callbacks remain read-only, and
-`exec`, which needs `FileSystem^`, still compiles only in local and full mode.
+`exec`, which needs `FileSystem^`, still compiles only in local, isolate and full mode.
 `requestExec` widens only `Exec^`; a command that also needs a file permission that is not
 configured needs a nested `requestFiles` block. The result of a request tells the agent
 what the user decided, so "once" needs another request next time while "for the session"
@@ -809,11 +815,11 @@ stderr, since the channel is its stdout: a JVM warning printed there was once re
 1.5 GB frame length. On macOS its profile denies by default, allows reading the JDK, ATC's
 class path entries and its working directory, and metadata of the directories above them
 (the JVM stats them at start and crashes without); it allows executing nothing but `java`,
-writing nothing, and no network. On Linux bubblewrap mounts the root file system read-only
-with the home directory and `/tmp` emptied, binds the same entries back, and unshares every
-namespace. Keys, the configuration and the model clients never enter the process. It starts
-from the long-lived launcher thread, as commands do, and costs about 150 ms more than an
-in-process REPL and 250 to 450 MB of memory.
+writing nothing, and no network. On Linux bubblewrap mounts the system directories
+read-only, empties the home directory and `/tmp`, binds the same entries back, and unshares
+every namespace; the process starts from the long-lived launcher thread, as commands do.
+Keys, the configuration and the model clients never enter the process. It costs about 150 ms
+more than an in-process REPL and 250 to 450 MB of memory.
 
 `Channel` is a symmetric call channel over the evaluator's stdin and stdout; it opens with
 a greeting that marks where frames begin. A conversation is one logical call stack across
@@ -912,8 +918,9 @@ agent's; the merge rule limits the damage. `CheckpointSuite` covers the store an
 `/mode isolate` (or the mode at start) moves the session to a copy of the project: the
 project root its config belongs to (`App.projectOf`), or the working directory when it has
 none; a directory that holds the home directory is refused. `App.isolatedArgs` makes the
-copy current and throws `App.Restart`, a control throwable that `Main` catches to start a
-new `App` in the copy, at the same offset below its root (made there if the copy lacks it),
+copy current and returns the arguments; `SessionCommands.move` saves the conversation (a
+quit at the copy's trust prompt would otherwise lose it) and throws `App.Restart`, a control
+throwable that `Main` catches to start a new `App` in the copy, at the same offset below its root (made there if the copy lacks it),
 carrying the conversation (`SessionCommands.resumeFrom`), the model, its effort and the
 `auto` switch; leaving the mode does the same the other way, after offering to apply, keep
 or discard the copy's changes. The session saves to and resumes from the project's session
@@ -966,7 +973,7 @@ command pattern (`HostProcesses.authorizeCommands`), since it can change only th
 project's own config, for the project's path the copy's path stands for, and the copy takes
 it on entry. Isolate mode therefore needs a confining OS sandbox and
 is refused without one. The copy's config is trusted when the project's config is its own and
-trusted. Mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
+trusted. The mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
 is left out of the Shift-Tab cycle, which does not leave it either. After each turn the
 terminal says how many files differ from the project (`Isolation.unapplied`). `/apply` first
 lists what it would write (`Isolation.preview`), marking a path the project changed too,
@@ -1138,7 +1145,7 @@ warning. `/model` starts the new model at its configured effort and removes `eff
 
 **Web search.** A model's `webSearch` turns on the provider's own search tool; the
 top-level `webSearch` does so for every model that does not set its own. It applies in full
-mode only (`Models.useMode`), since read-only and local mode keep the agent off the network. It is best effort:
+mode only (`Models.useMode`), since the other modes keep the agent off the network. It is best effort:
 when a provider rejects the tool, the model continues without it for the session.
 
 **Notifications.** `notifications` is `auto` (the default: the terminal's own notifications
@@ -1170,8 +1177,9 @@ readable by name.
 
 `commands` contains patterns matched against the complete command line. `*` is a wildcard,
 and a pattern without `*` matches by word prefix (`"git status"` allows `git status --short`
-but not `git statusx`). A command also needs read access to the directory it runs in. A
-pre-approved command runs with the user's privileges and is *not* subject to the file rules.
+but not `git statusx`). A command also needs read access to the directory it runs in. Where
+the OS sandbox is unavailable, a pre-approved command runs with the user's privileges and is
+*not* subject to the file rules; on macOS and Linux the sandbox holds it to them.
 `hosts` are glob patterns on host names; only `http`/`https` URLs are accepted and redirects
 are not followed. `denyCommands` and `denyHosts` use the same syntax: a deny rule overrides
 every allow rule, including a session grant, an open `request*` scope, and `--approve-all`.
@@ -1800,6 +1808,8 @@ Tests use munit under `app/test/src/atc`. Extend the suite responsible for the b
   terminal helpers, retained output, rendering, prediction and error reporting.
 - `ReplInterruptionSuite`: cancellation recovery in an isolated compiler process.
 - `ProcessesSuite`, `PlatformProcessSuite`, `TextFilesSuite`: process and platform behavior.
+- `ConfinementSuite`, `EvaluatorSuite`, `CheckpointSuite`, `IsolationSuite`, `ProjectRulesSuite`: the OS
+  sandbox and proxy, the evaluator process, checkpoints and `/undo`, isolate mode, saved grants.
 - `MainSuite`, `FirstRunSuite`, `commands.SlashCommandSuite`: command-line parsing, first-run setup and
   slash-command parsing.
 

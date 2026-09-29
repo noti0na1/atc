@@ -70,7 +70,6 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     case ex: RemoteExec => ex
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
-  // A failed classified value crosses with its message, which only the user's view renders.
   /** A failure goes without its message: computing it would run the agent's code outside the
     * computation, where its failing or hanging would be seen. */
   private def encodeClassified(e: Encoder, content: Classified[String]): Unit = RemoteClassified.unwrap(content) match

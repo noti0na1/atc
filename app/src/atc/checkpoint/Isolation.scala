@@ -21,7 +21,8 @@ import scala.util.Using
   * project's changes since `base`, and its git state, only while the project holds every
   * change of the copy, so that no change of the copy is lost; `base` is then the copy's
   * tree. `excluded` names project-relative paths neither store records (classified and
-  * no-access paths); they are neither applied nor taken, and `.atc` is copied whole.
+  * no-access paths); they are neither applied nor taken, and of `.atc` only the config and
+  * keys are copied, each time.
   * One process at a time uses a copy. */
 final class Isolation(val project: Path, stateDir: Path, dataDir: Path, excluded: String => Boolean):
   private val name = Checkpoints.digest(project)

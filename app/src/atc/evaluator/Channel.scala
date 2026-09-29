@@ -231,13 +231,13 @@ private[atc] final class Channel(name: String, in: InputStream, out: OutputStrea
       onCancel(frame.conversation)
     case other => throw IOException(s"$name: unknown frame kind $other")
 
-  /** Run a call and reply. A top-level server releases its mailbox first: once the reply is
-    * sent, the peer may start a new top-level call on the same conversation. */
   /** Answer `frame` with an error without running it. */
   private def refuse(frame: Frame, why: String): Unit =
     try send(Frame(Frame.Error, frame.id, frame.conversation, "", Channel.encodeError(IllegalStateException(why))))
     catch case NonFatal(_) => ()
 
+  /** Run a call and reply. A top-level server releases its mailbox first: once the reply is
+    * sent, the peer may start a new top-level call on the same conversation. */
   private def serve(frame: Frame, topLevel: Boolean): Unit =
     var fatal: Throwable | Null = null
     val reply =
