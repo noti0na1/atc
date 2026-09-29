@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Exec, FileSystem, IOCap, Network, UserIO}
+import atc.lib.{Classified, Exec, ExecOptions, FileSystem, IOCap, Network, Sealed, UserIO}
 import atc.perms.*
 import atc.platform.{PathGlob, Platform, PlatformPath}
 
@@ -67,6 +67,14 @@ class HostSuite extends munit.FunSuite:
   given net: Network = host.network
   import host.*
 
+  /** The host's own handle for `path`, as its path helpers use it. */
+  private def handle(path: String)(using fs: FileSystem): FileEntryImpl =
+    FileEntryImpl(fs.asInstanceOf[FileSystemImpl], host.canonical(path))
+
+  /** Run `op` in a classified block with the block's file system. */
+  private def inBlock[T](op: FileSystem ?=> T)(using parent: FileSystem): Classified[T] =
+    host.classified(using parent, ex)((_: Sealed, f: FileSystem, _: Exec) ?=> op(using f))
+
   private def rel(p: String) =
     val path = Path.of(p)
     if path.isAbsolute then PlatformPath.portable(root.relativize(path)) else p
@@ -78,7 +86,7 @@ class HostSuite extends munit.FunSuite:
     append("src/B.scala", "\n// more")
     assert(Files.readString(root.resolve("src/B.scala")).nn.endsWith("// more"))
     assert(exists("README.md"))
-    assertEquals(access("/a/b/c.txt").name, "c.txt")
+    assertEquals(handle("/a/b/c.txt").name, "c.txt")
 
   test("sed with quote/quoteReplacement makes a literal edit, metacharacters and all"):
     Files.writeString(root.resolve("edit.txt"), "f(a.b) = $x\nf(a-b) = $x\nf(a.b) = $x\n")
@@ -222,7 +230,7 @@ class HostSuite extends munit.FunSuite:
     assert(Files.exists(root.resolve("moved/mv2.txt")))
     intercept[IllegalArgumentException](move("moved", "elsewhere"))
     val e = intercept[SecurityException](move("secrets/key.txt", "leaked.txt")) // the read refuses classified
-    assert(e.getMessage.nn.contains("readClassified"), e.getMessage)
+    assert(e.getMessage.nn.contains("classified { ... } block"), e.getMessage)
     assert(Files.exists(root.resolve("secrets/key.txt")) && !Files.exists(root.resolve("leaked.txt")))
     intercept[SecurityException](copy("README.md", "secrets/copy.txt")) // the write refuses a classified target
 
@@ -467,7 +475,7 @@ class HostSuite extends munit.FunSuite:
     assume(!Platform.isWindows)
     val name = "back\\slash.txt"
     write(name, "content")
-    val returned = access(name).path
+    val returned = handle(name).path
     assert(returned.endsWith(name), returned)
     assertEquals(read(returned), "content")
 
@@ -522,14 +530,14 @@ class HostSuite extends munit.FunSuite:
   test("forEachLine streams lines with 1-based numbers"):
     write("lines.txt", "alpha\nbeta\ngamma")
     val seen = ListBuffer[(String, Int)]()
-    access("lines.txt").forEachLine((line, n) => seen += ((line, n)))
+    handle("lines.txt").forEachLine((line, n) => seen += ((line, n)))
     assertEquals(seen.toList, List(("alpha", 1), ("beta", 2), ("gamma", 3)))
 
   test("forEachLine and grep tolerate non-UTF-8 bytes like read() does (no abort on binary files)"):
     val bytes = "ok\n".getBytes("UTF-8") ++ Array[Byte](0xff.toByte, 0xfe.toByte) ++ " bad\nend\n".getBytes("UTF-8")
     Files.write(root.resolve("latin.txt"), bytes)
     val seen = ListBuffer[String]()
-    access("latin.txt").forEachLine((line, _) => seen += line)
+    handle("latin.txt").forEachLine((line, _) => seen += line)
     assertEquals(seen.size, 3)
     assertEquals(seen.head, "ok")
     assertEquals(seen.last, "end")
@@ -541,24 +549,24 @@ class HostSuite extends munit.FunSuite:
     val e = intercept[SecurityException](read("/etc/hosts"))
     assert(e.getMessage.nn.contains("requestFiles"), e.getMessage)
 
-  test("classified: plain read denied, classified read ok, listing rules"):
+  test("classified: plain read denied, read in a classified block ok, listing rules"):
     val e = intercept[SecurityException](read("secrets/key.txt"))
-    assert(e.getMessage.nn.contains("readClassified"))
-    assertEquals(ClassifiedImpl.get(readClassified("secrets/key.txt")), "s3cret")
-    assert(access("secrets/key.txt").isClassified)
-    intercept[SecurityException](access("secrets/key.txt").size)
+    assert(e.getMessage.nn.contains("classified { ... } block"))
+    assertEquals(ClassifiedImpl.get(inBlock(read("secrets/key.txt"))), "s3cret")
+    assert(handle("secrets/key.txt").isClassified)
+    intercept[SecurityException](handle("secrets/key.txt").size)
     // the classified dir itself is visible in its parent, but not enterable
     val top = ls(".").map(p => Path.of(p).getFileName.toString)
     assert(top.contains("secrets"))
     assert(!top.contains("private"), top.toString) // no access -> invisible
     intercept[SecurityException](ls("secrets"))
-    val inside = ClassifiedImpl.get(access("secrets").childrenClassified).map(p => Path.of(p).getFileName.toString)
+    val inside = ClassifiedImpl.get(inBlock(ls("secrets"))).map(p => Path.of(p).getFileName.toString)
     assertEquals(inside.sorted, List("key.txt", "sub"))
     val walked = walk(".").map(rel)
     assert(walked.contains("secrets"))
     assert(!walked.exists(_.startsWith("secrets/")), walked.toString)
     assert(!walked.exists(_.startsWith("private")))
-    val walkedC = ClassifiedImpl.get(access(".").walkClassified()).map(rel)
+    val walkedC = ClassifiedImpl.get(inBlock(walk("."))).map(rel)
     assert(walkedC.contains("secrets/sub/deep.txt"))
 
   test("a denial names the operation the agent called, and reads as a phrase in front of the path"):
@@ -568,7 +576,7 @@ class HostSuite extends munit.FunSuite:
       "cat" -> (() => cat("secrets/key.txt", 1, 2)),
       "readRange" -> (() => readRange("secrets/key.txt", 1, 2)),
       "grep" -> (() => grep("secrets/key.txt", "s")),
-      "forEachLine" -> (() => access("secrets/key.txt").forEachLine((_, _) => ())),
+      "forEachLine" -> (() => handle("secrets/key.txt").forEachLine((_, _) => ())),
     )
     for (operation, call) <- calls do
       val message = intercept[SecurityException](call()).getMessage.nn
@@ -608,7 +616,7 @@ class HostSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("requestExec"))
     decisions = List(Decision.AllowSession)
     assertEquals(requestExec(Set(pattern), "inspect cwd") { exec(pwd).exitCode }, 0)
-    assertEquals(exec(pwd, Nil, root.toString).exitCode, 0) // session grant persists
+    assertEquals(exec(pwd, Nil, ExecOptions(workingDir = root.toString)).exitCode, 0) // session grant persists
 
   test("commands do not inherit the variables that hold provider keys"):
     val envPolicy = Policy(List(rule(".", Some(Access.Read))), List(ProcessFixture.pattern("env")), Nil, prompter)
@@ -749,15 +757,16 @@ class HostSuite extends munit.FunSuite:
     )
     val target = PlatformPath.portable(env.root.resolve("secrets/key.txt"))
     intercept[SecurityException](env.host.read("pub/link.txt"))
-    val listed = env.host.access("pub").children
+    val listed = FileEntryImpl(fs.asInstanceOf[FileSystemImpl], env.host.canonical("pub")).children
     assertEquals(listed.map(_.path), List(target), "a link is listed as its target")
     assert(listed.head.isClassified)
     intercept[SecurityException](listed.head.read())
-    intercept[SecurityException](env.host.access("pub").walk().head.read())
-    // `ls` shows the same canonical path (relative to the root, as listings are), and
-    // `readClassified` stays the way in.
+    intercept[SecurityException](FileEntryImpl(
+      fs.asInstanceOf[FileSystemImpl],
+      env.host.canonical("pub")
+    ).walk().head.read())
+    // `ls` shows the same canonical path (relative to the root, as listings are).
     assertEquals(env.host.ls("pub"), List("secrets/key.txt"))
-    env.host.readClassified(listed.head.path)
 
   test("symlink escaping cwd is judged by its target"):
     val outside = Files.createTempDirectory("atc-link-target").nn.toRealPath().nn
@@ -819,7 +828,7 @@ class HostSuite extends munit.FunSuite:
     assertEquals(walked.count(_ == "real/sub/f.txt"), 1, walked.toString)
     // Evaluate access through the link at its target.
     assertEquals(read("dirlink/sub/f.txt"), "f")
-    assertEquals(access("dirlink/sub/f.txt").path, PlatformPath.portable(root.resolve("real/sub/f.txt")))
+    assertEquals(handle("dirlink/sub/f.txt").path, PlatformPath.portable(root.resolve("real/sub/f.txt")))
 
   test("move of a file onto itself is a no-op"):
     write("self.txt", "data")

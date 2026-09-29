@@ -10,8 +10,6 @@ import scala.util.{Success, Try}
   * rejects catches that could expose those failures or suppress cancellation. */
 final class ClassifiedImpl[+T](val value: Try[T]) extends Classified[T]:
   def map[B](op: T => B): Classified[B] = ClassifiedImpl(value.map(op))
-  def flatMap[B](op: T => Classified[B]): Classified[B] =
-    ClassifiedImpl(value.flatMap(v => ClassifiedImpl.unwrap(op(v))))
   override def toString: String = "Classified(***)"
 
 object ClassifiedImpl:

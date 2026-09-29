@@ -38,8 +38,7 @@ object Prompts:
          |machine-effect root), `given fs: FileSystem^{io.rd}` (read-only) and `given ex: Exec^{io.rd}`, which runs
          |commands only through `execReadOnly` (they read, but write nothing outside their temporary directory). The
          |separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`. Writes, `exec`, `spawn`, network
-         |and writes inside `requestFiles` do not compile ("... cannot subsume a read-only capture set" / "Cannot call
-         |update method");
+         |and writes inside `requestFiles` do not compile ("... cannot subsume a read-only capture set");
          |`requestFiles(path, Access.Read, reason) { ... }` can still ask to read more (it grants a read-only file system here,
          |matching your `fs`).
          |Do not try to work around this: explain what you would change and let the user switch to local or
@@ -217,15 +216,14 @@ object Prompts:
        |Sandbox rules
        |$safeModeRules
        |- In every mode, ambient file/network/process APIs, reflection, unsafe System operations, and new threads are forbidden.
-       |- Capability types carry a read/write mode (the API header explains `^`, `update def` and
-       |  `.rd`): a helper that writes must say `(using fs: FileSystem^)`, and
+       |- Capability types carry a read/write mode (the API header explains `^` and `.rd`): a helper
+       |  that writes must say `(using fs: FileSystem^)`, and
        |  `val ro: FileSystem^{fs.rd} = fs` is a read-only view for code that must not write (it can
        |  also read files inside `Classified.map`, where the full `fs` may not be captured). A helper
        |  that runs commands must require both `(using ex: Exec^, fs: FileSystem^)`.
-       |- Prefer the path-based helpers (`read`, `write`, `ls`, `walk`, `exists`, ...) over
-       |  `access(...)` handles. A top-level `val` holding a capturing value (`FileEntry`, `Process`)
-       |  needs an explicit type (`val e: FileEntry^{fs} = access("x")`, `val p: Process^{ex} = spawn("...")`);
-       |  `def`s and inline expressions are always fine. A top-level lambda capturing `println` needs an explicit type;
+       |- A top-level `val` holding a capturing value (a `Process`, a closure that prints) needs an
+       |  explicit type (`val p: Process^{ex} = spawn("...")`); `def`s and inline expressions are
+       |  always fine. A top-level lambda capturing `println` needs an explicit type;
        |  use a `def` when that is simpler.
        |- Prefer `readRange(path, from, to)` and `search(dir, regex, glob, SearchOptions(...))` for
        |  large files or repositories. Check the search result's `limited` flag and narrow the search
@@ -234,12 +232,12 @@ object Prompts:
        |  a bare `catch case _ =>`, and any use of `InterruptedException`/`ThreadDeath` are rejected.
        |  Catch a specific type instead, e.g. `catch case _: Exception` (or a `RuntimeException` subtype);
        |  a fatal error aborts the run by design.$nonFatalNote
-       |- Classified data (`readClassified`, `Classified[T]`): you never see the content; only `map`
-       |  with a pure function compiles (no effect, no capability, a read-only `fs` being the one
-       |  exception); the ways out are in the `Classified` doc below (`println` shows it to the user
-       |  only, `writeClassified`, `classifiedChat`). The classified model is assumed isolated and
-       |  effect-free, so `classifiedChat(String)` is deliberately capability-free and may run inside `map`;
-       |  `classifiedChat(Classified[String])` maps that operation while keeping the answer classified.
+       |- Classified data (`Classified[T]`): you never see the content. Work on it inside a
+       |  `classified { ... }` block, which reads classified files, runs sealed commands, opens values
+       |  with `reveal` and returns a `Classified` result, or with `map` and a pure function. The ways
+       |  out are in the `Classified` doc below (`println` shows it to the user only, classified files,
+       |  `classifiedChat`); it never reaches the network. The classified model is assumed isolated and
+       |  effect-free, so `classifiedChat(String)` is capability-free and may run inside the block or `map`.
        |  Do not try to infer content through
        |  secret-dependent exceptions, nontermination, timeouts, timing or resource consumption.
        |

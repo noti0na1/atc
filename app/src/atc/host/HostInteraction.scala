@@ -101,7 +101,7 @@ private[host] trait HostInteraction:
   /** The block runs in a sealed scope below the file system's, closed with its processes at
     * the end; everything done in that scope stays classified (see `Policy.openSealedScope`).
     * A failure becomes the value's; fatal errors and interruption escape. */
-  def classified[T, C <: caps.CapSet](using
+  def classified[T](using
     fs: FileSystem,
     ex: Exec
   )(op: (Sealed, FileSystem, Exec) ?=> T)
@@ -115,7 +115,6 @@ private[host] trait HostInteraction:
 
   def chat(message: String)(using UserIO): String = llm.chat(message)
   def classifiedChat(message: String): String = llm.classifiedChat(message)
-  def classifiedChat(message: Classified[String]): Classified[String] = message.map(classifiedChat)
 
 private[atc] object HostInteraction:
   /** The most characters task notes may hold, counted over all their entries. */

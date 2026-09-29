@@ -13,8 +13,7 @@ import scala.util.control.NonFatal
 // which checks it as it checks in-process calls; capabilities travel as the host's scope ids.
 // Classified values, callback results and parallel tasks stay here.
 
-private[evaluator] final class RemoteFileSystem(val scope: Long, host: RemoteHost) extends FileSystem:
-  def access(path: String): FileEntry = host.access(path)(using this)
+private[evaluator] final class RemoteFileSystem(val scope: Long, host: RemoteHost) extends FileSystem
 
 /** `network` is the scope of the `Network` a `withNetwork` block derived it from. */
 private[evaluator] final class RemoteExec(val scope: Long, val network: Option[Long]) extends Exec
@@ -22,8 +21,6 @@ private[evaluator] final class RemoteNetwork(val scope: Long) extends Network
 
 private[evaluator] final class RemoteClassified[+T](val value: Try[T]) extends Classified[T]:
   def map[B](op: T => B): Classified[B] = RemoteClassified(value.map(op))
-  def flatMap[B](op: T => Classified[B]): Classified[B] =
-    RemoteClassified(value.flatMap(v => RemoteClassified.unwrap(op(v))))
   override def toString: String = "Classified(***)"
 
 private[evaluator] object RemoteClassified:
@@ -33,32 +30,6 @@ private[evaluator] object RemoteClassified:
 
 /** Raised in the host when a callback failed here; the original throwable stays here. */
 private[evaluator] final class CallbackFailed extends RuntimeException("the callback failed in the evaluator")
-
-private[evaluator] final class RemoteFileEntry(fs: RemoteFileSystem, val path: String, host: RemoteHost)
-    extends FileEntry:
-  private def call(op: String)(args: Encoder => Unit): Decoder =
-    host.channel.call("entry." + op) { e => e.long(fs.scope).string(path); args(e) }
-  private def call(op: String): Decoder = call(op)(_ => ())
-  def name: String = call("name").string()
-  def exists: Boolean = call("exists").bool()
-  def isDirectory: Boolean = call("isDirectory").bool()
-  def isClassified: Boolean = call("isClassified").bool()
-  def size: Long = call("size").long()
-  def read(): String = call("read").string()
-  def readBytes(): Array[Byte] = call("readBytes").bytes()
-  def readLines(): List[String] = call("readLines").strings()
-  def forEachLine(op: (String, Int) => Unit): Unit = readLines().zipWithIndex.foreach((line, i) => op(line, i + 1))
-  def write(content: String): Unit = call("write")(_.string(content))
-  def writeBytes(content: Array[Byte]): Unit = call("writeBytes")(_.bytes(content))
-  def append(content: String): Unit = call("append")(_.string(content))
-  def delete(): Unit = call("delete")
-  def mkdir(): Unit = call("mkdir")
-  def children: List[FileEntry] = call("children").strings().map(RemoteFileEntry(fs, _, host))
-  def walk(): List[FileEntry] = call("walk").strings().map(RemoteFileEntry(fs, _, host))
-  def readClassified(): Classified[String] = host.decodeClassified(call("readClassified"))
-  def writeClassified(content: Classified[String]): Unit = call("writeClassified")(host.encodeClassified(_, content))
-  def childrenClassified: Classified[List[String]] = host.decodeClassifiedList(call("childrenClassified"))
-  def walkClassified(): Classified[List[String]] = host.decodeClassifiedList(call("walkClassified"))
 
 private[evaluator] final class RemoteProcess(val id: Int, val commandLine: String, scope: Long, host: RemoteHost)
     extends Process:
@@ -108,16 +79,9 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
   // A failed classified value crosses with its message, which only the user's view renders.
-  def encodeClassified(e: Encoder, content: Classified[String]): Unit = RemoteClassified.unwrap(content) match
+  private def encodeClassified(e: Encoder, content: Classified[String]): Unit = RemoteClassified.unwrap(content) match
     case Success(value) => e.bool(true).string(value)
     case Failure(error) => e.bool(false).string(Option(error.getMessage).getOrElse(error.toString))
-  def decodeClassified(d: Decoder): Classified[String] =
-    if d.bool() then RemoteClassified(Success(d.string())) else RemoteClassified(Failure(RuntimeException(d.string())))
-  def decodeClassifiedList(d: Decoder): Classified[List[String]] =
-    if d.bool() then RemoteClassified(Success(d.strings())) else RemoteClassified(Failure(RuntimeException(d.string())))
-  private def encodeSecrets(e: Encoder, secrets: Map[String, Classified[String]]): Unit =
-    e.int(secrets.size)
-    secrets.foreach((name, value) => { e.string(name); encodeClassified(e, value) })
   private def encodeOptions(e: Encoder, o: ExecOptions): Unit = e.string(o.workingDir).long(o.timeoutMs).string(o.stdin)
   private def decodeResult(d: Decoder): ProcessResult = ProcessResult(d.int(), d.string(), d.string())
   private def decodeMatches(d: Decoder): List[GrepMatch] =
@@ -173,11 +137,8 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     withCallback("requestFiles")(_.long(scopeOf(parent)).string(path).int(access.ordinal).string(reason)): scope =>
       op(using RemoteFileSystem(scope, this))
 
-  def access(path: String)(using fs: FileSystem): FileEntry =
-    val remote = fs match
-      case r: RemoteFileSystem => r
-      case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
-    RemoteFileEntry(remote, call("access")(_.long(remote.scope).string(path)).string(), this)
+  def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
+    call("writeClassified") { e => e.long(scopeOf(fs)).string(path); encodeClassified(e, content) }
   def read(path: String)(using fs: FileSystem): String = call("read")(_.long(scopeOf(fs)).string(path)).string()
   def readLines(path: String)(using fs: FileSystem): List[String] =
     call("readLines")(_.long(scopeOf(fs)).string(path)).strings()
@@ -229,10 +190,6 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     SearchResult(decodeMatches(d), d.int(), d.bool())
   def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
     call("find")(_.long(scopeOf(fs)).string(dir).string(glob)).strings()
-  def readClassified(path: String)(using fs: FileSystem): Classified[String] =
-    decodeClassified(call("readClassified")(_.long(scopeOf(fs)).string(path)))
-  def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
-    call("writeClassified") { e => e.long(scopeOf(fs)).string(path); encodeClassified(e, content) }
 
   // ── commands ──
   def requestExec[T](commands: Iterable[String])(op: Exec ?=> T)(using UserIO, Exec): T = requestExec(commands, "")(op)
@@ -243,8 +200,6 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   def exec(command: String)(using Exec, FileSystem): ProcessResult = exec(command, Nil, ExecOptions())
   def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
     exec(command, args, ExecOptions())
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec, FileSystem): ProcessResult =
-    exec(command, args, ExecOptions(workingDir = workingDir))
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
     runCommand("exec", command, args, options, ex, fs)
   def execOutput(command: String)(using Exec, FileSystem): String = execOutput(command, Nil, ExecOptions())
@@ -304,74 +259,32 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     body: Option[String],
     contentType: Option[String],
     headers: Map[String, String],
-    secrets: Option[Map[String, Classified[String]]],
     net: Network,
   ): Decoder =
     paused(call("http") { e =>
       e.long(scopeOf(net)).string(form).string(method).string(url).optionalString(body).optionalString(contentType)
-      e.stringMap(headers).bool(secrets.isDefined)
-      secrets.foreach(encodeSecrets(e, _))
+      e.stringMap(headers)
     })
-  def httpGet(url: String)(using net: Network): String = http("get", "GET", url, None, None, Map(), None, net).string()
+  def httpGet(url: String)(using net: Network): String = http("get", "GET", url, None, None, Map(), net).string()
   def httpGet(url: String, headers: Map[String, String])(using net: Network): String =
-    http("get", "GET", url, None, None, headers, None, net).string()
-  def httpGet(url: String, headers: Map[String, String], secretHeaders: Map[String, Classified[String]])(using
-    net: Network
-  ): Classified[String] = decodeClassified(http("get", "GET", url, None, None, headers, Some(secretHeaders), net))
+    http("get", "GET", url, None, None, headers, net).string()
   def httpPost(url: String, body: String)(using net: Network): String =
-    http("post", "POST", url, Some(body), None, Map(), None, net).string()
+    http("post", "POST", url, Some(body), None, Map(), net).string()
   def httpPost(url: String, body: String, contentType: String)(using net: Network): String =
-    http("post", "POST", url, Some(body), Some(contentType), Map(), None, net).string()
+    http("post", "POST", url, Some(body), Some(contentType), Map(), net).string()
   def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using
     net: Network
   ): String =
-    http("post", "POST", url, Some(body), Some(contentType), headers, None, net).string()
-  def httpPost(
-    url: String,
-    body: String,
-    contentType: String,
-    headers: Map[String, String],
-    secretHeaders: Map[String, Classified[String]],
-  )(using net: Network): Classified[String] =
-    decodeClassified(http("post", "POST", url, Some(body), Some(contentType), headers, Some(secretHeaders), net))
+    http("post", "POST", url, Some(body), Some(contentType), headers, net).string()
   def httpRequest(method: String, url: String)(using net: Network): HttpResponse =
-    response(http("request", method, url, None, None, Map(), None, net))
+    response(http("request", method, url, None, None, Map(), net))
   def httpRequest(method: String, url: String, body: String)(using net: Network): HttpResponse =
-    response(http("request", method, url, Some(body), None, Map(), None, net))
+    response(http("request", method, url, Some(body), None, Map(), net))
   def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using
     net: Network
   ): HttpResponse =
-    response(http("request", method, url, Some(body), None, headers, None, net))
-  def httpRequest(
-    method: String,
-    url: String,
-    body: String,
-    headers: Map[String, String],
-    secretHeaders: Map[String, Classified[String]],
-  )(using net: Network): Classified[HttpResponse] =
-    val d = http("request", method, url, Some(body), None, headers, Some(secretHeaders), net)
-    if d.bool() then RemoteClassified(Success(HttpResponse(d.int(), d.string())))
-    else RemoteClassified(Failure(RuntimeException(d.string())))
+    response(http("request", method, url, Some(body), None, headers, net))
   private def response(d: Decoder): HttpResponse = HttpResponse(d.int(), d.string())
-  def httpPostClassified(url: String, body: Classified[String])(using net: Network): Classified[String] =
-    httpPostClassified(url, body, "application/json", Map(), Map())
-  def httpPostClassified(url: String, body: Classified[String], contentType: String)(using
-    net: Network
-  ): Classified[String] =
-    httpPostClassified(url, body, contentType, Map(), Map())
-  def httpPostClassified(
-    url: String,
-    body: Classified[String],
-    contentType: String,
-    headers: Map[String, String],
-    secretHeaders: Map[String, Classified[String]],
-  )(using net: Network): Classified[String] =
-    decodeClassified(paused(call("httpPostClassified") { e =>
-      e.long(scopeOf(net)).string(url)
-      encodeClassified(e, body)
-      e.string(contentType).stringMap(headers)
-      encodeSecrets(e, secretHeaders)
-    }))
 
   // ── concurrency: tasks are closures here; each task thread is its own conversation ──
   def parallel[A, C <: caps.CapSet](tasks: Seq[() => A]): List[A] =
@@ -441,7 +354,7 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   def classify[T](value: T): Classified[T] = RemoteClassified(Success(value))
 
   // The block runs here; the host opens and closes its sealed scope, and the result stays here.
-  def classified[T, C <: caps.CapSet](using
+  def classified[T](using
     fs: FileSystem,
     ex: Exec
   )(op: (Sealed, FileSystem, Exec) ?=> T)
@@ -454,8 +367,6 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   // ── models: the clients and their keys stay in the host ──
   def chat(message: String)(using UserIO): String = paused(call("chat")(_.string(message))).string()
   def classifiedChat(message: String): String = paused(call("classifiedChat")(_.string(message))).string()
-  def classifiedChat(message: Classified[String]): Classified[String] =
-    decodeClassified(paused(call("classifiedChatClassified")(encodeClassified(_, message))))
 
 private[evaluator] object RemoteHost:
   val MaxParallel: Int = 8

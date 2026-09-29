@@ -28,22 +28,13 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
     channel.call("callback")(_.long(id).long(scopeOf(capability)))
     ()
 
-  private def classified[T](e: Encoder, value: Classified[T])(encode: (Encoder, T) => Unit): Unit =
-    ClassifiedImpl.unwrap(value) match
-      case Success(plain) => encode(e.bool(true), plain)
-      case Failure(error) => e.bool(false).string(Option(error.getMessage).getOrElse(error.toString))
   private def classifiedIn(d: Decoder): Classified[String] =
     if d.bool() then ClassifiedImpl.wrap(d.string()) else ClassifiedImpl.fromTry(Failure(RuntimeException(d.string())))
-  private def secrets(d: Decoder): Map[String, Classified[String]] =
-    List.fill(d.int())((d.string(), classifiedIn(d))).toMap
   private def options(d: Decoder): ExecOptions = ExecOptions(d.string(), d.long(), d.string())
   private def matches(e: Encoder, found: List[GrepMatch]): Unit =
     e.int(found.size)
     found.foreach(m => e.string(m.file).int(m.lineNumber).string(m.line))
   private def result(e: Encoder, r: ProcessResult): Unit = e.int(r.exitCode).string(r.stdout).string(r.stderr)
-  private def entry(d: Decoder): FileEntry =
-    val scope = d.long()
-    host.access(d.string())(using fs(scope))
   private def process(d: Decoder): ProcessImpl =
     val caller = ScopeId.fromLong(d.long())
     Option(processes.get(d.int())).filter(p => host.policy.scopeVisibleFrom(caller, p.scope)).getOrElse:
@@ -79,7 +70,8 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
         host.classified(using fs(fsScope), ex(exScope, None))((_: Sealed, f: FileSystem, _: Exec) ?=>
           callback(id, f.asInstanceOf[Scoped])
         )
-      case "access" => val s = d.long(); r.string(host.access(d.string())(using fs(s)).path)
+      case "writeClassified" =>
+        val (s, path) = (d.long(), d.string()); host.writeClassified(path, classifiedIn(d))(using fs(s))
       case "read" => val s = d.long(); r.string(host.read(d.string())(using fs(s)))
       case "readLines" => val s = d.long(); r.strings(host.readLines(d.string())(using fs(s)))
       case "readRange" => val s = d.long(); r.string(host.readRange(d.string(), d.int(), d.int())(using fs(s)))
@@ -115,30 +107,7 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
         matches(r, found.matches)
         r.int(found.filesScanned).bool(found.limited)
       case "find" => val s = d.long(); r.strings(host.find(d.string(), d.string())(using fs(s)))
-      case "readClassified" =>
-        val s = d.long(); classified(r, host.readClassified(d.string())(using fs(s)))(_.string(_))
-      case "writeClassified" =>
-        val (s, path) = (d.long(), d.string()); host.writeClassified(path, classifiedIn(d))(using fs(s))
       // ── file entries: re-derived from the scope and path on every call ──
-      case "entry.name" => r.string(entry(d).name)
-      case "entry.exists" => r.bool(entry(d).exists)
-      case "entry.isDirectory" => r.bool(entry(d).isDirectory)
-      case "entry.isClassified" => r.bool(entry(d).isClassified)
-      case "entry.size" => r.long(entry(d).size)
-      case "entry.read" => r.string(entry(d).read())
-      case "entry.readBytes" => r.bytes(entry(d).readBytes())
-      case "entry.readLines" => r.strings(entry(d).readLines())
-      case "entry.write" => val e = entry(d); e.write(d.string())
-      case "entry.writeBytes" => val e = entry(d); e.writeBytes(d.bytes())
-      case "entry.append" => val e = entry(d); e.append(d.string())
-      case "entry.delete" => entry(d).delete()
-      case "entry.mkdir" => entry(d).mkdir()
-      case "entry.children" => r.strings(entry(d).children.map(_.path))
-      case "entry.walk" => r.strings(entry(d).walk().map(_.path))
-      case "entry.readClassified" => classified(r, entry(d).readClassified())(_.string(_))
-      case "entry.writeClassified" => val e = entry(d); e.writeClassified(classifiedIn(d))
-      case "entry.childrenClassified" => classified(r, entry(d).childrenClassified)(_.strings(_))
-      case "entry.walkClassified" => classified(r, entry(d).walkClassified())(_.strings(_))
       // ── commands ──
       case "requestExec" =>
         val (scope, network) = (d.long(), d.optionalLong())
@@ -192,36 +161,16 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
       case "http" =>
         val (scope, form, method, url) = (d.long(), d.string(), d.string(), d.string())
         val (body, contentType, headers) = (d.optionalString(), d.optionalString(), d.stringMap())
-        val secret = if d.bool() then Some(secrets(d)) else None
         given Network = net(scope)
-        (form, secret) match
-          case ("get", None) => r.string(host.httpGet(url, headers))
-          case ("get", Some(s)) => classified(r, host.httpGet(url, headers, s))(_.string(_))
-          case ("post", None) =>
+        form match
+          case "get" => r.string(host.httpGet(url, headers))
+          case "post" =>
             val text = body.getOrElse("")
             r.string(contentType.fold(host.httpPost(url, text))(host.httpPost(url, text, _, headers)))
-          case ("post", Some(s)) =>
-            classified(
-              r,
-              host.httpPost(url, body.getOrElse(""), contentType.getOrElse("application/json"), headers, s)
-            )(
-              _.string(_)
-            )
-          case ("request", None) =>
+          case "request" =>
             val response = body.fold(host.httpRequest(method, url))(host.httpRequest(method, url, _, headers))
             r.int(response.status).string(response.body)
-          case ("request", Some(s)) =>
-            classified(r, host.httpRequest(method, url, body.getOrElse(""), headers, s))((e, res) =>
-              e.int(res.status).string(res.body)
-            )
           case _ => throw IllegalArgumentException(s"unknown request form $form")
-      case "httpPostClassified" =>
-        val (scope, url, body, contentType, headers) =
-          (d.long(), d.string(), classifiedIn(d), d.string(), d.stringMap())
-        classified(
-          r,
-          host.httpPostClassified(url, body, contentType, headers, secrets(d))(using net(scope))
-        )(_.string(_))
       // ── the user, notes and models ──
       case "ask" => r.optionalString(host.ask(d.string(), d.strings(), d.bool()))
       case "setTodos" => host.setTodos(List.fill(d.int())(Todo(d.string(), TodoStatus.fromOrdinal(d.int()))))
@@ -236,6 +185,5 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
         r.string(notes.goal).strings(notes.constraints).strings(notes.completed).strings(notes.remaining)
       case "chat" => r.string(host.chat(d.string()))
       case "classifiedChat" => r.string(host.classifiedChat(d.string()))
-      case "classifiedChatClassified" => classified(r, host.classifiedChat(classifiedIn(d)))(_.string(_))
       case other => throw UnsupportedOperationException(s"unknown call $other")
     r.result

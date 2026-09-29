@@ -42,7 +42,7 @@ class PromptsSuite extends munit.FunSuite:
     // `Prompts.interfaceSource` falls back to "(API reference unavailable)" when the
     // packaged resource is missing, so this checks that packaging succeeded.
     val source = Prompts.interfaceSource
-    assert(source.contains("def httpPostClassified"), source.take(200))
+    assert(source.contains("def classified[T]"), source.take(200))
     assert(!source.contains("API reference unavailable"), "the Interface.scala resource was not bundled")
 
   test("with auto on, the model is told that permission requests are rejected without asking"):

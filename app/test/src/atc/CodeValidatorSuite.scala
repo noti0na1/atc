@@ -130,7 +130,7 @@ class CodeValidatorSuite extends munit.FunSuite:
       requestFiles("/tmp", Access.Write, "cache") { write("/tmp/x", read("a.txt")) }
       requestExec(Set("git status")) { println(exec("git", List("status")).stdout) }
       requestNetwork(Set("example.com")) { httpGet("https://example.com") }
-      readClassified("secrets/k").map(_.trim)
+      classified { read("secrets/k").trim }
       setTodos(List(Todo("a"))); markTodo("a", TodoStatus.Done); ask("q", List("x"))
     """)
   test("allow Thread.currentThread and threadless names containing 'Thread'"):

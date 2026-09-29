@@ -30,22 +30,20 @@ the compiler, the host and the OS are all part of the trusted implementation. Se
 Here is a request, the Scala code the agent wrote, the program output, and the final answer:
 
 ```scala
-> which methods in the library can mutate a file?
+> which API methods can change a file?
 
 ● run_scala
-  │ grepRecursive("lib/src", "^\\s+update def", "*.scala")
-  │   .foreach(m => println(s"${m.lineNumber}  ${m.line.trim}"))
-  ├ output
-  │ 114  update def write(content: String): Unit
-  │ 115  update def writeBytes(content: Array[Byte]): Unit
-  │ 116  update def append(content: String): Unit
-  │ 117  update def delete(): Unit
-  │ 119  update def mkdir(): Unit
-  │ 129  update def writeClassified(content: Classified[String]): Unit
-  └ ok 121 ms
+  │ grepRecursive("lib/src", "using FileSystem\\^", "*.scala")
+  │   .map(m => m.line.trim.stripPrefix("def ").takeWhile(_ != '('))
+  │   .mkString(", ")
+  ├ result
+  │ val res0: String = write, writeBytes, move, copy, sed, replaceExact, replaceLines,
+  │   insertLines, append, mkdir, delete, writeClassified
+  └ ok 118 ms
 
-● Six of them: write, writeBytes, append, delete, mkdir and writeClassified. They are
-  declared `update`, so they can only be called through a full `FileSystem^`.
+● Twelve: write, writeBytes, move, copy, sed, replaceExact, replaceLines, insertLines,
+  append, mkdir, delete and writeClassified. Each asks for a full `FileSystem^`, so none
+  of them can be called through a read-only one.
 ```
 
 `grepRecursive` and `println` are not strings ATC parses: they are methods of
@@ -54,8 +52,8 @@ The snippet was compiled before it ran. The REPL keeps its state between snippet
 `val` defined in one turn is still there in the next.
 
 In **read-only mode** the same agent cannot express the write. The sandbox provides a
-read-only file system, and `write` is an `update` method that requires a full view. The
-compiler rejects the call, and the agent explains why:
+read-only file system, and `append` asks for a full one. The compiler rejects the call,
+and the agent explains why:
 
 ```scala
 read-only > add a "review the tests" item to TODO.md
@@ -204,7 +202,6 @@ snippet's capture set shows whether its commands can reach a host.
 |---|---|---|
 | `IOCap` | nothing by itself; it is the root the others are derived from | the preamble (`given io`) |
 | `FileSystem` | `read`, `ls`, `walk`, `grep`, …; `write`, `append`, `delete`, `mkdir` need a full one | the preamble's `fs` (derived from `io` by the sandbox; `val ro: FileSystem^{fs.rd} = fs` is a read-only view) |
-| `FileEntry` | a handle to one file or directory; as capable as the `FileSystem` it came from | `access(path)` |
 | `Exec` | running commands: `exec`/`spawn` with a full `FileSystem^`, `execReadOnly` with a read-only one; `withNetwork` adds the network | the preamble's `ex` (every mode; read-only mode's runs only `execReadOnly`) |
 | `Network` | HTTP requests | the preamble's `net` (full mode) |
 | `UserIO` | printing, questions, the TODO list, and normal-model `chat` | the preamble (`given user`), always full |
@@ -217,21 +214,22 @@ conversation, not on the machine, so it survives when the agent may touch nothin
 Each capability type has two views, following the nightly compiler's
 [mutable-capability model](https://nightly.scala-lang.org/docs/reference/experimental/capture-checking/mutability.html):
 the **bare** type (`FileSystem`, `IOCap`) is the **read-only** view; `^`, or `^{io}` ("as
-capable as `io`"), is the **full** view. The mutating operations are declared `update def`
-in the library, and an `update` method can only be called through a full capture set. This
-rule turns "read-only" from a runtime check into a typing rule:
+capable as `io`"), is the **full** view. An operation that changes something asks for the
+full view in its signature (`write(path, text)(using FileSystem^)`), and a read-only view
+cannot be passed there. This rule turns "read-only" from a runtime check into a typing rule:
 
 ```scala
-val e: FileEntry^{fs} = fs.access("notes.md")   // as capable as `fs` itself
-e.read()                                       // fine through either view
-e.write("hello")                               // only if `fs` is the full view
+val ro: FileSystem^{fs.rd} = fs         // a read-only view of `fs`
+read("notes.md")(using ro)              // fine through either view
+write("notes.md", "hello")(using ro)    // does not compile
 ```
 
-With a read-only `fs`, the compiler rejects the final line directly:
+The compiler rejects the final line directly:
 
 ```
-Cannot call update method write of e
-since its capture set {e} is read-only.
+Found:    (ro : FileSystem^{fs.rd})
+Required: FileSystem^{any}
+… it cannot subsume a read-only capture set of the stateful type
 ```
 
 The restriction also propagates into your own helpers, so a `def` that writes must declare
@@ -249,18 +247,18 @@ that escapes it.
 ### Classified data
 
 Capabilities constrain *effects*. Confidential content follows a second, independent set
-of rules: `readClassified(path)` returns a `Classified[String]`, whose `map` and `flatMap`
-take a function that may capture **read-only** capabilities only (`T ->{any.rd} B`). Every
-untrusted outward channel needs a *full* one (`println`/`ask`/normal-model `chat` need
-`UserIO^`, `write` needs `FileSystem^`, `exec` needs both `Exec^` and `FileSystem^`, and
-`httpGet` needs `Network^`), so none of them can appear inside a `map`. The agent can compute
-on a secret but never see it; `toString` is
-`Classified(***)`. The output paths are `println` (you see the
-value in the terminal, marked `[classified]`; the model sees `Classified(***)`),
-`writeClassified` into a classified path, `classifiedChat` with the configured classified
-model, and `httpPostClassified` / `secretHeaders` to an allow-listed host. A response to a
-request carrying classified content stays `Classified`, so a peer cannot reflect a secret
-header or body back into a plain model-visible value.
+of rules. A `classified { ... }` block works on secrets and returns its result as a
+`Classified` value: inside it the agent reads classified files, opens other classified
+values with `reveal`, and runs commands with `execReadOnly` that may read classified files
+but reach no network and write nothing. The block may capture only **read-only**
+capabilities from outside, and every untrusted outward channel needs a *full* one
+(`println`/`ask`/normal-model `chat` need `UserIO^`, `write` needs `FileSystem^`, `httpGet`
+needs `Network^`), so none of them can appear inside; nothing the block does persists.
+`map` computes on a value with a pure function. The agent can compute on a secret but never
+see it; `toString` is `Classified(***)`. The output paths are `println` (you see the value
+in the terminal, marked `[classified]`; the model sees `Classified(***)`), `writeClassified`
+into a classified path, and `classifiedChat` with the configured classified model;
+classified content never reaches the network.
 
 In this example `secrets/` is classified in the project config, and the agent is asked a
 question about a key it must never see:
@@ -269,7 +267,7 @@ question about a key it must never see:
 > secrets/api.env holds our vendor key. Is it a live key? They start with "sk-live".
 
 ● run_scala
-  │ val key = readClassified("secrets/api.env")
+  │ val key = classified { read("secrets/api.env") }
   │ val live = key.map(_.trim.stripPrefix("API_KEY=").startsWith("sk-live"))
   ├ result
   │ val key: Classified[String] = Classified(***)

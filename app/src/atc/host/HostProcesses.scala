@@ -47,9 +47,6 @@ private[host] trait HostProcesses:
   def exec(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
     exec(command, args, ExecOptions())
 
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec, FileSystem): ProcessResult =
-    exec(command, args, ExecOptions(workingDir = workingDir))
-
   /** A command line ready to start: parsed, authorized, and represented as one
     * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
   /** `sealedBlock`: started in a `classified` block, whose output stays classified. */
@@ -96,17 +93,17 @@ private[host] trait HostProcesses:
 
   private def commandDirectory(path: String, fs: FileSystem): Path =
     val dir = canonical(path)
-    requireReadable(scopeOf(fs), dir, "running a command in", "a working directory outside it")
+    requireReadable(scopeOf(fs), dir, "running a command in")
     dir
 
   private def inputRedirect(path: String, fs: FileSystem): Path =
     val input = canonical(path)
-    requireReadable(scopeOf(fs), input, "feeding a command from", "an unclassified file")
+    requireReadable(scopeOf(fs), input, "feeding a command from")
     input
 
   private def outputRedirect(path: String, fs: FileSystem): Path =
     val target = canonical(path)
-    requireWritable(scopeOf(fs), target, "redirecting a command's output to", "an unclassified file")
+    requireWritable(scopeOf(fs), target, "redirecting a command's output to")
     ensureParent(target)
     target
 

@@ -36,11 +36,9 @@ private[host] trait HostFiles:
     inScope(policy.requestFile(scopeOf(parent), canonical(path), requestedAccess, reason)): id =>
       op(using FileSystemImpl(id, this))
 
-  def access(path: String)(using fs: FileSystem): FileEntry = fs.access(path)
+  def read(path: String)(using fs: FileSystem): String = handle(path).read()
 
-  def read(path: String)(using fs: FileSystem): String = fs.access(path).read()
-
-  def readLines(path: String)(using fs: FileSystem): List[String] = fs.access(path).readLines()
+  def readLines(path: String)(using fs: FileSystem): List[String] = handle(path).readLines()
 
   def readRange(path: String, from: Int, to: Int)(using fs: FileSystem): String =
     if from < 1 || to < from || to.toLong - from >= 1000 then
@@ -49,10 +47,9 @@ private[host] trait HostFiles:
       )
     val lines = List.newBuilder[String]
     val limited =
-      impl(fs.access(path)).scanLines("readRange", Host.CatMaxLineChars, Host.ReadRangeMaxChars):
-        (line, chars, number) =>
-          if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
-          number < to
+      handle(path).scanLines("readRange", Host.CatMaxLineChars, Host.ReadRangeMaxChars): (line, chars, number) =>
+        if number >= from then lines += (if chars > line.length then s"$line ... [line truncated]" else line)
+        number < to
     if limited then lines += "[read limit reached before completing the requested range]"
     lines.result().mkString("\n")
 
@@ -60,7 +57,7 @@ private[host] trait HostFiles:
     * so a large file or line is never loaded whole: only the shown prefixes
     * are kept. */
   def cat(path: String)(using fs: FileSystem, user: UserIO): Unit =
-    val entry = impl(fs.access(path))
+    val entry = handle(path)
     val kept = mutable.ListBuffer[CappedLine]()
     var lineCount = 0
     val cut = entry.scanLines("cat", Host.CatMaxLineChars, Host.CatMaxReadChars): (prefix, chars, number) =>
@@ -84,7 +81,7 @@ private[host] trait HostFiles:
   def cat(path: String, from: Int, to: Int)(using fs: FileSystem, user: UserIO): Unit =
     if from < 1 || to < from then
       throw IllegalArgumentException(s"cat: the range must satisfy 1 <= from <= to (got $from, $to)")
-    val entry = impl(fs.access(path))
+    val entry = handle(path)
     val kept = mutable.ListBuffer[CappedLine]()
     val last = to.toLong.min(from.toLong + Host.CatMaxLines - 1).toInt
     var lineCount = 0
@@ -114,43 +111,42 @@ private[host] trait HostFiles:
       result.append(f"${first + index}%6d\t").append(shown).append('\n')
     result.toString
 
-  def readBytes(path: String)(using fs: FileSystem): Array[Byte] = fs.access(path).readBytes()
+  def readBytes(path: String)(using fs: FileSystem): Array[Byte] = handle(path).readBytes()
 
-  def write(path: String, content: String)(using fs: FileSystem): Unit = fs.access(path).write(content)
+  def write(path: String, content: String)(using fs: FileSystem): Unit = handle(path).write(content)
 
   def writeBytes(path: String, content: Array[Byte])(using fs: FileSystem): Unit =
-    fs.access(path).writeBytes(content)
+    handle(path).writeBytes(content)
 
   /** Move through checked primitives so the operation grants no extra access.
     * Streamed: a large file is copied in chunks rather than read whole. */
   def move(from: String, to: String)(using fs: FileSystem): Unit =
-    val source = impl(fs.access(from))
+    val source = handle(from)
     if source.isDirectory then
       throw IllegalArgumentException(s"move: '$from' is a directory; move its files and mkdir/delete the directories")
-    val target = impl(fs.access(to))
+    val target = handle(to)
     if source.path != target.path then
       requireWrite(scopeOf(fs), source.canonicalPath, "move")
       Using.resource(source.openRead())(in => target.writeFrom(source, in))
       source.delete()
 
   def copy(from: String, to: String)(using fs: FileSystem): Unit =
-    val source = impl(fs.access(from))
+    val source = handle(from)
     if source.isDirectory then
       throw IllegalArgumentException(s"copy: '$from' is a directory; copy its files one by one")
-    Using.resource(source.openRead())(in => impl(fs.access(to)).writeFrom(source, in))
+    Using.resource(source.openRead())(in => handle(to).writeFrom(source, in))
 
-  /** The host's own [[FileEntry]] implementation; agent code cannot supply
-    * another, so the cast is safe and keeps streaming helpers off the public API. */
-  private def impl(entry: FileEntry): FileEntryImpl = entry match
-    case e: FileEntryImpl => e
-    case other => throw SecurityException(s"Unknown FileEntry implementation: ${other.getClass.getName}")
+  /** The checked handle for `path` in `fs`'s scope. */
+  private def handle(path: String)(using fs: FileSystem): FileEntryImpl = fs match
+    case impl: FileSystemImpl => FileEntryImpl(impl, canonical(path))
+    case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
   /** Rewrite every regex match in place and reject an accidental no-op. One
     * pass both counts and rewrites, so a large file is scanned once. */
   def sed(path: String, pattern: String, replacement: String)(using fs: FileSystem): Int =
     if pattern.isEmpty then throw IllegalArgumentException("sed: the pattern must not be empty")
     val regex = Pattern.compile(pattern, Pattern.MULTILINE)
-    val entry = fs.access(path)
+    val entry = handle(path)
     val before = entry.read()
     val javaReplacement = sedReplacement(replacement)
     val rewritten = StringBuffer()
@@ -192,7 +188,7 @@ private[host] trait HostFiles:
 
   def replaceExact(path: String, expected: String, replacement: String)(using fs: FileSystem): Unit =
     if expected.isEmpty then throw IllegalArgumentException("replaceExact: expected text must not be empty")
-    val entry = fs.access(path)
+    val entry = handle(path)
     val before = entry.read()
     val index = before.indexOf(expected)
     if index < 0 then throw IllegalArgumentException("replaceExact: expected text was not found; read the file again")
@@ -201,7 +197,7 @@ private[host] trait HostFiles:
     entry.write(before.substring(0, index) + replacement + before.substring(index + expected.length))
 
   def replaceLines(path: String, from: Int, to: Int, text: String)(using fs: FileSystem): String =
-    val entry = fs.access(path)
+    val entry = handle(path)
     val document = TextFiles.splitLines(entry.read())
     val lines = document.lines
     val lineCount = lines.length
@@ -215,7 +211,7 @@ private[host] trait HostFiles:
     old.mkString(document.lineEnding)
 
   def insertLines(path: String, before: Int, text: String)(using fs: FileSystem): Unit =
-    val entry = fs.access(path)
+    val entry = handle(path)
     val document = TextFiles.splitLines(entry.read())
     val lines = document.lines
     val lineCount = lines.length
@@ -226,19 +222,19 @@ private[host] trait HostFiles:
     val updated = lines.take(before - 1) ++ TextFiles.splitLines(text).lines ++ lines.drop(before - 1)
     entry.write(document.copy(lines = updated).join)
 
-  def append(path: String, content: String)(using fs: FileSystem): Unit = fs.access(path).append(content)
+  def append(path: String, content: String)(using fs: FileSystem): Unit = handle(path).append(content)
 
-  def exists(path: String)(using fs: FileSystem): Boolean = fs.access(path).exists
+  def exists(path: String)(using fs: FileSystem): Boolean = handle(path).exists
 
-  def isDirectory(path: String)(using fs: FileSystem): Boolean = fs.access(path).isDirectory
+  def isDirectory(path: String)(using fs: FileSystem): Boolean = handle(path).isDirectory
 
-  def mkdir(path: String)(using fs: FileSystem): Unit = fs.access(path).mkdir()
+  def mkdir(path: String)(using fs: FileSystem): Unit = handle(path).mkdir()
 
-  def delete(path: String)(using fs: FileSystem): Unit = fs.access(path).delete()
+  def delete(path: String)(using fs: FileSystem): Unit = handle(path).delete()
 
-  def ls(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).children.map(entry => display(entry.path))
+  def ls(dir: String)(using fs: FileSystem): List[String] = handle(dir).children.map(entry => display(entry.path))
 
-  def walk(dir: String)(using fs: FileSystem): List[String] = fs.access(dir).walk().map(entry => display(entry.path))
+  def walk(dir: String)(using fs: FileSystem): List[String] = handle(dir).walk().map(entry => display(entry.path))
 
   private def grepEntry(entry: FileEntryImpl, operation: String, regex: Regex): List[GrepMatch] =
     val matches = mutable.ListBuffer[GrepMatch]()
@@ -250,7 +246,7 @@ private[host] trait HostFiles:
     matches.toList
 
   def grep(path: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
-    grepEntry(impl(fs.access(path)), "grep", pattern.r)
+    grepEntry(handle(path), "grep", pattern.r)
 
   def grepRecursive(dir: String, pattern: String)(using fs: FileSystem): List[GrepMatch] =
     grepRecursive(dir, pattern, "*")
@@ -275,7 +271,7 @@ private[host] trait HostFiles:
         "search: limits must be positive (maxMatches <= 10000, maxFiles <= 100000, maxLinesPerFile <= 1000000, maxLineChars <= 10000, maxCharsPerFile <= 10000000)"
       )
     val regex = pattern.r
-    val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.contentHidden)
+    val entries = matchingFiles(handle(dir).walkIterator, dir, glob).filterNot(_.contentHidden)
     val matches = mutable.ListBuffer[GrepMatch]()
     var scanned = 0
     // `limited` is set only where something was left out: a line cut at the
@@ -304,7 +300,7 @@ private[host] trait HostFiles:
 
   /** Select non-directory descendants by filename or relative-path glob. */
   private def filesNamed(dir: String, glob: String)(using fs: FileSystem): List[FileEntryImpl] =
-    matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).toList
+    matchingFiles(handle(dir).walkIterator, dir, glob).toList
 
   private def matchingFiles(entries: Iterator[FileEntryImpl], dir: String, glob: String): Iterator[FileEntryImpl] =
     val files = entries.filterNot(_.isDirectory)
@@ -314,7 +310,5 @@ private[host] trait HostFiles:
       files.filter(entry => pattern.matcher(PlatformPath.portable(base.relativize(Paths.get(entry.path)).nn)).matches())
     else files.filter(entry => pattern.matcher(entry.name).matches())
 
-  def readClassified(path: String)(using fs: FileSystem): Classified[String] = fs.access(path).readClassified()
-
   def writeClassified(path: String, content: Classified[String])(using fs: FileSystem): Unit =
-    fs.access(path).writeClassified(content)
+    handle(path).writeClassified(content)

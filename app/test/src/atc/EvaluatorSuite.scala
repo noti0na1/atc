@@ -95,8 +95,8 @@ class EvaluatorSuite extends munit.FunSuite:
       )
       assert(env.userOut.toString.contains("S3CR3T-IN-A-FILE"), env.userOut.toString)
       val written = session.run("""classified { write("public.txt", read("secrets/k.txt")) }""")
-      assert(written.success, written.render)
-      assert(!env.existsOnDisk("public.txt"), "a classified block writes only classified paths")
+      assert(!written.success, "a classified block writes nothing: write does not compile there")
+      assert(!env.existsOnDisk("public.txt"))
       assertEquals(env.policy.openScopeCount, 0)
 
   test("an interrupted loop stops and the session stays usable"):

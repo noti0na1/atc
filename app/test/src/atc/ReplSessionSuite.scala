@@ -234,9 +234,9 @@ class ReplSessionSuite extends munit.FunSuite:
     assertOk(run("Some(1).foreach(println)"))
     assertOk(run("Some(1) match { case Some(v) => println(v); case _ => () }"))
   test("safe mode: top-level val of a capturing type needs an explicit type"):
-    assertFails(run("""val handle = access("hello.txt")"""), "needs an explicit type")
+    assertFails(run("""val reader = () => read("hello.txt")"""), "needs an explicit type")
     assertFails(run("""val printer = () => println("x")"""), "needs an explicit type")
-    assertOk(run("""val handle: FileEntry^{fs} = access("hello.txt")"""))
+    assertOk(run("""def reader(): String = read("hello.txt")"""))
     assertOk(run("""def printer(): Unit = println("x")"""))
   test("no safe mode: top-level var and mutable collections work, validator still applies"):
     assert(assertOk(nosafe.run("var counter = 0; counter += 1; counter")).output.contains("1"))

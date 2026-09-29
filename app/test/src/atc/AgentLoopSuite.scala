@@ -1082,7 +1082,7 @@ class AgentLoopSuite extends munit.FunSuite:
       withClassified.systemPrompt.contains("used by `classifiedChat`): configured"),
       withClassified.systemPrompt
     )
-    assert(withClassified.systemPrompt.contains("deliberately capability-free"), withClassified.systemPrompt)
+    assert(withClassified.systemPrompt.contains("is capability-free"), withClassified.systemPrompt)
     assert(!withClassified.systemPrompt.contains("private-llm"), "the agent model is not told which model it is")
 
   test("the system prompt describes whether safe mode is actually enabled"):

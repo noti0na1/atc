@@ -16,47 +16,40 @@ import caps.*
 //     system that provably cannot write (hand it to a helper, or read files with
 //     it inside `Classified.map`, where a full `fs` may not be captured).
 //
-//   • `update def` marks a mutating operation (write, delete, …). It compiles
-//     only through a *full* capability; on a read-only one you get
-//     "Cannot call update method … its capture set is read-only".
-//
-// `Classified.map`/`flatMap` callbacks may capture only read-only capabilities.
-// Writing, commands, network, printing and asking are rejected; use one of the
-// classified destinations documented below.
+// `Classified.map` callbacks and `classified { ... }` blocks may capture only
+// read-only capabilities from outside. Writing, commands, network, printing and
+// asking are rejected there; use one of the classified destinations documented
+// below.
 
 // ─── Classified data ─────────────────────────────────────────────────────────
 
 /** Confidential data: you can compute with it but never see it.
  *
- *  `map` and `flatMap` accept functions that may capture only **read-only**
- *  capabilities. Within them, you can compute freely, use local `var`s and
- *  arrays, and read files where your `fs` is itself read-only. You can never
- *  write, run a command, use the network, `println`, normal-model `chat` or
- *  `ask`, because each of those needs a full capability. Whatever you compute
- *  stays classified; `toString` shows `Classified(***)`.
+ *  `map` accepts a function that may capture only **read-only** capabilities:
+ *  compute freely, use local `var`s and arrays, and read files where your `fs`
+ *  is itself read-only. For more (reading classified files, running commands on
+ *  them, combining several values), use a `classified { ... }` block, where
+ *  `reveal` opens a value. Whatever you compute stays classified; `toString`
+ *  shows `Classified(***)`.
  *
  *  Do not make nontermination, timeouts, timing or resource consumption depend
  *  on a secret; those side channels are not prevented.
  *
- *  The only supported destinations are `println` (the user sees the value while
- *  you still see `Classified(***)`), `writeClassified` (to a classified file),
- *  `classifiedChat` with the classified model, and `httpPostClassified` or
- *  `secretHeaders` to an allowed host. Calls carrying classified input return a
- *  `Classified` response.
+ *  Classified content never reaches the network. Its destinations are `println`
+ *  (the user sees the value while you still see `Classified(***)`),
+ *  `writeClassified` (to a classified file) and the classified model
+ *  (`classifiedChat`).
  *
  *  {{{
- *  val secret = readClassified(".env")          // Classified[String]
+ *  val secret = classified { read(".env") }     // Classified[String]
  *  val upper  = secret.map(_.toUpperCase)       // ok, stays classified
- *  val n      = secret.map(s => s.length * 2)   // ok
+ *  val both   = classified { secret.reveal + upper.reveal }
  *  println(secret)                              // the user sees it; you don't
  *  }}}
  */
 @assumeSafe
 abstract class Classified[+T] private[atc] ():
   def map[B](op: T ->{any.rd} B): Classified[B]
-  def flatMap[B](op: T ->{any.rd} Classified[B]): Classified[B]
-  /** Combine two classified values. */
-  def zip[B](that: Classified[B]): Classified[(T, B)] = flatMap(a => that.map(b => (a, b)))
 
 /** Held only inside a `classified` block, where `reveal` needs it. It cannot leave
  *  the block. */
@@ -91,51 +84,7 @@ object Access
  *  A full `FileSystem^` can read and write; a bare read-only `FileSystem` can
  *  only read. `requestFiles` hands a wider one to a block. */
 @assumeSafe
-abstract class FileSystem private[atc] () extends Cap:
-  /** A handle for `path` (absolute, or relative to the working directory). The
-   *  handle is read-only exactly when this file system is. */
-  def access(path: String): FileEntry^{this}
-
-/** A handle to a file or directory. Read operations work on any handle; the
- *  `update def`s (`write`, `writeBytes`, `append`, `delete`, `mkdir` and
- *  `writeClassified`) require one from a full `FileSystem^`. */
-@assumeSafe
-abstract class FileEntry private[atc] () extends Cap:
-  /** Absolute, normalized path. Windows separators are rendered as `/`; pass
-   *  the returned value directly back to path-taking methods. */
-  def path: String
-  def name: String
-  def exists: Boolean
-  def isDirectory: Boolean
-  /** Whether this file's content (or this directory's structure) is classified. */
-  def isClassified: Boolean
-  def size: Long
-  def read(): String
-  def readBytes(): Array[Byte]
-  def readLines(): List[String]
-  /** Visit each line without loading the file into memory; `op` gets the line
-   *  and its 1-based number. */
-  def forEachLine(op: (String, Int) => Unit): Unit
-  update def write(content: String): Unit
-  update def writeBytes(content: Array[Byte]): Unit
-  update def append(content: String): Unit
-  update def delete(): Unit
-  /** Create this directory, including missing parents. */
-  update def mkdir(): Unit
-  /** Immediate children of a (non-classified) directory; entries you cannot
-   *  access are omitted, and a symlink is listed as its target. */
-  def children: List[FileEntry^{this}]
-  /** All descendants; classified sub-directories and symlinked directories are
-   *  listed but not entered. */
-  def walk(): List[FileEntry^{this}]
-  /** Read any readable file as `Classified`. */
-  def readClassified(): Classified[String]
-  /** Write classified content; the target must be a classified path. */
-  update def writeClassified(content: Classified[String]): Unit
-  /** Absolute paths of the children of a classified directory (`/` separators on Windows). */
-  def childrenClassified: Classified[List[String]]
-  /** All descendant paths, including inside classified directories (`/` separators on Windows). */
-  def walkClassified(): Classified[List[String]]
+abstract class FileSystem private[atc] () extends Cap
 
 /** Capability to run commands (`given ex`), available in every mode. It has no
  *  read-only view. `exec`, `execOutput` and `spawn` additionally require
@@ -159,7 +108,7 @@ abstract class Network private[atc] () extends caps.ExclusiveCapability
  *  available for a later `read()`. `waitFor` returns `None` on timeout.
  *
  *  {{{
- *  val py: Process^{ex} = spawn("python3 -i")      // top-level val: explicit type, like FileEntry
+ *  val py: Process^{ex} = spawn("python3 -i")      // a top-level val needs this explicit type
  *  py.readUntil(">>> ", 5000)
  *  py.sendLine("print(6 * 7)")
  *  println(py.readUntil(">>> ", 5000))            // "42\n>>> "
@@ -367,10 +316,6 @@ trait Interface:
   def requestFiles[T, C^](path: String, access: Access, reason: String)(using UserIO^, FileSystem^{C})
                          (op: (FileSystem^{any.rd, C}) ?=> T): T
 
-  /** A handle for `path` (relative paths resolve against the working directory);
-   *  it is read-only exactly when `fs` is. */
-  def access(path: String)(using fs: FileSystem): FileEntry^{fs}
-
   /** Read a whole file. */
   def read(path: String)(using FileSystem): String
 
@@ -488,10 +433,10 @@ trait Interface:
   //   find(".", "app/**/test/*.py")    test scripts anywhere under app
   def find(dir: String, glob: String)(using FileSystem): List[String]
 
-  /** Read a file as `Classified` (required for classified paths). */
-  def readClassified(path: String)(using FileSystem): Classified[String]
-
-  /** Write classified content to a classified path. */
+  /** Write a classified value to a classified path. The file is created whether or
+   *  not the value is a failed computation, so neither its existence nor an error
+   *  reveals anything; a failure shows only in the user's view. This is how a
+   *  classified value is kept: a `classified` block itself writes nothing. */
   def writeClassified(path: String, content: Classified[String])(using FileSystem^): Unit
 
   // ── Commands ────────────────────────────────────────────────────
@@ -525,7 +470,6 @@ trait Interface:
    *  classified files, and has no network unless `ex` comes from `withNetwork`. */
   def exec(command: String)(using Exec^, FileSystem^): ProcessResult
   def exec(command: String, args: Seq[String])(using Exec^, FileSystem^): ProcessResult
-  def exec(command: String, args: Seq[String], workingDir: String)(using Exec^, FileSystem^): ProcessResult
   def exec(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem^): ProcessResult
 
   /** The stdout of a command that succeeded; throws `RuntimeException` with the exit
@@ -571,38 +515,21 @@ trait Interface:
   def requestNetwork[T](hosts: Iterable[String], reason: String)(op: Network^ ?=> T)(using UserIO^, Network^): T
 
   /** GET an `http`/`https` URL without following redirects. Responses are limited
-   *  to 8 MiB; status >= 400 throws (use `httpRequest` to inspect it). Supplying
-   *  `secretHeaders` keeps the response `Classified`. */
+   *  to 8 MiB; status >= 400 throws (use `httpRequest` to inspect it). */
   def httpGet(url: String)(using Network^): String
   def httpGet(url: String, headers: Map[String, String])(using Network^): String
-  def httpGet(url: String, headers: Map[String, String],
-              secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
   /** HTTP POST, same contract as `httpGet`. `contentType` (default
-   *  `application/json`) becomes the `Content-Type` header unless `headers` or
-   *  `secretHeaders` already set it. */
+   *  `application/json`) becomes the `Content-Type` header unless `headers`
+   *  already sets it. */
   def httpPost(url: String, body: String)(using Network^): String
   def httpPost(url: String, body: String, contentType: String)(using Network^): String
   def httpPost(url: String, body: String, contentType: String, headers: Map[String, String])(using Network^): String
-  def httpPost(url: String, body: String, contentType: String,
-               headers: Map[String, String],
-               secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
-  /** Any method; return raw status/body without throwing on an HTTP error.
-   *  Supplying `secretHeaders` keeps the response `Classified`. */
+  /** Any method; return raw status/body without throwing on an HTTP error. */
   def httpRequest(method: String, url: String)(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String)(using Network^): HttpResponse
   def httpRequest(method: String, url: String, body: String, headers: Map[String, String])(using Network^): HttpResponse
-  def httpRequest(method: String, url: String, body: String,
-                  headers: Map[String, String],
-                  secretHeaders: Map[String, Classified[String]])(using Network^): Classified[HttpResponse]
-
-  /** POST a classified body; the response stays classified. */
-  def httpPostClassified(url: String, body: Classified[String])(using Network^): Classified[String]
-  def httpPostClassified(url: String, body: Classified[String], contentType: String)(using Network^): Classified[String]
-  def httpPostClassified(url: String, body: Classified[String], contentType: String,
-                         headers: Map[String, String],
-                         secretHeaders: Map[String, Classified[String]])(using Network^): Classified[String]
 
   // ── Concurrency ─────────────────────────────────────────────────
 
@@ -670,8 +597,9 @@ trait Interface:
   def classify[T](value: T): Classified[T]
 
   /** Run `op` on confidential data and return its result as `Classified`. Inside the
-   *  block, `reveal` opens classified values, and the block's own file system and
-   *  `Exec` (the givens in scope there) read classified files as plain text:
+   *  block, `reveal` opens classified values, and the block's own read-only file
+   *  system and `Exec` (the givens in scope there) read classified files as plain
+   *  text:
    *
    *  {{{
    *  val digest: Classified[String] = classified {
@@ -684,13 +612,13 @@ trait Interface:
    *
    *  From outside the block it may capture only read-only views, so printing, asking,
    *  `chat`, permission requests, the network and the outer `fs` and `ex` do not
-   *  compile there. Its file system is as capable as yours, and writes only classified
-   *  paths. Its commands may read classified files, have no network, write only their
-   *  temporary directory, need no command permission (`denyCommands` still refuses),
-   *  and need the OS sandbox; `spawn` and `>` redirections are refused. A failure in the
-   *  block becomes a failed `Classified` value, whose message only the user sees. */
-  def classified[T, C^](using FileSystem^{C}, Exec^)
-                       (op: (Sealed^, FileSystem^{any.rd, C}, Exec^) ?->{any.rd} T): Classified[T]
+   *  compile there. Nothing done in the block persists: its file system only reads,
+   *  so run commands with `execReadOnly` (they may read classified files, have no
+   *  network, write only their temporary directory, need no command permission,
+   *  `denyCommands` still refusing, and need the OS sandbox), and keep a result with
+   *  `writeClassified` afterwards. A failure in the block becomes a failed
+   *  `Classified` value, whose message only the user sees. */
+  def classified[T](using FileSystem, Exec^)(op: (Sealed^, FileSystem, Exec^) ?->{any.rd} T): Classified[T]
 
   /** Open a classified value inside a `classified` block. */
   extension [T](c: Classified[T]) def reveal(using Sealed^): T
@@ -702,8 +630,6 @@ trait Interface:
   def chat(message: String)(using UserIO^): String
 
   /** Ask the configured classified model. This capability-free operation may be
-   *  called inside `Classified.map`; it fails if no classified model is configured. */
+   *  called inside `Classified.map` or a `classified` block; it fails if no
+   *  classified model is configured. */
   def classifiedChat(message: String): String
-
-  /** Ask the classified model about classified input; the answer stays classified. */
-  def classifiedChat(message: Classified[String]): Classified[String]

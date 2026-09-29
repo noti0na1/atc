@@ -169,8 +169,8 @@ A write in read-only mode fails before the policy receives an operation.
 
 `T^{c}` describes a value that may retain capability `c`; `T^{c, d}` permits both.
 Subcapturing expresses coverage: `{c}` is covered by `{c, d}`. Coverage can also follow a
-reference's declared captures, so a handle typed `FileEntry^{fs}` is accounted for by
-`fs`. For ordinary capturing types, a smaller permitted capture set gives a more specific
+reference's declared captures, so a handle typed `Process^{ex}` is accounted for by
+`ex`. For ordinary capturing types, a smaller permitted capture set gives a more specific
 type. Capture sets describe possible dependencies, not a list of operations already run.
 
 Function types make the distinction explicit:
@@ -256,9 +256,13 @@ this distinction internally with a reader qualifier. See
 
 ```scala
 val ro: FileSystem^{fs.rd} = fs
-ro.access("notes.txt").read()           // permitted when the file policy allows it
-ro.access("notes.txt").write("changed") // compile error: read-only receiver
+read("notes.txt")(using ro)             // permitted when the file policy allows it
+write("notes.txt", "changed")(using ro) // compile error: a read-only set cannot be subsumed
 ```
+
+The file system has no methods of its own: every operation is an `Interface` method whose
+signature asks for the view it needs, and the host works through its internal
+`FileEntryImpl` handle.
 
 `Exec` and `Network` extend only `ExclusiveCapability`. They do not support `.rd`; a bare
 `Exec` is already a full capability. The bare-`FileSystem` convention does not extend to
@@ -329,10 +333,25 @@ checking behavior.
 ### Classified data
 
 `ClassifiedImpl` stores a `Try`: non-fatal computation failures remain confidential.
-HTTP calls with classified headers or bodies return classified responses, preventing a
-server from reflecting a secret into ordinary output. Validate public parameters and
-permissions before inspecting classified values, and keep subsequent failures inside the
-classified result or user-only output.
+Classified content never reaches the network: no HTTP call takes a classified header or
+body. Validate public parameters and permissions before inspecting classified values, and
+keep subsequent failures inside the classified result or user-only output.
+
+A `classified { ... }` block (`HostInteraction.classified`) runs in a sealed permission
+scope (`Policy.openSealedScope`) below the caller's file system, closed with its processes
+when the block ends. The host's checks key on the scope: `requireReadable` lets classified
+content through, walks descend into classified directories and searches include classified
+files, and `requireWrite` refuses every change, since a change would outlast the block and
+whether it happened could depend on the content (a classified file's existence is visible
+outside). The block's file system is typed read-only for the same reason, so `write` and
+`exec` do not compile in it; `writeClassified` stays the one way to keep a classified value
+(it creates its file whether or not the value failed). Commands in a sealed scope run with
+a read-only plan in which classified roots are readable and `Secret` restrictions are
+dropped, need no command pattern, get no network, do not stream their output and need the
+OS sandbox; `spawn` and `>` redirections are refused, since the types cannot exclude them.
+`reveal` opens a value through a `Sealed` token that only the block's context supplies. In
+the evaluator the block runs as a callback in the scope the host opened, so its value and
+any failure stay in the evaluator.
 
 The data-flow argument relies on both parts of the API. `map` does not expose a plain
 result, and its callback cannot capture a full output capability. Deriving a Boolean from a
@@ -646,10 +665,9 @@ process registry lock their mutable state, and `Tui.popupBlock` takes a lock so 
 questions and permission prompts from several tasks reach the terminal one at a time (a
 waiter interrupted meanwhile never shows its pop-up).
 
-HTTP operations validate the scheme, host and headers (secret header names too; only their values stay inside the classified boundary), do not follow redirects, and cap
+HTTP operations validate the scheme, host and headers, do not follow redirects, and cap
 response bodies at 8 MiB. `httpGet` and `httpPost` throw for status codes of 400 or higher;
-`httpRequest` returns raw status and body. Classified request handling retains subsequent
-transport and response failures within `Classified`.
+`httpRequest` returns raw status and body.
 
 ## Command sandbox
 
@@ -1030,8 +1048,8 @@ classified or locked if any matching rule says so, and a deeper rule can only ma
 more restrictive.
 
 **Classified** content is only observable as `Classified[String]`, and a classified
-directory's structure is classified too (listing it needs `childrenClassified`/`walkClassified`;
-`walk`/`grepRecursive`/`find` do not descend into it). A plain `write` to a classified path
+directory's structure is classified too (listing it needs a `classified` block;
+`walk`/`grepRecursive`/`find` do not descend into it outside one). A plain `write` to a classified path
 is refused, and so is `writeClassified` to a non-classified path. **Locked** means no prompt
 can widen the rule. `"respectGitignore": true` (the default) additionally hides what git
 ignores from listings; that is visibility, not permission, so an ignored file is still

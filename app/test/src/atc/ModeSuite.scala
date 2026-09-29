@@ -62,7 +62,7 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
       """val root: IOCap^ = io
         |val files: FileSystem^{io} = fs
         |val commands: Exec^{io} = ex
-        |files.access("a.txt").read().length + commands.hashCode + root.hashCode""".stripMargin
+        |read("a.txt")(using files).length + commands.hashCode + root.hashCode""".stripMargin
     assertOk(full.run(rooted))
     assertOk(local.run(rooted))
     assertOk(full.run("""val network: Network^{io} = net; network.hashCode"""))
@@ -71,7 +71,7 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     assertOk(readOnly.run(
       """val root: IOCap^{io.rd} = io
         |val files: FileSystem^{io.rd} = fs
-        |files.access("a.txt").read().length + root.hashCode""".stripMargin
+        |read("a.txt")(using files).length + root.hashCode""".stripMargin
     ))
     assertFails(readOnly.run("""val root: IOCap^ = io; root.hashCode"""), "read-only")
 
@@ -100,7 +100,6 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     onlyIn(allModes.toSet, """read("a.txt")""")
     onlyIn(allModes.toSet, """cat("a.txt")""")
     onlyIn(allModes.toSet, """cat("a.txt", 1, 1)""")
-    onlyIn(allModes.toSet, """access("a.txt").read()""") // a bare fs is enough for a handle
     onlyIn(allModes.toSet, """Json.parse("{\"a\": [1, 2.5, \"x\"]}")("a")(1).num""")
     onlyIn(allModes.toSet, """Json.obj("k" -> Json.Str("v"), "n" -> Json.Num(1)).render.length""")
     onlyIn(allModes.toSet, """Json.parse("[1]")(5).isNull""")
@@ -115,7 +114,7 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
 
   test("classified reads and the classified model work in every mode"):
     onlyIn(allModes.toSet, """classify("x").map(_.length)""")
-    onlyIn(allModes.toSet, """classifiedChat(classify("x")).toString.length""")
+    onlyIn(allModes.toSet, """classified { classifiedChat(read("a.txt")) }.toString.length""")
     onlyIn(allModes.toSet, """classify("x").map(classifiedChat).toString.length""")
 
   // ── Writing: local and full only ────────────────────────────────
@@ -128,10 +127,9 @@ class ModeSuite extends munit.FunSuite, ReplAssertions:
     // the quoting pair the prompt recommends for literal text (safe mode refuses Regex.quote)
     onlyIn(rw, """sed("a.txt", quote("i!"), quoteReplacement("$!"))""")
     onlyIn(rw, """mkdir("sub")""")
-    onlyIn(rw, """access("a.txt").write("x")""")
 
-  test("read-only mode: the ambient fs is read-only, so its entries cannot be mutated"):
-    assertFails(readOnly.run("""fs.access("a.txt").write("y")"""), "read-only")
+  test("read-only mode: the ambient fs is read-only, so it cannot write"):
+    assertFails(readOnly.run("""write("a.txt", "y")(using fs)"""))
     assertEquals(readOnly.env.contents("a.txt"), "hello")
 
   test("read-only mode: a rejected write really does not touch the file"):

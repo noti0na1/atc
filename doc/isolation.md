@@ -257,58 +257,60 @@ first name, is a Scala keyword.)
 
 ```scala
 val digest: Classified[String] = classified {
-  val env  = read(".env")                                  // plain text inside the block
-  val keys = exec("jq -r .token secrets/ci.json").stdout   // a sealed command
+  val env  = read(".env")                                          // plain text inside the block
+  val keys = execReadOnly("jq -r .token secrets/ci.json").stdout   // a sealed command
   classifiedChat(s"Which of these tokens are expired? $env $keys")
 }
 println(digest)   // the user sees it; the model sees Classified(***)
 ```
 
 ```scala
-def classified[T, C^](using FileSystem^{C}, Exec^)
-                     (op: (Sealed^, FileSystem^{any.rd, C}, Exec^) ?->{any.rd} T): Classified[T]
+def classified[T](using FileSystem, Exec^)(op: (Sealed^, FileSystem, Exec^) ?->{any.rd} T): Classified[T]
 extension [T](c: Classified[T]) def reveal(using Sealed^): T
 ```
 
-- The block receives a sealed file system, as capable as the caller's, and a sealed `Exec^`
-  as context parameters, which take precedence over the ambient ones, as in `requestFiles`.
-  From outside it may capture only read-only views, so printing, asking, the normal model,
-  permission requests, public writes and the network do not compile.
+- The block receives a sealed, read-only file system and a sealed `Exec^` as context
+  parameters, which take precedence over the ambient ones, as in `requestFiles`. From
+  outside it may capture only read-only views, so printing, asking, the normal model,
+  permission requests, writes, `exec` and the network do not compile.
 - `c.reveal` opens a `Classified` value inside the block, through a `Sealed` token that exists
   only there.
-- The sealed file system reads classified files as plain text and writes only classified
-  paths.
+- The sealed file system reads classified files as plain text, lists and searches classified
+  directories, and changes nothing: the host refuses every write in a sealed scope.
 - A sealed command may read classified files, has no network, writes only a scratch
-  directory, and is killed when the block ends. The host refuses `spawn` on a sealed `Exec`,
-  which the types cannot exclude.
+  directory, needs no command pattern, and is killed when the block ends. The host refuses
+  `spawn` on a sealed `Exec`, which the types cannot exclude.
 - An exception that leaves the block becomes a classified failure; fatal errors and
   interruption escape it.
 - Classified content never gets network access. Its destinations are the user (`println`),
-  classified files and the classified model (`classifiedChat`).
+  classified files (`writeClassified`) and the classified model (`classifiedChat`).
 
-The block replaces `readClassified`, `writeClassified`, `childrenClassified`,
-`walkClassified`, `flatMap`, `zip` and the planned `execClassified`. `httpPostClassified`
+Nothing a block does persists. An earlier design let it write classified paths, but control
+flow inside a block can depend on the secret, and a classified file's existence is visible
+outside it, so creating, deleting or changing a file there would leak a bit per file.
+`writeClassified(path, value)` stays the way to keep a result: it runs outside any classified
+computation and creates its file whether or not the value failed.
+
+The block replaces `readClassified`, `childrenClassified`, `walkClassified`, `flatMap`, `zip`,
+`classifiedChat` on a classified value and the planned `execClassified`. `httpPostClassified`
 and the `secretHeaders` overloads are removed. Where commands cannot be confined, sealed
 commands are refused and pure code in the block still runs.
 
-The typing was prototyped in the real REPL, with a stub runtime, in full and read-only mode.
-Accepted: reads through the block's file system, `reveal`, `execReadOnly`, `exec` and
-`writeClassified` (full and local mode), local mutable state, a nested block and `parallel`.
-Rejected: `println`, `ask`, `chat`, `httpGet` and `requestFiles` in the block; writes or
-commands through the ambient `fs` and `ex`, and capturing `ex` at all; assigning an outer
-`var` or writing an outer array; returning the token, the block's file system or a closure
-over it ("outlives its scope"); `reveal` outside a block or inside `Classified.map`; the
-block inside `Classified.map`; and in read-only mode `exec` and writes in the block, whose
-file system is then read-only. Only `spawn` compiled where it should not.
+The typing was prototyped in the real REPL first, and `CapabilitySuite` now checks it:
+reads through the block's file system, `reveal`, `execReadOnly`, local mutable state and a
+nested block compile; `println`, `ask`, `chat`, `httpGet`, `requestFiles`, writes and `exec`
+in the block, the ambient `fs` and `ex`, outer mutable state, the token, the block's file
+system or a closure over it leaving the block, and `reveal` outside a block do not.
 
 ### Interface cleanup
 
-- `access` and `FileEntry` leave the agent API; the host keeps its handle type. Agents use
-  the path functions: in 13 saved sessions (135 snippets) no `FileEntry` navigation
-  appeared, nor any network, `spawn` or classified call.
-- Command and HTTP options become plain data values. Default arguments are safe there
-  because the values carry no capability, so each capability-taking function needs at most
-  two overloads; commands and network now take 32 methods.
+- `access` and `FileEntry` left the agent API; the host keeps `FileEntryImpl` as its
+  internal handle. Agents used the path functions: in 13 saved sessions (135 snippets) no
+  `FileEntry` navigation appeared, nor any network, `spawn` or classified call.
+- The classified variants went with the block, and `exec(command, args, workingDir)` with
+  `ExecOptions(workingDir = ...)`: commands and network take 25 methods instead of 32. The
+  remaining overloads are the familiar call shapes; folding `args` into a data value would
+  change the most used one for a few lines of prompt.
 - Each authority has one form: a block for a scoped or derived capability, a function name
   only where the static view decides (`exec` against `execReadOnly`).
 
@@ -367,9 +369,9 @@ meanwhile are kept. The approach is to be confirmed.
 | 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
 | 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
-| 8 | `classified` blocks; classified network paths removed | Typing prototyped; implementation planned |
+| 8 | `classified` blocks; classified network paths removed | Done; see [Classified data](development.md#classified-data) |
 | 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Done: holes closed (terminals, Linux mounts, service data, git credentials); read-only commands without network run any program, with narrower read roots |
-| 10 | Interface cleanup | Planned |
+| 10 | Interface cleanup | Done |
 | 11 | Isolate mode: one copy per project; commands see it at the original path on Linux, at its own path on macOS | Planned; the approach is to be confirmed |
 
 ## Spike measurements

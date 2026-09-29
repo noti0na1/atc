@@ -49,12 +49,7 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("""val ro: IOCap^{io.rd} = io; val rofs: FileSystem^{fs.rd} = fs; 1"""))
 
   test("reading works through either view"):
-    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; read("a.txt").length + rofs.access("a.txt").read().length"""))
-
-  test("a read-only FileEntry cannot be mutated"):
-    // Every `update def` of FileEntry is unreachable through a read-only file system.
-    for op <- List("""write("x")""", """append("x")""", "delete()", "mkdir()") do
-      assertFails(run(s"""val rofs: FileSystem^{fs.rd} = fs; rofs.access("a.txt").$op"""), "read-only")
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; read("a.txt").length + read("a.txt")(using rofs).length"""))
 
   test("a read-only FileSystem cannot be used for the writing path helpers"):
     for call <- List(
@@ -76,17 +71,11 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertFails(run("""def h(using fs: FileSystem) = write("a.txt", "x"); h(using fs)"""))
     assertOk(run("""def h2(using fs: FileSystem^) = write("a.txt", "x"); h2(using fs)"""))
 
-  test("access(...) mirrors the view of the file system it is given"):
-    assertOk(run("""access("a.txt").read().length"""))
-    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).read().length"""))
-    assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; access("a.txt")(using rofs).write("x")"""), "read-only")
-
   test("every exec, execOutput and spawn overload requires a full file system as well as a full Exec"):
     val echo = ujson.write(echoCommand)
     val calls = List(
       "ExecCommand" -> s"exec($echo)",
       "ExecArgs" -> s"exec($echo, Nil)",
-      "ExecWorkingDir" -> s"exec($echo, Nil, \".\")",
       "ExecOptions" -> s"exec($echo, Nil, ExecOptions())",
       "ExecOutputCommand" -> s"execOutput($echo)",
       "ExecOutputArgs" -> s"execOutput($echo, Nil)",
@@ -151,7 +140,7 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     ))
 
   test("a read-only view of fs can read and never write, even inside Classified.map"):
-    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; rofs.access("a.txt").read().length"""))
+    assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; read("a.txt")(using rofs).length"""))
     assertFails(run("""val rofs: FileSystem^{fs.rd} = fs; write("a.txt", "x")(using rofs)"""), "read-only")
     assertOk(run("""val rofs: FileSystem^{fs.rd} = fs; classify("a.txt").map(p => read(p)(using rofs)).toString"""))
     assertFails(run("""classify("a.txt").map(p => read(p)).toString""")) // the full fs may not be captured
@@ -209,9 +198,9 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // ...and the grant is gone once the block ends (it was "allow once").
     assertFails(run(s"read($fileCode)"))
 
-  test("a FileEntry from a requestFiles block cannot escape it"):
-    assertFails(run("""val leaked = requestFiles("/tmp") { access("/tmp") }"""), "leak")
-    assertFails(run("""val e: FileEntry^{fs} = requestFiles("/tmp") { fs2 ?=> fs2.access("/tmp/x") }"""), "leak")
+  test("the file system of a requestFiles block cannot escape it"):
+    assertFails(run("""val leaked = requestFiles("/tmp") { summon[FileSystem] }"""), "leak")
+    assertFails(run("""val e: FileSystem^{fs} = requestFiles("/tmp") { fs2 ?=> fs2 }"""))
 
   test("a closure over the block's file system cannot escape it"):
     // `read` needs only read-only access, so this surfaces as the REPL's
@@ -326,7 +315,9 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
       "an outer var" -> """def f(): Int = { var leak = ""; classified { leak = "s"; 1 }; 0 }""",
       "an outer array" -> """def g(): Int = { val a: Array[String]^ = Array(""); classified { a(0) = "s"; 1 }; 0 }""",
       "the token escapes" -> """val t = classified { summon[Sealed^] }""",
-      "the block's file system escapes" -> """val f2 = classified { summon[FileSystem^] }""",
+      "the block's file system escapes" -> """val f2 = classified { summon[FileSystem] }""",
+      "a write through its own file system" -> """classified { write("a.txt", "x"); 1 }""",
+      "exec, which may write" -> """classified { exec("echo") }""",
       "a closure over it escapes" -> """val f3 = classified { () => read("a.txt") }""",
       "reveal outside a block" -> """classify("s").reveal""",
       "reveal inside map" -> """classify("s").map(s => classify(s).reveal)""",
@@ -340,8 +331,7 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     // capability arrives as the lambda parameter rather than a free variable,
     // using it for an effect would make `map` impure and must be rejected.
     val attacks = List(
-      "FileSystem" -> """classify(fs).map(hidden => hidden.access("leak.txt").write("x"))""",
-      "FileEntry" -> """classify(access("a.txt")).map(hidden => hidden.write("x"))""",
+      "FileSystem" -> """classify(fs).map(hidden => write("leak.txt", "x")(using hidden))""",
       "Network" -> """classify(net).map(hidden => httpGet("http://example.com")(using hidden))""",
       "UserIO" -> """classify(user).map(hidden => println("leak")(using hidden))""",
       "Exec" -> """classify(ex).map(hidden => exec("echo", List("leak"))(using hidden, fs).stdout)""",
@@ -383,8 +373,8 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
     assertOk(run("""def trusted(s: String) = classifiedChat(s)"""))
     assertOk(run("""classify("def-secret").map(trusted).toString"""))
     assert(env.classifiedChats.contains("def-secret"), env.classifiedChats.toString)
-    // The Classified overload is exactly the convenient label-preserving wrapper.
+    // In a classified block the answer keeps the label.
     assertOk(
-      run("""val answer: Classified[String] = classifiedChat(classify("wrapped-secret")); answer.toString""")
+      run("""val answer: Classified[String] = classified { classifiedChat("wrapped-secret") }; answer.toString""")
     )
     assert(env.classifiedChats.contains("wrapped-secret"), env.classifiedChats.toString)

@@ -46,15 +46,15 @@ private[host] trait HostPaths:
   private[host] def requireRead(scope: ScopeId, path: Path, operation: String): Perm =
     requireAccess(scope, path, operation, write = false)
 
-  /** Inside a `classified` block only classified paths may change: any other change is an
-    * effect outside the block, which could depend on its content. */
+  /** A `classified` block changes nothing: a change would outlast it, and whether it
+    * happened could depend on the block's content (even a classified file's existence
+    * is visible outside). */
   private[host] def requireWrite(scope: ScopeId, path: Path, operation: String): Perm =
-    val permission = requireAccess(scope, path, operation, write = true)
-    if !permission.classified && policy.sealedScope(scope) then
+    if policy.sealedScope(scope) then
       throw SecurityException(
-        s"Access denied: '${PlatformPath.portable(path)}' is not a classified path; a classified block changes only classified paths, since anything else would declassify its content."
+        s"Access denied: a classified block changes no file ('${PlatformPath.portable(path)}'); keep its result with writeClassified after the block."
       )
-    permission
+    requireAccess(scope, path, operation, write = true)
 
   private def requireAccess(scope: ScopeId, path: Path, operation: String, write: Boolean): Perm =
     val permission = policy.effective(scope, path)
@@ -65,34 +65,25 @@ private[host] trait HostPaths:
     permission
 
   /** Refuse to reveal classified content, except inside a `classified` block, whose results stay classified. */
-  private def requireNotClassified(
-    scope: ScopeId,
-    permission: Perm,
-    path: Path,
-    operation: String,
-    alternative: String
-  ): Unit =
+  private def requireNotClassified(scope: ScopeId, permission: Perm, path: Path, operation: String): Unit =
     if permission.classified && !policy.sealedScope(scope) then
       throw SecurityException(
-        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Use $alternative instead."
+        s"Access denied: '${PlatformPath.portable(path)}' is classified; '$operation' would reveal its content. Do it inside a classified { ... } block, whose result stays classified."
       )
 
-  /** Require read access and that the content is not classified. `alternative`
-    * names what to use instead on a classified path. */
-  private[host] def requireReadable(scope: ScopeId, path: Path, operation: String, alternative: String): Perm =
+  /** Require read access and that the content is not classified. */
+  private[host] def requireReadable(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = requireRead(scope, path, operation)
-    requireNotClassified(scope, permission, path, operation, alternative)
+    requireNotClassified(scope, permission, path, operation)
     permission
 
   /** Require write access and that the target is not classified. */
-  private[host] def requireWritable(
-    scope: ScopeId,
-    path: Path,
-    operation: String,
-    alternative: String = "writeClassified(path, classify(content))"
-  ): Perm =
+  private[host] def requireWritable(scope: ScopeId, path: Path, operation: String): Perm =
     val permission = requireWrite(scope, path, operation)
-    requireNotClassified(scope, permission, path, operation, alternative)
+    if permission.classified then
+      throw SecurityException(
+        s"Access denied: '${PlatformPath.portable(path)}' is classified; write a classified value there with writeClassified(path, value)."
+      )
     permission
 
   private[host] def ensureParent(path: Path): Unit = Option(path.getParent).foreach(Files.createDirectories(_))
@@ -110,8 +101,8 @@ private[host] trait HostPaths:
     result
 
   private[atc] def writeFile(scope: ScopeId, path: Path, content: String, append: Boolean): Unit =
-    val permission = requireWritable(scope, path, if append then "append" else "write")
-    changing(permission, path):
+    requireWritable(scope, path, if append then "append" else "write")
+    withFileChange(path, "updated"):
       ensureParent(path)
       if append then
         Files.writeString(path, content, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
@@ -119,15 +110,11 @@ private[host] trait HostPaths:
     ()
 
   private[host] def writeFileBytes(scope: ScopeId, path: Path, content: Array[Byte]): Unit =
-    val permission = requireWritable(scope, path, "writeBytes")
-    changing(permission, path):
+    requireWritable(scope, path, "writeBytes")
+    withFileChange(path, "updated"):
       ensureParent(path)
       Files.write(path, content)
     ()
-
-  /** Run a write, reported as a file change unless the path is classified, whose content no preview may show. */
-  private[host] def changing[A](permission: Perm, path: Path)(body: => A): A =
-    if permission.classified then body else withFileChange(path, "updated")(body)
 
   private[host] def writeClassifiedFile(scope: ScopeId, path: Path, content: Try[String]): Unit =
     // Check the target before inspecting the classified computation. Otherwise
