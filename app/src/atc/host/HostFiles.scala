@@ -257,7 +257,7 @@ private[host] trait HostFiles:
 
   def grepRecursive(dir: String, pattern: String, glob: String)(using fs: FileSystem): List[GrepMatch] =
     val regex = pattern.r
-    filesNamed(dir, glob).filterNot(_.isClassified).flatMap(grepEntry(_, "grepRecursive", regex))
+    filesNamed(dir, glob).filterNot(_.contentHidden).flatMap(grepEntry(_, "grepRecursive", regex))
 
   def find(dir: String, glob: String)(using fs: FileSystem): List[String] =
     filesNamed(dir, glob).map(entry => display(entry.path))
@@ -275,7 +275,7 @@ private[host] trait HostFiles:
         "search: limits must be positive (maxMatches <= 10000, maxFiles <= 100000, maxLinesPerFile <= 1000000, maxLineChars <= 10000, maxCharsPerFile <= 10000000)"
       )
     val regex = pattern.r
-    val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.isClassified)
+    val entries = matchingFiles(impl(fs.access(dir)).walkIterator, dir, glob).filterNot(_.contentHidden)
     val matches = mutable.ListBuffer[GrepMatch]()
     var scanned = 0
     // `limited` is set only where something was left out: a line cut at the

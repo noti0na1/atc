@@ -52,11 +52,13 @@ private[host] trait HostProcesses:
 
   /** A command line ready to start: parsed, authorized, and represented as one
     * `ProcessBuilder` per pipeline stage. Shared by `exec` and `spawn`. */
+  /** `sealedBlock`: started in a `classified` block, whose output stays classified. */
   private final case class Prepared(
     pbs: List[ProcessBuilder],
     stageLines: List[String],
     line: String,
     launch: CommandSandbox.Launch,
+    sealedBlock: Boolean,
   )
 
   private def withArgs(command: String, args: Seq[String]): CommandLine.Pipeline =
@@ -130,7 +132,19 @@ private[host] trait HostProcesses:
     fs: FileSystem
   ): Prepared =
     val pipeline = withArgs(command, args)
-    if writable && !policy.mode.allowsWrite then
+    // A command in a classified block may read classified files, so it runs sealed: it writes
+    // only its temporary directory and reaches nothing, whatever `fs` could write.
+    val sealedBlock = policy.sealedScope(scopeOf(ex)) || policy.sealedScope(scopeOf(fs))
+    if sealedBlock then
+      if !commandSandbox.confined then
+        throw SecurityException(
+          s"Access denied: a command in a classified block needs the OS sandbox to keep it sealed, and commands here are ${commandSandbox.describe}"
+        )
+      if pipeline.stdoutFile.isDefined then
+        throw IllegalArgumentException(
+          "a command in a classified block cannot redirect to a file; write its output from Scala instead"
+        )
+    else if writable && !policy.mode.allowsWrite then
       throw SecurityException(
         s"Access denied: the sandbox is in ${policy.mode.label} mode; run commands with execReadOnly"
       )
@@ -147,7 +161,8 @@ private[host] trait HostProcesses:
       throw IllegalArgumentException(
         "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
       )
-    authorizeCommands(pipeline, scopeOf(ex), anyProgram = !writable && networkOf(ex).isEmpty)
+    val network = if sealedBlock then None else networkOf(ex)
+    authorizeCommands(pipeline, scopeOf(ex), anyProgram = (!writable || sealedBlock) && network.isEmpty)
 
     val dir = commandDirectory(options.workingDir, fs)
     val stdinFile = pipeline.stdinFile.map(inputRedirect(_, fs))
@@ -158,8 +173,9 @@ private[host] trait HostProcesses:
       val file = path.toFile
       pbs.last.redirectOutput(if pipeline.append then Redirect.appendTo(file) else Redirect.to(file))
     // File grants travel with the file system capability, so its scope decides what the command may touch.
-    val launch = commandSandbox.prepare(pbs, policy, scopeOf(fs), networkOf(ex), writable, dir, pipeline.line)
-    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch)
+    val launch =
+      commandSandbox.prepare(pbs, policy, scopeOf(fs), network, writable && !sealedBlock, dir, pipeline.line)
+    Prepared(pbs, pipeline.stages.map(_.line), pipeline.line, launch, sealedBlock)
 
   def exec(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): ProcessResult =
     if options.timeoutMs <= 0 then
@@ -190,7 +206,7 @@ private[host] trait HostProcesses:
           prepared.stageLines,
           prepared.line,
           options.timeoutMs,
-          Some(live),
+          Option.unless(prepared.sealedBlock)(live),
           options.stdin,
           prepared.launch.start,
         )
@@ -204,6 +220,8 @@ private[host] trait HostProcesses:
   def spawn(command: String)(using Exec, FileSystem): Process = spawn(command, ExecOptions())
 
   def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
+    if policy.sealedScope(scopeOf(ex)) || policy.sealedScope(scopeOf(fs)) then
+      throw SecurityException("spawn is not available in a classified block: a process may not outlive it")
     val prepared = prepare(command, Nil, options, writable = true)
     noteCommand()
     spawned.synchronized:

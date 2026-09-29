@@ -59,6 +59,9 @@ final class FileEntryImpl(fs: FileSystemImpl, p: Path) extends FileEntry:
 
   def isClassified: Boolean = host.requireRead(scope, p, "isClassified").classified
 
+  /** Whether a search must skip this file: classified, outside a `classified` block. */
+  private[host] def contentHidden: Boolean = isClassified && !host.policy.sealedScope(scope)
+
   def size: Long =
     requireReadable("size", "readClassified()")
     Files.size(p)

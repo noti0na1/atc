@@ -64,8 +64,9 @@ enum SessionGrant:
     case Host(pattern) => s"hosts: $pattern"
 
 /** A permission scope opened by a `request*` call. Its grants add to those
-  * of its ancestors; the base scope holds the session grants. */
-private[perms] final class Scope(val id: ScopeId, val parent: Option[Scope]):
+  * of its ancestors; the base scope holds the session grants. A sealed scope
+  * belongs to a `classified` block (see [[Policy.openSealedScope]]). */
+private[perms] final class Scope(val id: ScopeId, val parent: Option[Scope], val sealedBlock: Boolean = false):
   @volatile var fileGrants: List[(Path, Access)] = Nil
   @volatile var commands: List[String] = Nil
   @volatile var hosts: List[String] = Nil
@@ -365,6 +366,17 @@ final class Policy(
     s.id
 
   def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
+
+  /** Open the scope of a `classified` block below `parentId`. Everything done in it stays
+    * classified: its file system reads classified content and writes only classified paths,
+    * and its commands run sealed (no network, writes only to their temporary directory). */
+  def openSealedScope(parentId: ScopeId): ScopeId =
+    val s = Scope(ScopeId(nextId.getAndIncrement()), Some(scope(parentId)), sealedBlock = true)
+    scopes.put(s.id, s)
+    s.id
+
+  /** Whether `id` is a `classified` block's scope or lies inside one. */
+  def sealedScope(id: ScopeId): Boolean = scope(id).chain.exists(_.sealedBlock)
 
   /** Forget everything decided during the session: the "allow for the session"
     * grants, the requests `auto` rejected and every scope still open (a `request*`

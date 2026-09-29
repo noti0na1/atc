@@ -676,7 +676,8 @@ class AgentLoopSuite extends munit.FunSuite:
     assert(ui.warnings.exists(_.contains("output limit inside a tool call")), ui.warnings.toString)
 
   test("automatic compaction failure falls back to whole-exchange trimming and is not retried at once"):
-    val big = "old findings " * 1000
+    // Large beside the system prompt, so that only the second request reaches the threshold.
+    val big = "old findings " * 4000
     val (_, session, ui, agent) = setup(ScriptedModel("m", Nil))
     val afterFirst = usageOf(agent, Msg.User("investigate"), Msg.Assistant(big, Nil, None))
     // Small enough that the second request reaches 80%, and that trimming has to drop the

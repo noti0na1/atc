@@ -84,6 +84,21 @@ class EvaluatorSuite extends munit.FunSuite:
       )
       assert(env.userOut.toString.contains("S3CR3T"), env.userOut.toString)
 
+  test("a classified block runs in the evaluator and reads classified files for the user only"):
+    val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-evaluator-block")
+    env.file("secrets/k.txt", "s3cr3t-in-a-file")
+    withSession(env): session =>
+      val result = session.run("""println(classified { read("secrets/k.txt").toUpperCase })""")
+      assert(
+        result.success && !result.output.contains("S3CR3T") && result.output.contains("Classified(***)"),
+        result.render
+      )
+      assert(env.userOut.toString.contains("S3CR3T-IN-A-FILE"), env.userOut.toString)
+      val written = session.run("""classified { write("public.txt", read("secrets/k.txt")) }""")
+      assert(written.success, written.render)
+      assert(!env.existsOnDisk("public.txt"), "a classified block writes only classified paths")
+      assertEquals(env.policy.openScopeCount, 0)
+
   test("an interrupted loop stops and the session stays usable"):
     val env = TestEnv(prefix = "atc-evaluator-interrupt")
     withSession(env, timeout = None): session =>

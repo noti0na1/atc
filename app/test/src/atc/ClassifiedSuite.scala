@@ -1,7 +1,7 @@
 package atc
 
 import atc.host.*
-import atc.lib.{Classified, FileEntry, FileSystem}
+import atc.lib.{Classified, Exec, FileEntry, FileSystem, Sealed}
 import atc.perms.*
 
 import java.nio.file.{Files, Path}
@@ -365,3 +365,42 @@ class ClassifiedSuite extends munit.FunSuite:
     assertEquals(wrapped.toString, "Classified(***)")
     assert(ClassifiedImpl.unwrap(wrapped).isFailure)
     assert(!env.agentOut.toString.contains("WRAPPED-SECRET"), env.agentOut.toString)
+
+  // ── classified blocks ────────────────────────────────────────────
+
+  private given Exec = env.host.processes
+
+  /** Run `op` in a classified block with the block's file system. */
+  private def inBlock[T](op: FileSystem ?=> T): Classified[T] =
+    env.host.classified(using fs, summon[Exec])((_: Sealed, f: FileSystem, _: Exec) ?=> op(using f))
+
+  test("a classified block reads classified files, and its result stays classified"):
+    val r = inBlock(read(env.root.resolve("secrets/data.txt").toString))
+    assertEquals(r.toString, "Classified(***)")
+    assertEquals(ClassifiedImpl.get(r), "TOP SECRET DATA")
+    intercept[SecurityException](read(env.root.resolve("secrets/data.txt").toString))
+    assertEquals(env.policy.openScopeCount, 0, "the block's scope closes with it")
+
+  test("a classified block changes only classified paths"):
+    assert(ClassifiedImpl.unwrap(inBlock(write("secrets/out.txt", "kept"))).isSuccess)
+    assertEquals(env.contents("secrets/out.txt"), "kept")
+    assert(ClassifiedImpl.unwrap(inBlock(write("leak.txt", "x"))).isFailure)
+    assert(!env.existsOnDisk("leak.txt"))
+    assert(ClassifiedImpl.unwrap(inBlock(delete("public.txt"))).isFailure, "a delete outside is an effect too")
+    assert(env.existsOnDisk("public.txt"))
+
+  test("a classified block lists and searches classified directories"):
+    val walked = ClassifiedImpl.get(inBlock(walk("secrets")))
+    assert(walked.exists(_.endsWith("deep.txt")), walked.toString)
+    val found = ClassifiedImpl.get(inBlock(grepRecursive(".", "SECRET"))).map(_.file)
+    assert(found.exists(_.endsWith("data.txt")), found.toString)
+    assert(!grepRecursive(".", "SECRET").exists(_.file.endsWith("data.txt")), "outside, classified files are skipped")
+
+  test("reveal opens a classified value inside the block, and a failure becomes the value's"):
+    val r = env.host.classified(using fs, summon[Exec])((token: Sealed, _: FileSystem, _: Exec) ?=>
+      env.host.reveal(classify("in"))(using token) + "side"
+    )
+    assertEquals(ClassifiedImpl.get(r), "inside")
+    val failed = inBlock(throw RuntimeException("quoting TOP SECRET DATA"))
+    assert(ClassifiedImpl.unwrap(failed).isFailure)
+    assert(!intercept[IllegalStateException](ClassifiedImpl.get(failed)).getMessage.nn.contains("TOP SECRET"))

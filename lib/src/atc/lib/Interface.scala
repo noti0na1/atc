@@ -58,6 +58,11 @@ abstract class Classified[+T] private[atc] ():
   /** Combine two classified values. */
   def zip[B](that: Classified[B]): Classified[(T, B)] = flatMap(a => that.map(b => (a, b)))
 
+/** Held only inside a `classified` block, where `reveal` needs it. It cannot leave
+ *  the block. */
+@assumeSafe
+abstract class Sealed private[atc] () extends caps.ExclusiveCapability
+
 // ─── Capabilities ────────────────────────────────────────────────────────────
 
 @assumeSafe
@@ -663,6 +668,32 @@ trait Interface:
 
   /** Wrap a value as `Classified`. */
   def classify[T](value: T): Classified[T]
+
+  /** Run `op` on confidential data and return its result as `Classified`. Inside the
+   *  block, `reveal` opens classified values, and the block's own file system and
+   *  `Exec` (the givens in scope there) read classified files as plain text:
+   *
+   *  {{{
+   *  val digest: Classified[String] = classified {
+   *    val env  = read(".env")                                   // plain text here
+   *    val keys = execReadOnly("jq -r .token secrets/ci.json").stdout
+   *    classifiedChat(s"Which of these tokens are expired? $env $keys")
+   *  }
+   *  println(digest)   // the user sees it; you see Classified(***)
+   *  }}}
+   *
+   *  From outside the block it may capture only read-only views, so printing, asking,
+   *  `chat`, permission requests, the network and the outer `fs` and `ex` do not
+   *  compile there. Its file system is as capable as yours, and writes only classified
+   *  paths. Its commands may read classified files, have no network, write only their
+   *  temporary directory, need no command permission (`denyCommands` still refuses),
+   *  and need the OS sandbox; `spawn` and `>` redirections are refused. A failure in the
+   *  block becomes a failed `Classified` value, whose message only the user sees. */
+  def classified[T, C^](using FileSystem^{C}, Exec^)
+                       (op: (Sealed^, FileSystem^{any.rd, C}, Exec^) ?->{any.rd} T): Classified[T]
+
+  /** Open a classified value inside a `classified` block. */
+  extension [T](c: Classified[T]) def reveal(using Sealed^): T
 
   // ── LLM ─────────────────────────────────────────────────────────
 

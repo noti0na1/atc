@@ -74,6 +74,11 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
         host.requestFiles(path, access, reason)(using summon[UserIO], fs(scope))((f: FileSystem) ?=>
           callback(id, f.asInstanceOf[Scoped])
         )
+      case "classified" =>
+        val (fsScope, exScope, id) = (d.long(), d.long(), d.long())
+        host.classified(using fs(fsScope), ex(exScope, None))((_: Sealed, f: FileSystem, _: Exec) ?=>
+          callback(id, f.asInstanceOf[Scoped])
+        )
       case "access" => val s = d.long(); r.string(host.access(d.string())(using fs(s)).path)
       case "read" => val s = d.long(); r.string(host.read(d.string())(using fs(s)))
       case "readLines" => val s = d.long(); r.strings(host.readLines(d.string())(using fs(s)))

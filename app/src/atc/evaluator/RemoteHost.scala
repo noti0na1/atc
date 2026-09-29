@@ -440,6 +440,17 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
 
   def classify[T](value: T): Classified[T] = RemoteClassified(Success(value))
 
+  // The block runs here; the host opens and closes its sealed scope, and the result stays here.
+  def classified[T, C <: caps.CapSet](using
+    fs: FileSystem,
+    ex: Exec
+  )(op: (Sealed, FileSystem, Exec) ?=> T)
+    : Classified[T] =
+    RemoteClassified(Try(withCallback("classified")(_.long(scopeOf(fs)).long(execOf(ex).scope)): scope =>
+      op(using new Sealed {}, RemoteFileSystem(scope, this), RemoteExec(scope, None))))
+
+  extension [T](c: Classified[T]) def reveal(using Sealed): T = RemoteClassified.unwrap(c).get
+
   // ── models: the clients and their keys stay in the host ──
   def chat(message: String)(using UserIO): String = paused(call("chat")(_.string(message))).string()
   def classifiedChat(message: String): String = paused(call("classifiedChat")(_.string(message))).string()

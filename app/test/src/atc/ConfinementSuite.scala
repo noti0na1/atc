@@ -187,6 +187,25 @@ class ConfinementSuite extends munit.FunSuite:
     val confinedEnv = confined(Mode.ReadOnly)
     assertEquals(shReadOnly(confinedEnv, "echo \"$GIT_CONFIG_GLOBAL\"").stdout.trim, "/dev/null")
 
+  test("a command in a classified block reads classified files, writes nothing and asks for nothing"):
+    assume(sandbox.confined, s"no command sandbox here: ${sandbox.describe}")
+    val env = TestEnv(mkRules = secretsAndGit, commands = Nil, commandSandbox = sandbox)
+    env.policy.mode = Mode.Full
+    env.file("secrets/key", "the-secret")
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    def block[T](op: (Exec, FileSystem) ?=> T) =
+      env.host.classified(using summon[FileSystem], summon[Exec])((_: lib.Sealed, f: FileSystem, e: Exec) ?=>
+        op(using e, f)
+      )
+    assertEquals(host.ClassifiedImpl.get(block(env.host.exec("cat secrets/key").stdout)), "the-secret")
+    block(env.host.exec("sh -c 'echo x > made.txt'"))
+    assert(!env.existsOnDisk("made.txt"), "a sealed command writes only its temporary directory")
+    assert(host.ClassifiedImpl.unwrap(block(env.host.spawn("cat"))).isFailure, "no process may outlive the block")
+    assert(host.ClassifiedImpl.unwrap(block(env.host.exec("cat secrets/key > out.txt"))).isFailure)
+    assert(env.requests.isEmpty, "nobody was asked")
+
   test("a confined command writes in the project and nowhere else"):
     val env = confined()
     val outside = TestEnv.outsideDir()

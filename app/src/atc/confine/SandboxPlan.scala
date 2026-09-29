@@ -65,20 +65,24 @@ object SandboxPlan:
           case PathPattern.Form.Exact(path) if rule.access.exists(_ != Access.None) && rule.grants(path) => Some(path)
           case _ => None
       ++ policy.fileGrants(scope).collect { case (path, access) if access != Access.None => path }
+    // In a classified block's scope a command may read classified content (it runs sealed).
+    val sealedBlock = policy.sealedScope(scope)
     val roots = granted.distinct.map(path => path -> policy.effective(scope, path))
     val writableRoots = roots.collect { case (path, perm) if perm.canWrite && !perm.classified => path }
     val writable = if mayWrite then writableRoots else Nil
     val readable = roots.collect:
-      case (path, perm) if perm.canRead && !perm.classified && !writable.contains(path) => path
+      case (path, perm) if perm.canRead && (!perm.classified || sealedBlock) && !writable.contains(path) => path
     val fromRules = policy.rules.flatMap: rule =>
       val level =
         if rule.access.contains(Access.None) then Some(Level.Hidden)
-        else if rule.classified.contains(true) then Some(Level.Secret)
+        else if rule.classified.contains(true) then Option.when(!sealedBlock)(Level.Secret)
         else if rule.access.contains(Access.Read) then Some(Level.ReadOnly)
         else None
       level.flatMap: ruleLevel =>
         rule.pattern.form match
-          case PathPattern.Form.Exact(path) => exactLevel(policy, scope, path).map(Restriction(_, Target.Exact(path)))
+          case PathPattern.Form.Exact(path) =>
+            exactLevel(policy, scope, path).filter(level => !(sealedBlock && level == Level.Secret))
+              .map(Restriction(_, Target.Exact(path)))
           case PathPattern.Form.Anchored(root, glob) => Some(Restriction(ruleLevel, Target.Anchored(root, glob)))
           case PathPattern.Form.Component(glob) => Some(Restriction(ruleLevel, Target.Component(glob)))
     val protectedPaths = (project :: writable).distinct.flatMap(protectedIn(policy, scope, _))

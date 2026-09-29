@@ -98,6 +98,21 @@ private[host] trait HostInteraction:
 
   def classify[T](value: T): Classified[T] = ClassifiedImpl.wrap(value)
 
+  /** The block runs in a sealed scope below the file system's, closed with its processes at
+    * the end; everything done in that scope stays classified (see `Policy.openSealedScope`).
+    * A failure becomes the value's; fatal errors and interruption escape. */
+  def classified[T, C <: caps.CapSet](using
+    fs: FileSystem,
+    ex: Exec
+  )(op: (Sealed, FileSystem, Exec) ?=> T)
+    : Classified[T] =
+    val id = policy.openSealedScope(scopeOf(fs))
+    ClassifiedImpl.fromTry(scala.util.Try(inScope(id)(scope =>
+      op(using new Sealed {}, FileSystemImpl(scope, this), ExecImpl(scope))
+    )))
+
+  extension [T](c: Classified[T]) def reveal(using Sealed): T = ClassifiedImpl.unwrap(c).get
+
   def chat(message: String)(using UserIO): String = llm.chat(message)
   def classifiedChat(message: String): String = llm.classifiedChat(message)
   def classifiedChat(message: Classified[String]): Classified[String] = message.map(classifiedChat)

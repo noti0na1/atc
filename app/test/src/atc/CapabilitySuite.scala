@@ -311,6 +311,30 @@ class CapabilitySuite extends munit.FunSuite, ReplAssertions:
       val r = run(code)
       assert(!r.success, s"$what leaked into Classified.map:\n${r.output}")
 
+  test("a classified block admits its own capabilities and rejects every outward channel"):
+    assertOk(run("""classified { read("a.txt").length }"""))
+    assertOk(run("""classified { classify("s").reveal.length + read("a.txt").length }"""))
+    assertOk(run("""classified { var n = 0; n += 1; classified { n }; n }"""))
+    val rejected = List(
+      "print to the user" -> """classified { println("x"); 1 }""",
+      "ask the user" -> """classified { ask("q") }""",
+      "normal model" -> """classified { chat("q") }""",
+      "http" -> """classified { httpGet("http://example.com") }""",
+      "ask for permissions" -> """classified { requestFiles("/tmp") { read("/tmp/x") } }""",
+      "write through the outer fs" -> """classified { write("a.txt", "x")(using fs); 1 }""",
+      "the outer Exec" -> """classified { val e = ex; 1 }""",
+      "an outer var" -> """def f(): Int = { var leak = ""; classified { leak = "s"; 1 }; 0 }""",
+      "an outer array" -> """def g(): Int = { val a: Array[String]^ = Array(""); classified { a(0) = "s"; 1 }; 0 }""",
+      "the token escapes" -> """val t = classified { summon[Sealed^] }""",
+      "the block's file system escapes" -> """val f2 = classified { summon[FileSystem^] }""",
+      "a closure over it escapes" -> """val f3 = classified { () => read("a.txt") }""",
+      "reveal outside a block" -> """classify("s").reveal""",
+      "reveal inside map" -> """classify("s").map(s => classify(s).reveal)""",
+    )
+    for (what, code) <- rejected do
+      val r = run(code)
+      assert(!r.success, s"$what compiled in a classified block:\n${r.output}")
+
   test("capability values cannot be smuggled into Classified.map as its argument"):
     // `classify` does not erase a value's capture provenance. Even though each
     // capability arrives as the lambda parameter rather than a free variable,
