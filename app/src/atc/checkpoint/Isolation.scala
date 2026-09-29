@@ -2,8 +2,10 @@ package atc.checkpoint
 
 import atc.platform.{Platform, PlatformPath}
 
+import java.nio.channels.{FileChannel, OverlappingFileLockException}
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.{Files, Path, Paths, StandardCopyOption}
+import java.nio.file.{Files, LinkOption, Path, Paths, StandardCopyOption, StandardOpenOption}
+import java.util.concurrent.ConcurrentHashMap
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
@@ -12,76 +14,112 @@ import scala.util.Using
   * The copy lives at a fixed place per project, outside `~/.atc`, which the OS sandbox
   * hides from commands. It is kept between sessions, so build output stays warm, and it
   * starts as a copy-on-write clone where the file system offers one. Two checkpoint
-  * stores record the project and the copy; `base` is the project's tree when the copy last
-  * took the project's changes. The copy's pending changes are its differences from `base`:
-  * [[apply]] writes them into the project, merging a text file the user changed meanwhile,
-  * and [[discard]] resets the copy to `base`. [[enter]] takes the project's changes since
-  * `base` only while nothing is pending, so `base` stays the ancestor of both sides.
-  * `excluded` names project-relative paths neither store records (classified and
-  * no-access paths); they are neither applied nor taken, and `.atc` is copied whole. */
+  * stores record the project and the copy; `base` is the tree both sides last agreed on.
+  * The copy's pending changes are its differences from `base`: [[apply]] writes them into
+  * the project, merging a text file the user changed meanwhile, and adds what the project
+  * then holds to `base`; [[discard]] resets the copy to `base`. The copy takes the
+  * project's changes since `base`, and its git state, only while the project holds every
+  * change of the copy, so that no change of the copy is lost; `base` is then the copy's
+  * tree. `excluded` names project-relative paths neither store records (classified and
+  * no-access paths); they are neither applied nor taken, and `.atc` is copied whole.
+  * One process at a time uses a copy. */
 final class Isolation(val project: Path, stateDir: Path, dataDir: Path, excluded: String => Boolean):
   private val name = Checkpoints.digest(project)
   val copy: Path = dataDir.resolve(name).nn.resolve(Option(project.getFileName).fold("project")(_.toString)).nn
   private val storeDir = stateDir.resolve("isolate").nn.resolve(name).nn
   private def skip(path: String) = path == ".atc" || path.startsWith(".atc/") || excluded(path)
-  private lazy val projectStore = linked(CheckpointStore(storeDir.resolve("project").nn, project, skip), "copy")
-  private lazy val copyStore = linked(CheckpointStore(storeDir.resolve("copy").nn, copy, skip), "project")
+  private lazy val projectStore = store("project", project, "copy")
+  private lazy val copyStore = store("copy", copy, "project")
   private val baseFile = storeDir.resolve("base").nn
+  private val gitStampFile = storeDir.resolve("git").nn
+
+  /** A store over `root` that reads the project repository's objects and the other store's,
+    * never the copy's `.git`: the agent can write objects there, and one planted under the
+    * id of a file's content would change what [[apply]] writes. Files of any size are
+    * recorded, since an unrecorded change would not be applied. */
+  private def store(side: String, root: Path, other: String) =
+    CheckpointStore(
+      storeDir.resolve(side).nn,
+      root,
+      skip,
+      CheckpointStore.projectObjects(project).toList :+ storeDir.resolve(other).nn.resolve("objects").nn,
+      Long.MaxValue
+    )
 
   /** Make the copy current: create it when there is none, otherwise take the project's changes
-    * since `base` if nothing is pending. Returns the number of pending changes kept. */
+    * when the project holds all of the copy's. Returns the number of changes it does not. */
   def enter(): Int =
-    val pendingNow =
+    if !Isolation.hold(storeDir.resolve("lock").nn) then
+      throw IllegalStateException(s"another ATC session is using the copy of ${PlatformPath.display(project)}")
+    val waiting =
       if !Files.isDirectory(copy) then
         create()
         0
       else
-        val waiting = pending.size
-        if waiting == 0 then
-          val now = projectStore.snapshot()
-          val taken = projectStore.changes(base, now)
-          copyStore.revert(taken.map(c => c.path -> (c.after, c.before)).toMap, now)
-          setBase(now)
-        waiting
+        val count = unapplied.size
+        if count == 0 then sync()
+        count
     copyConfig()
-    pendingNow
+    waiting
 
   /** What the copy changed since `base`. */
   def pending: List[Change] = copyStore.changes(base, copyStore.snapshot())
 
   /** The pending changes the project does not hold yet. */
-  def unapplied: List[Change] = preview.map(_._1)
+  def unapplied: List[Change] = preview.changes.map(_._1)
 
-  /** [[unapplied]], each with whether the project changed that path since `base` too, so that
-    * applying it means a merge. */
-  def preview: List[(Change, Boolean)] =
+  /** The copy's current tree, with the pending changes the project does not hold yet, each
+    * with whether the project changed that path since `base` too, so that applying it means
+    * a merge. */
+  def preview: Isolation.Preview =
     val copyTree = copyStore.snapshot()
     val changes = copyStore.changes(base, copyTree)
-    if changes.isEmpty then Nil
+    if changes.isEmpty then Isolation.Preview(copyTree, Nil)
     else
       val projectTree = projectStore.snapshot()
       val differing = projectStore.changes(projectTree, copyTree).map(_.path).toSet
       val changedThere = projectStore.changes(base, projectTree).map(_.path).toSet
-      changes.filter(c => differing.contains(c.path)).map(c => c -> changedThere.contains(c.path))
+      Isolation.Preview(
+        copyTree,
+        changes.filter(c => differing.contains(c.path)).map(c => c -> changedThere.contains(c.path))
+      )
 
-  /** Write the copy's changes into the project. Where the project still holds `base` it
-    * takes the copy's version; a text file changed on both sides gets a three-way merge,
-    * written only when clean; anything else is reported and left alone. */
-  def apply(): RevertReport =
-    val tree = copyStore.snapshot()
-    projectStore.revert(copyStore.changes(base, tree).map(c => c.path -> (c.after, c.before)).toMap, tree)
+  /** Write the changes of `tree`, a state of the copy [[preview]] showed, into the project.
+    * Where the project still holds `base` it takes the copy's version; a text file changed on
+    * both sides gets a three-way merge, written only when clean; anything else is reported
+    * and left alone. Every path the project now agrees on takes the copy's version in `base`. */
+  def apply(tree: String): RevertReport =
+    val changes = copyStore.changes(base, tree)
+    val report = projectStore.revert(changes.map(c => c.path -> (c.after, c.before)).toMap, tree)
+    val conflicted = report.conflicts.map(_._1).toSet
+    setBase(copyStore.edited(base, changes.filterNot(c => conflicted(c.path)).map(c => c.path -> c.after).toMap))
+    report
 
-  /** Put the copy back to `base`. */
+  /** Put the copy back to `base`, then let it take the project's changes. */
   def discard(): RevertReport =
-    val changes = pending
-    copyStore.revert(changes.map(c => c.path -> (c.before, c.after)).toMap, base)
+    val report = copyStore.revert(pending.map(c => c.path -> (c.before, c.after)).toMap, base)
+    if unapplied.isEmpty then sync()
+    report
 
-  private def base: String = Files.readString(baseFile, UTF_8).nn.trim
+  private def base: String =
+    if !Files.isRegularFile(baseFile) then
+      throw IllegalStateException(
+        s"the copy at ${PlatformPath.display(copy)} has lost the record of what it started from; " +
+          "move the copy away to start a fresh one"
+      )
+    Files.readString(baseFile, UTF_8).nn.trim
 
   private def setBase(tree: String): Unit =
     Files.createDirectories(storeDir)
     Files.writeString(baseFile, tree + "\n", UTF_8)
     ()
+
+  /** Take the project's changes since `base` and its git state; the copy's tree becomes `base`. */
+  private def sync(): Unit =
+    val now = projectStore.snapshot()
+    copyStore.revert(projectStore.changes(base, now).map(c => c.path -> (c.after, c.before)).toMap, now)
+    refreshGit()
+    setBase(copyStore.snapshot())
 
   private def create(): Unit =
     val parent = copy.getParent.nn
@@ -89,14 +127,35 @@ final class Isolation(val project: Path, stateDir: Path, dataDir: Path, excluded
     val staging = parent.resolve(copy.getFileName.toString + ".partial").nn
     Isolation.deleteTree(staging)
     Isolation.cloneTree(project, staging)
+    projectStore.snapshot()
+    // The clone's own tree, so that a file the user saves meanwhile is the project's change,
+    // not the copy's. The store's index stays valid when the directory moves.
+    setBase(store("copy", staging, "project").snapshot())
+    Files.writeString(gitStampFile, Isolation.gitStamp(project.resolve(".git").nn), UTF_8)
     Files.move(staging, copy)
-    setBase(projectStore.snapshot())
-    copyStore.snapshot()
     ()
 
-  /** The project's configuration and keys, which the stores do not record. */
+  /** Give the copy the project's `.git` when it changed. The copy's files now match the
+    * project's, and a stale index or `HEAD` would let `git checkout` or `git stash` there
+    * bring back old content that [[apply]] would then write. */
+  private def refreshGit(): Unit =
+    val source = project.resolve(".git").nn
+    if Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS) then
+      val stamp = Isolation.gitStamp(source)
+      if !Files.isRegularFile(gitStampFile) || Files.readString(gitStampFile, UTF_8) != stamp then
+        val staging = copy.resolveSibling(s"${copy.getFileName}.git.partial").nn
+        Isolation.deleteTree(staging)
+        Isolation.cloneTree(source, staging)
+        Isolation.deleteTree(copy.resolve(".git").nn)
+        Files.move(staging, copy.resolve(".git"))
+        Files.writeString(gitStampFile, stamp, UTF_8)
+        ()
+
+  /** The project's configuration and keys, which the stores do not record: copied each time,
+    * and removed from the copy when the project no longer has them. */
   private def copyConfig(): Unit =
     val target = copy.resolve(".atc").nn
+    if Files.isSymbolicLink(target) then Files.delete(target)
     for file <- List("config.json", "keys.properties") do
       val source = project.resolve(".atc").nn.resolve(file).nn
       if Files.isRegularFile(source) then
@@ -105,19 +164,15 @@ final class Isolation(val project: Path, stateDir: Path, dataDir: Path, excluded
           source,
           target.resolve(file),
           StandardCopyOption.REPLACE_EXISTING,
-          StandardCopyOption.COPY_ATTRIBUTES
+          StandardCopyOption.COPY_ATTRIBUTES,
+          LinkOption.NOFOLLOW_LINKS
         )
-
-  /** Let `store` read the other store's objects, which apply and the project's changes need. */
-  private def linked(store: CheckpointStore, other: String): CheckpointStore =
-    store.snapshot() // creates the store
-    val alternates = store.dir.resolve("objects/info/alternates").nn
-    val line = PlatformPath.portable(storeDir.resolve(other).nn.resolve("objects").nn)
-    val lines = if Files.exists(alternates) then Files.readAllLines(alternates).nn.asScala.toList else Nil
-    if !lines.contains(line) then Files.writeString(alternates, (lines :+ line).mkString("", "\n", "\n"), UTF_8)
-    store
+      else Files.deleteIfExists(target.resolve(file))
 
 object Isolation:
+  /** A state of the copy, as a tree, and its changes the project does not hold yet. */
+  final case class Preview(tree: String, changes: List[(Change, Boolean)])
+
   /** Where copies live: the platform's per-user application data directory. */
   def dataDir(home: Path): Path =
     if Platform.isMac then home.resolve("Library/Application Support/atc/isolate").nn
@@ -127,6 +182,37 @@ object Isolation:
     else
       Option(System.getenv("XDG_DATA_HOME")).filter(_.nonEmpty).map(Paths.get(_).nn)
         .getOrElse(home.resolve(".local/share")).resolve("atc/isolate").nn
+
+  /** The locks this process holds, kept until it exits: a session that moves in and out of
+    * isolate mode stays one user of the copy. */
+  private val held = ConcurrentHashMap[Path, FileChannel]()
+
+  /** Hold `file`'s lock for the rest of this process; false when another process holds it. */
+  private def hold(file: Path): Boolean = synchronized:
+    held.containsKey(file) || {
+      Files.createDirectories(file.getParent)
+      val channel = FileChannel.open(file, StandardOpenOption.CREATE, StandardOpenOption.WRITE).nn
+      val lock =
+        try channel.tryLock()
+        catch case _: OverlappingFileLockException => null
+      if lock == null then
+        channel.close()
+        false
+      else
+        held.put(file, channel)
+        true
+    }
+
+  /** What of a repository's git state [[Isolation.refreshGit]] compares: `HEAD` and the size and
+    * time of the index, the packed references and `HEAD`'s log. */
+  private def gitStamp(git: Path): String =
+    val head = git.resolve("HEAD").nn
+    val headText = if Files.isRegularFile(head) then Files.readString(head, UTF_8).nn.trim else ""
+    (headText :: List("index", "packed-refs", "logs/HEAD").map: name =>
+      val file = git.resolve(name).nn
+      if Files.isRegularFile(file) then s"$name ${Files.size(file)} ${Files.getLastModifiedTime(file).toMillis}"
+      else name
+    ).mkString("\n")
 
   /** Copy `source` to the new directory `target`, as copy-on-write clones where the file
     * system can make them (APFS, btrfs, XFS), keeping links as links. */

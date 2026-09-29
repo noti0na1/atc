@@ -4,7 +4,7 @@ import atc.platform.{Platform, PlatformPath}
 
 import java.io.InputStream
 import java.nio.charset.StandardCharsets.UTF_8
-import java.nio.file.attribute.{BasicFileAttributes, PosixFilePermissions}
+import java.nio.file.attribute.{BasicFileAttributes, PosixFilePermission, PosixFilePermissions}
 import java.nio.file.{AtomicMoveNotSupportedException, Files, LinkOption, Path, Paths, StandardCopyOption}
 import java.text.Normalizer
 import java.util.Locale
@@ -33,16 +33,26 @@ final case class RevertReport(
 
 /** Snapshots of a project's files in a git object store kept outside the project.
   *
-  * The store has its own index, which serves as a stat cache, and borrows the
-  * project's objects through `objects/info/alternates` when the project is the
-  * root of a git work tree. Recorded: tracked and untracked files git does not
-  * ignore, except new files over [[CheckpointStore.MaxNewFileBytes]], nested
-  * repositories and the paths `exclude` names. Git runs with the store as its
-  * directory, never with the project's repository, whose configuration the agent
-  * may have written. All operations are serialized. */
-final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boolean):
+  * The store has its own index, which serves as a stat cache, and borrows the objects
+  * of `alternates` (by default the project's repository, when the project is the root
+  * of a git work tree). Recorded: tracked and untracked files git does not ignore,
+  * except new files over `maxNewFileBytes`, nested repositories and the paths `exclude`
+  * names. Git runs with the store as its directory, never with the project's
+  * repository, whose configuration the agent may have written. All operations are
+  * serialized. */
+final class CheckpointStore(
+  val dir: Path,
+  project: Path,
+  exclude: String => Boolean,
+  alternates: List[Path],
+  maxNewFileBytes: Long,
+):
+  def this(dir: Path, project: Path, exclude: String => Boolean) =
+    this(dir, project, exclude, CheckpointStore.projectObjects(project).toList, CheckpointStore.MaxNewFileBytes)
+
   private val git = Git(dir, project)
   private var headTree: Option[String] = None
+  private var opened = false
 
   /** Record the project and return the tree id. `force` lists project-relative
     * paths written since the last snapshot: git compares timestamps in whole
@@ -97,6 +107,21 @@ final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boo
           val fields = header.drop(1).split(' ')
           Change(path, entry(fields(0), fields(2)), entry(fields(1), fields(3)), counts.getOrElse(path, None))
       }.toList
+
+  /** `tree` with each path of `edits` set to its entry, or removed. */
+  def edited(tree: String, edits: Map[String, Option[Entry]]): String = synchronized:
+    if edits.isEmpty then tree
+    else
+      open()
+      val index = dir.resolve(s"edit-${java.util.UUID.randomUUID()}.index").nn
+      try
+        val scratch = Git(dir, project, Some(index))
+        scratch("read-tree", tree)
+        val lines = edits.toList.map: (path, entry) =>
+          entry.fold(s"0 ${"0" * tree.length}\t$path")(e => s"${e.mode} ${e.oid}\t$path")
+        scratch.withInput(nul(lines), "update-index", "-z", "--index-info")
+        text(scratch("write-tree"))
+      finally Files.deleteIfExists(index)
 
   /** Keep the objects of `trees` and `before` alive under `name`, and copy the
     * contents in `before` into the store's own objects, so that a revert does not
@@ -171,19 +196,30 @@ final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boo
             merged = merged.filterNot(_ == path)
     RevertReport(restored.sorted, deleted.sorted, merged.sorted, conflicts.sortBy(_._1))
 
-  /** Create the store on first use. */
+  /** Create the store on first use, and borrow exactly the objects of `alternates`. */
   private def open(): Unit =
-    if !Files.isRegularFile(dir.resolve("HEAD")) then
-      Files.createDirectories(dir.getParent)
-      val objects = CheckpointStore.projectObjects(project)
-      val format = objects.flatMap(CheckpointStore.objectFormat).getOrElse("sha1")
-      Git.run(List("git", "init", "-q", "--bare", s"--object-format=$format", dir.toString), Array.emptyByteArray, None)
-      if !Platform.isWindows then Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"))
-      Files.writeString(dir.resolve("config"), Files.readString(dir.resolve("config")) + CheckpointStore.config)
-      // The highest-precedence attributes: exact bytes, no filters and no line-ending conversion.
-      Files.createDirectories(dir.resolve("info"))
-      Files.writeString(dir.resolve("info/attributes"), "* -text -eol -filter -ident -working-tree-encoding\n")
-      objects.foreach(o => Files.writeString(dir.resolve("objects/info/alternates"), s"${PlatformPath.portable(o)}\n"))
+    if !opened then
+      if !Files.isRegularFile(dir.resolve("HEAD")) then
+        Files.createDirectories(dir.getParent)
+        val format = alternates.view.flatMap(CheckpointStore.objectFormat).headOption.getOrElse("sha1")
+        Git.run(
+          List("git", "init", "-q", "--bare", s"--object-format=$format", dir.toString),
+          Array.emptyByteArray,
+          None
+        )
+        if !Platform.isWindows then Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"))
+        Files.writeString(dir.resolve("config"), Files.readString(dir.resolve("config")) + CheckpointStore.config)
+        // The highest-precedence attributes: exact bytes, no filters and no line-ending conversion.
+        Files.createDirectories(dir.resolve("info"))
+        Files.writeString(dir.resolve("info/attributes"), "* -text -eol -filter -ident -working-tree-encoding\n")
+      val file = dir.resolve("objects/info/alternates").nn
+      val wanted = alternates.map(p => s"${PlatformPath.portable(p)}\n").mkString
+      val present = if Files.exists(file) then Files.readString(file) else ""
+      if present != wanted then
+        Files.writeString(file, wanted)
+        // Objects the index names may have come from a source no longer borrowed: hash every file again.
+        Files.deleteIfExists(dir.resolve("index"))
+      opened = true
     if headTree.isEmpty then
       headTree = Option(text(git.check(false, "rev-parse", "-q", "--verify", "HEAD^{tree}"))).filter(_.nonEmpty)
 
@@ -192,7 +228,7 @@ final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boo
     !path.endsWith("/") && !exclude(path) &&
       (try
         val attributes = Files.readAttributes(resolve(path), classOf[BasicFileAttributes], LinkOption.NOFOLLOW_LINKS).nn
-        attributes.isSymbolicLink || (attributes.isRegularFile && attributes.size <= CheckpointStore.MaxNewFileBytes)
+        attributes.isSymbolicLink || (attributes.isRegularFile && attributes.size <= maxNewFileBytes)
       catch case NonFatal(_) => false)
 
   /** On a case-insensitive file system, recorded paths whose exact spelling is gone
@@ -294,16 +330,16 @@ final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boo
               check = false,
             )
             if result.exit == 0 then Right((Entry(mode, ""), result.out))
-            else if result.exit > 0 && result.exit < 128 then Left("the same lines were changed after the turn")
-            else Left("it was changed after the turn and cannot be merged")
+            else if result.exit > 0 && result.exit < 128 then Left("both versions changed the same lines")
+            else Left("both versions changed it and they cannot be merged")
           finally
             Using.resource(Files.list(temp).nn)(_.iterator.nn.asScala.foreach(Files.delete))
             Files.delete(temp)
       case (_, _, Some(Entry("?", _))) => Left("it exists but is not recorded (ignored, too large or excluded)")
-      case (None, _, _) => Left("the agent created it and it was changed afterwards")
-      case (_, None, _) => Left("the agent deleted it and it was created again afterwards")
-      case (_, _, None) => Left("it was deleted afterwards")
-      case _ => Left("it is not a regular file and was changed afterwards")
+      case (None, _, _) => Left("deleting it would lose a later change")
+      case (_, None, _) => Left("it exists now and would be overwritten")
+      case (_, _, None) => Left("it was deleted meanwhile")
+      case _ => Left("it is not a regular file and was changed meanwhile")
 
   private def write(path: String, entry: Entry, content: Array[Byte]): Unit =
     val target = resolve(path)
@@ -317,13 +353,23 @@ final class CheckpointStore(val dir: Path, project: Path, exclude: String => Boo
       val temp = Files.createTempFile(target.getParent, ".atc-", ".tmp").nn
       try
         Files.write(temp, content)
-        if !Platform.isWindows then
-          val permissions = if entry.mode == "100755" then "rwxr-xr-x" else "rw-r--r--"
-          Files.setPosixFilePermissions(temp, PosixFilePermissions.fromString(permissions))
+        if !Platform.isWindows then Files.setPosixFilePermissions(temp, permissions(target, entry.mode == "100755"))
         try Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         catch case _: AtomicMoveNotSupportedException => Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING)
       finally Files.deleteIfExists(temp)
     ()
+
+  /** The permissions a rewritten file gets: those of the file it replaces, or `rw-r--r--`,
+    * with execute set where read is when `executable`, and cleared otherwise. */
+  private def permissions(target: Path, executable: Boolean): java.util.Set[PosixFilePermission] =
+    import PosixFilePermission.*
+    val current =
+      try Files.getPosixFilePermissions(target, LinkOption.NOFOLLOW_LINKS).nn.asScala.toSet
+      catch case NonFatal(_) => Set(OWNER_READ, OWNER_WRITE, GROUP_READ, OTHERS_READ)
+    val execute = List(OWNER_READ -> OWNER_EXECUTE, GROUP_READ -> GROUP_EXECUTE, OTHERS_READ -> OTHERS_EXECUTE)
+    val kept = current -- execute.map(_._2)
+    (if executable then kept ++ execute.collect { case (read, exec) if current.contains(read) => exec }
+     else kept).asJava
 
   /** Remove the directories that deleting `deleted` left empty and that `dirs` does not hold. */
   private def removeEmptyDirectories(deleted: List[String], dirs: String): Unit =
@@ -447,18 +493,22 @@ private[atc] object CheckpointStore:
       )
     catch case NonFatal(_) => None
 
-/** `git` with the store as its directory and the project as its work tree. */
-private[checkpoint] final class Git(gitDir: Path, workTree: Path):
+/** `git` with the store as its directory and the project as its work tree; with `index`,
+  * that file as its index instead of the store's. */
+private[checkpoint] final class Git(gitDir: Path, workTree: Path, index: Option[Path] = None):
   private val prefix =
     List("git", s"--git-dir=$gitDir", s"--work-tree=$workTree", "-c", "core.fsmonitor=false") ++
       List("-c", "user.name=atc", "-c", "user.email=atc@localhost", "-c", "commit.gpgSign=false")
+  private val environment = index.map(file => "GIT_INDEX_FILE" -> file.toString).toMap
 
-  def apply(args: String*): Array[Byte] = Git.run(prefix ++ args, Array.emptyByteArray, Some(workTree)).out
+  def apply(args: String*): Array[Byte] =
+    Git.run(prefix ++ args, Array.emptyByteArray, Some(workTree), environment = environment).out
 
-  def withInput(input: Array[Byte], args: String*): Array[Byte] = Git.run(prefix ++ args, input, Some(workTree)).out
+  def withInput(input: Array[Byte], args: String*): Array[Byte] =
+    Git.run(prefix ++ args, input, Some(workTree), environment = environment).out
 
   def check(fail: Boolean, args: String*): Array[Byte] =
-    Git.run(prefix ++ args, Array.emptyByteArray, Some(workTree), check = fail).out
+    Git.run(prefix ++ args, Array.emptyByteArray, Some(workTree), check = fail, environment = environment).out
 
 private[checkpoint] object Git:
   final case class Result(exit: Int, out: Array[Byte], err: String)
@@ -467,13 +517,21 @@ private[checkpoint] object Git:
   private val TimeoutSeconds = 300L
 
   /** Run a git command line. The environment loses every `GIT_` variable, which
-    * would redirect git to another repository, index or object directory. */
-  def run(command: List[String], input: Array[Byte], cwd: Option[Path], check: Boolean = true): Result =
+    * would redirect git to another repository, index or object directory, and gets
+    * `environment` instead. */
+  def run(
+    command: List[String],
+    input: Array[Byte],
+    cwd: Option[Path],
+    check: Boolean = true,
+    environment: Map[String, String] = Map.empty
+  ): Result =
     val builder = ProcessBuilder(command.asJava)
     cwd.foreach(d => builder.directory(d.toFile))
-    val environment = builder.environment().nn
-    environment.keySet().nn.removeIf(_.toUpperCase(Locale.ROOT).startsWith("GIT_"))
-    environment.put("GIT_TERMINAL_PROMPT", "0")
+    val variables = builder.environment().nn
+    variables.keySet().nn.removeIf(_.toUpperCase(Locale.ROOT).startsWith("GIT_"))
+    variables.put("GIT_TERMINAL_PROMPT", "0")
+    environment.foreach((name, value) => variables.put(name, value))
     val process = builder.start().nn
     val out = drain(process.getInputStream.nn)
     val err = drain(process.getErrorStream.nn)

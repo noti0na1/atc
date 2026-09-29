@@ -69,14 +69,19 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
   /** The permission pop-up, offering to save the grant to the project config where it can
     * be written there, and saving it when the user chooses that. */
   private def askPermission(request: PermissionRequest): Decision =
-    // In isolate mode a grant is saved to the project's own config, which the copy takes on entry.
+    // In isolate mode a grant is saved to the project's own config, which the copy takes on
+    // entry, for the project's path that the copy's path stands for.
     val here = PlatformPath.canonical(sessionRoot)
-    val target = ProjectRules.plan(sessionRoot, request).map: plan =>
+    val saved = (request, isolatedRoots) match
+      case (file: FileRequest, Some((project, copy))) if file.path.startsWith(copy) =>
+        file.copy(path = project.resolve(copy.relativize(file.path)).nn)
+      case _ => request
+    val target = ProjectRules.plan(sessionRoot, saved).map: plan =>
       if plan.config.startsWith(here) then PlatformPath.portable(here.relativize(plan.config).nn)
       else PlatformPath.display(plan.config)
     val decision = withClockPaused(tui.askPermission(request, target))
     if decision == Decision.AllowAlways then
-      try tui.info(ProjectRules.save(sessionRoot, request))
+      try tui.info(ProjectRules.save(sessionRoot, saved))
       catch
         case NonFatal(e) =>
           tui.error(s"The grant holds for this session but could not be saved: ${Debug.message(e)}")
@@ -160,6 +165,12 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
       )
     val here = PlatformPath.canonical(cwd)
     val project = App.projectOf(here)
+    val home = PlatformPath.canonical(PlatformPath.userHome)
+    if home.startsWith(project) then
+      throw IllegalStateException(
+        s"isolate mode copies a project, and ${PlatformPath.display(project)} holds your home directory; " +
+          "start ATC in a project directory, or give this one a config with `atc --init`"
+      )
     val isolation = isolationOf(project)
     tui.info(s"Preparing the copy of ${PlatformPath.display(project)}...")
     val kept = isolation.enter()
@@ -174,15 +185,17 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     if ownConfig && ProjectTrust.pending(project, Config.globalDir).isEmpty &&
       ProjectTrust.pending(isolation.copy, Config.globalDir).isDefined
     then ProjectTrust.trust(isolation.copy, Config.globalDir)
-    args.copy(
-      cwd = isolation.copy.resolve(project.relativize(here)).nn,
-      isolatedFrom = Some(here),
-      sessionMode = Some(Mode.Isolate)
-    )
+    // A directory the copy lacks (new or ignored since the copy was made) is made there.
+    val start = Files.createDirectories(isolation.copy.resolve(project.relativize(here))).nn
+    moved(args.copy(cwd = start, isolatedFrom = Some(here), sessionMode = Some(Mode.Isolate)))
 
   /** The arguments that run the session in `project` again, in `mode`. */
   def argsLeaving(project: Path, mode: Mode): Cli.Args =
-    args.copy(cwd = project, isolatedFrom = None, sessionMode = Some(mode))
+    moved(args.copy(cwd = project, isolatedFrom = None, sessionMode = Some(mode)))
+
+  /** A moved session keeps its model, its effort and the `auto` switch. */
+  private def moved(next: Cli.Args): Cli.Args =
+    next.copy(auto = policy.auto, model = Some(agent.model.ref), sessionEffort = Some(agent.model.effort))
 
   /** Records the files the agent changes in each turn, for `/undo` (config
     * `checkpoints`). A `-p` run has nobody to undo anything. */
@@ -266,7 +279,8 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
           banner()
           models.catalog.refresh()
           resume match
-            case Some(saved) => commands.sessionCommands.resumeFrom(saved)
+            // A moved session carries its conversation, even an empty one, and offers no other.
+            case Some(saved) => if saved.nonEmpty then commands.sessionCommands.resumeFrom(saved)
             case None => if tui.menusAvailable then commands.sessionCommands.offerResume()
           sandbox.warm() // after the resume offer: restoring would only discard it
           checkpoints.foreach(_.warm())

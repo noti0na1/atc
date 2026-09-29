@@ -1,7 +1,8 @@
 package atc.commands
 
 import atc.{App, Debug}
-import atc.checkpoint.{Change, Checkpoints, Isolation, RevertReport}
+import atc.checkpoint.{Checkpoints, Isolation, RevertReport}
+import atc.confine.SandboxPlan
 import atc.agent.{Agent, ScalaToolRunner, SessionSnapshot, SessionStore}
 import atc.llm.CancelledException
 import atc.perms.{Access, Mode}
@@ -79,21 +80,17 @@ final class SessionCommands(app: App):
         predictor.invalidate()
         checkpoints.undo(arg.split("\\s+").toList.filter(_.nonEmpty)) match
           case Left(message) => tui.info(message)
-          case Right(report) =>
-            // What the user reads, and what the agent is told, about each group of paths.
-            val groups = List(
-              ("Restored", "Restored", report.restored),
-              ("Deleted", "Deleted", report.deleted),
-              ("Reverted, keeping your later edits in", "Reverted, keeping the user's later edits in", report.merged),
-            ).filter(_._3.nonEmpty)
-            groups.foreach((label, _, paths) => tui.success(s"$label: ${paths.mkString(", ")}"))
-            report.conflicts.foreach((path, reason) => tui.warn(s"Left unchanged: $path ($reason)"))
-            if groups.isEmpty && report.conflicts.isEmpty then tui.info("The files already match their earlier state.")
-            else
-              val outcome =
-                (groups.map((_, label, paths) => s"$label: ${paths.mkString(", ")}.") ++
-                  report.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
-              agent.noteFilesReverted(outcome)
+          case Right(done) =>
+            report(
+              done,
+              List(
+                "Restored" -> "Restored",
+                "Deleted" -> "Deleted",
+                "Reverted, keeping your later edits in" -> "Reverted, keeping the user's later edits in"
+              ),
+              "The files already match their earlier state.",
+              agent.noteFilesReverted
+            )
 
   /** `/mode`: choose the sandbox mode from a menu (no argument), cycle it (`next`, which
     * Shift-Tab sends) or set the named one. A new REPL starts with only that mode's
@@ -101,6 +98,9 @@ final class SessionCommands(app: App):
   def switchMode(arg: String): Unit =
     val target = arg.trim match
       case "" => chooseMode()
+      case "next" if app.isolatedFrom.isDefined =>
+        tui.info("Shift-Tab stays in isolate mode; /mode leaves it.")
+        None
       case "next" => Some(policy.mode.next)
       case named =>
         try Some(Mode.parse(named))
@@ -112,7 +112,7 @@ final class SessionCommands(app: App):
       if m == policy.mode then tui.info(s"mode: ${m.describe}")
       else if m == Mode.Isolate then
         // The session moves to the project's copy; Main starts it there with this conversation.
-        try throw App.Restart(app.isolatedArgs(), Some(agent.snapshot).filter(_.nonEmpty))
+        try throw App.Restart(app.isolatedArgs(), Some(agent.snapshot))
         catch case e: IllegalStateException => tui.error(Debug.message(e))
       else if app.isolatedFrom.isDefined then leaveIsolation(m)
       else
@@ -157,10 +157,17 @@ final class SessionCommands(app: App):
         else "auto off: permission requests are asked again"
       )
 
-  /** Leave isolate mode for `mode`, first offering to apply or drop what the copy changed. */
+  /** Leave isolate mode for `mode`, first offering to apply or drop what the copy changed. When
+    * the copy cannot be compared with the project, its changes stay in it. */
   private def leaveIsolation(mode: Mode): Unit =
     val project = app.isolatedFrom.get
-    val waiting = app.isolation.fold(Nil)(listChanges)
+    val preview =
+      try app.isolation.map(listChanges)
+      catch
+        case NonFatal(e) =>
+          tui.warn(s"Could not compare the copy with the project, so its changes stay there: ${Debug.message(e)}")
+          None
+    val waiting = preview.fold(Nil)(_.changes)
     val (applyIt, keep, drop) = (s"Apply them and switch to ${mode.label}", "Keep them in the copy", "Discard them")
     val choice =
       if waiting.isEmpty then Some(keep)
@@ -170,40 +177,55 @@ final class SessionCommands(app: App):
           List(applyIt, keep, drop, "Stay here")
         )
     val go = choice match
-      case Some(`applyIt`) => app.isolation.foreach(applyNow); true
+      case Some(`applyIt`) =>
+        for isolation <- app.isolation; shown <- preview do applyNow(isolation, shown)
+        true
       case Some(`drop`) => discardIsolated(); true
       case Some(`keep`) => true
       case _ => false
-    if go then throw App.Restart(app.argsLeaving(project, mode), Some(agent.snapshot).filter(_.nonEmpty))
+    if go then throw App.Restart(app.argsLeaving(project, mode), Some(agent.snapshot))
 
   /** `/apply`: show what the copy would write into the project, and write it once the user agrees. */
   def applyIsolated(): Unit =
     app.isolation match
       case None => tui.info("/apply works in isolate mode (/mode isolate).")
       case Some(isolation) =>
-        val waiting = listChanges(isolation)
-        if waiting.isEmpty then tui.info("The project already holds the copy's changes.")
-        else if tui.confirm(s"Write these ${waiting.size} changes into the project?") then applyNow(isolation)
+        val preview = listChanges(isolation)
+        val count = preview.changes.size
+        if count == 0 then tui.info("The project already holds the copy's changes.")
+        else if tui.confirm(s"Write ${if count == 1 then "this change" else s"these $count changes"} into the project?")
+        then applyNow(isolation, preview)
         else tui.info("Nothing applied; the changes stay in the copy.")
 
   /** Print the changes the project does not hold yet, marking those that meet the user's own
-    * edits and those the project config keeps read-only, and return them. */
-  private def listChanges(isolation: Isolation): List[(Change, Boolean)] =
-    val waiting = isolation.preview
+    * edits, those the project config keeps read-only, and links and files that editors or
+    * shells act on, and return them with the state of the copy they come from. */
+  private def listChanges(isolation: Isolation): Isolation.Preview =
+    val preview = isolation.preview
     val copy = app.isolatedRoots.map(_._2)
-    for (change, changedThere) <- waiting do
+    for (change, changedThere) <- preview.changes do
       val notes = List(
         Option.when(changedThere)("you changed it too: merged if clean"),
         copy.filter(root => policy.ceiling(root.resolve(PlatformPath.native(change.path)).nn) != Access.Write)
           .map(_ => "read-only in your config"),
+        Option.when(change.after.exists(_.mode == "120000"))("symbolic link"),
+        Option.when(SandboxPlan.ProjectProtected.contains(change.path.takeWhile(_ != '/')))(
+          "editors or shells act on it"
+        ),
       ).flatten
       tui.println(s"  ${Checkpoints.describe(change)}${notes.map(n => s" [$n]").mkString}")
-    waiting
+    if preview.changes.nonEmpty then tui.info("Files git ignores, nested repositories and submodules stay in the copy.")
+    preview
 
-  private def applyNow(isolation: Isolation): Unit =
+  /** Write the changes `preview` showed, as the copy was then. */
+  private def applyNow(isolation: Isolation, preview: Isolation.Preview): Unit =
     report(
-      isolation.apply(),
-      List("Applied", "Deleted", "Merged with your edits in"),
+      isolation.apply(preview.tree),
+      List(
+        "Applied" -> "Applied",
+        "Deleted" -> "Deleted",
+        "Merged with your edits in" -> "Merged with the user's edits in"
+      ),
       "The copy's changes are already in the project.",
       agent.noteIsolationApplied
     )
@@ -215,20 +237,22 @@ final class SessionCommands(app: App):
       case Some(isolation) =>
         report(
           isolation.discard(),
-          List("Restored", "Deleted", "Merged in"),
+          List("Restored" -> "Restored", "Deleted" -> "Deleted", "Merged in" -> "Merged in"),
           "The copy has no changes.",
           agent.noteIsolationDiscarded
         )
 
-  /** Show what an apply or discard did, and tell the agent. */
-  private def report(done: RevertReport, labels: List[String], nothing: String, note: String => Unit): Unit =
+  /** Show what an undo, apply or discard did, and tell the agent. `labels` name the restored,
+    * deleted and merged paths, as the user reads them and as the agent does. */
+  private def report(done: RevertReport, labels: List[(String, String)], nothing: String, note: String => Unit)
+    : Unit =
     val groups = labels.zip(List(done.restored, done.deleted, done.merged)).filter(_._2.nonEmpty)
-    groups.foreach((label, paths) => tui.success(s"$label: ${paths.mkString(", ")}"))
+    groups.foreach((label, paths) => tui.success(s"${label._1}: ${paths.mkString(", ")}"))
     done.conflicts.foreach((path, reason) => tui.warn(s"Left unchanged: $path ($reason)"))
     if groups.isEmpty && done.conflicts.isEmpty then tui.info(nothing)
     else
       note(
-        (groups.map((label, paths) => s"$label: ${paths.mkString(", ")}.") ++
+        (groups.map((label, paths) => s"${label._2}: ${paths.mkString(", ")}.") ++
           done.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
       )
 

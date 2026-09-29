@@ -885,28 +885,43 @@ agent's; the merge rule limits the damage. `CheckpointSuite` covers the store an
 
 `/mode isolate` (or the mode at start) moves the session to a copy of the project: the
 project root its config belongs to (`App.projectOf`), or the working directory when it has
-none. `App.isolatedArgs` makes the copy current and throws `App.Restart`, a control throwable
-that `Main` catches to start a new `App` in the copy, at the same offset below its root,
-carrying the conversation (`SessionCommands.resumeFrom`); leaving the mode does the same the
-other way, after offering to apply, keep or discard the copy's changes. The session saves to
-and resumes from the project's session file (`App.sessionRoot`). The REPL starts afresh, as
-for any mode change.
+none; a directory that holds the home directory is refused. `App.isolatedArgs` makes the
+copy current and throws `App.Restart`, a control throwable that `Main` catches to start a
+new `App` in the copy, at the same offset below its root (made there if the copy lacks it),
+carrying the conversation (`SessionCommands.resumeFrom`), the model, its effort and the
+`auto` switch; leaving the mode does the same the other way, after offering to apply, keep
+or discard the copy's changes. The session saves to and resumes from the project's session
+file (`App.sessionRoot`). The REPL starts afresh, as for any mode change.
 
 `Isolation` keeps the copy in the platform's application data directory (outside `~/.atc`,
 which the OS sandbox hides from commands), one per project, made with `cp -c` (an APFS
 clone) on macOS or `cp -a --reflink=auto` on Linux and kept between sessions, so ignored
-build output stays warm in it. Two checkpoint stores under `~/.atc/isolate/<project>` record
-the project and the copy, each reading the other's objects through `alternates`; `base` is
-the project's tree when the copy last took the project's changes. The pending changes are
-the copy's differences from `base`. `apply` is the project store's `revert` with the copy's
-entries as targets and `base` as the expected state: where the project still holds `base` it
-takes the copy's version, a text file changed on both sides gets a clean three-way merge or
-is left alone and reported. Applying again changes nothing, so `base` does not move.
-`discard` reverts the copy to `base`. `enter` takes the project's changes since `base` only
-while nothing is pending, so `base` stays the ancestor of both sides, and copies
-`.atc/config.json` and `keys.properties` each time, since the stores do not record `.atc`.
-Classified and no-access paths are not recorded either, so they are neither applied nor
-taken.
+build output stays warm in it. One process at a time uses a copy: `enter` takes a file lock
+that the process keeps until it exits. Two checkpoint stores under
+`~/.atc/isolate/<project>` record the project and the copy. Each reads the project
+repository's objects and the other store's through `alternates`, never the copy's `.git`,
+where the agent could plant an object under the id of a file's content and change what
+`/apply` writes; they record files of any size, since an unrecorded change would not be
+applied. `base` is the tree both sides last agreed on, and the pending changes are the
+copy's differences from it. `apply` takes the copy tree the preview showed, so a process
+still running cannot slip in a change nobody saw, and is the project store's `revert` with
+that tree's entries as targets and `base` as the expected state: where the project still
+holds `base` it takes the copy's version, a text file changed on both sides gets a clean
+three-way merge or is left alone and reported. Every path the project then agrees on takes
+the copy's entry in `base` (`CheckpointStore.edited`), so a change the user undoes in the
+project afterwards is not applied again. The copy takes the project's changes since `base`
+(`sync`) only while the project holds every change of the copy, so none is lost: on entry,
+and after `discard` has reverted the copy to `base`. The sync also gives the copy the
+project's `.git` when its `HEAD`, index, packed references or `HEAD` log changed, since a
+stale index would let `git checkout` or `git stash` in the copy bring back old content that
+`/apply` would then write; the copy's commits do not reach the project, only its files do.
+After a sync `base` is the copy's tree, so a path the copy could not take counts as the
+project's change, not the copy's; a new copy's `base` is the clone's own tree, recorded before
+it moves into place, for the same reason. `enter` copies `.atc/config.json` and
+`keys.properties` each time, and removes them from the copy when the project no longer has
+them, since the stores do not record `.atc`. Classified and no-access paths are not recorded
+either, so they are neither applied nor taken; nor are ignored files, nested repositories and
+submodules, which `/apply` says.
 
 The copy session's policy adds a locked no-access rule for the original project, so neither
 the file API nor a command reaches it, whatever a global rule grants there; the rule becomes
@@ -919,14 +934,17 @@ and config, `.atc`, `.vscode`, `.idea`, `.envrc`). The sandbox plan drops read-o
 restrictions accordingly, except locked ones. A confined command in isolate mode needs no
 command pattern (`HostProcesses.authorizeCommands`), since it can change only the copy;
 `denyCommands` still refuses. A grant saved with "Always allow in this project" goes to the
-project's own config, which the copy takes on entry. Isolate mode therefore needs a confining OS sandbox and
+project's own config, for the project's path the copy's path stands for, and the copy takes
+it on entry. Isolate mode therefore needs a confining OS sandbox and
 is refused without one. The copy's config is trusted when the project's config is its own and
 trusted. Mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
-is left out of the Shift-Tab cycle. After each turn the terminal says how many files differ
-from the project (`Isolation.unapplied`). `/apply` first lists what it would write
-(`Isolation.preview`), marking a path the project changed too, which is merged, and a path
-the project config keeps read-only, then asks; leaving the mode shows the same list before
-its choices. `/apply` and `/discard` report per path and queue a note for the model. The host maps a path under the project to the copy
+is left out of the Shift-Tab cycle, which does not leave it either. After each turn the
+terminal says how many files differ from the project (`Isolation.unapplied`). `/apply` first
+lists what it would write (`Isolation.preview`), marking a path the project changed too,
+which is merged, a path the project config keeps read-only, a symbolic link, and a file
+editors or shells act on (`.vscode`, `.idea`, `.envrc`), then asks; leaving the mode shows
+the same list before its choices, and leaves the changes in the copy when the list cannot be
+made. `/apply` and `/discard` report per path and queue a note for the model. The host maps a path under the project to the copy
 (`Host.rebase`), so either spelling works with the file API. On Linux, commands see the copy
 at the project's path too, and start at the matching directory (`CommandSandbox.detect`'s
 `mirror`), so path-keyed caches and editable installs keep working. bubblewrap takes a

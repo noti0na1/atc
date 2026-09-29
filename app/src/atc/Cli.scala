@@ -19,6 +19,8 @@ private[atc] object Cli:
     isolatedFrom: Option[Path] = None,
     /** The mode a moved session runs in; `mode` stays what the command line said. */
     sessionMode: Option[Mode] = None,
+    /** The effort a moved session's model keeps, when it moved (`None` inside: the default). */
+    sessionEffort: Option[Option[String]] = None,
     init: Boolean = false,
     initGlobal: Boolean = false,
     help: Boolean = false,
