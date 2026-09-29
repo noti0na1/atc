@@ -3,7 +3,7 @@ package atc
 import atc.confine.CommandSandbox
 import atc.evaluator.EvaluatorSession
 import atc.perms.*
-import atc.platform.PlatformPath
+import atc.platform.{Platform, PlatformPath}
 import atc.sandbox.SandboxConfig
 
 import java.nio.file.{Files, Paths}
@@ -19,6 +19,8 @@ class EvaluatorSuite extends munit.FunSuite:
   private def withSession[T](env: TestEnv, mode: Mode = Mode.Full, timeout: Option[Long] = Some(60_000L))(
     body: EvaluatorSession => T
   ): T =
+    // ATC starts an evaluator only under an OS sandbox, which it does not have on Windows yet.
+    assume(!Platform.isWindows, "no evaluator process on Windows")
     env.policy.mode = mode
     val session = EvaluatorSession.start(SandboxConfig(true, mode, timeout), env.host, sandbox)
     env.session = Some(session) // host-side prints go to the evaluator, as in the application

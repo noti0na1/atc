@@ -766,7 +766,8 @@ evaluation; the host's `clock` subtracts its own pauses from the reported time. 
 does not stop within five seconds of an interruption, or that exceeds its limit plus five
 seconds, is ended together with its process; the result says the REPL's definitions are
 gone, and the next tool call starts a new evaluator. `EvaluatorSuite` runs sessions against
-a test host and checks the evaluator's own confinement.
+a test host and checks the evaluator's own confinement; it is skipped on Windows, where ATC
+does not start an evaluator.
 
 ## Checkpoints
 

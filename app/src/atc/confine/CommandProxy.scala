@@ -4,7 +4,8 @@ import atc.perms.{Policy, ScopeId}
 
 import java.io.{InputStream, OutputStream}
 import java.net.{InetAddress, InetSocketAddress, Socket, StandardProtocolFamily, URI, UnixDomainSocketAddress}
-import java.nio.channels.{Channels, ServerSocketChannel, SocketChannel}
+import java.nio.ByteBuffer
+import java.nio.channels.{ServerSocketChannel, SocketChannel}
 import java.nio.charset.StandardCharsets.ISO_8859_1
 import java.nio.file.{Files, Path}
 import java.util.concurrent.ConcurrentHashMap
@@ -63,8 +64,8 @@ final class CommandProxy private (server: ServerSocketChannel, policy: Policy, s
 
   private def serve(client: SocketChannel): Unit =
     try
-      val in = Channels.newInputStream(client).nn
-      val out = Channels.newOutputStream(client).nn
+      val in = CommandProxy.input(client)
+      val out = CommandProxy.output(client)
       CommandProxy.readHead(in) match
         case None => ()
         case Some((head, rest)) =>
@@ -216,6 +217,24 @@ object CommandProxy:
   /** Loopback, link-local (cloud metadata included), wildcard and multicast addresses. */
   private def local(address: InetAddress): Boolean =
     address.isLoopbackAddress || address.isLinkLocalAddress || address.isAnyLocalAddress || address.isMulticastAddress
+
+  /** Streams over a blocking socket channel that call its `read` and `write` directly. On
+    * JDK 17 the streams of `Channels` hold the channel's blocking lock while a read waits,
+    * so a tunnel could not write to the client while it waits for the client's next bytes. */
+  private def input(channel: SocketChannel): InputStream = new InputStream:
+    def read(): Int =
+      val one = new Array[Byte](1)
+      if read(one, 0, 1) < 0 then -1 else one(0) & 0xff
+    override def read(bytes: Array[Byte], offset: Int, length: Int): Int =
+      if length == 0 then 0 else channel.read(ByteBuffer.wrap(bytes, offset, length))
+    override def close(): Unit = channel.close()
+
+  private def output(channel: SocketChannel): OutputStream = new OutputStream:
+    def write(byte: Int): Unit = write(Array(byte.toByte), 0, 1)
+    override def write(bytes: Array[Byte], offset: Int, length: Int): Unit =
+      val buffer = ByteBuffer.wrap(bytes, offset, length)
+      while buffer.hasRemaining do channel.write(buffer)
+    override def close(): Unit = channel.close()
 
   private def pump(in: InputStream, out: OutputStream): Unit =
     val buffer = new Array[Byte](16384)

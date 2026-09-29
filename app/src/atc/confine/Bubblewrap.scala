@@ -83,7 +83,7 @@ private[atc] object Bubblewrap:
       (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
     for (flag, path) <- binds.sortBy(_._2.getNameCount) do args ++= List(flag, path.toString, path.toString)
     for (level, path) <- masks(plan).sortBy(_._2.getNameCount) do args ++= mask(level, path)
-    for socket <- agentSockets if Files.exists(socket, LinkOption.NOFOLLOW_LINKS) do args ++= mask(Level.Hidden, socket)
+    for socket <- agentSockets do args ++= mask(Level.Hidden, socket)
     args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
     if !plan.network || bridge.isDefined then args += "--unshare-net"
     args ++= List("--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
@@ -105,14 +105,18 @@ private[atc] object Bubblewrap:
     if Files.isDirectory(home) then args ++= List("--tmpfs", home.toString)
     for path <- readable.filter(Files.exists(_)).sortBy(_.getNameCount) do
       args ++= List("--ro-bind", path.toString, path.toString)
-    for socket <- agentSockets if Files.exists(socket, LinkOption.NOFOLLOW_LINKS) do args ++= mask(Level.Hidden, socket)
+    for socket <- agentSockets do args ++= mask(Level.Hidden, socket)
     args ++= List("--chdir", "/tmp", "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
     args.result()
 
-  /** Where agents and daemons that act for the user listen. */
+  /** Where agents and daemons that act for the user listen, as the existing real paths:
+    * bubblewrap cannot mount over a path reached through a link such as `/var/run`. */
   private def agentSockets: List[Path] =
-    Option(System.getenv("XDG_RUNTIME_DIR")).map(Paths.get(_).nn).toList ++
-      List(Paths.get("/run/docker.sock").nn, Paths.get("/var/run/docker.sock").nn)
+    (Option(System.getenv("XDG_RUNTIME_DIR")).map(Paths.get(_).nn).toList ++
+      List(Paths.get("/run/docker.sock").nn, Paths.get("/var/run/docker.sock").nn)).flatMap: path =>
+      try Some(path.toRealPath().nn)
+      catch case NonFatal(_) => None
+    .distinct
 
   private def mask(level: Level, path: Path): List[String] =
     val shown = path.toString
