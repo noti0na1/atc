@@ -43,6 +43,7 @@ class ConfinementSuite extends munit.FunSuite:
     assert(!p.network)
 
   test("service data under system directories is hidden unless a policy root lies inside it"):
+    assume(!Platform.isWindows, "Unix package managers' directories")
     val env = TestEnv()
     val homebrewVar = Path.of("/opt/homebrew/var").nn
     assert(plan(env).restrictions.contains(Restriction(Level.Hidden, Target.Exact(homebrewVar))))

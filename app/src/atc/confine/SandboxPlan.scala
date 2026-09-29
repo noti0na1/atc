@@ -136,7 +136,7 @@ object SandboxPlan:
 
   /** Where package managers keep the data of the services they run (databases, logs), inside
     * system directories commands may read; hidden unless a policy root lies inside one. */
-  val ServiceData: List[String] = List("/opt/homebrew/var", "/usr/local/var")
+  val ServiceData: List[String] = if Platform.isWindows then Nil else List("/opt/homebrew/var", "/usr/local/var")
 
   /** Credentials and agent sockets in the home directory, hidden even when a root covers them. */
   val HomeSecrets: List[String] = List(
