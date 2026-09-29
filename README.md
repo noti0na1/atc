@@ -335,7 +335,7 @@ agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|
-| **isolate** | work like local mode on a copy of the project; `/apply` writes its changes into the project, `/discard` drops them |
+| **isolate** | work on a copy of the project with more freedom: write any readable file there, `.git` included, and run any command without asking, but write nothing outside it; `/apply` shows the changes and writes them into the project, `/discard` drops them |
 | **read-only** | read files, report, ask, and run commands that write nothing (any command, without asking, where the OS sandbox confines them) |
 | **local** | also write files and run commands that write |
 | **full** | also reach the network, and let the model's provider search the web |

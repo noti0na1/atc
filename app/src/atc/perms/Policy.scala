@@ -111,6 +111,10 @@ final class Policy(
   /** The `auto` switch: every permission request is rejected without asking the user.
     * The rejected requests are kept, so the user can grant them after the turn. */
   @volatile var auto: Boolean = false
+  /** In isolate mode, the project's copy: nothing outside it may be written, and inside it every
+    * path the rules let the agent read may be written too, since changes reach the project
+    * only when the user applies them. Locked, hidden and classified paths keep their rules. */
+  @volatile var copyRoot: Option[Path] = None
 
   private def scope(id: ScopeId): Scope =
     scopes.getOrElse(
@@ -197,9 +201,13 @@ final class Policy(
   def effective(scopeId: ScopeId, p: Path): Perm =
     val currentScope = scope(scopeId)
     val configured = configPerm(p)
-    val perm =
+    val granted =
       if configured.locked then configured
       else configured.copy(access = configured.access.max(grantedAccess(currentScope, p)))
+    val perm = copyRoot match
+      case Some(copy) if !p.startsWith(copy) => granted.copy(access = granted.access.min(Access.Read))
+      case Some(_) if !granted.locked && !granted.classified && granted.canRead => granted.copy(access = Access.Write)
+      case _ => granted
     if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
@@ -208,6 +216,10 @@ final class Policy(
     if access == Access.Write && !mode.allowsWrite then
       throw SecurityException(
         s"Access denied: the sandbox is in ${mode.label} mode; writing '$shown' cannot be granted"
+      )
+    if access == Access.Write && copyRoot.exists(copy => !p.startsWith(copy)) then
+      throw SecurityException(
+        s"Access denied: isolate mode writes only the project's copy, so writing '$shown' cannot be granted"
       )
     val current = effective(parentId, p)
     if !(current.access >= access) then

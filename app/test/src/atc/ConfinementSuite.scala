@@ -224,6 +224,34 @@ class ConfinementSuite extends munit.FunSuite:
     assertEquals(env.contents("new.txt"), "made\n")
     assert(!Files.exists(project.resolve("new.txt")), "the project is untouched")
 
+  test("in isolate mode a confined command runs any program, writes the copy and its .git, and nothing outside"):
+    assume(sandbox.confined, s"no command sandbox here: ${sandbox.describe}")
+    val outside = TestEnv.outsideDir()
+    val env = TestEnv(
+      mkRules = root => secretsAndGit(root) :+ FileRule(PathPattern(outside.toString, root), Some(Access.Write), None),
+      commands = Nil,
+      commandSandbox = sandbox,
+    )
+    env.policy.mode = Mode.Isolate
+    env.policy.copyRoot = Some(env.root)
+    env.dir(".git/hooks")
+    sh(
+      env,
+      s"echo made > made.txt; echo o > ${outside}/new.txt; echo head > .git/HEAD2; echo x > .git/hooks/pre-commit"
+    )
+    assertEquals(env.contents("made.txt"), "made\n")
+    assertEquals(env.contents(".git/HEAD2"), "head\n", "the copy's .git is writable")
+    assert(!env.existsOnDisk(".git/hooks/pre-commit"), "its hooks are not")
+    assert(!Files.exists(outside.resolve("new.txt")), "nothing outside the copy is written")
+    assert(env.requests.isEmpty, "nobody was asked")
+
+  test("in isolate mode without a confining sandbox a command still needs a pattern"):
+    val env = TestEnv(commands = Nil)
+    env.policy.mode = Mode.Isolate
+    env.policy.copyRoot = Some(env.root)
+    val refused = intercept[SecurityException](sh(env, "true"))
+    assert(refused.getMessage.nn.contains("no permitted pattern"), refused.getMessage)
+
   test("a confined command writes in the project and nowhere else"):
     val env = confined()
     val outside = TestEnv.outsideDir()

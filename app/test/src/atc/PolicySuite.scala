@@ -431,3 +431,28 @@ class PolicySuite extends munit.FunSuite:
     assertEquals(env.requests.size, 1, "asked again once auto is off")
     env.policy.resetSession()
     assert(env.policy.rejected.isEmpty)
+
+  test("in isolate mode nothing outside the copy may be written, and inside it every readable path may"):
+    val outside = TestEnv.outsideDir()
+    val env = TestEnv(mkRules =
+      root =>
+        TestEnv.defaultRules(root) ++ List(
+          FileRule(PathPattern(outside.toString, root), Some(Access.Write), None),
+          FileRule(PathPattern("./vendor", root), Some(Access.Read), None),
+          FileRule(PathPattern("./hidden", root), Some(Access.None), None),
+          FileRule(PathPattern("./locked", root), Some(Access.Read), None, locked = true),
+          FileRule(PathPattern("./secrets", root), None, Some(true)),
+        )
+    )
+    def access(p: Path) = env.policy.effective(ScopeId.Base, p).access
+    assertEquals(access(outside), Access.Write)
+    assertEquals(access(env.root.resolve("vendor").nn), Access.Read)
+    env.policy.copyRoot = Some(env.root)
+    assertEquals(access(outside), Access.Read, "outside the copy: read at most")
+    assertEquals(access(env.root.resolve("vendor").nn), Access.Write, "a read-only path in the copy is writable")
+    assertEquals(access(env.root.resolve("hidden").nn), Access.None)
+    assertEquals(access(env.root.resolve("locked").nn), Access.Read)
+    assert(env.policy.effective(ScopeId.Base, env.root.resolve("secrets/k").nn).classified)
+    val refused = intercept[SecurityException](env.policy.requestFile(ScopeId.Base, outside, Access.Write, "w"))
+    assert(refused.getMessage.nn.contains("isolate mode"), refused.getMessage)
+    assert(env.requests.isEmpty, "nobody was asked")

@@ -61,18 +61,20 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
   policy.auto = args.auto || config.auto
+  policy.copyRoot = isolatedRoots.map(_._2)
   models.useMode(policy.mode)
 
   /** The permission pop-up, offering to save the grant to the project config where it can
     * be written there, and saving it when the user chooses that. */
   private def askPermission(request: PermissionRequest): Decision =
-    val here = PlatformPath.canonical(cwd)
-    val target = ProjectRules.plan(cwd, request).map: plan =>
+    // In isolate mode a grant is saved to the project's own config, which the copy takes on entry.
+    val here = PlatformPath.canonical(sessionRoot)
+    val target = ProjectRules.plan(sessionRoot, request).map: plan =>
       if plan.config.startsWith(here) then PlatformPath.portable(here.relativize(plan.config).nn)
       else PlatformPath.display(plan.config)
     val decision = withClockPaused(tui.askPermission(request, target))
     if decision == Decision.AllowAlways then
-      try tui.info(ProjectRules.save(cwd, request))
+      try tui.info(ProjectRules.save(sessionRoot, request))
       catch
         case NonFatal(e) =>
           tui.error(s"The grant holds for this session but could not be saved: ${Debug.message(e)}")

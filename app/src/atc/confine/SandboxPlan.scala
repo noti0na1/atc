@@ -76,7 +76,9 @@ object SandboxPlan:
       val level =
         if rule.access.contains(Access.None) then Some(Level.Hidden)
         else if rule.classified.contains(true) then Option.when(!sealedBlock)(Level.Secret)
-        else if rule.access.contains(Access.Read) then Some(Level.ReadOnly)
+        // In isolate mode the copy, the one writable root, has no read-only limits but locked ones.
+        else if rule.access.contains(Access.Read) && (rule.locked || policy.copyRoot.isEmpty) then
+          Some(Level.ReadOnly)
         else None
       level.flatMap: ruleLevel =>
         rule.pattern.form match

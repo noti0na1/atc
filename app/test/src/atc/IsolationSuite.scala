@@ -109,3 +109,14 @@ class IsolationSuite extends munit.FunSuite:
     assert(i.pending.isEmpty)
     i.apply()
     assertEquals(s.read(s.project, "secrets/key"), "k1")
+
+  test("the preview lists what the project lacks and marks what the project changed too"):
+    val s = Setup()
+    s.write(s.project, "both.txt", "a\nb\nc\n")
+    s.write(s.project, "copy.txt", "x\n")
+    val i = s.isolation
+    i.enter()
+    s.write(i.copy, "both.txt", "A\nb\nc\n")
+    s.write(i.copy, "copy.txt", "y\n")
+    s.write(s.project, "both.txt", "a\nb\nC\n")
+    assertEquals(i.preview.map((c, there) => c.path -> there).toMap, Map("both.txt" -> true, "copy.txt" -> false))

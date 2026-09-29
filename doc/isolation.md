@@ -326,7 +326,7 @@ A mode chooses what the agent can reach; a separate switch chooses whether ATC a
 
 | Mode | The agent can |
 |---|---|
-| isolate | work on a copy of the project: write it and run commands in it, without network; changes reach the project when the user applies them (`/apply`) |
+| isolate | work on a copy of the project with more freedom (any readable file there writable, `.git` included, any command without asking) and nothing outside it writable, without network; changes reach the project when the user reviews and applies them (`/apply`) |
 | read-only | read files and run commands that write nothing |
 | local | also write files and run commands that write; no network |
 | full | also reach allowed hosts |

@@ -38,8 +38,10 @@ object Prompts:
          |`given io: IOCap^`, `given fs: FileSystem^{io}` (read + write) and `given ex: Exec^{io}` (commands), as in local
          |mode. The working directory is the copy: the user's project is unchanged until they apply your changes with
          |/apply (or drop them with /discard), and a path under the project names the copy here (commands on Linux see
-         |the copy at the project's path too). Work as usual; tell the user when a change is ready to apply. The separate `given user: UserIO^` handles reporting, questions, TODOs and
-         |`chat`.""".stripMargin
+         |the copy at the project's path too). In the copy you may write every file you may read, `.git` included, so
+         |commit or branch freely, and any command runs without a permission request (only `denyCommands` refuses
+         |one); nothing outside the copy can be written. Tell the user when a change is ready to apply. The separate
+         |`given user: UserIO^` handles reporting, questions, TODOs and `chat`.""".stripMargin
     case Mode.ReadOnly =>
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the
          |machine-effect root), `given fs: FileSystem^{io.rd}` (read-only) and `given ex: Exec^{io.rd}`, which runs

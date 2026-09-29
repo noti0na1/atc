@@ -50,12 +50,19 @@ final class Isolation(val project: Path, stateDir: Path, dataDir: Path, excluded
   def pending: List[Change] = copyStore.changes(base, copyStore.snapshot())
 
   /** The pending changes the project does not hold yet. */
-  def unapplied: List[Change] =
-    val changes = pending
+  def unapplied: List[Change] = preview.map(_._1)
+
+  /** [[unapplied]], each with whether the project changed that path since `base` too, so that
+    * applying it means a merge. */
+  def preview: List[(Change, Boolean)] =
+    val copyTree = copyStore.snapshot()
+    val changes = copyStore.changes(base, copyTree)
     if changes.isEmpty then Nil
     else
-      val differing = projectStore.changes(projectStore.snapshot(), copyStore.snapshot()).map(_.path).toSet
-      changes.filter(c => differing.contains(c.path))
+      val projectTree = projectStore.snapshot()
+      val differing = projectStore.changes(projectTree, copyTree).map(_.path).toSet
+      val changedThere = projectStore.changes(base, projectTree).map(_.path).toSet
+      changes.filter(c => differing.contains(c.path)).map(c => c -> changedThere.contains(c.path))
 
   /** Write the copy's changes into the project. Where the project still holds `base` it
     * takes the copy's version; a text file changed on both sides gets a three-way merge,

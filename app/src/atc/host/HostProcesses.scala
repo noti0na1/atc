@@ -159,7 +159,10 @@ private[host] trait HostProcesses:
         "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
       )
     val network = if sealedBlock then None else networkOf(ex)
-    authorizeCommands(pipeline, scopeOf(ex), anyProgram = (!writable || sealedBlock) && network.isEmpty)
+    // In isolate mode a confined command can change only the project's copy, as a read-only
+    // command can change nothing: neither needs a command pattern.
+    val contained = !writable || sealedBlock || (policy.copyRoot.isDefined && commandSandbox.confined)
+    authorizeCommands(pipeline, scopeOf(ex), anyProgram = contained && network.isEmpty)
 
     val dir = commandDirectory(options.workingDir, fs)
     val stdinFile = pipeline.stdinFile.map(inputRedirect(_, fs))

@@ -901,12 +901,23 @@ taken.
 
 The copy session's policy adds a locked no-access rule for the original project, so neither
 the file API nor a command reaches it, whatever a global rule grants there; the rule becomes
-a hidden path in the OS sandbox plan. Isolate mode therefore needs a confining OS sandbox and
+a hidden path in the OS sandbox plan. `Policy.copyRoot` sets the copy's bounds: every path
+outside it is read-only at most, whatever a rule or grant says, and a write request for one
+is refused without asking, so the copy is the only writable root; inside it, every path the
+rules let the agent read is writable, `.git` included, while locked, hidden and classified
+paths keep their rules and commands still cannot change the protected paths (`.git` hooks
+and config, `.atc`, `.vscode`, `.idea`, `.envrc`). The sandbox plan drops read-only glob
+restrictions accordingly, except locked ones. A confined command in isolate mode needs no
+command pattern (`HostProcesses.authorizeCommands`), since it can change only the copy;
+`denyCommands` still refuses. A grant saved with "Always allow in this project" goes to the
+project's own config, which the copy takes on entry. Isolate mode therefore needs a confining OS sandbox and
 is refused without one. The copy's config is trusted when the project's config is its own and
 trusted. Mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
 is left out of the Shift-Tab cycle. After each turn the terminal says how many files differ
-from the project (`Isolation.unapplied`), and `/apply` and `/discard` report per path and
-queue a note for the model. The host maps a path under the project to the copy
+from the project (`Isolation.unapplied`). `/apply` first lists what it would write
+(`Isolation.preview`), marking a path the project changed too, which is merged, and a path
+the project config keeps read-only, then asks; leaving the mode shows the same list before
+its choices. `/apply` and `/discard` report per path and queue a note for the model. The host maps a path under the project to the copy
 (`Host.rebase`), so either spelling works with the file API. On Linux, commands see the copy
 at the project's path too: bubblewrap mounts it there after its restrictions, which come
 along, and starts the command at the matching directory (`CommandSandbox.detect`'s

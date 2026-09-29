@@ -1,10 +1,10 @@
 package atc.commands
 
 import atc.{App, Debug}
-import atc.checkpoint.RevertReport
+import atc.checkpoint.{Change, Checkpoints, Isolation, RevertReport}
 import atc.agent.{Agent, ScalaToolRunner, SessionSnapshot, SessionStore}
 import atc.llm.CancelledException
-import atc.perms.Mode
+import atc.perms.{Access, Mode}
 import atc.platform.PlatformPath
 
 import java.nio.file.{FileAlreadyExistsException, Files, Path, Paths}
@@ -147,29 +147,53 @@ final class SessionCommands(app: App):
   /** Leave isolate mode for `mode`, first offering to apply or drop what the copy changed. */
   private def leaveIsolation(mode: Mode): Unit =
     val project = app.isolatedFrom.get
-    val waiting = app.isolation.fold(0)(_.unapplied.size)
-    val (applyIt, keep, drop) = (s"Apply them and switch to ${mode.label}", s"Keep them in the copy", s"Discard them")
+    val waiting = app.isolation.fold(Nil)(listChanges)
+    val (applyIt, keep, drop) = (s"Apply them and switch to ${mode.label}", "Keep them in the copy", "Discard them")
     val choice =
-      if waiting == 0 then Some(keep)
-      else tui.choose(s"The copy differs from the project in $waiting files.", List(applyIt, keep, drop, "Stay here"))
+      if waiting.isEmpty then Some(keep)
+      else
+        tui.choose(
+          s"The copy differs from the project in ${waiting.size} files.",
+          List(applyIt, keep, drop, "Stay here")
+        )
     val go = choice match
-      case Some(`applyIt`) => applyIsolated(); true
+      case Some(`applyIt`) => app.isolation.foreach(applyNow); true
       case Some(`drop`) => discardIsolated(); true
       case Some(`keep`) => true
       case _ => false
     if go then throw App.Restart(app.argsLeaving(project, mode), Some(agent.snapshot).filter(_.nonEmpty))
 
-  /** `/apply`: write the copy's changes into the project. */
+  /** `/apply`: show what the copy would write into the project, and write it once the user agrees. */
   def applyIsolated(): Unit =
     app.isolation match
       case None => tui.info("/apply works in isolate mode (/mode isolate).")
       case Some(isolation) =>
-        report(
-          isolation.apply(),
-          List("Applied", "Deleted", "Merged with your edits in"),
-          "The copy's changes are already in the project.",
-          agent.noteIsolationApplied
-        )
+        val waiting = listChanges(isolation)
+        if waiting.isEmpty then tui.info("The project already holds the copy's changes.")
+        else if tui.confirm(s"Write these ${waiting.size} changes into the project?") then applyNow(isolation)
+        else tui.info("Nothing applied; the changes stay in the copy.")
+
+  /** Print the changes the project does not hold yet, marking those that meet the user's own
+    * edits and those the project config keeps read-only, and return them. */
+  private def listChanges(isolation: Isolation): List[(Change, Boolean)] =
+    val waiting = isolation.preview
+    val copy = app.isolatedRoots.map(_._2)
+    for (change, changedThere) <- waiting do
+      val notes = List(
+        Option.when(changedThere)("you changed it too: merged if clean"),
+        copy.filter(root => policy.ceiling(root.resolve(PlatformPath.native(change.path)).nn) != Access.Write)
+          .map(_ => "read-only in your config"),
+      ).flatten
+      tui.println(s"  ${Checkpoints.describe(change)}${notes.map(n => s" [$n]").mkString}")
+    waiting
+
+  private def applyNow(isolation: Isolation): Unit =
+    report(
+      isolation.apply(),
+      List("Applied", "Deleted", "Merged with your edits in"),
+      "The copy's changes are already in the project.",
+      agent.noteIsolationApplied
+    )
 
   /** `/discard`: put the copy back to the project's state. */
   def discardIsolated(): Unit =
