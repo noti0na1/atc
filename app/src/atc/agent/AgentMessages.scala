@@ -55,6 +55,12 @@ object AgentMessages:
         "Work within the current permissions and say what you need."
     else "[permissions] The user turned auto off: permission requests reach them again."
 
+  def isolationApplied(outcome: String): String =
+    s"[isolate] The user applied the copy's changes to the project. $outcome"
+
+  def isolationDiscarded(outcome: String): String =
+    s"[isolate] The user discarded the copy's changes; its files are back to the project's state. $outcome"
+
   def processesKilled(what: String): String =
     s"[processes] The user $what with /kill. Those Process handles no longer work."
 

@@ -326,7 +326,7 @@ A mode chooses what the agent can reach; a separate switch chooses whether ATC a
 
 | Mode | The agent can |
 |---|---|
-| isolate | work on a copy of the project: write it and run commands in it, without network; changes reach the project when the user applies them |
+| isolate | work on a copy of the project: write it and run commands in it, without network; changes reach the project when the user applies them (`/apply`) |
 | read-only | read files and run commands that write nothing |
 | local | also write files and run commands that write; no network |
 | full | also reach allowed hosts |
@@ -337,16 +337,16 @@ rejects as well. The agent is told why; the rejected requests are listed for the
 end of the turn, to grant for the next one. Deny lists and locked rules are unchanged.
 
 Isolate keeps one copy per project at a fixed location (an APFS clone on macOS, a reflink or
-plain copy on Linux), kept between sessions so that build caches stay warm, and ATC's own file
-operations map original paths to it. On Linux, commands see the copy at the original path
-through a bubblewrap bind. macOS gives unprivileged programs no per-process view of the file
-system: there are no mount namespaces and no bind mounts, Seatbelt only allows or denies, and
-`DYLD_INSERT_LIBRARIES` is removed for system programs and ignored by hardened ones. So macOS
-commands run at the copy's path and are denied the original, and caches keyed by path rebuild
-once there (Mill 21 s against 1.9 s). No other agent keeps the real path on macOS either:
-AgentFS mounts its overlay through a localhost NFS server at a separate path, and worktree
-tools accept the new path. Applying uses the checkpoint merge, so edits the user made
-meanwhile are kept. The approach is to be confirmed.
+plain copy on Linux), kept between sessions so that build caches stay warm; the session moves
+to the copy, and the original project is locked out of it. macOS gives unprivileged programs
+no per-process view of the file system: there are no mount namespaces and no bind mounts,
+Seatbelt only allows or denies, and `DYLD_INSERT_LIBRARIES` is removed for system programs and
+ignored by hardened ones. So commands see the copy at its own path, and caches keyed by path
+rebuild once there (Mill 21 s against 1.9 s). No other agent keeps the real path on macOS
+either: AgentFS mounts its overlay through a localhost NFS server at a separate path, and
+worktree tools accept the new path. Linux could bind the copy at the original path with
+bubblewrap; that is not done. Applying uses the checkpoint merge, so edits the user made
+meanwhile are kept (see [Isolate mode](development.md#isolate-mode)).
 
 ## Platform support
 
@@ -372,7 +372,7 @@ meanwhile are kept. The approach is to be confirmed.
 | 8 | `classified` blocks; classified network paths removed | Done; see [Classified data](development.md#classified-data) |
 | 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Done: holes closed (terminals, Linux mounts, service data, git credentials); read-only commands without network run any program, with narrower read roots |
 | 10 | Interface cleanup | Done |
-| 11 | Isolate mode: one copy per project; commands see it at the original path on Linux, at its own path on macOS | Planned; the approach is to be confirmed |
+| 11 | Isolate mode: one copy per project, applied with a merge | Done; see [Isolate mode](development.md#isolate-mode); binding the copy at the original path on Linux is not done |
 
 ## Spike measurements
 

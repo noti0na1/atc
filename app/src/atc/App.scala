@@ -1,10 +1,10 @@
 package atc
 
-import atc.agent.{Agent, AgentEnvironment, InputPredictor, ToolCallHooks, TurnOutcome}
-import atc.checkpoint.Checkpoints
+import atc.agent.{Agent, AgentEnvironment, InputPredictor, SessionSnapshot, ToolCallHooks, TurnOutcome}
+import atc.checkpoint.{Checkpoints, Isolation}
 import atc.commands.{Commands, SlashCommand}
 import atc.confine.CommandSandbox
-import atc.config.{Config, Configuration, ProjectRules}
+import atc.config.{Config, Configuration, ProjectRules, ProjectTrust}
 import atc.host.{FileChange, Host, HostLlm, HostOutput, HostUi}
 import atc.lib.Todo
 import atc.llm.ChatModel
@@ -12,7 +12,7 @@ import atc.perms.*
 import atc.platform.PlatformPath
 import atc.ui.{Notifier, Tui}
 
-import java.nio.file.Path
+import java.nio.file.{Files, Path}
 import java.util.Locale
 import scala.util.control.NonFatal
 
@@ -20,8 +20,12 @@ import scala.util.control.NonFatal
   * host, sandbox, agent loop and terminal UI together, then runs either one
   * non-interactive turn (`-p`) or the interactive loop. [[Commands]] runs the
   * slash commands. */
-final class App(args: Cli.Args, val tui: Tui):
+final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = None):
   val cwd: Path = args.cwd
+  /** In isolate mode, the project this session works on a copy of. */
+  val isolatedFrom: Option[Path] = args.isolatedFrom
+  /** Where the session is saved and resumed: the project, in isolate mode too. */
+  val sessionRoot: Path = isolatedFrom.getOrElse(cwd)
 
   /** Every configuration layer in force (global ← project ← `-c`), after the
     * first-run offers of [[Setup.load]] (which may end the program instead). */
@@ -44,7 +48,11 @@ final class App(args: Cli.Args, val tui: Tui):
 
   val policy: Policy =
     Policy(
-      configuration.fileRules(cwd),
+      // The project an isolated session copied is out of reach, whatever the rules grant there.
+      configuration.fileRules(cwd) ++
+        isolatedFrom.map(from =>
+          FileRule(PathPattern(".", App.projectOf(from)), Some(Access.None), None, locked = true)
+        ),
       config.commands,
       config.hosts,
       App.permissionPrompter(args, request => askPermission(request)),
@@ -115,6 +123,53 @@ final class App(args: Cli.Args, val tui: Tui):
   val host: Host =
     Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, osSandbox)
 
+  /** The copy and its stores, in an isolated session. */
+  lazy val isolation: Option[Isolation] = isolatedFrom.map(from => isolationOf(App.projectOf(from)))
+
+  private def isolationOf(project: Path): Isolation =
+    // This session's view of the project root: the project, or in isolate mode the copy's root,
+    // as many levels above the working directory as the session started below the project.
+    val root = isolatedFrom.fold(project): from =>
+      val depth = project.relativize(PlatformPath.canonical(from)).nn.toString match
+        case "" => 0
+        case relative => java.nio.file.Paths.get(relative).nn.getNameCount
+      Iterator.iterate(PlatformPath.canonical(cwd))(dir => Option(dir.getParent).getOrElse(dir)).drop(depth).next()
+    // Classified and no-access paths are not recorded, as for checkpoints.
+    def excluded(path: String): Boolean =
+      val permission = policy.effective(ScopeId.Base, root.resolve(PlatformPath.native(path)).nn)
+      permission.classified || (permission.locked && !permission.canRead)
+    Isolation(project, Config.globalDir, Isolation.dataDir(PlatformPath.canonical(PlatformPath.userHome)), excluded)
+
+  /** Make this project's copy current and return the arguments that run the session there. */
+  def isolatedArgs(): Cli.Args =
+    if !osSandbox.confined then
+      throw IllegalStateException(
+        s"isolate mode needs the OS sandbox to keep commands off the project, and commands here are ${osSandbox.describe}"
+      )
+    val here = PlatformPath.canonical(cwd)
+    val project = App.projectOf(here)
+    val isolation = isolationOf(project)
+    tui.info(s"Preparing the copy of ${PlatformPath.display(project)}...")
+    val kept = isolation.enter()
+    if kept > 0 then
+      tui.info(
+        s"The copy keeps $kept changes from before; the project's own changes since then reach it after /apply or /discard."
+      )
+    // The copy's config is the project's: trusted when the project's is.
+    val ownConfig = Files.isRegularFile(Config.projectPath(project))
+    if ownConfig && ProjectTrust.pending(project, Config.globalDir).isEmpty &&
+      ProjectTrust.pending(isolation.copy, Config.globalDir).isDefined
+    then ProjectTrust.trust(isolation.copy, Config.globalDir)
+    args.copy(
+      cwd = isolation.copy.resolve(project.relativize(here)).nn,
+      isolatedFrom = Some(here),
+      mode = Some(Mode.Isolate)
+    )
+
+  /** The arguments that run the session in `project` again, in `mode`. */
+  def argsLeaving(project: Path, mode: Mode): Cli.Args =
+    args.copy(cwd = project, isolatedFrom = None, mode = Some(mode))
+
   /** Records the files the agent changes in each turn, for `/undo` (config
     * `checkpoints`). A `-p` run has nobody to undo anything. */
   val checkpoints: Option[Checkpoints] =
@@ -179,6 +234,7 @@ final class App(args: Cli.Args, val tui: Tui):
 
   def run(): Int =
     try
+      if policy.mode == Mode.Isolate && isolatedFrom.isEmpty then throw App.Restart(isolatedArgs(), None)
       // A directory no config covers is unreachable; say so rather than leave the
       // agent to find out through repeated denials.
       if !policy.effective(ScopeId.Base, PlatformPath.canonical(cwd)).canRead then
@@ -195,7 +251,9 @@ final class App(args: Cli.Args, val tui: Tui):
         case None =>
           banner()
           models.catalog.refresh()
-          if tui.menusAvailable then commands.sessionCommands.offerResume()
+          resume match
+            case Some(saved) => commands.sessionCommands.resumeFrom(saved)
+            case None => if tui.menusAvailable then commands.sessionCommands.offerResume()
           sandbox.warm() // after the resume offer: restoring would only discard it
           checkpoints.foreach(_.warm())
           interactive()
@@ -214,7 +272,8 @@ final class App(args: Cli.Args, val tui: Tui):
         "model" -> models.describe(agent.model),
         "mode" -> policy.mode.describe,
         "directory" -> PlatformPath.display(cwd),
-      ) ++ osSandbox.notice.map("OS sandbox" -> _)
+      ) ++ isolatedFrom.map(project => "copy of" -> s"${PlatformPath.display(project)} (/apply, /discard)")
+        ++ osSandbox.notice.map("OS sandbox" -> _)
         ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
         ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)")
         ++ Option.when(policy.auto)("permissions" -> "every request rejected without asking (/auto switches it)"),
@@ -251,6 +310,7 @@ final class App(args: Cli.Args, val tui: Tui):
         outcome,
       )))
       showChanges()
+      showUnapplied()
       showRejected(rejectionsBefore)
       predictor.start()
 
@@ -264,6 +324,18 @@ final class App(args: Cli.Args, val tui: Tui):
         val more = if changes.size > App.ChangesShown then s" and ${changes.size - App.ChangesShown} more" else ""
         val files = if changes.size == 1 then "1 file" else s"${changes.size} files"
         tui.info(s"Changed $files: $shown$more. /undo reverts them.")
+
+  /** After a turn in isolate mode: how far the copy is from the project. */
+  private def showUnapplied(): Unit =
+    for i <- isolation do
+      try
+        val count = i.unapplied.size
+        if count > 0 then
+          val files = if count == 1 then "1 file" else s"$count files"
+          tui.info(
+            s"The copy differs from the project in $files: /apply writes the changes there, /discard drops them."
+          )
+      catch case NonFatal(e) => tui.warn(s"Could not compare the copy with the project: ${Debug.message(e)}")
 
   /** After a turn: the requests `auto` rejected in it, which `/perms grant` allows. */
   private def showRejected(since: Int): Unit =
@@ -301,6 +373,19 @@ final class App(args: Cli.Args, val tui: Tui):
 object App:
   /** Thrown to end the program from setup, before there is anything to run. */
   final case class Exit(code: Int) extends RuntimeException(s"exit $code")
+
+  /** The directory isolate mode copies for a session in `dir`: the project root its config
+    * belongs to, or `dir` itself when it has none (the global config is not a project's). */
+  def projectOf(dir: Path): Path =
+    val here = PlatformPath.canonical(dir)
+    Config.projectRoot(here).map(PlatformPath.canonical)
+      .filterNot(root => root.resolve(".atc").nn == PlatformPath.canonical(Config.globalDir)).getOrElse(here)
+
+  /** Thrown to run the session again with `args` (another directory, entering or leaving
+    * isolate mode), carrying the conversation. A control throwable, so no handler of
+    * ordinary failures swallows it on the way out. */
+  final case class Restart(args: Cli.Args, resume: Option[SessionSnapshot])
+      extends scala.util.control.ControlThrowable
 
   /** Changed files named after a turn; the rest are counted. */
   private val ChangesShown = 6

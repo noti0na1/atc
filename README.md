@@ -150,7 +150,7 @@ the read-only git commands and a set of documentation hosts. Review it to choose
 **3. Talk to it.** Type a request at the prompt; the agent answers by writing and running
 Scala in the sandbox, and asks before touching anything the config does not grant. `/help`
 lists the slash commands, Ctrl-C interrupts a turn, Ctrl-D quits. The most useful flags are
-`-m <alias>` to pick a model, `--mode readonly|local|full` to pick a sandbox mode, and
+`-m <alias>` to pick a model, `--mode isolate|readonly|local|full` to pick a sandbox mode, and
 `-p "<request>"` to run one turn from the shell and exit:
 
 ```bash
@@ -328,22 +328,24 @@ own packages) before compilation, and a class loader that shows agent code only 
 [Levels of protection](#levels-of-protection). The details are in
 [doc/development.md](doc/development.md#defence-in-depth).
 
-## Modes: read-only, local, full
+## Modes: isolate, read-only, local, full
 
 A **mode** decides which capabilities the preamble puts in scope, and therefore what the
 agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|
+| **isolate** | work like local mode on a copy of the project; `/apply` writes its changes into the project, `/discard` drops them |
 | **read-only** | read files, report, ask, and run commands that write nothing (any command, without asking, where the OS sandbox confines them) |
 | **local** | also write files and run commands that write |
 | **full** | also reach the network, and let the model's provider search the web |
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
 explain what it *would* have done. The policy enforces the same three levels again at run
-time. Switch with `/mode` (cycles the three), **Shift-Tab** on an empty prompt, `--mode`,
-or `"mode"` in the config; switching starts a fresh REPL but keeps the conversation. The
-default is full.
+time. Switch with `/mode` (cycles read-only, local and full), **Shift-Tab** on an empty
+prompt, `--mode`, or `"mode"` in the config; switching starts a fresh REPL but keeps the
+conversation. `/mode isolate` moves the session to the project's copy, which needs the OS
+sandbox and stays between sessions. The default is full.
 
 ## Asking for more
 

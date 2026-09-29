@@ -132,6 +132,10 @@ final class Agent(
 
   def noteAutoSwitched(on: Boolean): Unit = conversation.queueNote(AgentMessages.autoSwitched(on))
 
+  def noteIsolationApplied(outcome: String): Unit = conversation.queueNote(AgentMessages.isolationApplied(outcome))
+
+  def noteIsolationDiscarded(outcome: String): Unit = conversation.queueNote(AgentMessages.isolationDiscarded(outcome))
+
   def noteProcessesKilled(what: String): Unit = conversation.queueNote(AgentMessages.processesKilled(what))
 
   def noteFilesReverted(outcome: String): Unit = conversation.queueNote(AgentMessages.filesReverted(outcome))

@@ -872,6 +872,43 @@ that is a subdirectory of a repository gets a store of its own without alternate
 `.gitignore` files above it do not apply. A user edit made while a command runs counts as the
 agent's; the merge rule limits the damage. `CheckpointSuite` covers the store and the session.
 
+## Isolate mode
+
+`/mode isolate` (or the mode at start) moves the session to a copy of the project: the
+project root its config belongs to (`App.projectOf`), or the working directory when it has
+none. `App.isolatedArgs` makes the copy current and throws `App.Restart`, a control throwable
+that `Main` catches to start a new `App` in the copy, at the same offset below its root,
+carrying the conversation (`SessionCommands.resumeFrom`); leaving the mode does the same the
+other way, after offering to apply, keep or discard the copy's changes. The session saves to
+and resumes from the project's session file (`App.sessionRoot`). The REPL starts afresh, as
+for any mode change.
+
+`Isolation` keeps the copy in the platform's application data directory (outside `~/.atc`,
+which the OS sandbox hides from commands), one per project, made with `cp -c` (an APFS
+clone) on macOS or `cp -a --reflink=auto` on Linux and kept between sessions, so ignored
+build output stays warm in it. Two checkpoint stores under `~/.atc/isolate/<project>` record
+the project and the copy, each reading the other's objects through `alternates`; `base` is
+the project's tree when the copy last took the project's changes. The pending changes are
+the copy's differences from `base`. `apply` is the project store's `revert` with the copy's
+entries as targets and `base` as the expected state: where the project still holds `base` it
+takes the copy's version, a text file changed on both sides gets a clean three-way merge or
+is left alone and reported. Applying again changes nothing, so `base` does not move.
+`discard` reverts the copy to `base`. `enter` takes the project's changes since `base` only
+while nothing is pending, so `base` stays the ancestor of both sides, and copies
+`.atc/config.json` and `keys.properties` each time, since the stores do not record `.atc`.
+Classified and no-access paths are not recorded either, so they are neither applied nor
+taken.
+
+The copy session's policy adds a locked no-access rule for the original project, so neither
+the file API nor a command reaches it, whatever a global rule grants there; the rule becomes
+a hidden path in the OS sandbox plan. Isolate mode therefore needs a confining OS sandbox and
+is refused without one. The copy's config is trusted when the project's config is its own and
+trusted. Mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
+is left out of the Shift-Tab cycle. After each turn the terminal says how many files differ
+from the project (`Isolation.unapplied`), and `/apply` and `/discard` report per path and
+queue a note for the model. Commands see the copy at its own path on both platforms; binding
+it at the original path on Linux is possible with bubblewrap but not done.
+
 ## Configuration semantics
 
 Layers load in this order: global, nearest project, explicit `-c` file. A project is the

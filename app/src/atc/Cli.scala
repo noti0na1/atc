@@ -15,6 +15,8 @@ private[atc] object Cli:
     prompt: Option[String] = None,
     approveAll: Boolean = false,
     auto: Boolean = false,
+    /** In isolate mode, the project whose copy `cwd` is (set when ATC moves the session). */
+    isolatedFrom: Option[Path] = None,
     init: Boolean = false,
     initGlobal: Boolean = false,
     help: Boolean = false,

@@ -1,5 +1,7 @@
 package atc
 
+import atc.agent.SessionSnapshot
+
 import atc.config.{Config, ProjectTrust}
 import atc.ui.{Ansi, Tui}
 
@@ -21,7 +23,7 @@ object Main:
        |  -C, --cwd <dir>       working directory (default: current)
        |  -m, --model <ref>     model to use: an alias from the config, or provider/alias
        |  -p, --prompt <text>   run one turn non-interactively and exit
-       |      --mode <mode>     sandbox mode: readonly | local | full (default: the config's "mode", else full)
+       |      --mode <mode>     sandbox mode: isolate | readonly | local | full (default: the config's "mode", else full)
        |      --auto            reject every permission request without asking (/auto switches it)
        |      --approve-all     auto-approve permission requests (use with -p in trusted setups only)
        |      --init            write a starter ./.atc/config.json (project layer) and exit
@@ -59,7 +61,17 @@ object Main:
     // Opened here so it is closed even when App's constructor fails (a bad config, an
     // unknown model): the terminal has a status footer and signal handlers by then.
     val tui = Tui(Config.globalDir.resolve("history").nn, nonInteractive = args.prompt.nonEmpty)
-    try App(args, tui).run()
+    try
+      // Entering or leaving isolate mode moves the session to another directory: a new App
+      // there, with the conversation carried over.
+      var next: Option[(Cli.Args, Option[SessionSnapshot])] = Some((args, None))
+      var code = 0
+      while next.isDefined do
+        val (current, resume) = next.get
+        next = None
+        try code = App(current, tui, resume).run()
+        catch case App.Restart(moved, carried) => next = Some((moved, carried))
+      code
     catch
       case App.Exit(code) => code
       case e: Throwable =>

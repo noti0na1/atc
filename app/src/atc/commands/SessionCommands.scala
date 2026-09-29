@@ -1,6 +1,7 @@
 package atc.commands
 
 import atc.{App, Debug}
+import atc.checkpoint.RevertReport
 import atc.agent.{Agent, ScalaToolRunner, SessionSnapshot, SessionStore}
 import atc.llm.CancelledException
 import atc.perms.Mode
@@ -15,7 +16,7 @@ final class SessionCommands(app: App):
   import app.{agent, cwd, host, policy, predictor, sandbox, tui}
 
   /** Where the conversation is kept between runs in this directory. */
-  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, cwd)
+  private lazy val autoSaveFile = SessionStore.autoSavePath(PlatformPath.userHome, app.sessionRoot)
 
   /** Clear the conversation, task state, output history and session grants; keep the models and mode. */
   private def startOver(): Boolean =
@@ -108,6 +109,11 @@ final class SessionCommands(app: App):
             None
     target.foreach: m =>
       if m == policy.mode then tui.info(s"mode: ${m.describe}")
+      else if m == Mode.Isolate then
+        // The session moves to the project's copy; Main starts it there with this conversation.
+        try throw App.Restart(app.isolatedArgs(), Some(agent.snapshot).filter(_.nonEmpty))
+        catch case e: IllegalStateException => tui.error(Debug.message(e))
+      else if app.isolatedFrom.isDefined then leaveIsolation(m)
       else
         val previous = policy.mode
         policy.mode = m
@@ -137,6 +143,60 @@ final class SessionCommands(app: App):
         if on then "auto on: permission requests are rejected without asking"
         else "auto off: permission requests are asked again"
       )
+
+  /** Leave isolate mode for `mode`, first offering to apply or drop what the copy changed. */
+  private def leaveIsolation(mode: Mode): Unit =
+    val project = app.isolatedFrom.get
+    val waiting = app.isolation.fold(0)(_.unapplied.size)
+    val (applyIt, keep, drop) = (s"Apply them and switch to ${mode.label}", s"Keep them in the copy", s"Discard them")
+    val choice =
+      if waiting == 0 then Some(keep)
+      else tui.choose(s"The copy differs from the project in $waiting files.", List(applyIt, keep, drop, "Stay here"))
+    val go = choice match
+      case Some(`applyIt`) => applyIsolated(); true
+      case Some(`drop`) => discardIsolated(); true
+      case Some(`keep`) => true
+      case _ => false
+    if go then throw App.Restart(app.argsLeaving(project, mode), Some(agent.snapshot).filter(_.nonEmpty))
+
+  /** `/apply`: write the copy's changes into the project. */
+  def applyIsolated(): Unit =
+    app.isolation match
+      case None => tui.info("/apply works in isolate mode (/mode isolate).")
+      case Some(isolation) =>
+        report(
+          isolation.apply(),
+          List("Applied", "Deleted", "Merged with your edits in"),
+          "The copy's changes are already in the project.",
+          agent.noteIsolationApplied
+        )
+
+  /** `/discard`: put the copy back to the project's state. */
+  def discardIsolated(): Unit =
+    app.isolation match
+      case None => tui.info("/discard works in isolate mode (/mode isolate).")
+      case Some(isolation) =>
+        report(
+          isolation.discard(),
+          List("Restored", "Deleted", "Merged in"),
+          "The copy has no changes.",
+          agent.noteIsolationDiscarded
+        )
+
+  /** Show what an apply or discard did, and tell the agent. */
+  private def report(done: RevertReport, labels: List[String], nothing: String, note: String => Unit): Unit =
+    val groups = labels.zip(List(done.restored, done.deleted, done.merged)).filter(_._2.nonEmpty)
+    groups.foreach((label, paths) => tui.success(s"$label: ${paths.mkString(", ")}"))
+    done.conflicts.foreach((path, reason) => tui.warn(s"Left unchanged: $path ($reason)"))
+    if groups.isEmpty && done.conflicts.isEmpty then tui.info(nothing)
+    else
+      note(
+        (groups.map((label, paths) => s"$label: ${paths.mkString(", ")}.") ++
+          done.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
+      )
+
+  /** Continue a conversation carried over from the session this one replaced. */
+  def resumeFrom(saved: SessionSnapshot): Unit = restore(saved)
 
   /** `/run`: the user runs Scala in the sandbox with the same API, givens and
     * permissions as the agent. It is shown as a code block like an agent tool

@@ -59,6 +59,8 @@ final class Commands(app: App):
     case Cmd.Providers => providersMenu.run()
     case Cmd.Mode => sessionCommands.switchMode(arg)
     case Cmd.Auto => sessionCommands.switchAuto(arg)
+    case Cmd.Apply => sessionCommands.applyIsolated()
+    case Cmd.Discard => sessionCommands.discardIsolated()
     case Cmd.Perms => statusCommands.permissions(arg)
     case Cmd.Config => configCommands.run(arg)
     case Cmd.Interface => tui.println(Prompts.interfaceSource)

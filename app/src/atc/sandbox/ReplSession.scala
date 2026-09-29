@@ -126,7 +126,7 @@ object ReplSession:
           "@assumeSafe given ex: (Exec^{io}) = atc.lib.Runtime.processes",
           "@assumeSafe given net: (Network^{io}) = atc.lib.Runtime.network",
         )
-      case Mode.Local =>
+      case Mode.Local | Mode.Isolate =>
         List(
           "@assumeSafe given io: (IOCap^) = atc.lib.Runtime.rootIO",
           "@assumeSafe given user: (UserIO^) = atc.lib.Runtime.rootUser",

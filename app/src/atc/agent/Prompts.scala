@@ -33,6 +33,13 @@ object Prompts:
          |does not provide a `Network`; its derivations are internal, so `httpGet`/`requestNetwork` do not compile even though
          |`io` is full. The separate `given user: UserIO^` handles reporting, questions, TODOs and `chat`. Tell the user to
          |switch to full mode (`/mode full`) if the task needs the network.""".stripMargin
+    case Mode.Isolate =>
+      """|Sandbox mode: ISOLATE, meaning files and commands on a copy of the project, and no network. In scope:
+         |`given io: IOCap^`, `given fs: FileSystem^{io}` (read + write) and `given ex: Exec^{io}` (commands), as in local
+         |mode. The working directory is the copy: the user's project is unchanged until they apply your changes with
+         |/apply (or drop them with /discard), and it is not accessible from here. Work as usual; tell the user when a
+         |change is ready to apply. The separate `given user: UserIO^` handles reporting, questions, TODOs and
+         |`chat`.""".stripMargin
     case Mode.ReadOnly =>
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the
          |machine-effect root), `given fs: FileSystem^{io.rd}` (read-only) and `given ex: Exec^{io.rd}`, which runs
