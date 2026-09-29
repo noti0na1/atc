@@ -85,3 +85,10 @@ class SessionStoreSuite extends munit.FunSuite:
     assert(empty.copy(pendingNotes = List("User ran: println(42)")).nonEmpty)
     assert(empty.copy(task = TaskNotes(goal = "finish the tests")).nonEmpty)
     assert(empty.copy(history = List(Msg.User("hello"))).nonEmpty)
+
+  test("a session keeps the mode it was in, and an older save without one still loads"):
+    val isolated = snapshot.copy(mode = Some("isolate"))
+    assertEquals(SessionStore.decode(SessionStore.encode(isolated)).mode, Some("isolate"))
+    val older = ujson.read(SessionStore.encode(snapshot.copy(mode = None)))
+    assert(!older.obj.contains("mode"))
+    assertEquals(SessionStore.decode(ujson.write(older)).mode, None)

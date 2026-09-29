@@ -67,7 +67,15 @@ final class Agent(
 
   def snapshot: SessionSnapshot =
     val (notes, todos) = taskState()
-    SessionSnapshot(history, conversation.notes, conversation.userRequests, notes, todos, model.ref)
+    SessionSnapshot(
+      history,
+      conversation.notes,
+      conversation.userRequests,
+      notes,
+      todos,
+      model.ref,
+      Some(policy.mode.label)
+    )
 
   def restore(saved: SessionSnapshot): Unit =
     clear()

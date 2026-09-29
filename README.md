@@ -563,7 +563,7 @@ and reasoning out in full, Shift-Tab cycles the mode, and Shift+Enter adds a lin
 agent is working, type a correction and press Enter: it reaches the agent before its next
 tool call. After a turn that changed files, ATC lists them, and `/undo` reverts them.
 Sessions are saved when you leave, and the next start in the same directory
-offers to resume. ATC notifies you when a turn ends or the agent waits for you.
+offers to resume, in the mode the session was in (unless `--mode` names one). ATC notifies you when a turn ends or the agent waits for you.
 
 Without a terminal (`-p` in a pipe) nothing asks: a permission the configuration does not
 grant fails instead of waiting, so use `--approve-all` only in a trusted setup.

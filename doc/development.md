@@ -1422,11 +1422,17 @@ interrupts the turn instead, queued text goes back to the prompt as a draft
 request therefore sees the correction before choosing another operation.
 
 `SessionStore` writes versioned JSON snapshots with neutral messages, pending notes, task
-state and TODOs. It excludes SDK replay payloads, REPL definitions and permission grants.
+state, TODOs and the mode (absent in older saves). It excludes SDK replay payloads, REPL definitions and permission grants.
 Files are limited to 8 MiB, created exclusively and owner-only on POSIX systems. `/resume [file]`
 validates the file before clearing current state, checks tool-call/result pairing, creates
 fresh permission and REPL state, and adds explicit notices about lost definitions and
-grants. It retains the currently selected model and never executes saved tool calls.
+grants. It retains the currently selected model and never executes saved tool calls. It
+restores the saved mode unless the command line named one (`App.cliMode`): a mode the REPL
+takes in place is set before the fresh REPL starts, and entering or leaving isolate mode
+moves the session once the conversation is restored, so resuming an isolated session goes
+back to its copy with the changes still pending there. A conversation carried across such a
+move (`resumeFrom`) keeps the mode the move set, which `Cli.Args.sessionMode` carries apart
+from the command line's `mode`.
 
 Interactive terminal sessions save on normal exit (`/quit`, its aliases, or Ctrl-D).
 `SessionStore.autoSavePath` hashes the canonical working directory with SHA-256 to select

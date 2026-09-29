@@ -24,6 +24,8 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
   val cwd: Path = args.cwd
   /** In isolate mode, the project this session works on a copy of. */
   val isolatedFrom: Option[Path] = args.isolatedFrom
+  /** The mode the command line named, which a resumed session's mode does not override. */
+  val cliMode: Option[Mode] = args.mode
   /** Where the session is saved and resumed: the project, in isolate mode too. */
   val sessionRoot: Path = isolatedFrom.getOrElse(cwd)
 
@@ -59,7 +61,7 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
       config.denyCommands,
       config.denyHosts
     )
-  policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
+  policy.mode = args.sessionMode.orElse(args.mode).orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
   policy.auto = args.auto || config.auto
   policy.copyRoot = isolatedRoots.map(_._2)
   models.useMode(policy.mode)
@@ -163,7 +165,9 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     val kept = isolation.enter()
     if kept > 0 then
       tui.info(
-        s"The copy keeps $kept changes from before; the project's own changes since then reach it after /apply or /discard."
+        s"The copy keeps ${
+            if kept == 1 then "1 change" else s"$kept changes"
+          } from before; the project's own changes since then reach it after /apply or /discard."
       )
     // The copy's config is the project's: trusted when the project's is.
     val ownConfig = Files.isRegularFile(Config.projectPath(project))
@@ -173,12 +177,12 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
     args.copy(
       cwd = isolation.copy.resolve(project.relativize(here)).nn,
       isolatedFrom = Some(here),
-      mode = Some(Mode.Isolate)
+      sessionMode = Some(Mode.Isolate)
     )
 
   /** The arguments that run the session in `project` again, in `mode`. */
   def argsLeaving(project: Path, mode: Mode): Cli.Args =
-    args.copy(cwd = project, isolatedFrom = None, mode = Some(mode))
+    args.copy(cwd = project, isolatedFrom = None, sessionMode = Some(mode))
 
   /** Records the files the agent changes in each turn, for `/undo` (config
     * `checkpoints`). A `-p` run has nobody to undo anything. */

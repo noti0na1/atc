@@ -17,6 +17,8 @@ private[atc] object Cli:
     auto: Boolean = false,
     /** In isolate mode, the project whose copy `cwd` is (set when ATC moves the session). */
     isolatedFrom: Option[Path] = None,
+    /** The mode a moved session runs in; `mode` stays what the command line said. */
+    sessionMode: Option[Mode] = None,
     init: Boolean = false,
     initGlobal: Boolean = false,
     help: Boolean = false,

@@ -166,7 +166,7 @@ final class SessionCommands(app: App):
       if waiting.isEmpty then Some(keep)
       else
         tui.choose(
-          s"The copy differs from the project in ${waiting.size} files.",
+          s"The copy differs from the project in ${if waiting.size == 1 then "1 file" else s"${waiting.size} files"}.",
           List(applyIt, keep, drop, "Stay here")
         )
     val go = choice match
@@ -233,7 +233,7 @@ final class SessionCommands(app: App):
       )
 
   /** Continue a conversation carried over from the session this one replaced. */
-  def resumeFrom(saved: SessionSnapshot): Unit = restore(saved)
+  def resumeFrom(saved: SessionSnapshot): Unit = restore(saved, withMode = false)
 
   /** `/run`: the user runs Scala in the sandbox with the same API, givens and
     * permissions as the agent. It is shown as a code block like an agent tool
@@ -321,8 +321,19 @@ final class SessionCommands(app: App):
           tui.error(s"Could not save the session: ${Debug.describe(error)}")
           Debug.trace(error)
 
-  private def restore(saved: SessionSnapshot): Unit =
+  /** Continue `saved`, in the mode it was in when `withMode` (unless the command line named a
+    * mode). A mode the REPL takes in place is set before the fresh REPL starts; entering or
+    * leaving isolate mode moves the session once the conversation is restored. */
+  private def restore(saved: SessionSnapshot, withMode: Boolean = true): Unit =
+    val savedMode = Option.when(withMode && app.cliMode.isEmpty)(saved.mode).flatten
+      .flatMap(label => scala.util.Try(Mode.parse(label)).toOption).filter(_ != policy.mode)
+    val inPlace = savedMode.filter(m => m != Mode.Isolate && app.isolatedFrom.isEmpty)
+    val previous = policy.mode
+    inPlace.foreach(m => policy.mode = m)
     if startOver() then
+      inPlace.foreach: m =>
+        app.models.useMode(m)
+        app.updateStatus()
       host.restoreTaskState(saved.task, saved.todos)
       agent.restore(saved)
       if saved.model != agent.model.ref then
@@ -330,3 +341,6 @@ final class SessionCommands(app: App):
       tui.success(
         s"Resumed ${saved.history.size} messages with fresh permissions and REPL state. No tool calls were replayed."
       )
+      inPlace.foreach(m => tui.info(s"mode -> ${m.describe}, as in the saved session"))
+      savedMode.filterNot(inPlace.contains).foreach(m => switchMode(m.label))
+    else policy.mode = previous
