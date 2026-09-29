@@ -140,15 +140,17 @@ Rules for every process:
   macOS kills the launch's process group.
 - The environment is scrubbed as today, plus variables that point to credential agents.
 
-The command allowlist becomes a statement of intent rather than containment. Whether local
-mode may run any non-denied command under confinement is an open decision.
+The command allowlist stays in every mode, read-only included. A confined command reads more
+than the file API allows: system and toolchain directories and its temporary directory, and
+on Linux every world-readable path outside the home directory, because bubblewrap mounts `/`
+read-only. On macOS `/opt/homebrew/var`, where Homebrew services keep their data, is
+readable too. Narrowing both to the directories tools need is planned.
 
 API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
 variant lets read-only mode run commands that write nothing; network comes from a derived
 block such as `withNetwork { exec(...) }` whose runtime object carries the flag and whose
-capture set records `net`. A later extension, `execClassified`, runs a process on classified
-input under a sealed profile (no network, a fresh scratch directory, no IPC) and returns its
-stdout, stderr, exit code and timing inside a `Classified` result.
+capture set records `net`. Commands on classified input run inside a `sealed` block
+([The agent API with the sandbox](#the-agent-api-with-the-sandbox)).
 
 Backends:
 
@@ -211,6 +213,89 @@ installs would test the original sources.
 | No OS sandbox (Windows before `srt`, Linux without user namespaces) | L0, L1, L3; commands run unconfined and ATC says so |
 | A damaged checkpoint store | L0 to L2 |
 
+## The agent API with the sandbox
+
+A call's authority is the capabilities it holds. For code the compiler sees, capture checking
+enforces it; for code it cannot see (commands, and the evaluator itself), the host turns the
+same capabilities into an OS profile. Views such as `fs.rd` are erased at run time, so an
+authority the host enforces must live in a distinct runtime object, created by a block or a
+function whose signature states what it grants (`requestFiles`, `withNetwork`,
+`execReadOnly`). The signature fixes the most a call may do; the runtime object fixes what it
+does.
+
+### Sealed classified computations
+
+`sealed { ... }` runs a block and returns its result as `Classified[T]`:
+
+```scala
+val digest: Classified[String] = sealed {
+  val env  = read(".env")                                  // plain text inside the block
+  val keys = exec("jq -r .token secrets/ci.json").stdout   // a sealed command
+  classifiedChat(s"Which of these tokens are expired? $env $keys")
+}
+println(digest)   // the user sees it; the model sees Classified(***)
+```
+
+- The block receives a sealed `FileSystem^` and `Exec^` as context parameters, which take
+  precedence over the ambient ones, as in `requestFiles`. From outside it may capture only
+  read-only views, so printing, asking, the normal model, public writes and the network do
+  not compile.
+- `c.reveal` opens a `Classified` value inside the block. It needs a token that exists only
+  in the block and cannot escape it.
+- The sealed file system reads classified files as plain text and writes only classified
+  paths.
+- A sealed command may read classified files, has no network, writes only a scratch
+  directory, and is killed when the block ends. `spawn` is not available.
+- An exception that leaves the block becomes a classified failure.
+- Classified content never gets network access. Its destinations are the user (`println`),
+  classified files and the classified model (`classifiedChat`).
+
+The block replaces `readClassified`, `writeClassified`, `childrenClassified`,
+`walkClassified`, `flatMap`, `zip` and the planned `execClassified`. `httpPostClassified`
+and the `secretHeaders` overloads are removed. Where commands cannot be confined, sealed
+commands are refused and pure sealed code still runs. The typing is prototyped before the
+API changes: precedence of the block's givens, escape of `reveal`, writes to outer mutable
+state, and exceptions.
+
+### Interface cleanup
+
+- `access` and `FileEntry` leave the agent API; the host keeps its handle type. Agents use
+  the path functions: in 13 saved sessions (135 snippets) no `FileEntry` navigation
+  appeared, nor any network, `spawn` or classified call.
+- Command and HTTP options become plain data values. Default arguments are safe there
+  because the values carry no capability, so each capability-taking function needs at most
+  two overloads; commands and network now take 32 methods.
+- Each authority has one form: a block for a scoped or derived capability, a function name
+  only where the static view decides (`exec` against `execReadOnly`).
+
+Directions the combination opens, not scheduled: a process lives no longer than the
+capabilities it was started with, as `spawn` inside `requestExec` already does; `fs.within(dir)`
+as a narrower runtime capability, so that `parallel` tasks given disjoint regions cannot race;
+and a revertible block with no network in scope, confined commands and a checkpoint restored
+on failure.
+
+### Modes and the auto switch
+
+A mode chooses what the agent can reach; a separate switch chooses whether ATC asks.
+
+| Mode | The agent can |
+|---|---|
+| isolate | work on a copy of the project: write it and run commands in it, without network; changes reach the project when the user applies them |
+| read-only | read files and run commands that write nothing |
+| local | also write files and run commands that write; no network |
+| full | also reach allowed hosts |
+
+`auto` rejects every permission request without asking, in every mode: files outside the
+policy, commands outside the allowlist, and hosts outside `hosts`, which the command proxy
+rejects as well. The agent is told why; the rejected requests are listed for the user at the
+end of the turn, to grant for the next one. Deny lists and locked rules are unchanged.
+
+Open for isolate: where the copy lives. A copy at another path (an APFS clone, a reflink or a
+git worktree) isolates on every platform but rebuilds caches keyed by path (Mill 21 s against
+1.9 s) and breaks editable installs. A bubblewrap overlay at the real path avoids both on
+Linux, but covers only commands, so the host's own file operations would have to write to the
+overlay as well. Applying uses the checkpoint merge, so edits the user made meanwhile are kept.
+
 ## Platform support
 
 | Layer | macOS | Linux | Windows |
@@ -228,9 +313,14 @@ installs would test the original sources.
 | 2 | L3 checkpoints, turn summary, `/undo` | Done; see [Checkpoints](development.md#checkpoints) |
 | 3 | L2 on macOS and Linux, local mode without network for commands, protected paths | Done; see [Command sandbox](development.md#command-sandbox) |
 | 3b | Host proxy that enforces `hosts` for commands in full mode | Done |
-| 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` planned |
+| 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` becomes `sealed` (phase 8) |
 | 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
+| 7 | The `auto` switch | Planned |
+| 8 | `sealed` classified computations, prototyped first; classified network paths removed | Planned |
+| 9 | Interface cleanup | Planned |
+| 10 | Isolate mode | Planned; where the copy lives is open |
+| 11 | Commands read only the system and toolchain directories they need (Linux mounts, `/opt/homebrew/var`) | Planned |
 
 ## Spike measurements
 
@@ -254,6 +344,8 @@ Desktop for Linux.
 - Classified content is protected by the compiler only, with or without L1.
 - Committed classified files remain readable through git objects by any process that may
   read `.git`.
+- Confined commands read system and toolchain directories the file API refuses, and on
+  Linux every world-readable path outside the home directory (phase 11).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
 - Host file operations remain check-then-use; mitigations are no-follow opens, a check after
