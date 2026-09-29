@@ -368,7 +368,7 @@ meanwhile are kept (see [Isolate mode](development.md#isolate-mode)).
 | 3b | Host proxy that enforces `hosts` for commands in full mode | Done |
 | 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` becomes the `classified` block (phase 8) |
 | 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
-| 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
+| 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Linux staging done as isolate mode's copy mounted at the project's path (phase 11); Windows through `srt` and the discovery mode not started: `srt` on Windows needs a Windows machine and its elevated install to build and verify, and a discovery log has no Linux counterpart to Seatbelt's reports |
 | 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
 | 8 | `classified` blocks; classified network paths removed | Done; see [Classified data](development.md#classified-data) |
 | 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Done: holes closed (terminals, Linux mounts, service data, git credentials); read-only commands without network run any program, with narrower read roots |
