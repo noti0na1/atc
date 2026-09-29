@@ -95,14 +95,15 @@ final class SessionCommands(app: App):
                   report.conflicts.map((path, reason) => s"Left unchanged: $path ($reason).")).mkString(" ")
               agent.noteFilesReverted(outcome)
 
-  /** `/mode`: cycle (no argument) or set the sandbox mode. A new REPL starts
-    * with only that mode's capabilities; its definitions are gone, the
-    * conversation stays. */
+  /** `/mode`: choose the sandbox mode from a menu (no argument), cycle it (`next`, which
+    * Shift-Tab sends) or set the named one. A new REPL starts with only that mode's
+    * capabilities; its definitions are gone, the conversation stays. */
   def switchMode(arg: String): Unit =
-    val target =
-      if arg.isEmpty then Some(policy.mode.next)
-      else
-        try Some(Mode.parse(arg))
+    val target = arg.trim match
+      case "" => chooseMode()
+      case "next" => Some(policy.mode.next)
+      case named =>
+        try Some(Mode.parse(named))
         catch
           case e: IllegalArgumentException =>
             tui.error(Debug.message(e))
@@ -122,6 +123,18 @@ final class SessionCommands(app: App):
           app.updateStatus()
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
+
+  /** The mode the user picks from a menu opening on the current one; `None` when they leave it. */
+  private def chooseMode(): Option[Mode] =
+    val modes = Mode.values.toList
+    val width = modes.map(_.label.length).max
+    val rows = modes.map(m => s"${m.label.padTo(width, ' ')}  ${m.description}")
+    val chosen =
+      tui.choose("Choose the sandbox mode", rows, modes.indexOf(policy.mode)).map(row => modes(rows.indexOf(row)))
+    if chosen.isEmpty then
+      tui.info(s"mode: ${policy.mode.describe}" +
+        (if tui.menusAvailable then "" else s" (/mode ${modes.map(_.label).mkString("|")})"))
+    chosen
 
   /** `/auto`: switch (no argument), or turn on or off, the rejection of every
     * permission request without asking. The REPL and its capabilities stay. */

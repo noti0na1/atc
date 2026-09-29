@@ -21,7 +21,7 @@ enum Mode(val label: String, val description: String):
   def allowsNetwork: Boolean = this == Full
   /** One line naming the mode and what it allows, for the banner and `/mode`. */
   def describe: String = s"$label: $description"
-  /** The next mode when cycling (Shift-Tab / `/mode` without an argument). Isolate mode, which
+  /** The next mode when cycling (Shift-Tab, `/mode next`). Isolate mode, which
     * moves the session to a copy of the project, is left out: `/mode isolate` enters it. */
   def next: Mode = this match
     case Full | Isolate => ReadOnly

@@ -12,7 +12,7 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Models extends SlashCommand("/models", "list configured models")
   case Providers extends SlashCommand("/providers", "turn providers and models on or off, or add a provider")
   case Effort extends SlashCommand("/effort [level]", "choose the agent model's reasoning effort")
-  case Mode extends SlashCommand("/mode [name]", "change mode and restart the REPL")
+  case Mode extends SlashCommand("/mode [name]", "choose the sandbox mode from a menu, or set the named one")
   case Auto extends SlashCommand("/auto [on|off]", "reject permission requests without asking")
   case Apply extends SlashCommand("/apply", "in isolate mode, write the copy's changes into the project")
   case Discard extends SlashCommand("/discard", "in isolate mode, put the copy back to the project's state")

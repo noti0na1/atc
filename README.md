@@ -342,9 +342,9 @@ agent can express at all, before the permission policy applies:
 
 A mode withdraws an effect while leaving the conversation intact, so the agent can always
 explain what it *would* have done. The policy enforces the same three levels again at run
-time. Switch with `/mode` (cycles read-only, local and full), **Shift-Tab** on an empty
-prompt, `--mode`, or `"mode"` in the config; switching starts a fresh REPL but keeps the
-conversation. `/mode isolate` moves the session to the project's copy, which needs the OS
+time. Switch with `/mode`, which opens a menu (or `/mode <name>`), **Shift-Tab** on an empty
+prompt, which cycles read-only, local and full, `--mode`, or `"mode"` in the config;
+switching starts a fresh REPL but keeps the conversation. `/mode isolate` moves the session to the project's copy, which needs the OS
 sandbox and stays between sessions. The default is full.
 
 ## Asking for more
