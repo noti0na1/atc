@@ -85,8 +85,11 @@ private[atc] object Bubblewrap:
     val binds = (plan.readable ++ plan.toolchain).filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
       (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
     for (flag, path) <- binds.sortBy(_._2.getNameCount) do args ++= List(flag, path.toString, path.toString)
-    for (level, path) <- masks(plan).sortBy(_._2.getNameCount) do args ++= mask(level, path)
-    for socket <- agentSockets do args ++= mask(Level.Hidden, socket)
+    // A path under nothing mounted is absent already; masking it would only create it.
+    val mounted = systemPaths ++ plan.readable ++ plan.toolchain ++ plan.writable :+ plan.cache
+    def visible(path: Path) = mounted.exists(path.startsWith(_))
+    for (level, path) <- masks(plan).sortBy(_._2.getNameCount) if visible(path) do args ++= mask(level, path)
+    for socket <- agentSockets if visible(socket) do args ++= mask(Level.Hidden, socket)
     args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
     if !plan.network || bridge.isDefined then args += "--unshare-net"
     args ++= List("--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
@@ -110,7 +113,8 @@ private[atc] object Bubblewrap:
     if Files.isDirectory(home) then args ++= List("--tmpfs", home.toString)
     for path <- readable.filter(Files.exists(_)).sortBy(_.getNameCount) do
       args ++= List("--ro-bind", path.toString, path.toString)
-    for socket <- agentSockets do args ++= mask(Level.Hidden, socket)
+    for socket <- agentSockets if (systemPaths ++ readable).exists(socket.startsWith(_)) do
+      args ++= mask(Level.Hidden, socket)
     args ++= List("--chdir", "/tmp", "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
     args.result()
 
@@ -119,6 +123,11 @@ private[atc] object Bubblewrap:
 
   /** Top-level directories that a merged `/usr` replaces with links into it. */
   private val UsrLinks = List("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+
+  /** The system directories and top-level links present here. */
+  private def systemPaths: List[Path] = (SystemRoots ++ UsrLinks).map(Paths.get(_).nn).filter(p =>
+    Files.isDirectory(p) || Files.isSymbolicLink(p)
+  )
 
   /** Read-only mounts of the system directories present here, with the links of a merged `/usr`. */
   private def systemMounts: List[String] =

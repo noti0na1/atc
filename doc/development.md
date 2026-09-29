@@ -307,7 +307,11 @@ views are erased at run time (`fs` and `fs.rd` are the same object), so the host
 from the capability whether a command may write; the method decides instead: `exec` asks the
 OS sandbox for the file system's writable roots, `execReadOnly` for none, and `execReadOnly`
 is refused where commands are not sandboxed, since its type promises what only the sandbox
-can keep. `withNetwork` derives an `ExecImpl` that carries the `Network`'s scope; only
+can keep. A command started with `execReadOnly` and a plain `Exec` needs no command pattern
+(`HostProcesses.authorizeCommands`): it can neither write nor reach anything, and a pattern
+would not narrow what it reads, since any reader a pattern admits reads everything the
+sandbox allows. `denyCommands` still refuses it, and one started inside `withNetwork` needs a
+pattern as `exec` does. `withNetwork` derives an `ExecImpl` that carries the `Network`'s scope; only
 commands started with it get the network, through the proxy, and the proxy decides hosts in
 that scope, so a `requestNetwork` grant reaches the commands inside its block and ends with
 it. A plain `Exec` gives commands no network in any mode. `requestExec` keeps the network
@@ -665,10 +669,13 @@ may write (not for `execReadOnly`, whose writable roots become readable ones) an
 environment. The plan lists concrete paths:
 
 - Readable roots: exact-path rules that grant read access, the scope's file grants, and a
-  toolchain bundle (JDKs, build tool homes, dependency caches, version managers and the
-  directories on the `PATH`, when they exist under the home directory, plus `java.home` and
-  `JAVA_HOME`). Everything else under the home directory is unreadable; system directories
-  are the backend's.
+  toolchain bundle (JDKs, build tool homes, dependency caches, version managers, git's
+  configuration and the directories on the `PATH`, when they exist under the home
+  directory, plus `java.home` and `JAVA_HOME`). Everything else under the home directory is
+  unreadable; system directories are the backend's. A read-only plan (`execReadOnly`) keeps
+  a `PATH` directory under the home directory only inside a named toolchain root and hides
+  git's user configuration (`GitConfig`), which can hold tokens; its commands get
+  `GIT_CONFIG_GLOBAL=/dev/null`, since git stops at a configuration file it cannot read.
 - Writable roots: the same sources with write access, and a cache directory the sandbox owns
   (`~/Library/Caches/atc-sandbox`, `~/.cache/atc-sandbox`). Tool caches in the home
   directory stay read-only, because unsandboxed tools later load code from them.
@@ -678,7 +685,7 @@ environment. The plan lists concrete paths:
   restriction regardless, so the plan never grants more than the policy. `.git` is
   read-only unless the policy lets it be written, in which case only its hooks and
   configuration are; `.atc`, `.vscode`, `.idea` and `.envrc` in every writable root are
-  read-only; the home directory's credential files and agent sockets are hidden, and so is
+  read-only; the home directory's credential files (`HomeSecrets`) and agent sockets are hidden, and so is
   the service data package managers keep in system directories (`/opt/homebrew/var`,
   `/usr/local/var`) unless a policy root lies inside it.
 

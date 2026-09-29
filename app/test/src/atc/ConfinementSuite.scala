@@ -70,7 +70,7 @@ class ConfinementSuite extends munit.FunSuite:
     assert(plan(env, network = true).network)
 
   test("toolchain directories never include the home directory or a directory above it"):
-    val bundle = SandboxPlan.toolchain(home)
+    val bundle = SandboxPlan.toolchain(home, readOnly = false, Option(System.getenv("PATH")).getOrElse(""))
     assert(bundle.forall(p => !home.startsWith(p)), bundle.toString)
 
   // ── rendering ───────────────────────────────────────────────────
@@ -149,6 +149,43 @@ class ConfinementSuite extends munit.FunSuite:
     given Exec = env.host.processes
     given FileSystem = env.host.fileSystem
     intercept[IllegalArgumentException](env.host.execReadOnly("sh -c true > out.txt"))
+
+  test("a read-only command runs any program without asking, and the deny list still refuses"):
+    assume(sandbox.confined, s"no command sandbox here: ${sandbox.describe}")
+    val env = TestEnv(mkRules = secretsAndGit, commands = Nil, denyCommands = List("rm *"), commandSandbox = sandbox)
+    env.policy.mode = Mode.Full
+    env.file("open.txt", "open")
+    import env.given
+    given Exec = env.host.processes
+    given FileSystem = env.host.fileSystem
+    assertEquals(env.host.execReadOnly("cat open.txt").stdout, "open")
+    val denied = intercept[SecurityException](env.host.execReadOnly("rm -rf open.txt"))
+    assert(denied.getMessage.nn.contains("denyCommands"), denied.getMessage)
+    val writing = intercept[SecurityException](env.host.exec("cat open.txt"))
+    assert(writing.getMessage.nn.contains("no permitted pattern"), writing.getMessage)
+    given lib.Network = env.host.network
+    val networked = intercept[SecurityException](env.host.withNetwork(env.host.execReadOnly("cat open.txt")))
+    assert(networked.getMessage.nn.contains("no permitted pattern"), networked.getMessage)
+    assert(env.requests.isEmpty, "nobody was asked")
+
+  test("a read-only command gets no git user configuration and no personal PATH directories"):
+    val env = TestEnv()
+    val hidden = (level: Level, name: String) => Restriction(level, Target.Exact(home.resolve(name).nn))
+    val readOnly = plan(env, mayWrite = false).restrictions.toSet
+    val writing = plan(env).restrictions.toSet
+    for name <- SandboxPlan.GitConfig do
+      assert(readOnly.contains(hidden(Level.Hidden, name)), name)
+      assert(!writing.contains(hidden(Level.Hidden, name)), name)
+    assert(writing.contains(hidden(Level.Hidden, ".config/git/credentials")))
+    val fakeHome = Files.createTempDirectory("atc-home").nn.toRealPath().nn
+    val personal = Files.createDirectories(fakeHome.resolve("bin")).nn
+    val lean = Files.createDirectories(fakeHome.resolve(".elan/bin")).nn
+    val path = List(personal, lean).mkString(java.io.File.pathSeparator)
+    val strict = SandboxPlan.toolchain(fakeHome, readOnly = true, path)
+    assert(strict.contains(fakeHome.resolve(".elan").nn) && !strict.contains(personal), strict.toString)
+    assert(SandboxPlan.toolchain(fakeHome, readOnly = false, path).contains(personal))
+    val confinedEnv = confined(Mode.ReadOnly)
+    assertEquals(shReadOnly(confinedEnv, "echo \"$GIT_CONFIG_GLOBAL\"").stdout.trim, "/dev/null")
 
   test("a confined command writes in the project and nowhere else"):
     val env = confined()

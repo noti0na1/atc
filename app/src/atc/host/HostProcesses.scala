@@ -70,13 +70,17 @@ private[host] trait HostProcesses:
         "exec(command, args, ...): `command` must be one program when args are given; write a pipeline or redirection in the one-line form exec(\"...\")"
       )
 
-  private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId): Unit =
+  /** The deny list applies to every command. The allowlist does not apply to a read-only command
+    * without network (`anyProgram`): the OS sandbox keeps it from writing or reaching anything,
+    * and the allowlist would not narrow what it reads, since any reader it admits reads all of it. */
+  private def authorizeCommands(pipeline: CommandLine.Pipeline, scope: ScopeId, anyProgram: Boolean): Unit =
     for stage <- pipeline.stages; pattern <- policy.commandDenied(stage.line) do
       throw SecurityException(
         s"Access denied: command '${stage.line}' is refused by the configuration (denyCommands pattern '$pattern'). It cannot be granted; do not retry it or work around it, tell the user instead."
       )
 
-    val missing = pipeline.stages.filterNot(stage => policy.commandAllowed(scope, stage.line))
+    val missing =
+      if anyProgram then Nil else pipeline.stages.filterNot(stage => policy.commandAllowed(scope, stage.line))
     if missing.nonEmpty then
       val target =
         if pipeline.stages.lengthIs == 1 then s"command '${missing.head.line}'"
@@ -143,7 +147,7 @@ private[host] trait HostProcesses:
       throw IllegalArgumentException(
         "exec: both ExecOptions(stdin = ...) and '< file' would feed the command; use one of them"
       )
-    authorizeCommands(pipeline, scopeOf(ex))
+    authorizeCommands(pipeline, scopeOf(ex), anyProgram = !writable && networkOf(ex).isEmpty)
 
     val dir = commandDirectory(options.workingDir, fs)
     val stdinFile = pipeline.stdinFile.map(inputRedirect(_, fs))

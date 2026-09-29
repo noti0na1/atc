@@ -337,7 +337,7 @@ agent can express at all, before the permission policy applies:
 
 | Mode | The agent can |
 |---|---|
-| **read-only** | read files, report, ask, and run commands that write nothing |
+| **read-only** | read files, report, ask, and run commands that write nothing (any command, without asking, where the OS sandbox confines them) |
 | **local** | also write files and run commands that write |
 | **full** | also reach the network, and let the model's provider search the web |
 

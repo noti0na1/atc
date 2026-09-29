@@ -149,11 +149,14 @@ object CommandSandbox:
     command: List[String],
     tmp: String,
     cache: Path,
-    proxy: Option[Int]
+    proxy: Option[Int],
+    readOnly: Boolean,
   ): Unit =
     stage.command((command ++ stage.command().nn.asScala).asJava)
     val environment = stage.environment().nn
     AgentVariables.foreach(environment.remove)
+    // A read-only command cannot read the user's git configuration; git would stop at it.
+    if readOnly then environment.put("GIT_CONFIG_GLOBAL", "/dev/null")
     environment.put("TMPDIR", tmp)
     environment.put("TMPPREFIX", s"$tmp/zsh")
     environment.put("MPLCONFIGDIR", cache.resolve("matplotlib").toString)
@@ -202,7 +205,7 @@ object CommandSandbox:
       val tmp = PlatformPath.canonical(Files.createTempDirectory(Paths.get("/private/tmp").nn, "atc-").nn)
       val prefix = Seatbelt.prefix(sandboxPlan, tmp, proxy.map(_.port))
       stages.foreach: stage =>
-        configure(stage, prefix, tmp.toString, sandboxPlan.cache, proxy.map(_.port))
+        configure(stage, prefix, tmp.toString, sandboxPlan.cache, proxy.map(_.port), readOnly = !writable)
         // The JVM on macOS ignores TMPDIR and would write into the user's shared temporary directory.
         appendOption(stage.environment().nn, "JAVA_TOOL_OPTIONS", s"-Djava.io.tmpdir=$tmp")
       Launch(startHere, closing(proxy, deleteTree(tmp)))
@@ -232,7 +235,7 @@ object CommandSandbox:
           val dir = Files.createTempDirectory("atc-proxy").nn
           (socatPath, dir, CommandProxy.unix(dir.resolve("proxy.sock").nn, policy, netScope, line))
       val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)))
-      stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort)))
+      stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort), !writable))
       Launch(Launcher.start, closing(bridge.map(_._3), bridge.foreach((_, dir, _) => deleteTree(dir))))
 
   /** Starts processes on one long-lived thread. `--die-with-parent` kills the sandbox

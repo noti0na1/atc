@@ -140,9 +140,13 @@ Rules for every process:
   macOS kills the launch's process group.
 - The environment is scrubbed as today, plus variables that point to credential agents.
 
-The command allowlist stays in every mode for now. It limits which programs run, not what
-they read: any reader it admits (`cat`, `rg`, `git`, an interpreter) reads whatever the
-sandbox lets it read, so the sandbox's read roots are what protect files.
+The command allowlist applies to commands that may write or use the network. It limits which
+programs run, not what they read: any reader it admits (`cat`, `rg`, `git`, an interpreter)
+reads whatever the sandbox lets it read, so the sandbox's read roots are what protect files.
+A read-only command without network therefore runs any program `denyCommands` does not
+refuse, in every mode, and its read roots are narrower: no git user configuration (git gets
+`GIT_CONFIG_GLOBAL=/dev/null`) and no `PATH` directory under the home directory outside the
+named toolchain roots.
 
 Read-only audit (September 2026, macOS 27 and Ubuntu 24.04 with JDK 17), with read-only
 commands started through ATC's own launch path:
@@ -159,11 +163,14 @@ commands started through ATC's own launch path:
   database, D-Bus); only system directories are mounted now. `/opt/homebrew/var` and
   `/usr/local/var` are hidden on both.
 - Still readable beyond the file API: system directories (`/etc`, `/Library/Preferences`,
-  `/opt/homebrew/etc`, whose OpenSSL certificates tools need) and the toolchain bundle,
-  which includes `~/.gitconfig` (it can hold tokens) and every `PATH` directory under the
-  home directory (20 of 21 here, personal script directories among them).
-- Still allowed on macOS: creating and writing POSIX shared memory under any name, and
-  posting Darwin notifications, both visible to other processes of the user.
+  `/opt/homebrew/etc`, whose OpenSSL certificates tools need) and the toolchain bundle. For
+  commands that may write, the bundle includes `~/.gitconfig` (it can hold tokens) and every
+  `PATH` directory under the home directory (20 of 21 here, personal script directories and
+  other programs' files among them); read-only commands get neither. `~/.config/git/credentials`,
+  a git credential store, was readable and is hidden now.
+- Still allowed on macOS: creating POSIX shared memory, and writing a segment of another of
+  the user's programs whose name it knows and whose permissions allow it (the system's own
+  segments are refused), and posting Darwin notifications.
 - Unbounded: disk (macOS) or memory (Linux) used by the private temporary directory.
 
 API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
@@ -361,7 +368,7 @@ meanwhile are kept. The approach is to be confirmed.
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
 | 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
 | 8 | `classified` blocks; classified network paths removed | Typing prototyped; implementation planned |
-| 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Audit done, holes closed (terminals, Linux mounts, service data); allowing any read-only command awaits a decision on the remaining exposure |
+| 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Done: holes closed (terminals, Linux mounts, service data, git credentials); read-only commands without network run any program, with narrower read roots |
 | 10 | Interface cleanup | Planned |
 | 11 | Isolate mode: one copy per project; commands see it at the original path on Linux, at its own path on macOS | Planned; the approach is to be confirmed |
 
@@ -388,8 +395,9 @@ Desktop for Linux.
 - Committed classified files remain readable through git objects by any process that may
   read `.git`.
 - Confined commands read system and toolchain directories the file API refuses, including
-  `~/.gitconfig` and `PATH` directories under the home directory; on macOS they can write
-  POSIX shared memory and post notifications (phase 9).
+  `~/.gitconfig` and `PATH` directories under the home directory for commands that may
+  write; on macOS they can post notifications and write another program's shared memory
+  when they know its name (phase 9).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
 - Host file operations remain check-then-use; mitigations are no-follow opens, a check after

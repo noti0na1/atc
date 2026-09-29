@@ -87,6 +87,8 @@ object SandboxPlan:
         .map(data => Restriction(Level.Hidden, Target.Exact(data)))
     val homeRules =
       HomeSecrets.map(name => Restriction(Level.Hidden, Target.Exact(home.resolve(name).nn))) ++
+        Option.when(!mayWrite)(GitConfig.map(name => Restriction(Level.Hidden, Target.Exact(home.resolve(name).nn))))
+          .toList.flatten ++
         Option.when(writable.exists(home.startsWith(_)))(HomeStartup.map(name =>
           Restriction(Level.ReadOnly, Target.Exact(home.resolve(name).nn))
         )).toList.flatten
@@ -95,7 +97,7 @@ object SandboxPlan:
       home,
       readable.distinct,
       writable,
-      toolchain(home),
+      toolchain(home, readOnly = !mayWrite, Option(System.getenv("PATH")).getOrElse("")),
       (fromRules ++ protectedPaths ++ homeRules ++ serviceData).distinct,
       network,
       cache
@@ -148,6 +150,7 @@ object SandboxPlan:
     ".pypirc",
     ".git-credentials",
     ".password-store",
+    ".config/git/credentials",
     ".cargo/credentials",
     ".cargo/credentials.toml",
     ".ivy2/.credentials",
@@ -178,10 +181,17 @@ object SandboxPlan:
     ".config/systemd",
   )
 
+  /** Git's user configuration. Commands that may write read it (a commit needs the identity);
+    * read-only commands do not, since it can hold tokens, and git gets an empty one instead. */
+  val GitConfig: List[String] = List(".gitconfig", ".config/git/config")
+
   /** Toolchains and dependency caches under the home directory that commands may read:
-    * JDKs and build tools, their dependency caches, language version managers, and
-    * the directories on the `PATH`. Only existing directories are listed. */
-  def toolchain(home: Path): List[Path] =
+    * JDKs and build tools, their dependency caches, language version managers, and the
+    * directories on the `PATH` (`pathVariable`). For a read-only command (`readOnly`), a
+    * `PATH` directory under the home directory counts only inside one of the named roots:
+    * others hold personal scripts and other programs' files. Only existing directories are
+    * listed. */
+  def toolchain(home: Path, readOnly: Boolean, pathVariable: String): List[Path] =
     val named = List(
       ".sdkman/candidates",
       ".jdks",
@@ -203,17 +213,33 @@ object SandboxPlan:
       ".local/bin",
       ".local/lib",
       "go/pkg/mod",
+      "go/bin",
       ".deno",
       ".bun",
-      ".config/git",
-      ".gitconfig",
+      ".elan",
+      ".ghcup",
+      ".opam",
+      ".juliaup",
+      ".volta",
+      ".asdf",
+      ".rbenv",
+      ".local/share/mise",
+      ".local/share/coursier",
+      "Library/Application Support/Coursier",
+      ".conda",
+      "micromamba",
+      "miniconda3",
+      "anaconda3",
+      "miniforge3",
     ).map(home.resolve(_).nn)
+    val git = List(".config/git", ".gitconfig").map(home.resolve(_).nn)
     val javaHomes = (Option(System.getProperty("java.home")) ++ Option(System.getenv("JAVA_HOME"))).map(Paths.get(_).nn)
-    val path = Option(System.getenv("PATH")).toList.flatMap(_.split(Platform.pathListSeparator).toList)
-      .filter(_.nonEmpty).map(Paths.get(_).nn)
-    (named ++ javaHomes ++ path)
-      .filter(p => p.isAbsolute && Files.exists(p))
-      .map(PlatformPath.canonical)
+    def existing(paths: List[Path]) =
+      paths.filter(p => p.isAbsolute && Files.exists(p)).map(PlatformPath.canonical)
+    val roots = existing(named)
+    val path = existing(pathVariable.split(Platform.pathListSeparator).toList.filter(_.nonEmpty).map(Paths.get(_).nn))
+      .filter(dir => !readOnly || !dir.startsWith(home) || roots.exists(dir.startsWith(_)))
+    (roots ++ existing(git ++ javaHomes) ++ path)
       // Never the home directory, a directory above it, or a file system root.
       .filter(p => !home.startsWith(p) && p.getParent != null)
       .distinct

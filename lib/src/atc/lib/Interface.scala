@@ -543,7 +543,9 @@ trait Interface:
    *  enforces this, so a read-only `FileSystem` is enough: this is how read-only mode
    *  runs commands (`git log`, `rg`, a test runner that writes nothing). Grammar as for
    *  `exec`, except that `>`/`>>` redirections are refused. It is refused where
-   *  commands cannot be sandboxed. */
+   *  commands cannot be sandboxed. It needs no command permission: any program runs
+   *  unless `denyCommands` refuses it (inside `withNetwork` the permitted patterns apply,
+   *  as for `exec`). Git sees no user configuration here. */
   def execReadOnly(command: String)(using Exec^, FileSystem): ProcessResult
   def execReadOnly(command: String, args: Seq[String])(using Exec^, FileSystem): ProcessResult
   def execReadOnly(command: String, args: Seq[String], options: ExecOptions)(using Exec^, FileSystem): ProcessResult
