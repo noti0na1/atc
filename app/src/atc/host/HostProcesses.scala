@@ -264,11 +264,13 @@ private[host] trait HostProcesses:
     reapProcesses()
     spawned.nonEmpty
 
-  /** Return the live processes visible from the caller's scope. */
+  /** Return the live processes visible from the caller's scope. None is visible from a
+    * classified block: a process started outside it could carry what the block reads out. */
   def runningProcesses(using ex: Exec): List[Process] = spawned.synchronized:
     reapProcesses()
     val caller = scopeOf(ex)
-    spawned.values.toList.filter(process => policy.scopeVisibleFrom(caller, process.scope))
+    if policy.sealedScope(caller) then Nil
+    else spawned.values.toList.filter(process => policy.scopeVisibleFrom(caller, process.scope))
 
   private def reapProcesses(): Unit = spawned.filterInPlace((_, process) => process.managed.isAlive)
 

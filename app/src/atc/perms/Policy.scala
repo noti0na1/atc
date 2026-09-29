@@ -210,8 +210,15 @@ final class Policy(
       case _ => granted
     if mode.allowsWrite then perm else perm.copy(access = perm.access.min(Access.Read))
 
+  /** A classified block asks for nothing: the answer would carry what it read out. The types
+    * keep `request*` out of a block; this holds even without them. */
+  private def unsealed(parentId: ScopeId): Scope =
+    if sealedScope(parentId) then
+      throw SecurityException("Access denied: a classified block cannot ask for permissions")
+    scope(parentId)
+
   def requestFile(parentId: ScopeId, p: Path, access: Access, reason: String): ScopeId =
-    val parent = scope(parentId)
+    val parent = unsealed(parentId)
     val shown = PlatformPath.portable(p)
     if access == Access.Write && !mode.allowsWrite then
       throw SecurityException(
@@ -243,7 +250,7 @@ final class Policy(
       commandPatterns(scope(scopeId)).exists(GlobMatcher.matchesCommand(commandLine, _))
 
   def requestExec(parentId: ScopeId, commands: List[String], reason: String): ScopeId =
-    val parent = scope(parentId)
+    val parent = unsealed(parentId)
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
@@ -262,7 +269,7 @@ final class Policy(
       hostPatterns(scope(scopeId)).exists(GlobMatcher.matchesHost(host, _))
 
   def requestNet(parentId: ScopeId, hosts: List[String], reason: String): ScopeId =
-    val parent = scope(parentId)
+    val parent = unsealed(parentId)
     if !mode.allowsNetwork then
       throw SecurityException(s"Access denied: the sandbox is in ${mode.label} mode; the network is not reachable")
     refuseDenied("host", hosts, denyHosts, GlobMatcher.matchesHost)
@@ -380,8 +387,9 @@ final class Policy(
   def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
 
   /** Open the scope of a `classified` block below `parentId`. Everything done in it stays
-    * classified: its file system reads classified content and writes only classified paths,
-    * and its commands run sealed (no network, writes only to their temporary directory). */
+    * classified: its file system reads classified content and writes nothing, its commands
+    * run sealed (no network, writes only to their temporary directory), and it asks for
+    * nothing. */
   def openSealedScope(parentId: ScopeId): ScopeId =
     val s = Scope(ScopeId(nextId.getAndIncrement()), Some(scope(parentId)), sealedBlock = true)
     scopes.put(s.id, s)

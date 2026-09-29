@@ -695,8 +695,12 @@ environment. The plan lists concrete paths:
   git's user configuration (`GitConfig`), which can hold tokens; its commands get
   `GIT_CONFIG_GLOBAL=/dev/null`, since git stops at a configuration file it cannot read.
 - Writable roots: the same sources with write access, and a cache directory the sandbox owns
-  (`~/Library/Caches/atc-sandbox`, `~/.cache/atc-sandbox`). Tool caches in the home
-  directory stay read-only, because unsandboxed tools later load code from them.
+  (`~/Library/Caches/atc-sandbox`, `~/.cache/atc-sandbox`; in isolate mode `<copy>.cache`
+  beside the copy, so that nothing outside it keeps what its commands write). A read-only or
+  sealed plan has no cache: its tools keep their caches in the temporary directory, which is
+  deleted with the command. Tool caches in the home directory stay read-only, because
+  unsandboxed tools later load code from them; sbt's launcher locks there (`ToolLocks`) are
+  writable only for a plan that may write outside isolate mode.
 - Restrictions, applied after the roots: every rule without access hides its paths, every
   classified rule hides their content, every read ceiling makes them read-only. An exact
   path is evaluated in the scope, so a grant can lift its read ceiling; a glob keeps its
@@ -721,7 +725,11 @@ which the kernel marks with the `com.apple.sandbox.pty` extension, and no other:
 types there and writing one bypasses ATC's display. macOS starts commands in ATC's session,
 and the sandbox refuses the `TIOCSTI` ioctl that would inject input into it. Each command gets a private temporary
 directory under `/private/tmp`, short because sbt's socket path must fit 104 bytes, and JVMs
-get it as `java.io.tmpdir`, since the macOS JVM ignores `TMPDIR`.
+get it as `java.io.tmpdir`, since the macOS JVM ignores `TMPDIR`. POSIX semaphores and shared
+memory are allowed only for a plan with a cache, since named ones outlive the command. The
+command runs under a small `sh` wrapper (`Seatbelt.Reaper`) that puts it in its own process
+group and kills what is left of that group when it exits, as the end of a PID namespace does
+on Linux; a process that leaves the group itself survives, still confined.
 
 bubblewrap mounts the system directories read-only (`/usr`, `/etc`, `/opt`, `/sys`, `/nix`,
 `/gnu` and `/snap` where they exist, and `/bin`, `/sbin` and `/lib*` as the links a merged
@@ -731,9 +739,10 @@ bubblewrap mounts the system directories read-only (`/usr`, `/etc`, `/opt`, `/sy
 home directory with empty file systems, mounts the roots back, and then the restrictions: an empty read-only file
 system over a hidden directory, `/dev/null` over a hidden file, a read-only mount over a
 read-only path. Mounts need existing paths, so glob restrictions apply to the matches found
-by a walk of the writable roots when the command starts (at most 50000 entries, skipping
-dependency and build directories), and a restricted path that does not exist yet is not
-covered. New user, PID and IPC namespaces, `--die-with-parent` and `--new-session` end the
+by a walk when the command starts (at most 50000 entries): a name glob is searched for in
+the writable roots, skipping dependency, build and `.git` directories, and a glob below a
+path from its leading literal names, so that `.git/modules/**/{config,hooks}` is found. A
+restricted path that does not exist yet is not covered. New user, PID and IPC namespaces, `--die-with-parent` and `--new-session` end the
 process tree with the command. Linux delivers the parent-death signal when the *thread* that
 started the process exits, so `CommandSandbox` starts processes on one long-lived thread.
 
@@ -919,9 +928,10 @@ from the project (`Isolation.unapplied`). `/apply` first lists what it would wri
 the project config keeps read-only, then asks; leaving the mode shows the same list before
 its choices. `/apply` and `/discard` report per path and queue a note for the model. The host maps a path under the project to the copy
 (`Host.rebase`), so either spelling works with the file API. On Linux, commands see the copy
-at the project's path too: bubblewrap mounts it there after its restrictions, which come
-along, and starts the command at the matching directory (`CommandSandbox.detect`'s
-`mirror`), so path-keyed caches and editable installs keep working. macOS has no way to show
+at the project's path too, and start at the matching directory (`CommandSandbox.detect`'s
+`mirror`), so path-keyed caches and editable installs keep working. bubblewrap takes a
+mount's source from outside the sandbox, so that mount shows the copy unrestricted; the
+copy's restrictions are mounted again at the project's path after it. macOS has no way to show
 a directory at another path, so its commands see the copy's own path and the project stays
 hidden from them.
 

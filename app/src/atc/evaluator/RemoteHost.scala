@@ -1,5 +1,6 @@
 package atc.evaluator
 
+import atc.host.ClassifiedImpl
 import atc.lib.*
 import atc.sandbox.ExecutionClock
 
@@ -20,7 +21,7 @@ private[evaluator] final class RemoteExec(val scope: Long, val network: Option[L
 private[evaluator] final class RemoteNetwork(val scope: Long) extends Network
 
 private[evaluator] final class RemoteClassified[+T](val value: Try[T]) extends Classified[T]:
-  def map[B](op: T => B): Classified[B] = RemoteClassified(value.map(op))
+  def map[B](op: T => B): Classified[B] = RemoteClassified(value.flatMap(v => ClassifiedImpl.attempt(op(v))))
   override def toString: String = "Classified(***)"
 
 private[evaluator] object RemoteClassified:
@@ -79,9 +80,11 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     case other => throw SecurityException(s"Unknown capability implementation: ${other.getClass.getName}")
 
   // A failed classified value crosses with its message, which only the user's view renders.
+  /** A failure goes without its message: computing it would run the agent's code outside the
+    * computation, where its failing or hanging would be seen. */
   private def encodeClassified(e: Encoder, content: Classified[String]): Unit = RemoteClassified.unwrap(content) match
     case Success(value) => e.bool(true).string(value)
-    case Failure(error) => e.bool(false).string(Option(error.getMessage).getOrElse(error.toString))
+    case Failure(_) => e.bool(false)
   private def encodeOptions(e: Encoder, o: ExecOptions): Unit = e.string(o.workingDir).long(o.timeoutMs).string(o.stdin)
   private def decodeResult(d: Decoder): ProcessResult = ProcessResult(d.int(), d.string(), d.string())
   private def decodeMatches(d: Decoder): List[GrepMatch] =
@@ -359,8 +362,9 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     ex: Exec
   )(op: (Sealed, FileSystem, Exec) ?=> T)
     : Classified[T] =
-    RemoteClassified(Try(withCallback("classified")(_.long(scopeOf(fs)).long(execOf(ex).scope)): scope =>
-      op(using new Sealed {}, RemoteFileSystem(scope, this), RemoteExec(scope, None))))
+    RemoteClassified(ClassifiedImpl.attempt(withCallback("classified")(_.long(scopeOf(fs)).long(execOf(ex).scope)):
+      scope =>
+        op(using new Sealed {}, RemoteFileSystem(scope, this), RemoteExec(scope, None))))
 
   extension [T](c: Classified[T]) def reveal(using Sealed): T = RemoteClassified.unwrap(c).get
 

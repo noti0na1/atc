@@ -29,7 +29,8 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
     ()
 
   private def classifiedIn(d: Decoder): Classified[String] =
-    if d.bool() then ClassifiedImpl.wrap(d.string()) else ClassifiedImpl.fromTry(Failure(RuntimeException(d.string())))
+    if d.bool() then ClassifiedImpl.wrap(d.string())
+    else ClassifiedImpl.fromTry(Failure(RuntimeException("the classified computation failed")))
   private def options(d: Decoder): ExecOptions = ExecOptions(d.string(), d.long(), d.string())
   private def matches(e: Encoder, found: List[GrepMatch]): Unit =
     e.int(found.size)
@@ -37,7 +38,8 @@ private[atc] final class HostDispatch(host: Host, channel: => Channel):
   private def result(e: Encoder, r: ProcessResult): Unit = e.int(r.exitCode).string(r.stdout).string(r.stderr)
   private def process(d: Decoder): ProcessImpl =
     val caller = ScopeId.fromLong(d.long())
-    Option(processes.get(d.int())).filter(p => host.policy.scopeVisibleFrom(caller, p.scope)).getOrElse:
+    val visible = (p: ProcessImpl) => !host.policy.sealedScope(caller) && host.policy.scopeVisibleFrom(caller, p.scope)
+    Option(processes.get(d.int())).filter(visible).getOrElse:
       throw IllegalStateException("no such process is visible here (see runningProcesses)")
   private def remember(p: Process): ProcessImpl = p match
     case impl: ProcessImpl =>

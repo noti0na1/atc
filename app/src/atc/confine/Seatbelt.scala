@@ -31,7 +31,13 @@ private[atc] object Seatbelt:
     * temporary directory and, when the plan allows the network, the proxy on `proxyPort`
     * as its only way out. */
   def prefix(plan: SandboxPlan, tmp: Path, proxyPort: Option[Int]): List[String] =
-    List(Executable.toString, "-p", profile(plan, tmp, proxyPort))
+    List(Executable.toString, "-p", profile(plan, tmp, proxyPort), "/bin/sh", "-c", Reaper, "sh")
+
+  /** Runs the command in its own process group and kills what is left of the group when it
+    * exits, as the end of a PID namespace does on Linux: a child left running in the
+    * background would otherwise outlive the call. The shell's own messages go to /dev/null. */
+  private val Reaper =
+    "set -m; exec 3>&2 2>/dev/null; \"$@\" 2>&3 3>&- & pid=$!; wait $pid; code=$?; kill -KILL -$pid; exit $code"
 
   /** The prefix that runs the evaluator process: it may read `readable` (the JDK, ATC's
     * classes, its working directory) and the system's libraries, run nothing but `java`,
@@ -73,14 +79,6 @@ private[atc] object Seatbelt:
   /** Directories whose code may be mapped executable, besides the system's. */
   private val ExecutableRoots = List("/opt/homebrew", "/Library/Developer/CommandLineTools", "/Applications/Xcode.app")
 
-  /** Lock files the sbt launcher writes into its otherwise read-only home directories. */
-  private val SbtLocks = List(
-    ".sbt/boot/sbt.boot.lock",
-    ".ivy2/.sbt.ivy.lock",
-    ".ivy2/exclude_classifiers",
-    ".ivy2/exclude_classifiers.lock"
-  )
-
   /** Directory names whose files are exempt from glob restrictions: installed
     * dependencies ship certificate bundles and test keys that `*.pem`-style rules
     * would otherwise hide. */
@@ -88,8 +86,8 @@ private[atc] object Seatbelt:
 
   def profile(plan: SandboxPlan, tmp: Path, proxyPort: Option[Int]): String =
     val policyRoots = plan.readable ++ plan.writable
-    val readRoots = policyRoots ++ plan.toolchain ++ List(tmp, plan.cache)
-    val writeRoots = plan.writable ++ List(tmp, plan.cache)
+    val readRoots = policyRoots ++ plan.toolchain ++ (tmp :: plan.cache.toList)
+    val writeRoots = plan.writable ++ (tmp :: plan.cache.toList)
     val (globs, exact) = plan.restrictions.partition(_.target match
       case Target.Exact(_) => false
       case _ => true)
@@ -101,7 +99,9 @@ private[atc] object Seatbelt:
     lines += "(allow signal (target same-sandbox))"
     lines += "(allow process-info* (target same-sandbox))"
     lines += "(allow process-info-pidinfo process-info-setcontrol process-info-dirtycontrol process-info-codesignature)"
-    lines += "(allow sysctl-read system-info ipc-posix-sem ipc-posix-shm user-preference-read pseudo-tty)"
+    lines += "(allow sysctl-read system-info user-preference-read pseudo-tty)"
+    // Named POSIX semaphores and shared memory outlive the command: not for one that must leave nothing behind.
+    if plan.cache.isDefined then lines += "(allow ipc-posix-sem ipc-posix-shm)"
     // stat() everywhere: getcwd, realpath and canonicalization need it; content stays restricted.
     lines += "(allow file-read-metadata file-test-existence)"
     lines += "(allow file-read* file-write-data file-ioctl (literal \"/dev/ptmx\") (literal \"/dev/null\") " +
@@ -118,8 +118,7 @@ private[atc] object Seatbelt:
     // pasteboard and the keychain stay denied: `open` would start programs outside the sandbox.
     val mach = List("com.apple.SystemConfiguration.configd", "com.apple.FSEvents")
     lines += s"(allow mach-lookup ${mach.map(name => s"(global-name ${string(name)})").mkString(" ")})"
-    val locks = SbtLocks.map(name => literal(plan.home.resolve(name).nn))
-    lines += s"(allow file-write* ${(writeRoots.map(subpath) ++ locks).mkString(" ")} " +
+    lines += s"(allow file-write* ${(writeRoots.map(subpath) ++ plan.locks.map(literal)).mkString(" ")} " +
       "(literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") " +
       "(subpath \"/dev/fd\"))"
     globs.foreach(r => lines += deny(r.level, filter(r.target, policyRoots)))

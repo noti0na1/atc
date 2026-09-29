@@ -107,7 +107,7 @@ private[host] trait HostInteraction:
   )(op: (Sealed, FileSystem, Exec) ?=> T)
     : Classified[T] =
     val id = policy.openSealedScope(scopeOf(fs))
-    ClassifiedImpl.fromTry(scala.util.Try(inScope(id)(scope =>
+    ClassifiedImpl.fromTry(ClassifiedImpl.attempt(inScope(id)(scope =>
       op(using new Sealed {}, FileSystemImpl(scope, this), ExecImpl(scope))
     )))
 

@@ -77,8 +77,10 @@ private[atc] object Bubblewrap:
     * [[ProxyPort]]; without it, such a command shares the host's network. */
   def prefix(plan: SandboxPlan, bridge: Option[(Path, Path)]): List[String] = prefix(plan, bridge, None, None)
 
-  /** With `mirror` (a copy and the path it stands for), the copy is mounted at that path too,
-    * after its own restrictions so that they come along, and the command starts in `start`. */
+  /** With `mirror` (a copy and the path it stands for), the copy is mounted at that path too
+    * and the command starts in `start`. bubblewrap takes a mount's source from the file system
+    * outside the sandbox, so that mount shows the copy unrestricted: the copy's restrictions
+    * are mounted again at the path it stands for. */
   def prefix(
     plan: SandboxPlan,
     bridge: Option[(Path, Path)],
@@ -91,17 +93,21 @@ private[atc] object Bubblewrap:
     args ++= List("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
     for (_, dir) <- bridge do args ++= List("--bind", dir.toString, ProxyDir)
     if Files.isDirectory(plan.home) then args ++= List("--tmpfs", plan.home.toString)
+    val writable = plan.writable ++ plan.cache ++ plan.locks
     val binds = (plan.readable ++ plan.toolchain).filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
-      (plan.writable :+ plan.cache).filter(Files.exists(_)).map(p => ("--bind", p))
+      writable.filter(Files.exists(_)).map(p => ("--bind", p))
     for (flag, path) <- binds.sortBy(_._2.getNameCount) do args ++= List(flag, path.toString, path.toString)
     // A path under nothing mounted is absent already; masking it would only create it.
-    val mounted = systemPaths ++ plan.readable ++ plan.toolchain ++ plan.writable :+ plan.cache
+    val mounted = systemPaths ++ plan.readable ++ plan.toolchain ++ writable
     def visible(path: Path) = mounted.exists(path.startsWith(_))
-    for (level, path) <- masks(plan).sortBy(_._2.getNameCount) if visible(path) do args ++= mask(level, path)
-    for socket <- agentSockets if visible(socket) do args ++= mask(Level.Hidden, socket)
+    val masked = masks(plan).sortBy(_._2.getNameCount).filter((_, path) => visible(path))
+    for (level, path) <- masked do args ++= mask(level, path, path)
+    for socket <- agentSockets if visible(socket) do args ++= mask(Level.Hidden, socket, socket)
     for (copy, original) <- mirror do
-      val flag = if (plan.writable :+ plan.cache).exists(copy.startsWith(_)) then "--bind" else "--ro-bind"
+      val flag = if writable.exists(copy.startsWith(_)) then "--bind" else "--ro-bind"
       args ++= List(flag, copy.toString, original.toString)
+      for (level, path) <- masked if path.startsWith(copy) do
+        args ++= mask(level, path, original.resolve(copy.relativize(path)).nn)
     for dir <- start do args ++= List("--chdir", dir.toString)
     args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
     if !plan.network || bridge.isDefined then args += "--unshare-net"
@@ -127,7 +133,7 @@ private[atc] object Bubblewrap:
     for path <- readable.filter(Files.exists(_)).sortBy(_.getNameCount) do
       args ++= List("--ro-bind", path.toString, path.toString)
     for socket <- agentSockets if (systemPaths ++ readable).exists(socket.startsWith(_)) do
-      args ++= mask(Level.Hidden, socket)
+      args ++= mask(Level.Hidden, socket, socket)
     args ++= List("--chdir", "/tmp", "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
     args.result()
 
@@ -161,35 +167,40 @@ private[atc] object Bubblewrap:
       catch case NonFatal(_) => None
     .distinct
 
-  private def mask(level: Level, path: Path): List[String] =
-    val shown = path.toString
+  /** Restrict `target`, which shows `source`: a read-only mount takes its content from there. */
+  private def mask(level: Level, source: Path, target: Path): List[String] =
+    val shown = target.toString
     level match
-      case Level.ReadOnly => List("--ro-bind", shown, shown)
-      case _ if Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) => List("--tmpfs", shown, "--remount-ro", shown)
+      case Level.ReadOnly => List("--ro-bind", source.toString, shown)
+      case _ if Files.isDirectory(source, LinkOption.NOFOLLOW_LINKS) => List("--tmpfs", shown, "--remount-ro", shown)
       case _ => List("--ro-bind", "/dev/null", shown)
 
-  /** The existing paths each restriction covers, outermost first. */
+  /** The existing paths each restriction covers. A name glob is searched for in the roots; a
+    * glob below a path is searched for from its leading literal names, so that one inside a
+    * skipped directory such as `.git` is found too. */
   def masks(plan: SandboxPlan): List[(Level, Path)] =
     val exact = plan.restrictions.collect:
       case Restriction(level, Target.Exact(path)) if Files.exists(path, LinkOption.NOFOLLOW_LINKS) => (level, path)
-    val globs = plan.restrictions.collect:
+    val roots =
+      (plan.writable ++
+        plan.readable.filter(r => plan.writable.exists(r.startsWith(_)) || r.startsWith(plan.project))).distinct
+    val names = plan.restrictions.collect:
       case Restriction(level, Target.Component(glob)) =>
         val pattern = PathGlob.pattern(glob)
         (level, (p: Path) => Option(p.getFileName).exists(name => pattern.matcher(name.toString).matches()))
+    val anchored = plan.restrictions.flatMap:
       case Restriction(level, Target.Anchored(root, glob)) =>
+        val start = glob.split('/').init.takeWhile(!_.exists("*?[{\\".contains(_))).foldLeft(root)(_.resolve(_).nn)
         val pattern = PathGlob.pattern(glob)
-        (
-          level,
-          (p: Path) =>
-            p.startsWith(root) && p != root && pattern.matcher(PlatformPath.portable(root.relativize(p).nn)).matches()
-        )
-    val found =
-      if globs.isEmpty then Nil
-      else
-        (plan.writable ++
-          plan.readable.filter(r => plan.writable.exists(r.startsWith(_)) || r.startsWith(plan.project)))
-          .distinct.flatMap(root => search(root, globs))
-    (exact ++ found).distinct
+        val matches = (p: Path) => pattern.matcher(PlatformPath.portable(root.relativize(p).nn)).matches()
+        Option.when(roots.exists(start.startsWith(_)) && Files.isDirectory(start))(search(
+          start,
+          List((level, matches))
+        ))
+          .toList.flatten
+      case _ => Nil
+    val found = if names.isEmpty then Nil else roots.flatMap(search(_, names))
+    (exact ++ found ++ anchored).distinct
 
   /** Walk `root` and return the paths a glob restriction matches, without descending below a match. */
   private def search(root: Path, globs: List[(Level, Path => Boolean)]): List[(Level, Path)] =

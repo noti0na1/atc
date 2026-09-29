@@ -124,8 +124,10 @@ Rules for every process:
   toolchain bundle detected from installed tools (JDK, build tool homes, dependency caches,
   Homebrew). Classified paths, no-access paths and `~/.atc` are never readable.
 - Tool caches are readable but not writable, because unsandboxed tools later load code from
-  them. Tools that must write get a cache directory owned by the sandbox. Each launch gets a
-  short private `TMPDIR`, and JVMs get `java.io.tmpdir` through `JAVA_TOOL_OPTIONS`.
+  them. Commands that may write get a cache directory owned by the sandbox (in isolate mode
+  one beside the copy); read-only and sealed commands keep caches in their temporary
+  directory. Each launch gets a short private `TMPDIR`, and JVMs get `java.io.tmpdir` through
+  `JAVA_TOOL_OPTIONS`.
 - Unix sockets and loopback TCP are blocked, and the network namespace is always separate on
   Linux. A daemon started outside the sandbox (a build server, an IDE server, a credential
   agent) acts with the user's full authority, so it must be unreachable. Builds run without a
@@ -136,8 +138,9 @@ Rules for every process:
 - On macOS, LaunchServices, the pasteboard and the keychain services stay denied; a profile
   that allowed mach services by default let a sandboxed command start an application outside
   the sandbox.
-- The process tree ends with its scope. Linux uses a PID namespace and `--die-with-parent`;
-  macOS kills the launch's process group.
+- The process tree ends with the command. Linux uses a PID namespace and `--die-with-parent`;
+  on macOS a wrapper runs the command in its own process group and kills what is left of it
+  when the command exits.
 - The environment is scrubbed as today, plus variables that point to credential agents.
 
 The command allowlist applies to commands that may write or use the network. It limits which
@@ -168,9 +171,13 @@ commands started through ATC's own launch path:
   `PATH` directory under the home directory (20 of 21 here, personal script directories and
   other programs' files among them); read-only commands get neither. `~/.config/git/credentials`,
   a git credential store, was readable and is hidden now.
-- Still allowed on macOS: creating POSIX shared memory, and writing a segment of another of
-  the user's programs whose name it knows and whose permissions allow it (the system's own
-  segments are refused), and posting Darwin notifications.
+- Still allowed on macOS: posting Darwin notifications. Commands that may write can also create
+  POSIX shared memory and write a segment of another of the user's programs whose name they
+  know and whose permissions allow it (the system's own segments are refused); read-only and
+  sealed commands get no POSIX shared memory or semaphores, which would outlive them.
+- Fixed after the audit: every command could write the sandbox's shared cache, so a
+  sealed command could leave a classified file's content there for a later command, and an
+  isolate command could change caches a later session in the project uses.
 - Unbounded: disk (macOS) or memory (Linux) used by the private temporary directory.
 
 API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
@@ -186,7 +193,8 @@ Backends:
   "unsupported syntax" error.
 - Linux: bubblewrap with read-only mounts of the system directories, `--dev /dev`,
   `--proc /proc`, a private `/tmp`, writable binds, masks after the binds (`--tmpfs` plus `--remount-ro` for directories,
-  `--ro-bind /dev/null` for files), `--unshare-net --unshare-pid --unshare-user
+  `--ro-bind /dev/null` for files) and again at the project's path after isolate mode's mount
+  of the copy there, `--unshare-net --unshare-pid --unshare-user
   --unshare-ipc --die-with-parent --new-session`. Protected paths that do not exist need
   placeholder mounts, which leave empty entries to remove afterwards. A seccomp filter that
   denies `socket(AF_UNIX)` is a strict option because it breaks Python multiprocessing and
@@ -278,10 +286,12 @@ extension [T](c: Classified[T]) def reveal(using Sealed^): T
 - The sealed file system reads classified files as plain text, lists and searches classified
   directories, and changes nothing: the host refuses every write in a sealed scope.
 - A sealed command may read classified files, has no network, writes only a scratch
-  directory, needs no command pattern, and is killed when the block ends. The host refuses
-  `spawn` on a sealed `Exec`, which the types cannot exclude.
-- An exception that leaves the block becomes a classified failure; fatal errors and
-  interruption escape it.
+  directory, needs no command pattern, and ends with its children before the block goes on.
+  The host refuses `spawn` on a sealed `Exec` and lists no running process to a sealed scope,
+  which the types cannot exclude, and refuses permission requests from one.
+- An exception or a transfer of control (a non-local `return`, `Breaks.break`) that leaves the
+  block becomes a classified failure, as in `Classified.map`; fatal errors and interruption
+  escape it.
 - Classified content never gets network access. Its destinations are the user (`println`),
   classified files (`writeClassified`) and the classified model (`classifiedChat`).
 
@@ -403,6 +413,10 @@ Desktop for Linux.
   when they know its name (phase 9).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
+- On macOS, commands see the size and times of classified files: Seatbelt denies their
+  content, and a directory listing returns its entries' attributes in bulk, whatever the
+  profile says about each entry. The length of what `writeClassified` writes is therefore
+  readable, and a block's running time is observable everywhere.
 - Host file operations remain check-then-use; mitigations are no-follow opens, a check after
   opening, and on Linux `openat2` with `RESOLVE_BENEATH`.
 - Checkpoints cannot restore ignored files, files over the size cap, or classified files, and

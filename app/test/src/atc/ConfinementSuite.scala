@@ -19,7 +19,7 @@ class ConfinementSuite extends munit.FunSuite:
 
   private def plan(env: TestEnv, network: Boolean = false, scope: ScopeId = ScopeId.Base, mayWrite: Boolean = true)
     : SandboxPlan =
-    SandboxPlan(env.policy, scope, env.root, home, network, mayWrite, cache)
+    SandboxPlan(env.policy, scope, env.root, home, network, mayWrite, Option.when(mayWrite)(cache))
 
   private val secretsAndGit: Path => List[FileRule] = root =>
     TestEnv.withSecrets(root) ++ List(
@@ -60,6 +60,25 @@ class ConfinementSuite extends munit.FunSuite:
     assert(restrictions.contains(Restriction(Level.ReadOnly, Target.Exact(git.resolve("hooks").nn))))
     assert(restrictions.contains(Restriction(Level.ReadOnly, Target.Exact(git.resolve("config").nn))))
     assert(!restrictions.contains(Restriction(Level.ReadOnly, Target.Exact(git))))
+
+  test("bubblewrap finds a glob below a path inside a skipped directory, such as a submodule's git configuration"):
+    val env = TestEnv()
+    env.file(".git/modules/sub/config", "x")
+    env.file(".git/modules/sub/hooks/pre-commit", "x")
+    val masks = Bubblewrap.masks(plan(env)).toSet
+    assert(masks.contains((Level.ReadOnly, env.root.resolve(".git/modules/sub/config").nn)), masks.toString)
+    assert(masks.contains((Level.ReadOnly, env.root.resolve(".git/modules/sub/hooks").nn)), masks.toString)
+
+  test("only a command that may write keeps a cache, and only outside isolate mode does it write tool locks"):
+    val env = TestEnv()
+    assert(plan(env).cache.isDefined && plan(env).locks.nonEmpty)
+    assertEquals(plan(env, mayWrite = false).cache, None)
+    assertEquals(plan(env, mayWrite = false).locks, Nil)
+    env.policy.copyRoot = Some(env.root)
+    assertEquals(plan(env).locks, Nil)
+    val tmp = Files.createTempDirectory("atc-profile").nn
+    assert(Seatbelt.profile(plan(env), tmp, None).contains("ipc-posix-shm"))
+    assert(!Seatbelt.profile(plan(env, mayWrite = false), tmp, None).contains("ipc-posix-shm"))
 
   test("a grant of the command's scope adds a root, and the mode decides the network"):
     val env = TestEnv()
@@ -219,10 +238,15 @@ class ConfinementSuite extends munit.FunSuite:
       at = Some(copy),
     )
     env.file("f.txt", "copy\n")
+    env.file("secrets/key", "the-secret")
+    env.dir(".git/hooks")
     val result = sh(env, s"pwd; cat f.txt; cat ${project}/f.txt; echo made > ${project}/new.txt")
     assertEquals(result.stdout.linesIterator.toList, List(project.toString, "copy", "copy"), result.toString)
     assertEquals(env.contents("new.txt"), "made\n")
     assert(!Files.exists(project.resolve("new.txt")), "the project is untouched")
+    val masked = sh(env, s"cat ${project}/secrets/key; echo x > ${project}/.git/hooks/pre-commit")
+    assert(!masked.stdout.contains("the-secret"), masked.toString)
+    assert(!env.existsOnDisk(".git/hooks/pre-commit"), "the copy's restrictions hold at the project's path")
 
   test("in isolate mode a confined command runs any program, writes the copy and its .git, and nothing outside"):
     assume(sandbox.confined, s"no command sandbox here: ${sandbox.describe}")
@@ -244,6 +268,24 @@ class ConfinementSuite extends munit.FunSuite:
     assert(!env.existsOnDisk(".git/hooks/pre-commit"), "its hooks are not")
     assert(!Files.exists(outside.resolve("new.txt")), "nothing outside the copy is written")
     assert(env.requests.isEmpty, "nobody was asked")
+
+  test("a command that may not write keeps its caches in its temporary directory, and in isolate mode beside the copy"):
+    val readOnly = confined(Mode.ReadOnly)
+    val lines = shReadOnly(readOnly, "echo \"$UV_CACHE_DIR\"; echo \"$TMPDIR\"").stdout.linesIterator.toList
+    assert(lines.head.startsWith(lines(1)), lines.toString)
+    val isolated = confined(Mode.Isolate)
+    isolated.policy.copyRoot = Some(isolated.root)
+    val uv = sh(isolated, "echo \"$UV_CACHE_DIR\"").stdout.trim
+    assert(uv.startsWith(s"${isolated.root}.cache/"), uv)
+
+  test("a command's background children end with it"):
+    val env = confined()
+    val result = sh(env, "(sleep 1; echo late > late.txt) & echo started")
+    assertEquals(result.stdout, "started\n")
+    assertEquals(result.stderr, "", "the wrapper's own messages stay out of the output")
+    Thread.sleep(2000)
+    assert(!env.existsOnDisk("late.txt"))
+    assertEquals(sh(env, "exit 3").exitCode, 3)
 
   test("in isolate mode without a confining sandbox a command still needs a pattern"):
     val env = TestEnv(commands = Nil)

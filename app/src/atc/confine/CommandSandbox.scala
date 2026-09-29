@@ -124,17 +124,23 @@ object CommandSandbox:
 
   private def home: Path = PlatformPath.canonical(PlatformPath.userHome)
 
-  /** A directory the sandbox owns, where tools keep caches between commands. */
-  private def cacheDir: Path =
-    val base =
-      if Platform.isMac then home.resolve("Library/Caches").nn
-      else Option(System.getenv("XDG_CACHE_HOME")).map(Paths.get(_).nn).getOrElse(home.resolve(".cache").nn)
-    val dir = base.resolve("atc-sandbox").nn
-    if !Files.isDirectory(dir) then
-      Files.createDirectories(dir)
-      try Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"))
-      catch case NonFatal(_) => ()
-    PlatformPath.canonical(dir)
+  /** A directory the sandbox owns, where tools keep caches between commands. In isolate mode
+    * it lies beside the copy, since commands there change nothing else; a command that may
+    * not write gets none. */
+  private def cacheDir(policy: Policy, writable: Boolean): Option[Path] =
+    Option.when(writable):
+      val dir = policy.copyRoot match
+        case Some(copy) => copy.resolveSibling(s"${copy.getFileName}.cache").nn
+        case None =>
+          val base =
+            if Platform.isMac then home.resolve("Library/Caches").nn
+            else Option(System.getenv("XDG_CACHE_HOME")).map(Paths.get(_).nn).getOrElse(home.resolve(".cache"))
+          base.resolve("atc-sandbox").nn
+      if !Files.isDirectory(dir) then
+        Files.createDirectories(dir)
+        try Files.setPosixFilePermissions(dir, PosixFilePermissions.fromString("rwx------"))
+        catch case NonFatal(_) => ()
+      PlatformPath.canonical(dir)
 
   private def plan(
     policy: Policy,
@@ -143,11 +149,12 @@ object CommandSandbox:
     writable: Boolean,
     cwd: Path
   ): SandboxPlan =
-    SandboxPlan(policy, scope, PlatformPath.canonical(cwd), home, network.isDefined, writable, cacheDir)
+    val cache = cacheDir(policy, writable)
+    SandboxPlan(policy, scope, PlatformPath.canonical(cwd), home, network.isDefined, writable, cache)
 
-  /** Settings that keep common tools inside their temporary directory and the sandbox's
-    * cache, and send their traffic to the proxy at `proxy` (`127.0.0.1:port`) when the
-    * command may use the network. */
+  /** Settings that keep common tools inside their temporary directory and `cache`, and send
+    * their traffic to the proxy at `proxy` (`127.0.0.1:port`) when the command may use the
+    * network. */
   private def configure(
     stage: ProcessBuilder,
     command: List[String],
@@ -209,7 +216,8 @@ object CommandSandbox:
       val tmp = PlatformPath.canonical(Files.createTempDirectory(Paths.get("/private/tmp").nn, "atc-").nn)
       val prefix = Seatbelt.prefix(sandboxPlan, tmp, proxy.map(_.port))
       stages.foreach: stage =>
-        configure(stage, prefix, tmp.toString, sandboxPlan.cache, proxy.map(_.port), readOnly = !writable)
+        val cache = sandboxPlan.cache.getOrElse(tmp.resolve("cache").nn)
+        configure(stage, prefix, tmp.toString, cache, proxy.map(_.port), readOnly = !writable)
         // The JVM on macOS ignores TMPDIR and would write into the user's shared temporary directory.
         appendOption(stage.environment().nn, "JAVA_TOOL_OPTIONS", s"-Djava.io.tmpdir=$tmp")
       Launch(startHere, closing(proxy, deleteTree(tmp)))
@@ -243,7 +251,8 @@ object CommandSandbox:
         mirror.collect { case (copy, project) if cwd.startsWith(copy) => project.resolve(copy.relativize(cwd)).nn }
       val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)), mirror, start)
       stages.foreach: stage =>
-        configure(stage, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort), !writable)
+        val cache = sandboxPlan.cache.getOrElse(Paths.get("/tmp/cache").nn)
+        configure(stage, prefix, "/tmp", cache, bridge.map(_ => Bubblewrap.ProxyPort), !writable)
         start.foreach(dir => stage.environment().nn.put("PWD", dir.toString))
       Launch(Launcher.start, closing(bridge.map(_._3), bridge.foreach((_, dir, _) => deleteTree(dir))))
 

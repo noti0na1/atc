@@ -99,6 +99,28 @@ class EvaluatorSuite extends munit.FunSuite:
       assert(!env.existsOnDisk("public.txt"))
       assertEquals(env.policy.openScopeCount, 0)
 
+  test("control flow that depends on a classified value stays inside it, and so does its failure"):
+    val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-evaluator-control")
+    env.file("secrets/k.txt", "S")
+    withSession(env): session =>
+      assert(session.run("""val c = classified { read("secrets/k.txt") }""").success)
+      val viaMap = session.run(
+        """def bit(i: Int): Boolean = { c.map(s => if ((s.charAt(0) >> i) & 1) == 1 then return true else 0); false }
+          |println((0 until 8).map(i => if bit(i) then 1 else 0).mkString)""".stripMargin
+      )
+      assert(viaMap.success && viaMap.output.contains("00000000"), viaMap.render)
+      val viaBlock = session.run(
+        """def bit2(i: Int): Boolean = { classified { if ((c.reveal.charAt(0) >> i) & 1) == 1 then return true else 0 }; false }
+          |println((0 until 8).map(i => if bit2(i) then 1 else 0).mkString)""".stripMargin
+      )
+      assert(viaBlock.success && viaBlock.output.contains("00000000"), viaBlock.render)
+      val written = session.run(
+        """class Boom extends RuntimeException { override def getMessage: String = throw IllegalStateException("seen") }
+          |writeClassified("secrets/n.txt", c.map(_ => throw Boom()))
+          |println("written")""".stripMargin
+      )
+      assert(written.success && written.output.contains("written"), written.render)
+
   test("an interrupted loop stops and the session stays usable"):
     val env = TestEnv(prefix = "atc-evaluator-interrupt")
     withSession(env, timeout = None): session =>

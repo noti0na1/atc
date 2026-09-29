@@ -14,7 +14,8 @@ class ClassifiedSuite extends munit.FunSuite:
 
   private val nl = System.lineSeparator
 
-  val env = TestEnv(mkRules = TestEnv.withSecrets, prefix = "atc-classified")
+  val env =
+    TestEnv(mkRules = TestEnv.withSecrets, commands = List(ProcessFixture.pattern("cat")), prefix = "atc-classified")
   import env.given
   import env.host.*
   given fs: FileSystem = env.host.fileSystem
@@ -74,6 +75,31 @@ class ClassifiedSuite extends munit.FunSuite:
     try ClassifiedImpl.wrap("x").map[Int](_ => throw ThreadDeath())
     catch case _: ThreadDeath => propagated = true
     assert(propagated)
+
+  test("a break inside a classified computation stays in the classified value"):
+    import scala.util.control.Breaks.{break, breakable}
+    var escaped = true
+    breakable:
+      assert(ClassifiedImpl.unwrap(ClassifiedImpl.wrap("x").map[Int](_ => break())).isFailure)
+      assert(ClassifiedImpl.unwrap(inBlock(break())).isFailure)
+      escaped = false
+    assert(!escaped, "the break left the computation")
+
+  test("a classified block sees no process started outside it and asks for nothing"):
+    env.host.spawn(ProcessFixture.command("cat"))(using summon[Exec], fs)
+    try
+      assert(env.host.runningProcesses.nonEmpty)
+      val listed = env.host.classified(using fs, summon[Exec])((_: Sealed, _: FileSystem, e: Exec) ?=>
+        env.host.runningProcesses(using e).size
+      )
+      assertEquals(ClassifiedImpl.get(listed), 0)
+      val sealedScope = env.policy.openSealedScope(ScopeId.Base)
+      try
+        intercept[SecurityException](env.policy.requestExec(sealedScope, List("ls"), "test"))
+        intercept[SecurityException](env.policy.requestNet(sealedScope, List("example.com"), "test"))
+        intercept[SecurityException](env.policy.requestFile(sealedScope, env.root, Access.Read, "test"))
+      finally env.policy.closeScope(sealedScope)
+    finally env.host.killProcesses()
 
   test("map on a failed value short-circuits without running the function"):
     val failed = ClassifiedImpl.wrap("secret").map(_ => throw RuntimeException("boom"))

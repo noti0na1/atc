@@ -23,8 +23,12 @@ final case class SandboxPlan(
   toolchain: List[Path],
   restrictions: List[SandboxPlan.Restriction],
   network: Boolean,
-  /** A directory owned by the sandbox, where tools keep caches between commands. */
-  cache: Path,
+  /** Where tools keep caches between commands; none for a command that must leave nothing
+    * behind (read-only and sealed ones), whose caches go into its temporary directory. */
+  cache: Option[Path],
+  /** Files outside the roots that tools write as they start (sbt's locks); only for a
+    * command that may write beyond isolate mode's copy. */
+  locks: List[Path],
 )
 
 object SandboxPlan:
@@ -57,7 +61,7 @@ object SandboxPlan:
     home: Path,
     network: Boolean,
     mayWrite: Boolean,
-    cache: Path,
+    cache: Option[Path],
   ): SandboxPlan =
     val granted =
       policy.rules.flatMap: rule =>
@@ -106,7 +110,8 @@ object SandboxPlan:
       toolchain(home, readOnly = !mayWrite, Option(System.getenv("PATH")).getOrElse("")),
       (fromRules ++ protectedPaths ++ homeRules ++ serviceData).distinct,
       network,
-      cache
+      cache,
+      if mayWrite && policy.copyRoot.isEmpty then ToolLocks.map(home.resolve(_).nn) else Nil
     )
 
   /** The restriction an exact rule path has in `scope`, if any: a grant may have widened it. */
@@ -185,6 +190,14 @@ object SandboxPlan:
     "Library/LaunchAgents",
     ".config/autostart",
     ".config/systemd",
+  )
+
+  /** Lock files the sbt launcher writes into its otherwise read-only home directories. */
+  val ToolLocks: List[String] = List(
+    ".sbt/boot/sbt.boot.lock",
+    ".ivy2/.sbt.ivy.lock",
+    ".ivy2/exclude_classifiers",
+    ".ivy2/exclude_classifiers.lock"
   )
 
   /** Git's user configuration. Commands that may write read it (a commit needs the identity);
