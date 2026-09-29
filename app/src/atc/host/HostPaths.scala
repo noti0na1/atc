@@ -29,7 +29,10 @@ private[host] trait HostPaths:
       throw IllegalArgumentException(
         s"UNC path ${ScalaSource.stringLiteral(path)} is not supported outside the working directory's share"
       )
-    PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
+    val resolved = PlatformPath.canonical(if raw.isAbsolute then raw else cwd.resolve(raw).nn)
+    rebase match
+      case Some((project, copy)) if resolved.startsWith(project) => copy.resolve(project.relativize(resolved)).nn
+      case _ => resolved
 
   /** `operation` carries its own preposition, so that it reads as a phrase in
     * front of the path (`read '/x'`, `running a command in '/x'`). */

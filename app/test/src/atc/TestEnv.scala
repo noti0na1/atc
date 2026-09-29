@@ -25,8 +25,10 @@ final class TestEnv(
   denyCommands: List[String] = Nil,
   denyHosts: List[String] = Nil,
   commandSandbox: CommandSandbox = CommandSandbox.Unconfined("tests"),
+  /** An existing directory to use as the root instead of a new temporary one. */
+  at: Option[Path] = None,
 ):
-  val root: Path = Files.createTempDirectory(prefix).nn.toRealPath().nn
+  val root: Path = at.getOrElse(Files.createTempDirectory(prefix).nn).toRealPath().nn
 
   // ── permission prompter (scripted; unanswered requests are denied) ──
   var decisions: List[Decision] = Nil

@@ -865,3 +865,16 @@ class HostSuite extends munit.FunSuite:
       bomText(Array(0xfe.toByte, 0xff.toByte), sample.getBytes(StandardCharsets.UTF_16BE)),
       sample,
     )
+
+  test("in isolate mode a path under the project names the copy"):
+    val project = Files.createTempDirectory("atc-host-project").nn.toRealPath().nn
+    val copy = Files.createTempDirectory("atc-host-copy").nn.toRealPath().nn
+    Files.writeString(project.resolve("f.txt"), "project")
+    Files.writeString(copy.resolve("f.txt"), "copy")
+    val copyPolicy = Policy(List(FileRule(PathPattern(".", copy), Some(Access.Write), None)), Nil, Nil, prompter)
+    val isolated = Host(copyPolicy, copy, output, llm, hostUi, rebase = Some((project, copy)))
+    given FileSystem = isolated.fileSystem
+    assertEquals(isolated.read(project.resolve("f.txt").toString), "copy")
+    isolated.write(project.resolve("g.txt").toString, "written")
+    assertEquals(Files.readString(copy.resolve("g.txt")), "written")
+    assert(!Files.exists(project.resolve("g.txt")), "the project is untouched")

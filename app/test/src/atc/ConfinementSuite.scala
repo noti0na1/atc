@@ -206,6 +206,23 @@ class ConfinementSuite extends munit.FunSuite:
     assert(host.ClassifiedImpl.unwrap(block(env.host.exec("cat secrets/key > out.txt"))).isFailure)
     assert(env.requests.isEmpty, "nobody was asked")
 
+  test("in isolate mode a Linux command starts at the project's path and sees the copy there"):
+    assume(!Platform.isMac && sandbox.confined, s"bubblewrap: ${sandbox.describe}")
+    val project = Files.createTempDirectory("atc-mirror-project").nn.toRealPath().nn
+    Files.writeString(project.resolve("f.txt"), "project")
+    val copy = Files.createTempDirectory("atc-mirror-copy").nn.toRealPath().nn
+    val env = TestEnv(
+      mkRules = secretsAndGit,
+      commands = List("sh"),
+      commandSandbox = CommandSandbox.detect("auto", Some((copy, project))),
+      at = Some(copy),
+    )
+    env.file("f.txt", "copy\n")
+    val result = sh(env, s"pwd; cat f.txt; cat ${project}/f.txt; echo made > ${project}/new.txt")
+    assertEquals(result.stdout.linesIterator.toList, List(project.toString, "copy", "copy"), result.toString)
+    assertEquals(env.contents("new.txt"), "made\n")
+    assert(!Files.exists(project.resolve("new.txt")), "the project is untouched")
+
   test("a confined command writes in the project and nowhere else"):
     val env = confined()
     val outside = TestEnv.outsideDir()

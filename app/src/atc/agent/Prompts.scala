@@ -37,8 +37,8 @@ object Prompts:
       """|Sandbox mode: ISOLATE, meaning files and commands on a copy of the project, and no network. In scope:
          |`given io: IOCap^`, `given fs: FileSystem^{io}` (read + write) and `given ex: Exec^{io}` (commands), as in local
          |mode. The working directory is the copy: the user's project is unchanged until they apply your changes with
-         |/apply (or drop them with /discard), and it is not accessible from here. Work as usual; tell the user when a
-         |change is ready to apply. The separate `given user: UserIO^` handles reporting, questions, TODOs and
+         |/apply (or drop them with /discard), and a path under the project names the copy here (commands on Linux see
+         |the copy at the project's path too). Work as usual; tell the user when a change is ready to apply. The separate `given user: UserIO^` handles reporting, questions, TODOs and
          |`chat`.""".stripMargin
     case Mode.ReadOnly =>
       """|Sandbox mode: READ-ONLY, meaning you can only read files. In scope: `given io: IOCap` (read-only view of the

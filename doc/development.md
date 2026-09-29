@@ -906,8 +906,13 @@ is refused without one. The copy's config is trusted when the project's config i
 trusted. Mode has local mode's capabilities (`ReplSession.preambleChunks`), no network, and
 is left out of the Shift-Tab cycle. After each turn the terminal says how many files differ
 from the project (`Isolation.unapplied`), and `/apply` and `/discard` report per path and
-queue a note for the model. Commands see the copy at its own path on both platforms; binding
-it at the original path on Linux is possible with bubblewrap but not done.
+queue a note for the model. The host maps a path under the project to the copy
+(`Host.rebase`), so either spelling works with the file API. On Linux, commands see the copy
+at the project's path too: bubblewrap mounts it there after its restrictions, which come
+along, and starts the command at the matching directory (`CommandSandbox.detect`'s
+`mirror`), so path-keyed caches and editable installs keep working. macOS has no way to show
+a directory at another path, so its commands see the copy's own path and the project stays
+hidden from them.
 
 ## Configuration semantics
 

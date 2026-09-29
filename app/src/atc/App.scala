@@ -119,21 +119,29 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
   /** Listings hide what git ignores unless the config turns that off. */
   private val gitIgnore: GitIgnore = if config.respectGitignore then GitIgnore(cwd) else GitIgnore.Disabled
   /** How commands run: confined by the platform's sandbox, refused, or unconfined (config `osSandbox`). */
-  val osSandbox: CommandSandbox = CommandSandbox.detect(config.osSandbox)
+  val osSandbox: CommandSandbox =
+    CommandSandbox.detect(config.osSandbox, isolatedRoots.map((project, copy) => (copy, project)))
   val host: Host =
-    Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, osSandbox)
+    Host(policy, cwd, output, llm, hostUi, gitIgnore, () => models.configuration.keyVariables, osSandbox, isolatedRoots)
 
   /** The copy and its stores, in an isolated session. */
   lazy val isolation: Option[Isolation] = isolatedFrom.map(from => isolationOf(App.projectOf(from)))
 
-  private def isolationOf(project: Path): Isolation =
-    // This session's view of the project root: the project, or in isolate mode the copy's root,
-    // as many levels above the working directory as the session started below the project.
-    val root = isolatedFrom.fold(project): from =>
-      val depth = project.relativize(PlatformPath.canonical(from)).nn.toString match
-        case "" => 0
-        case relative => java.nio.file.Paths.get(relative).nn.getNameCount
+  /** In isolate mode, the project and this session's copy of it: the copy's root lies as many
+    * levels above the working directory as the session started below the project. */
+  lazy val isolatedRoots: Option[(Path, Path)] = isolatedFrom.map: from =>
+    val project = App.projectOf(from)
+    val depth = project.relativize(PlatformPath.canonical(from)).nn.toString match
+      case "" => 0
+      case relative => java.nio.file.Paths.get(relative).nn.getNameCount
+    (
+      project,
       Iterator.iterate(PlatformPath.canonical(cwd))(dir => Option(dir.getParent).getOrElse(dir)).drop(depth).next()
+    )
+
+  private def isolationOf(project: Path): Isolation =
+    // This session's view of the project root: the project, or the copy's in isolate mode.
+    val root = isolatedRoots.fold(project)(_._2)
     // Classified and no-access paths are not recorded, as for checkpoints.
     def excluded(path: String): Boolean =
       val permission = policy.effective(ScopeId.Base, root.resolve(PlatformPath.native(path)).nn)

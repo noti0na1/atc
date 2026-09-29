@@ -88,14 +88,18 @@ object CommandSandbox:
       )
 
   /** The sandbox the setting asks for, as far as this platform provides it. */
-  def detect(setting: String): CommandSandbox =
+  def detect(setting: String): CommandSandbox = detect(setting, None)
+
+  /** `mirror` (isolate mode's copy and the project it copies): commands see the copy at the
+    * project's path as well, where the backend can show a directory at another path (Linux). */
+  def detect(setting: String, mirror: Option[(Path, Path)]): CommandSandbox =
     val backend: Either[String, CommandSandbox] =
       if Platform.isMac then Either.cond(Seatbelt.available, SeatbeltSandbox(), "sandbox-exec cannot run here")
       else if Platform.isWindows then Left("Windows has no command sandbox yet")
       else
         Either.cond(
           Bubblewrap.available,
-          BubblewrapSandbox(Bubblewrap.socat),
+          BubblewrapSandbox(Bubblewrap.socat, mirror),
           "bubblewrap is missing or user namespaces are off"
         )
     Setting.parse(setting) match
@@ -211,7 +215,7 @@ object CommandSandbox:
       Launch(startHere, closing(proxy, deleteTree(tmp)))
 
   /** `socat`, when present, forwards the sandbox's loopback proxy port to the host's proxy. */
-  private final class BubblewrapSandbox(socat: Option[Path]) extends CommandSandbox:
+  private final class BubblewrapSandbox(socat: Option[Path], mirror: Option[(Path, Path)]) extends CommandSandbox:
     def confined: Boolean = true
     def describe: String = "sandboxed with bubblewrap"
     override def evaluator(java: Path, readable: List[Path]): Option[EvaluatorLaunch] =
@@ -234,8 +238,13 @@ object CommandSandbox:
         for socatPath <- socat; netScope <- network yield
           val dir = Files.createTempDirectory("atc-proxy").nn
           (socatPath, dir, CommandProxy.unix(dir.resolve("proxy.sock").nn, policy, netScope, line))
-      val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)))
-      stages.foreach(configure(_, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort), !writable))
+      // In isolate mode the command starts at the project's path, where it sees the copy.
+      val start =
+        mirror.collect { case (copy, project) if cwd.startsWith(copy) => project.resolve(copy.relativize(cwd)).nn }
+      val prefix = Bubblewrap.prefix(sandboxPlan, bridge.map((socatPath, dir, _) => (socatPath, dir)), mirror, start)
+      stages.foreach: stage =>
+        configure(stage, prefix, "/tmp", sandboxPlan.cache, bridge.map(_ => Bubblewrap.ProxyPort), !writable)
+        start.foreach(dir => stage.environment().nn.put("PWD", dir.toString))
       Launch(Launcher.start, closing(bridge.map(_._3), bridge.foreach((_, dir, _) => deleteTree(dir))))
 
   /** Starts processes on one long-lived thread. `--die-with-parent` kills the sandbox

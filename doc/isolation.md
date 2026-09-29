@@ -344,8 +344,9 @@ Seatbelt only allows or denies, and `DYLD_INSERT_LIBRARIES` is removed for syste
 ignored by hardened ones. So commands see the copy at its own path, and caches keyed by path
 rebuild once there (Mill 21 s against 1.9 s). No other agent keeps the real path on macOS
 either: AgentFS mounts its overlay through a localhost NFS server at a separate path, and
-worktree tools accept the new path. Linux could bind the copy at the original path with
-bubblewrap; that is not done. Applying uses the checkpoint merge, so edits the user made
+worktree tools accept the new path. On Linux, bubblewrap mounts the copy at the project's
+path as well and starts commands there, so they read and write the original path while the
+copy takes the changes. Applying uses the checkpoint merge, so edits the user made
 meanwhile are kept (see [Isolate mode](development.md#isolate-mode)).
 
 ## Platform support
@@ -372,7 +373,7 @@ meanwhile are kept (see [Isolate mode](development.md#isolate-mode)).
 | 8 | `classified` blocks; classified network paths removed | Done; see [Classified data](development.md#classified-data) |
 | 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Done: holes closed (terminals, Linux mounts, service data, git credentials); read-only commands without network run any program, with narrower read roots |
 | 10 | Interface cleanup | Done |
-| 11 | Isolate mode: one copy per project, applied with a merge | Done; see [Isolate mode](development.md#isolate-mode); binding the copy at the original path on Linux is not done |
+| 11 | Isolate mode: one copy per project, applied with a merge; on Linux commands see it at the project's path | Done; see [Isolate mode](development.md#isolate-mode) |
 
 ## Spike measurements
 

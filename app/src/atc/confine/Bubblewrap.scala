@@ -75,7 +75,16 @@ private[atc] object Bubblewrap:
     * holding the host's proxy socket), a command that may use the network keeps its own
     * network namespace and reaches only the proxy, through `socat` listening on
     * [[ProxyPort]]; without it, such a command shares the host's network. */
-  def prefix(plan: SandboxPlan, bridge: Option[(Path, Path)]): List[String] =
+  def prefix(plan: SandboxPlan, bridge: Option[(Path, Path)]): List[String] = prefix(plan, bridge, None, None)
+
+  /** With `mirror` (a copy and the path it stands for), the copy is mounted at that path too,
+    * after its own restrictions so that they come along, and the command starts in `start`. */
+  def prefix(
+    plan: SandboxPlan,
+    bridge: Option[(Path, Path)],
+    mirror: Option[(Path, Path)],
+    start: Option[Path]
+  ): List[String] =
     val args = List.newBuilder[String]
     args += "bwrap"
     args ++= systemMounts
@@ -90,6 +99,10 @@ private[atc] object Bubblewrap:
     def visible(path: Path) = mounted.exists(path.startsWith(_))
     for (level, path) <- masks(plan).sortBy(_._2.getNameCount) if visible(path) do args ++= mask(level, path)
     for socket <- agentSockets if visible(socket) do args ++= mask(Level.Hidden, socket)
+    for (copy, original) <- mirror do
+      val flag = if (plan.writable :+ plan.cache).exists(copy.startsWith(_)) then "--bind" else "--ro-bind"
+      args ++= List(flag, copy.toString, original.toString)
+    for dir <- start do args ++= List("--chdir", dir.toString)
     args ++= List("--unshare-user", "--unshare-pid", "--unshare-ipc")
     if !plan.network || bridge.isDefined then args += "--unshare-net"
     args ++= List("--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")

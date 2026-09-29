@@ -23,6 +23,8 @@ final class Host(
   private[host] val keyVariables: () => Set[String] = () => Set.empty,
   /** How commands are confined at the OS level (config `osSandbox`). */
   val commandSandbox: CommandSandbox = CommandSandbox.Unconfined("not configured"),
+  /** In isolate mode, the project and its copy: a path under the project names the copy. */
+  private[host] val rebase: Option[(Path, Path)] = None,
 ) extends Interface, Derivations, HostPaths, HostFiles, HostProcesses, HostNetwork, HostInteraction:
 
   /** Changes the agent made, for checkpoints: the paths its file operations wrote since
