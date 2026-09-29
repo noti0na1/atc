@@ -10,9 +10,10 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Linux: commands run under bubblewrap with new user, PID, IPC and (without network)
-  * network namespaces. The root file system is mounted read-only; `/tmp` and the home
-  * directory are replaced by empty file systems, and the plan's roots are mounted back
-  * over them, read-only or writable. Restrictions are mounted last: an empty read-only
+  * network namespaces. Only the system directories are mounted, read-only, so other
+  * users' homes, `/srv`, `/mnt`, `/var` and the service sockets under `/run` stay out of
+  * reach; `/tmp` and the home directory are empty file systems, and the plan's roots are
+  * mounted over them, read-only or writable. Restrictions are mounted last: an empty read-only
   * file system over a hidden directory, `/dev/null` over a hidden file, and a read-only
   * mount over a read-only path. Mounts need existing paths, so a glob restriction is
   * applied to the matches that exist when the command starts, and a restricted path
@@ -76,7 +77,9 @@ private[atc] object Bubblewrap:
     * [[ProxyPort]]; without it, such a command shares the host's network. */
   def prefix(plan: SandboxPlan, bridge: Option[(Path, Path)]): List[String] =
     val args = List.newBuilder[String]
-    args ++= List("bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+    args += "bwrap"
+    args ++= systemMounts
+    args ++= List("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
     for (_, dir) <- bridge do args ++= List("--bind", dir.toString, ProxyDir)
     if Files.isDirectory(plan.home) then args ++= List("--tmpfs", plan.home.toString)
     val binds = (plan.readable ++ plan.toolchain).filter(Files.exists(_)).map(p => ("--ro-bind", p)) ++
@@ -96,18 +99,36 @@ private[atc] object Bubblewrap:
       args ++= List("/bin/sh", "-c", script, "atc-proxy")
     args.result()
 
-  /** The prefix that runs the evaluator process: the root file system read-only, the home
+  /** The prefix that runs the evaluator process: the system directories read-only, the home
     * directory and `/tmp` empty except for what `readable` names (the JDK, ATC's classes),
     * and every namespace unshared, so it has no network and sees no other process. */
   def evaluatorPrefix(home: Path, readable: List[Path]): List[String] =
     val args = List.newBuilder[String]
-    args ++= List("bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
+    args += "bwrap"
+    args ++= systemMounts
+    args ++= List("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp")
     if Files.isDirectory(home) then args ++= List("--tmpfs", home.toString)
     for path <- readable.filter(Files.exists(_)).sortBy(_.getNameCount) do
       args ++= List("--ro-bind", path.toString, path.toString)
     for socket <- agentSockets do args ++= mask(Level.Hidden, socket)
     args ++= List("--chdir", "/tmp", "--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--")
     args.result()
+
+  /** System directories every sandboxed process may read. */
+  private val SystemRoots = List("/usr", "/etc", "/opt", "/sys", "/nix", "/gnu", "/snap")
+
+  /** Top-level directories that a merged `/usr` replaces with links into it. */
+  private val UsrLinks = List("/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
+
+  /** Read-only mounts of the system directories present here, with the links of a merged `/usr`. */
+  private def systemMounts: List[String] =
+    SystemRoots.map(Paths.get(_).nn).filter(Files.isDirectory(_)).flatMap(dir =>
+      List("--ro-bind", dir.toString, dir.toString)
+    ) ++
+      UsrLinks.map(Paths.get(_).nn).flatMap: path =>
+        if Files.isSymbolicLink(path) then List("--symlink", Files.readSymbolicLink(path).toString, path.toString)
+        else if Files.isDirectory(path) then List("--ro-bind", path.toString, path.toString)
+        else Nil
 
   /** Where agents and daemons that act for the user listen, as the existing real paths:
     * bubblewrap cannot mount over a path reached through a link such as `/var/run`. */

@@ -82,6 +82,9 @@ object SandboxPlan:
           case PathPattern.Form.Anchored(root, glob) => Some(Restriction(ruleLevel, Target.Anchored(root, glob)))
           case PathPattern.Form.Component(glob) => Some(Restriction(ruleLevel, Target.Component(glob)))
     val protectedPaths = (project :: writable).distinct.flatMap(protectedIn(policy, scope, _))
+    val serviceData =
+      ServiceData.map(Paths.get(_).nn).filterNot(data => (readable ++ writable).exists(_.startsWith(data)))
+        .map(data => Restriction(Level.Hidden, Target.Exact(data)))
     val homeRules =
       HomeSecrets.map(name => Restriction(Level.Hidden, Target.Exact(home.resolve(name).nn))) ++
         Option.when(writable.exists(home.startsWith(_)))(HomeStartup.map(name =>
@@ -93,7 +96,7 @@ object SandboxPlan:
       readable.distinct,
       writable,
       toolchain(home),
-      (fromRules ++ protectedPaths ++ homeRules).distinct,
+      (fromRules ++ protectedPaths ++ homeRules ++ serviceData).distinct,
       network,
       cache
     )
@@ -124,6 +127,10 @@ object SandboxPlan:
 
   /** Project entries that editors, shells and ATC read and act on. */
   val ProjectProtected: List[String] = List(".atc", ".vscode", ".idea", ".envrc")
+
+  /** Where package managers keep the data of the services they run (databases, logs), inside
+    * system directories commands may read; hidden unless a policy root lies inside one. */
+  val ServiceData: List[String] = List("/opt/homebrew/var", "/usr/local/var")
 
   /** Credentials and agent sockets in the home directory, hidden even when a root covers them. */
   val HomeSecrets: List[String] = List(

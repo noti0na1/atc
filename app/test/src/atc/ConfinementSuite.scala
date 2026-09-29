@@ -42,6 +42,16 @@ class ConfinementSuite extends munit.FunSuite:
     assert(restrictions.contains(Restriction(Level.Hidden, Target.Exact(home.resolve(".ssh").nn))))
     assert(!p.network)
 
+  test("service data under system directories is hidden unless a policy root lies inside it"):
+    val env = TestEnv()
+    val homebrewVar = Path.of("/opt/homebrew/var").nn
+    assert(plan(env).restrictions.contains(Restriction(Level.Hidden, Target.Exact(homebrewVar))))
+    val inside = TestEnv(mkRules =
+      root =>
+        TestEnv.defaultRules(root) :+ FileRule(PathPattern("/opt/homebrew/var/db", root), Some(Access.Read), None)
+    )
+    assert(!plan(inside).restrictions.exists(_.target == Target.Exact(homebrewVar)))
+
   test("a writable .git keeps only its hooks and configuration read-only"):
     val env = TestEnv()
     val restrictions = plan(env).restrictions.toSet
@@ -159,6 +169,33 @@ class ConfinementSuite extends munit.FunSuite:
       val result = sh(env, s"cat $path")
       assertNotEquals(result.exitCode, 0, path)
       assert(!result.stdout.contains("secret") && !result.stdout.contains("TOKEN"), path)
+
+  test("a confined command uses the terminals it opens and no other terminal"):
+    val env = confined()
+    assume(Platform.isMac && Files.isExecutable(Path.of("/usr/bin/script")), "BSD script on macOS")
+    // A terminal opened outside the sandbox, as another tab of the user would be.
+    val ttyFile = Files.createTempFile("atc-tty", ".txt").nn
+    val outside = ProcessBuilder("/usr/bin/script", "-q", "/dev/null", "/bin/sh", "-c", s"tty > '$ttyFile'; sleep 20")
+      .redirectInput(ProcessBuilder.Redirect.from(java.io.File("/dev/null"))).start().nn
+    try
+      var tty = ""
+      val deadline = System.nanoTime() + 10_000_000_000L
+      while tty.isEmpty && System.nanoTime() < deadline do
+        tty = Files.readString(ttyFile).nn.trim
+        if tty.isEmpty then Thread.sleep(50)
+      assert(tty.startsWith("/dev/ttys"), s"no terminal from script: '$tty'")
+      assertEquals(sh(env, s"exec 3<> $tty && echo opened || echo refused").stdout.trim, "refused")
+      assertEquals(sh(env, "exec 3<> /dev/tty && echo opened || echo refused").stdout.trim, "refused")
+      assert(sh(env, "/usr/bin/script -q /dev/null /bin/echo on-its-own-terminal < /dev/null").stdout
+        .contains("on-its-own-terminal"))
+    finally outside.destroyForcibly()
+
+  test("a confined command on Linux sees the system directories and none of the rest of /"):
+    val env = confined()
+    assume(!Platform.isMac, "bubblewrap")
+    assertEquals(sh(env, "cat /etc/hostname > /dev/null && echo readable").stdout.trim, "readable")
+    for path <- List("/var", "/srv", "/mnt", "/run") do
+      assertEquals(sh(env, s"test -e $path && echo visible || echo absent").stdout.trim, "absent", path)
 
   test("a confined command cannot change protected paths"):
     val env = confined()

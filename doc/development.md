@@ -678,7 +678,9 @@ environment. The plan lists concrete paths:
   restriction regardless, so the plan never grants more than the policy. `.git` is
   read-only unless the policy lets it be written, in which case only its hooks and
   configuration are; `.atc`, `.vscode`, `.idea` and `.envrc` in every writable root are
-  read-only; the home directory's credential files and agent sockets are hidden.
+  read-only; the home directory's credential files and agent sockets are hidden, and so is
+  the service data package managers keep in system directories (`/opt/homebrew/var`,
+  `/usr/local/var`) unless a policy root lies inside it.
 
 The Seatbelt profile denies by default, imports `system.sb`, and allows `stat` everywhere,
 which canonicalization needs. Its rules match the real path on disk, so a symbolic link or a
@@ -688,12 +690,20 @@ expressions where file names are; dependency directories (`node_modules`, `.venv
 `site-packages`) are exempt from them, since packages ship certificate bundles that `*.pem`
 would otherwise hide. A renamed parent could swap a protected path out, so parents of
 protected paths inside writable roots cannot be unlinked. Launch Services, the pasteboard
-and the keychain services stay unreachable. Each command gets a private temporary
+and the keychain services stay unreachable. A command may use the terminals it opens itself,
+which the kernel marks with the `com.apple.sandbox.pty` extension, and no other: not
+`/dev/tty` and not the user's other terminals, since reading one captures what the user
+types there and writing one bypasses ATC's display. macOS starts commands in ATC's session,
+and the sandbox refuses the `TIOCSTI` ioctl that would inject input into it. Each command gets a private temporary
 directory under `/private/tmp`, short because sbt's socket path must fit 104 bytes, and JVMs
 get it as `java.io.tmpdir`, since the macOS JVM ignores `TMPDIR`.
 
-bubblewrap mounts the root file system read-only, replaces `/tmp` and the home directory with
-empty file systems, mounts the roots back, and then the restrictions: an empty read-only file
+bubblewrap mounts the system directories read-only (`/usr`, `/etc`, `/opt`, `/sys`, `/nix`,
+`/gnu` and `/snap` where they exist, and `/bin`, `/sbin` and `/lib*` as the links a merged
+`/usr` makes or as directories), not the whole root: other users' homes, `/srv`, `/mnt`,
+`/var` and the sockets under `/run` stay absent, since a read-only mount does not stop a
+`connect` to a Unix socket. The evaluator gets the same mounts. It replaces `/tmp` and the
+home directory with empty file systems, mounts the roots back, and then the restrictions: an empty read-only file
 system over a hidden directory, `/dev/null` over a hidden file, a read-only mount over a
 read-only path. Mounts need existing paths, so glob restrictions apply to the matches found
 by a walk of the writable roots when the command starts (at most 50000 entries, skipping

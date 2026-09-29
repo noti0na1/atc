@@ -140,11 +140,31 @@ Rules for every process:
   macOS kills the launch's process group.
 - The environment is scrubbed as today, plus variables that point to credential agents.
 
-The command allowlist stays in every mode, read-only included. A confined command reads more
-than the file API allows: system and toolchain directories and its temporary directory, and
-on Linux every world-readable path outside the home directory, because bubblewrap mounts `/`
-read-only. On macOS `/opt/homebrew/var`, where Homebrew services keep their data, is
-readable too. Narrowing both to the directories tools need is planned.
+The command allowlist stays in every mode for now. It limits which programs run, not what
+they read: any reader it admits (`cat`, `rg`, `git`, an interpreter) reads whatever the
+sandbox lets it read, so the sandbox's read roots are what protect files.
+
+Read-only audit (September 2026, macOS 27 and Ubuntu 24.04 with JDK 17), with read-only
+commands started through ATC's own launch path:
+
+- Denied on both: writes outside the private temporary directory, classified and hidden
+  paths, the network, loopback TCP, abstract Unix sockets, signals to and the arguments and
+  environment of other processes. macOS also denies the home directory beyond the toolchain,
+  `/Users`, Unix sockets, the system resolver, the pasteboard, `launchctl submit`,
+  `defaults write`, `log show` and Spotlight, and the `TIOCSTI` ioctl.
+- Fixed by the audit: a macOS command could open the user's other terminals, reading what
+  they typed and writing escape sequences to them; it now reaches only terminals it opens.
+  On Linux, bubblewrap mounted all of `/`, so other users' homes, `/srv`, `/mnt` and `/var`
+  were readable and Unix sockets under `/run` or `/var/lib` accepted connections (a local
+  database, D-Bus); only system directories are mounted now. `/opt/homebrew/var` and
+  `/usr/local/var` are hidden on both.
+- Still readable beyond the file API: system directories (`/etc`, `/Library/Preferences`,
+  `/opt/homebrew/etc`, whose OpenSSL certificates tools need) and the toolchain bundle,
+  which includes `~/.gitconfig` (it can hold tokens) and every `PATH` directory under the
+  home directory (20 of 21 here, personal script directories among them).
+- Still allowed on macOS: creating and writing POSIX shared memory under any name, and
+  posting Darwin notifications, both visible to other processes of the user.
+- Unbounded: disk (macOS) or memory (Linux) used by the private temporary directory.
 
 API changes that follow from the table: `exec` keeps requiring `FileSystem^`; a read-only
 variant lets read-only mode run commands that write nothing; network comes from a derived
@@ -157,8 +177,8 @@ Backends:
 - macOS: `/usr/bin/sandbox-exec -p <profile>` with parameters passed as `-D`. The profile is
   deny-by-default and imports `system.sb`. Missing parameters fail with a misleading
   "unsupported syntax" error.
-- Linux: bubblewrap with `--ro-bind / /`, `--dev /dev`, `--proc /proc`, a private `/tmp`,
-  writable binds, masks after the binds (`--tmpfs` plus `--remount-ro` for directories,
+- Linux: bubblewrap with read-only mounts of the system directories, `--dev /dev`,
+  `--proc /proc`, a private `/tmp`, writable binds, masks after the binds (`--tmpfs` plus `--remount-ro` for directories,
   `--ro-bind /dev/null` for files), `--unshare-net --unshare-pid --unshare-user
   --unshare-ipc --die-with-parent --new-session`. Protected paths that do not exist need
   placeholder mounts, which leave empty entries to remove afterwards. A seccomp filter that
@@ -341,7 +361,7 @@ meanwhile are kept. The approach is to be confirmed.
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
 | 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
 | 8 | `classified` blocks; classified network paths removed | Typing prototyped; implementation planned |
-| 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs (Linux mounts, `/opt/homebrew/var`) | Next |
+| 9 | Read-only mode: whether confinement protects files inside and outside the project well enough to run any read-only command without the allowlist, and the narrower read roots that needs | Audit done, holes closed (terminals, Linux mounts, service data); allowing any read-only command awaits a decision on the remaining exposure |
 | 10 | Interface cleanup | Planned |
 | 11 | Isolate mode: one copy per project; commands see it at the original path on Linux, at its own path on macOS | Planned; the approach is to be confirmed |
 
@@ -367,8 +387,9 @@ Desktop for Linux.
 - Classified content is protected by the compiler only, with or without L1.
 - Committed classified files remain readable through git objects by any process that may
   read `.git`.
-- Confined commands read system and toolchain directories the file API refuses, and on
-  Linux every world-readable path outside the home directory (phase 9).
+- Confined commands read system and toolchain directories the file API refuses, including
+  `~/.gitconfig` and `PATH` directories under the home directory; on macOS they can write
+  POSIX shared memory and post notifications (phase 9).
 - On macOS, a process that detaches from its process group survives the launch, though it
   stays confined.
 - Host file operations remain check-then-use; mitigations are no-follow opens, a check after

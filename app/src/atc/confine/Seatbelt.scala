@@ -104,8 +104,12 @@ private[atc] object Seatbelt:
     lines += "(allow sysctl-read system-info ipc-posix-sem ipc-posix-shm user-preference-read pseudo-tty)"
     // stat() everywhere: getcwd, realpath and canonicalization need it; content stays restricted.
     lines += "(allow file-read-metadata file-test-existence)"
-    lines += "(allow file-read* file-write-data file-ioctl (literal \"/dev/tty\") (regex #\"^/dev/ttys[0-9]+$\") " +
-      "(literal \"/dev/ptmx\") (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/random\") (literal \"/dev/urandom\"))"
+    lines += "(allow file-read* file-write-data file-ioctl (literal \"/dev/ptmx\") (literal \"/dev/null\") " +
+      "(literal \"/dev/zero\") (literal \"/dev/random\") (literal \"/dev/urandom\"))"
+    // Terminals the command opens itself carry this extension. The user's terminals do not:
+    // reading one captures what they type there, writing one bypasses ATC's display.
+    lines += "(allow file-read* file-write* file-ioctl " +
+      "(require-all (regex #\"^/dev/ttys[0-9]+$\") (extension \"com.apple.sandbox.pty\")))"
     lines += s"(allow file-read* ${SystemRoots.map(r => subpath(Paths.get(r).nn)).mkString(" ")})"
     lines += s"(allow file-read* ${readRoots.map(subpath).mkString(" ")})"
     lines +=
@@ -116,8 +120,8 @@ private[atc] object Seatbelt:
     lines += s"(allow mach-lookup ${mach.map(name => s"(global-name ${string(name)})").mkString(" ")})"
     val locks = SbtLocks.map(name => literal(plan.home.resolve(name).nn))
     lines += s"(allow file-write* ${(writeRoots.map(subpath) ++ locks).mkString(" ")} " +
-      "(literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (regex #\"^/dev/ttys[0-9]+$\") " +
-      "(literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))"
+      "(literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") " +
+      "(subpath \"/dev/fd\"))"
     globs.foreach(r => lines += deny(r.level, filter(r.target, policyRoots)))
     if globs.nonEmpty then
       val dependencies = s"(${DependencyDirs.map(escapeRegex).mkString("|")})"
