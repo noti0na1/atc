@@ -201,6 +201,9 @@ final case class Config(
   /** Initial sandbox mode: `readonly` (read files only), `local` (read/write
     * files, run commands) or `full` (also network). `/mode` switches at run time. */
   mode: Option[String] = None,
+  /** Reject every permission request without asking; `/auto` switches it at run time.
+    * A project layer may turn it on but not off. */
+  auto: Boolean = false,
   /** Wall-clock limit for one snippet, excluding time spent waiting for the user
     * or for a command (`exec` has its own `ExecOptions.timeoutMs`). */
   executionTimeoutMs: Option[Long] = Some(300000L),

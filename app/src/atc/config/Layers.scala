@@ -134,7 +134,7 @@ object Configuration:
     * which every layer may add to) merges in layer order. */
   private val PolicyKeys =
     Set("files", "denyCommands", "denyHosts") ++
-      Set("mode", "safeMode", "respectGitignore", "checkpoints", "osSandbox") ++
+      Set("mode", "auto", "safeMode", "respectGitignore", "checkpoints", "osSandbox") ++
       Set("executionTimeoutMs", "maxToolCalls", "maxToolOutputChars")
 
   /** Combine the layers.
@@ -150,7 +150,7 @@ object Configuration:
     *  - **policy settings** come from the *granting* layers (global, `-c`)
     *    merged the same way, and are then narrowed by the project layer:
     *    limits, the sandbox mode and `osSandbox` by the stricter value,
-    *    `safeMode`, `respectGitignore` and `checkpoints` only towards "on".
+    *    `auto`, `safeMode`, `respectGitignore` and `checkpoints` only towards "on".
     *  - **file rules** from every layer are kept with their anchor: a project
     *    layer's rules grant only inside its own folder, and clamp everywhere
     *    (see [[LayeredRule]] and `Policy.configPerm`).
@@ -206,6 +206,7 @@ object Configuration:
     def onlyIfSet[T](key: String)(stricter: => T)(keep: => T): T = if layer.defines(key) then stricter else keep
     base.copy(
       mode = onlyIfSet("mode")(stricterMode(base.mode, n.mode))(base.mode),
+      auto = base.auto || (layer.defines("auto") && n.auto),
       safeMode = base.safeMode || (layer.defines("safeMode") && n.safeMode),
       respectGitignore = base.respectGitignore || (layer.defines("respectGitignore") && n.respectGitignore),
       checkpoints = base.checkpoints || (layer.defines("checkpoints") && n.checkpoints),

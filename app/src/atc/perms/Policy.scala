@@ -107,6 +107,9 @@ final class Policy(
     * (the preamble hands out only the mode's capabilities); the checks below
     * make the host refuse it too, so nothing depends on the REPL alone. */
   @volatile var mode: Mode = Mode.Full
+  /** The `auto` switch: every permission request is rejected without asking the user.
+    * The rejected requests are kept, so the user can grant them after the turn. */
+  @volatile var auto: Boolean = false
 
   private def scope(id: ScopeId): Scope =
     scopes.getOrElse(
@@ -209,9 +212,7 @@ final class Policy(
     if !(current.access >= access) then
       if current.locked then
         throw SecurityException(s"Access denied: '$shown' is locked to ${current.access.label} by the configuration")
-      decide(FileRequest(p, access, current, reason, ceiling(p)), s"${access.label} on '$shown'") {
-        base.synchronized(base.fileGrants ::= (p -> access))
-      }
+      decide(FileRequest(p, access, current, reason, ceiling(p)), s"${access.label} on '$shown'")
     openScope(parent, fileGrants = List(p -> access))
 
   // ── commands ──────────────────────────────────────────────────────
@@ -233,9 +234,7 @@ final class Policy(
     refuseDenied("command", commands, denyCommands, GlobMatcher.matchesCommand)
     val missing = commands.filterNot(command => commandPatterns(parent).exists(GlobMatcher.matchesCommand(command, _)))
     if missing.nonEmpty then
-      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}") {
-        base.synchronized(base.commands ++= missing)
-      }
+      decide(ExecRequest(missing, reason), s"commands ${missing.mkString(", ")}")
     openScope(parent, commands = commands)
 
   // ── network ───────────────────────────────────────────────────────
@@ -259,9 +258,7 @@ final class Policy(
     // an exact `::1` grant covers the equivalent expanded IPv6 spelling.
     val missing = hosts.filterNot(host => hostPatterns(parent).exists(GlobMatcher.matchesHost(host, _)))
     if missing.nonEmpty then
-      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}") {
-        base.synchronized(base.hosts ++= missing)
-      }
+      decide(NetRequest(missing, reason), s"hosts ${missing.mkString(", ")}")
     openScope(parent, hosts = hosts)
 
   /** Refuse a `request*` whose patterns collide with the deny list, before the
@@ -292,10 +289,18 @@ final class Policy(
 
   // ── scopes ────────────────────────────────────────────────────────
 
-  /** Put `request` to the user. Denial throws (`what` names what was refused);
-    * "allow for the session" also runs `remember`, which records the grant on
-    * the base scope. Returns normally when the caller may open its scope. */
-  private def decide(request: PermissionRequest, what: String)(remember: => Unit): Unit =
+  /** Put `request` to the user, or with `auto` reject it without asking. Denial
+    * throws (`what` names what was refused); "allow for the session" also
+    * records the grant on the base scope. Returns normally when the caller may
+    * open its scope. */
+  private def decide(request: PermissionRequest, what: String): Unit =
+    if auto then
+      rejections.synchronized:
+        rejections += (request -> what)
+      throw SecurityException(
+        s"Access denied: auto is on, so permission requests are rejected without asking the user: $what. " +
+          "Do not retry it; work within the current permissions and say what you need."
+      )
     val decision = prompter.ask(request)
     decisionLog.synchronized:
       decisionLog += (decision -> what)
@@ -304,7 +309,33 @@ final class Policy(
       case Decision.Revise(_) =>
         throw SecurityException(s"Permission request not approved: $what. The user supplied instructions to revise it.")
       case Decision.AllowOnce => ()
-      case Decision.AllowSession | Decision.AllowAlways => remember
+      case Decision.AllowSession | Decision.AllowAlways => remember(request)
+
+  /** Record `request`'s grant on the base scope, for the rest of the session. */
+  private def remember(request: PermissionRequest): Unit = base.synchronized:
+    request match
+      case FileRequest(path, access, _, _, _) => base.fileGrants ::= (path -> access)
+      case ExecRequest(commands, _) => base.commands ++= commands
+      case NetRequest(hosts, _) => base.hosts ++= hosts
+
+  /** The requests `auto` rejected, in order, with what each was about. */
+  private val rejections = mutable.ListBuffer[(PermissionRequest, String)]()
+  def rejectionCount: Int = rejections.synchronized(rejections.length)
+
+  /** The requests rejected since there were `count`, once each. */
+  def rejectedSince(count: Int): List[(PermissionRequest, String)] = rejections.synchronized:
+    rejections.drop(count).toList.distinctBy(_._2)
+
+  /** The rejected requests the user has not granted since, once each. */
+  def rejected: List[(PermissionRequest, String)] = rejectedSince(0)
+
+  /** Grant a request `auto` rejected for the rest of the session, as "allow for the session" would have. */
+  def grant(request: PermissionRequest): Unit =
+    remember(request)
+    rejections.synchronized:
+      // The same request rejected again with another reason is granted too.
+      val granted = rejections.collect { case (r, what) if r == request => what }.toSet
+      rejections.filterInPlace((_, what) => !granted.contains(what))
 
   /** Every decision the user made at a prompt, in order, with what it was
     * about as a phrase (`write on '/tmp/x'`, `commands npm *`). The agent
@@ -336,8 +367,9 @@ final class Policy(
   def closeScope(id: ScopeId): Unit = if id != ScopeId.Base then scopes.remove(id)
 
   /** Forget everything decided during the session: the "allow for the session"
-    * grants and every scope still open (a `request*` block whose capability
-    * outlived it). The configured rules, the deny lists and the mode stay. */
+    * grants, the requests `auto` rejected and every scope still open (a `request*`
+    * block whose capability outlived it). The configured rules, the deny lists,
+    * the mode and the `auto` switch stay. */
   def resetSession(): Unit =
     scopes.clear()
     scopes.put(ScopeId.Base, base)
@@ -347,6 +379,8 @@ final class Policy(
       base.hosts = Nil
     decisionLog.synchronized:
       decisionLog.clear()
+    rejections.synchronized:
+      rejections.clear()
     matchingRulesCache.synchronized:
       matchingRulesCache.clear()
 
@@ -386,6 +420,7 @@ final class Policy(
       if !withSession || patterns.isEmpty then "" else s"  + session: ${patterns.mkString(", ")}"
     val lines = List.newBuilder[String]
     lines += s"Mode: ${mode.label} (${mode.description})"
+    if withSession && auto then lines += "Auto: permission requests are rejected without asking"
     lines += "File rules (strictest matching rule wins; unmatched paths are inaccessible):"
     lines ++= explicit.map(r => s"  ${r.describe}")
     if classifiedOnly.nonEmpty then

@@ -128,6 +128,10 @@ final class Agent(
   def notePermissionRevoked(grant: String): Unit =
     conversation.queueNote(AgentMessages.permissionRevoked(grant))
 
+  def notePermissionGranted(what: String): Unit = conversation.queueNote(AgentMessages.permissionGranted(what))
+
+  def noteAutoSwitched(on: Boolean): Unit = conversation.queueNote(AgentMessages.autoSwitched(on))
+
   def noteProcessesKilled(what: String): Unit = conversation.queueNote(AgentMessages.processesKilled(what))
 
   def noteFilesReverted(outcome: String): Unit = conversation.queueNote(AgentMessages.filesReverted(outcome))

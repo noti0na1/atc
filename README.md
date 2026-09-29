@@ -368,6 +368,10 @@ its request. The granted capability cannot leave the block, and the host closes 
 when the block exits. `locked` rules cannot be widened at all, and a `denyCommands` or
 `denyHosts` match is refused without a pop-up.
 
+To work without interruptions, turn on **auto** with `/auto` (or `--auto`, or `"auto": true`
+in the config): every request is rejected without a pop-up, and after the turn
+`/perms grant` allows what was rejected.
+
 ## Configuration
 
 Config files are JSON, in three layers:

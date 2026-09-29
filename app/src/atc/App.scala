@@ -52,6 +52,7 @@ final class App(args: Cli.Args, val tui: Tui):
       config.denyHosts
     )
   policy.mode = args.mode.orElse(config.mode.map(Mode.parse)).getOrElse(Mode.Full)
+  policy.auto = args.auto || config.auto
   models.useMode(policy.mode)
 
   /** The permission pop-up, offering to save the grant to the project config where it can
@@ -164,7 +165,8 @@ final class App(args: Cli.Args, val tui: Tui):
   def updateStatus(): Unit =
     val directory = Option(cwd.getFileName).fold(PlatformPath.display(cwd))(_.toString)
     val effort = agent.model.effort.fold("")(e => s" ($e)")
-    tui.setContext(policy.mode.label, models.catalog.label(models.catalog.find(agent.model.ref)) + effort, directory)
+    val mode = if policy.auto then s"${policy.mode.label} auto" else policy.mode.label
+    tui.setContext(mode, models.catalog.label(models.catalog.find(agent.model.ref)) + effort, directory)
   updateStatus()
 
   // ── commands ──────────────────────────────────────────────────────
@@ -214,7 +216,8 @@ final class App(args: Cli.Args, val tui: Tui):
         "directory" -> PlatformPath.display(cwd),
       ) ++ osSandbox.notice.map("OS sandbox" -> _)
         ++ agent.classifiedModel.map(model => "classified model" -> models.describe(model))
-        ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)"),
+        ++ Option.when(args.approveAll)("permissions" -> "every request approved without asking (--approve-all)")
+        ++ Option.when(policy.auto)("permissions" -> "every request rejected without asking (/auto switches it)"),
       (List("/help commands", "Shift-Tab mode", "Ctrl-C interrupt", "Ctrl-O details", "Ctrl-D quit")
         ++ Option.when(predictor.enabled)("Tab or → accept a suggestion")).mkString(" · "),
     )
@@ -225,6 +228,7 @@ final class App(args: Cli.Args, val tui: Tui):
     tui.beginTurn()
     val started = System.nanoTime()
     val (usageBefore, callsBefore) = (agent.usage, agent.toolCalls)
+    val rejectionsBefore = policy.rejectionCount
     var outcome = TurnOutcome.Failed
     checkpoints.foreach(_.beginTurn())
     try
@@ -247,6 +251,7 @@ final class App(args: Cli.Args, val tui: Tui):
         outcome,
       )))
       showChanges()
+      showRejected(rejectionsBefore)
       predictor.start()
 
   /** After a turn: what the agent changed, which `/undo` can revert. */
@@ -259,6 +264,12 @@ final class App(args: Cli.Args, val tui: Tui):
         val more = if changes.size > App.ChangesShown then s" and ${changes.size - App.ChangesShown} more" else ""
         val files = if changes.size == 1 then "1 file" else s"${changes.size} files"
         tui.info(s"Changed $files: $shown$more. /undo reverts them.")
+
+  /** After a turn: the requests `auto` rejected in it, which `/perms grant` allows. */
+  private def showRejected(since: Int): Unit =
+    val rejected = policy.rejectedSince(since)
+    if rejected.nonEmpty then
+      tui.info(s"Auto rejected ${rejected.map(_._2).mkString("; ")}. /perms grant allows them for the session.")
 
   private def interactive(): Unit =
     var running = true
@@ -282,10 +293,10 @@ final class App(args: Cli.Args, val tui: Tui):
       val queued = agent.takeQueuedInput()
       if queued.nonEmpty then tui.draft(queued.mkString("\n"))
 
-  /** The input prompt names the mode unless it is the full one. */
-  def prompt: String = policy.mode match
-    case Mode.Full => "> "
-    case m => s"${m.label} > "
+  /** The input prompt names the mode unless it is the full one, and `auto` when it is on. */
+  def prompt: String =
+    (Option.when(policy.mode != Mode.Full)(policy.mode.label) ++ Option.when(policy.auto)("auto")).map(_ + " ")
+      .mkString + "> "
 
 object App:
   /** Thrown to end the program from setup, before there is anything to run. */

@@ -22,6 +22,7 @@ object Main:
        |  -m, --model <ref>     model to use: an alias from the config, or provider/alias
        |  -p, --prompt <text>   run one turn non-interactively and exit
        |      --mode <mode>     sandbox mode: readonly | local | full (default: the config's "mode", else full)
+       |      --auto            reject every permission request without asking (/auto switches it)
        |      --approve-all     auto-approve permission requests (use with -p in trusted setups only)
        |      --init            write a starter ./.atc/config.json (project layer) and exit
        |      --init-global     write a starter ~/.atc/config.json (global layer) and exit

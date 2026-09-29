@@ -707,3 +707,10 @@ class LayerSuite extends munit.FunSuite:
     assert(e.getMessage.nn.contains("Invalid config"), e.getMessage)
     assert(e.getMessage.nn.contains("Unknown mode"), e.getMessage)
     assert(e.getMessage.nn.contains(".atc"), e.getMessage)
+
+  test("auto is off unless a layer turns it on, and a project layer cannot turn it off"):
+    def auto(global: String, project: String = "") = World(global = global, project = project).settings.auto
+    assert(!auto(""), "off when no layer mentions it")
+    assert(auto("""{ "auto": true }"""), "on when the global config says so")
+    assert(auto("""{ "auto": true }""", """{ "auto": false }"""), "a project may not switch it off")
+    assert(auto(GrantCwd, """{ "auto": true }"""), "a project may switch it on")

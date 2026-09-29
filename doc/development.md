@@ -513,6 +513,16 @@ host applies only for this session until the user trusts the project. The callba
 Denial throws before a child scope is opened. The compiler's lifetime checks and the
 host's scope IDs therefore enforce complementary parts of the same request contract.
 
+`Policy.auto` (the `auto` switch: `/auto`, `--auto`, config `auto`, which a project layer
+may turn on but not off) makes `Policy.decide` reject every request without calling the
+prompter, including the command proxy's host requests. The exception tells the agent that
+nobody was asked, and the system prompt's user line says so while the switch is on;
+`/auto` also queues a note when it changes. Rejected requests are kept: `App` lists those of
+a turn after it (`rejectedSince`), and `/perms grant` passes one to `Policy.grant`, which
+records it on `ScopeId.Base` as "allow for the session" would have and queues a note for the
+model. Deny lists, locked rules and mode checks come before `decide`, so they refuse as
+before and nothing is kept for them. `--auto` and `--approve-all` together are rejected.
+
 Permission requests display numbered command or host rows, and a `note` row when a command
 pattern holds `*`, which allows any arguments and so, for an interpreter, any code. The host
 sorts and deduplicates

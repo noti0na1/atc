@@ -13,8 +13,13 @@ enum SlashCommand(val usage: String, val help: String, val aliases: String*):
   case Providers extends SlashCommand("/providers", "turn providers and models on or off, or add a provider")
   case Effort extends SlashCommand("/effort [level]", "choose the agent model's reasoning effort")
   case Mode extends SlashCommand("/mode [name]", "change mode and restart the REPL")
+  case Auto extends SlashCommand("/auto [on|off]", "reject permission requests without asking")
   case Perms
-      extends SlashCommand("/perms [revoke [number|all]]", "show permissions or revoke session grants", "/permissions")
+      extends SlashCommand(
+        "/perms [grant|revoke [number|all]]",
+        "show permissions, grant requests auto rejected, or revoke session grants",
+        "/permissions"
+      )
   case Config extends SlashCommand("/config [show|setting value]", "change a setting, or show the configuration")
   case Interface extends SlashCommand("/interface", "show the sandbox API reference", "/api")
   case Run extends SlashCommand("/run [code]", "run Scala; omit code for multiline input", "/scala")

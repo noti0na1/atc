@@ -316,7 +316,7 @@ overlay as well. Applying uses the checkpoint merge, so edits the user made mean
 | 4 | Capability-derived process authority in the API: `execReadOnly`, `withNetwork` | Done; `execClassified` becomes `sealed` (phase 8) |
 | 5 | L1 evaluator on macOS and Linux | Done; see [Evaluator process](development.md#evaluator-process) |
 | 6 | Windows through `srt`, Linux overlay staging, a discovery mode that logs what a run needed | Planned |
-| 7 | The `auto` switch | Planned |
+| 7 | The `auto` switch | Done; see [Scope lifecycle](development.md#scope-lifecycle) |
 | 8 | `sealed` classified computations, prototyped first; classified network paths removed | Planned |
 | 9 | Interface cleanup | Planned |
 | 10 | Isolate mode | Planned; where the copy lives is open |

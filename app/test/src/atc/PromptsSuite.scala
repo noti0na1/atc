@@ -44,3 +44,16 @@ class PromptsSuite extends munit.FunSuite:
     val source = Prompts.interfaceSource
     assert(source.contains("def httpPostClassified"), source.take(200))
     assert(!source.contains("API reference unavailable"), "the Interface.scala resource was not bundled")
+
+  test("with auto on, the model is told that permission requests are rejected without asking"):
+    val env = TestEnv(prefix = "atc-prompt-auto")
+    env.policy.auto = true
+    val prompt = Prompts.system(
+      AgentEnvironment("/p", "test-os"),
+      env.policy,
+      classifiedModelConfigured = false,
+      safeMode = true,
+      respectGitignore = true,
+      extra = None,
+    )
+    assert(prompt.contains("auto is on") && prompt.contains("rejected without asking"), prompt)

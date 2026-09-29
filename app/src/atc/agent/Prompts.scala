@@ -111,7 +111,11 @@ object Prompts:
        |- OS: ${quoted(environment.operatingSystem)}
        |- REPL: $replDescription
        |- user: ${
-        if environment.userPresent then "at the terminal: `ask` and permission prompts reach them"
+        if environment.userPresent && policy.auto then
+          "at the terminal, but auto is on: `ask` reaches them, and every permission request is rejected " +
+            "without asking them; work within the current permissions, and when something outside them is " +
+            "needed, finish what does not depend on it and say what you need (they can grant it after the turn)"
+        else if environment.userPresent then "at the terminal: `ask` and permission prompts reach them"
         else
           "absent (a scripted, non-interactive run): `ask` returns None and a permission prompt fails unless the " +
             "run pre-approves it; decide reasonable questions yourself, and when a decision is truly the user's, " +

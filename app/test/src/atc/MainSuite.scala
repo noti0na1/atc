@@ -107,3 +107,8 @@ class MainSuite extends munit.FunSuite:
     val normal = App.permissionPrompter(Cli.Args(), interactive)
     assertEquals(normal.ask(request), Decision.AllowOnce)
     assertEquals(asked, 1)
+
+  test("--auto sets the switch and contradicts --approve-all"):
+    assert(parse("--auto").auto && !parse().auto)
+    val e = intercept[IllegalArgumentException](Cli.validate(parse("--auto", "--approve-all")))
+    assert(e.getMessage.nn.contains("pick one"), e.getMessage)

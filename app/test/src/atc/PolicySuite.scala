@@ -404,3 +404,30 @@ class PolicySuite extends munit.FunSuite:
     assert(!rows.exists(_.exists(c => c == '\n' || c == '\r')), rows.toString)
     assert(rows(2).contains("ls\\n    command 3: git status"), rows(2))
     assertEquals(PermissionRequest.visible("a​b‮c\td"), "a\\u200bb\\u202ec\\td")
+
+  test("auto rejects every request without asking, keeps it for a later grant, and leaves deny lists final"):
+    val env = TestEnv(denyCommands = List("rm *"))
+    env.policy.auto = true
+    val outside = TestEnv.outsideDir()
+    val file = intercept[SecurityException](env.policy.requestFile(ScopeId.Base, outside, Access.Read, "look"))
+    assert(file.getMessage.nn.contains("auto is on"), file.getMessage)
+    val before = env.policy.rejectionCount
+    intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("npm test"), "test"))
+    intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("npm test"), "again"))
+    val denied = intercept[SecurityException](env.policy.requestExec(ScopeId.Base, List("rm -rf x"), "clean"))
+    assert(denied.getMessage.nn.contains("configuration"), denied.getMessage)
+    assert(env.requests.isEmpty, "nobody was asked")
+    assertEquals(env.policy.rejectedSince(before).map(_._2), List("commands npm test"), "once, as the turn lists it")
+    assertEquals(
+      env.policy.rejected.map(_._2),
+      List(s"read on '${PlatformPath.portable(outside)}'", "commands npm test")
+    )
+    env.policy.grant(env.policy.rejected(1)._1)
+    assert(env.policy.commandAllowed(ScopeId.Base, "npm test"), "granted for the session")
+    assertEquals(env.policy.rejected.size, 1, "a granted request is no longer offered")
+    env.policy.auto = false
+    env.decisions = List(Decision.AllowOnce)
+    env.policy.requestFile(ScopeId.Base, outside, Access.Read, "look")
+    assertEquals(env.requests.size, 1, "asked again once auto is off")
+    env.policy.resetSession()
+    assert(env.policy.rejected.isEmpty)

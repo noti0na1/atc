@@ -117,6 +117,27 @@ final class SessionCommands(app: App):
           tui.success(s"mode -> ${m.describe} (fresh REPL)")
         else policy.mode = previous
 
+  /** `/auto`: switch (no argument), or turn on or off, the rejection of every
+    * permission request without asking. The REPL and its capabilities stay. */
+  def switchAuto(arg: String): Unit =
+    val target = arg.trim.toLowerCase(java.util.Locale.ROOT) match
+      case "" => Some(!policy.auto)
+      case "on" => Some(true)
+      case "off" => Some(false)
+      case _ =>
+        tui.error("Usage: /auto [on|off]")
+        None
+    target.foreach: on =>
+      if on != policy.auto then
+        predictor.invalidate()
+        policy.auto = on
+        agent.noteAutoSwitched(on)
+        app.updateStatus()
+      tui.success(
+        if on then "auto on: permission requests are rejected without asking"
+        else "auto off: permission requests are asked again"
+      )
+
   /** `/run`: the user runs Scala in the sandbox with the same API, givens and
     * permissions as the agent. It is shown as a code block like an agent tool
     * call, with the same keys (Ctrl-C interrupts, Ctrl-O expands). The code is

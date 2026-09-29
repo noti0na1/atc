@@ -47,6 +47,7 @@ final class ConfigCommands(app: App):
     val policy = app.config
     val settings = List(
       "safeMode" -> policy.safeMode.toString,
+      "auto" -> app.policy.auto.toString,
       "executionTimeoutMs" -> policy.executionTimeoutMs.fold("none")(_.toString),
       "maxToolCalls" -> policy.maxToolCalls.toString,
       "respectGitignore" -> policy.respectGitignore.toString,

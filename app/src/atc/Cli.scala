@@ -14,6 +14,7 @@ private[atc] object Cli:
     mode: Option[Mode] = None,
     prompt: Option[String] = None,
     approveAll: Boolean = false,
+    auto: Boolean = false,
     init: Boolean = false,
     initGlobal: Boolean = false,
     help: Boolean = false,
@@ -40,6 +41,7 @@ private[atc] object Cli:
     case ("-p" | "--prompt") :: value :: rest => parseRaw(rest, current.copy(prompt = Some(value)))
     case "--mode" :: value :: rest => parseRaw(rest, current.copy(mode = Some(Mode.parse(value))))
     case "--approve-all" :: rest => parseRaw(rest, current.copy(approveAll = true))
+    case "--auto" :: rest => parseRaw(rest, current.copy(auto = true))
     case "--init" :: rest => parseRaw(rest, current.copy(init = true))
     case "--init-global" :: rest => parseRaw(rest, current.copy(initGlobal = true))
     case ("-h" | "--help") :: rest => parseRaw(rest, current.copy(help = true))
@@ -66,6 +68,8 @@ private[atc] object Cli:
       if !Files.isDirectory(args.cwd) then
         throw IllegalArgumentException(s"Working directory is not a directory: ${args.cwd}")
     if args.prompt.exists(_.trim.isEmpty) then throw IllegalArgumentException("-p needs a request (try --help)")
+    if args.auto && args.approveAll then
+      throw IllegalArgumentException("--auto rejects every permission request and --approve-all approves it; pick one")
     if !args.help && !args.version && !args.init && !args.initGlobal then
       args.config.foreach: config =>
         if !Files.exists(config) then throw IllegalArgumentException(s"Config file does not exist: $config")

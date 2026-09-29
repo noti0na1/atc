@@ -250,6 +250,17 @@ class ConfinementSuite extends munit.FunSuite:
       assertEquals(env.requests.size, 1, "the answer holds for the rest of the command")
     finally proxy.close()
 
+  test("with auto on, the proxy refuses a host the policy does not allow without asking"):
+    val env = networkEnv(Nil)
+    env.policy.auto = true
+    val proxy = CommandProxy.tcp(env.policy, ScopeId.Base, "curl")
+    try
+      val refused = through(proxy, s"CONNECT 127.0.0.1:$webPort HTTP/1.1\r\n\r\n")
+      assert(refused.startsWith("HTTP/1.1 403"), refused)
+      assert(env.requests.isEmpty, "nobody was asked")
+      assertEquals(env.policy.rejected.map(_._2), List("hosts 127.0.0.1"))
+    finally proxy.close()
+
   test("a host approved once is reachable until the command ends"):
     val env = networkEnv(Nil)
     env.decisions = List(Decision.AllowOnce)
