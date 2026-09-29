@@ -14,10 +14,11 @@ import scala.util.control.NonFatal
 
 /** The agent's REPL in a separate evaluator process, started confined by the OS sandbox.
   * The compiler, the REPL and the agent's code run there and hold no keys; every effect
-  * comes back here as a call that [[HostDispatch]] checks against the policy. Stopping
-  * first raises the REPL's stop flag; an evaluation that does not stop within a grace
-  * period, or runs past its time limit, is ended with the process, and the next tool call
-  * starts a new one. */
+  * comes back here as a call that [[HostDispatch]] checks against the policy. The time
+  * limit is kept here, on the host's clock, which leaves out prompts, commands and model
+  * calls as for an in-process session. Stopping, at the limit or on an interrupt, raises
+  * the REPL's stop flag; an evaluation that does not stop within a grace period is ended
+  * with the process, and the next tool call starts a new one. */
 final class EvaluatorSession private (
   process: java.lang.Process,
   channel: Channel,
@@ -27,7 +28,10 @@ final class EvaluatorSession private (
 ) extends SandboxSession:
   /** Host-side pauses (prompts, commands, model calls), subtracted from the reported time. */
   val clock: ExecutionClock = ExecutionClock()
-  @volatile private var running: Option[Long] = None
+  /** The run in progress: its conversation, and whether it passed its time limit. */
+  private final class Run(val conversation: Long):
+    @volatile var timedOut = false
+  @volatile private var running: Option[Run] = None
   @volatile private var stopReason: Option[String] = None
 
   override def alive: Boolean = process.isAlive && !channel.isClosed
@@ -36,28 +40,38 @@ final class EvaluatorSession private (
     clock.reset()
     if !alive then ExecutionResult.failed(stopped("the evaluator process is not running"))
     else
-      running = Some(channel.conversation)
-      val watchdog =
-        config.executionTimeoutMs.map(limit => EvaluatorSession.daemon("atc-evaluator-watchdog")(() => watch(limit)))
+      val run = Run(channel.conversation)
+      running = Some(run)
+      val watchdog = config.executionTimeoutMs.map(limit =>
+        EvaluatorSession.daemon("atc-evaluator-watchdog")(() => watch(run, limit))
+      )
       try
         val d = channel.call("eval")(_.string(code))
-        ExecutionResult(d.bool(), d.string(), d.optionalString())
+        val result = ExecutionResult(d.bool(), d.string(), d.optionalString())
+        if run.timedOut then
+          result.copy(
+            success = false,
+            error = config.executionTimeoutMs.map(limit =>
+              s"Execution timed out after ${limit}ms (completed effects are not rolled back)"
+            )
+          )
+        else result
       catch
         case e: IOException => ExecutionResult.failed(stopped(e.getMessage.nn))
       finally
         running = None
         watchdog.foreach(_.interrupt())
 
-  /** End the process when the run exceeds its time limit, less host-side pauses, by more than
-    * the grace period: the REPL's own timeout did not stop it. */
-  private def watch(limitMs: Long): Unit =
+  /** Stop `run` once it exceeds its time limit, less host-side pauses. */
+  private def watch(run: Run, limitMs: Long): Unit =
     val start = System.nanoTime()
     try
-      while running.isDefined do
-        Thread.sleep(500)
+      while running.exists(_ eq run) && !run.timedOut do
+        Thread.sleep(200)
         val elapsedMs = (System.nanoTime() - start - clock.paused) / 1_000_000L
-        if running.isDefined && elapsedMs > limitMs + EvaluatorSession.GraceMs then
-          kill(s"the snippet ran past its ${limitMs} ms limit and did not stop")
+        if elapsedMs > limitMs && running.exists(_ eq run) then
+          run.timedOut = true
+          stop(run, s"the snippet ran past its ${limitMs} ms limit and did not stop")
     catch case _: InterruptedException => ()
 
   def printAgent(text: String): Unit =
@@ -65,15 +79,17 @@ final class EvaluatorSession private (
       try channel.call("print")(_.string(text))
       catch case NonFatal(_) => ()
 
-  def interrupt(): Unit =
-    for conversation <- running do
-      try channel.cancel(conversation)
-      catch case NonFatal(_) => ()
-      EvaluatorSession.daemon("atc-evaluator-stop"): () =>
-        try
-          Thread.sleep(EvaluatorSession.GraceMs)
-          if running.contains(conversation) then kill("the snippet did not stop when interrupted")
-        catch case _: InterruptedException => ()
+  def interrupt(): Unit = running.foreach(stop(_, "the snippet did not stop when interrupted"))
+
+  /** Ask the evaluator to stop `run`, and end the process if the run goes on for the grace period. */
+  private def stop(run: Run, reason: String): Unit =
+    try channel.cancel(run.conversation)
+    catch case NonFatal(_) => ()
+    EvaluatorSession.daemon("atc-evaluator-stop"): () =>
+      try
+        Thread.sleep(EvaluatorSession.GraceMs)
+        if running.exists(_ eq run) then kill(reason)
+      catch case _: InterruptedException => ()
 
   def close(): Unit =
     stopReason = stopReason.orElse(Some("the session was closed"))
@@ -138,7 +154,7 @@ object EvaluatorSession:
       channel.call("init"): e =>
         e.bool(
           config.safeMode
-        ).string(config.mode.toString).optionalLong(config.executionTimeoutMs).int(config.maxEchoChars)
+        ).string(config.mode.toString).int(config.maxEchoChars)
       session
     catch
       case NonFatal(e) =>

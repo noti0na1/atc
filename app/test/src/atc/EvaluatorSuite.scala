@@ -131,6 +131,54 @@ class EvaluatorSuite extends munit.FunSuite:
       assert(session.alive)
       assert(session.run("1 + 1").output.contains("2"))
 
+  test("an interrupt during a run with a time limit stops the command the host runs for it"):
+    val env = TestEnv(commands = List(ProcessFixture.pattern("sleep")), prefix = "atc-evaluator-stop-command")
+    def sleeping = ProcessHandle.current().nn.descendants().nn.iterator().nn.asScala
+      .exists(p =>
+        p.info().nn.arguments().nn.orElse(Array.empty[String]).nn.toList.takeRight(3) ==
+          List("atc.TestProcess", "sleep", "30000")
+      )
+    withSession(env): session =>
+      val stopper = Thread: () =>
+        val deadline = System.nanoTime() + 20_000_000_000L
+        while !sleeping && System.nanoTime() < deadline do Thread.sleep(100)
+        session.interrupt()
+      stopper.start()
+      val stopped = session.run(s"""exec(${ujson.write(ProcessFixture.command("sleep", "30000"))})""")
+      assert(!stopped.success, stopped.render)
+      val deadline = System.nanoTime() + 5_000_000_000L
+      while sleeping && System.nanoTime() < deadline do Thread.sleep(100)
+      assert(!sleeping, "the command outlived the interrupt")
+      assert(session.alive)
+
+  test("the time limit is the host's: a loop stops at it, inside a classified block too, and the session goes on"):
+    val env = TestEnv(prefix = "atc-evaluator-timeout")
+    withSession(env, timeout = Some(2000L)): session =>
+      assert(session.run("val kept = 41").success)
+      for code <- List("while true do ()", "classified { while true do (); 1 }") do
+        val stopped = session.run(code)
+        assert(!stopped.success && stopped.render.contains("timed out after 2000ms"), stopped.render)
+        assert(session.alive, s"the evaluator was ended for: $code")
+      assert(session.run("kept + 1").output.contains("42"), "the definitions are kept")
+
+  test("the stop of one run does not end the next"):
+    val env = TestEnv(commands = List(ProcessFixture.pattern("sleep")), prefix = "atc-evaluator-next-run")
+    withSession(env, timeout = None): session =>
+      val stopper = Thread(() => { Thread.sleep(1000); session.interrupt() })
+      stopper.start()
+      assert(!session.run("while true do ()").success)
+      // Runs past the grace period that began with the first run's stop.
+      val next = session.run(s"""exec(${ujson.write(ProcessFixture.command("sleep", "6000"))}).exitCode""")
+      assert(next.success && next.output.contains("0"), next.render)
+
+  test("a result too large for the channel is an error, and the session goes on"):
+    val env = TestEnv(prefix = "atc-evaluator-large")
+    Files.write(env.root.resolve("big.txt"), Array.fill[Byte](70 * 1024 * 1024)('a'.toByte))
+    withSession(env): session =>
+      val large = session.run("""read("big.txt").length""")
+      assert(!large.success && large.render.contains("more than the channel carries"), large.render)
+      assert(session.run("1 + 1").output.contains("2"))
+
   test("a run that ignores the stop is ended with its process"):
     val env = TestEnv(prefix = "atc-evaluator-kill")
     withSession(env, timeout = None): session =>

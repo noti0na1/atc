@@ -456,3 +456,26 @@ class PolicySuite extends munit.FunSuite:
     val refused = intercept[SecurityException](env.policy.requestFile(ScopeId.Base, outside, Access.Write, "w"))
     assert(refused.getMessage.nn.contains("isolate mode"), refused.getMessage)
     assert(env.requests.isEmpty, "nobody was asked")
+
+  test("in isolate mode a rule for a path in the project, or for all of it, holds in the copy too"):
+    val project = java.nio.file.Files.createTempDirectory("atc-rules-project").nn.toRealPath().nn
+    val copy = java.nio.file.Files.createTempDirectory("atc-rules-copy").nn.toRealPath().nn
+    val above = project.getParent.nn
+    val rules = FileRule.forCopy(
+      List(
+        FileRule(PathPattern(s"$above", project), Some(Access.Write), None),
+        FileRule(PathPattern(s"$project/secret", project), None, Some(true)),
+        FileRule(PathPattern(s"$project/keys/*.pem", project), Some(Access.None), None),
+        FileRule(PathPattern("*.log", project), Some(Access.Read), None),
+      ),
+      project,
+      copy
+    )
+    val p = Policy(rules, Nil, Nil, _ => Decision.Deny)
+    assert(
+      p.effective(ScopeId.Base, copy.resolve("src/a.scala").nn).canWrite,
+      "the grant above the project covers the copy"
+    )
+    assert(p.effective(ScopeId.Base, copy.resolve("secret").nn).classified)
+    assert(!p.effective(ScopeId.Base, copy.resolve("keys/a.pem").nn).canRead)
+    assertEquals(rules.count(_.pattern.toString == "*.log"), 1, "a name rule applies everywhere already")

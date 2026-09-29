@@ -18,23 +18,28 @@ object EvaluatorMain:
     val channel = Channel("evaluator", System.in.nn, channelOut, conversationTag = 1)
     val host = RemoteHost(channel)
     @volatile var session: ReplSession | Null = null
-    channel.onCancel = _ =>
+    @volatile var evaluating = -1L
+    // Only the host's cancellation of an evaluation stops the snippet; the channel has already
+    // interrupted the thread serving the cancelled conversation.
+    channel.onCancel = conversation =>
       val current = session
-      if current != null then current.interrupt()
+      if current != null && conversation == evaluating then current.interrupt()
     // The host is gone: nothing is left to serve.
     channel.onClose = () => Runtime.getRuntime.nn.halt(0)
     channel.handler = (method, payload) =>
       val d = Decoder(payload)
       method match
         case "init" =>
-          val config = SandboxConfig(d.bool(), Mode.valueOf(d.string()), d.optionalLong(), d.int())
+          // No time limit here: the host keeps it, and the snippet runs on this thread, which
+          // the host's cancellation of this conversation interrupts.
+          val config = SandboxConfig(d.bool(), Mode.valueOf(d.string()), None, d.int())
           val created = ReplSession(config, host)
           host.printStream = created.printStream
-          host.clock = created.clock
           created.init()
           session = created
           Array.emptyByteArray
         case "eval" =>
+          evaluating = channel.conversation
           val result = Option(session).getOrElse(throw IllegalStateException("no session")).run(d.string())
           Encoder().bool(result.success).string(result.output).optionalString(result.error).result
         case "callback" =>

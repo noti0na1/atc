@@ -52,6 +52,22 @@ final case class FileRule(
     val note = grantsWithin.map(root => s"from the project config, granting only inside ${PlatformPath.portable(root)}")
     s"$pattern: ${if parts.isEmpty then "(no constraint)" else parts.mkString(", ")}${note.fold("")(n => s" ($n)")}"
 
+object FileRule:
+  /** `rules` for a session in isolate mode's `copy` of `project`: a rule that names a path in
+    * the project, or covers all of it, names the copy's path the same way too, so that a
+    * global rule written for the project keeps its effect there (a classified file stays
+    * classified in the copy). */
+  def forCopy(rules: List[FileRule], project: Path, copy: Path): List[FileRule] =
+    def inCopy(path: Path) = PlatformPath.portable(copy.resolve(project.relativize(path)).nn)
+    rules.flatMap: rule =>
+      val moved = rule.pattern.form match
+        case PathPattern.Form.Component(_) => None
+        case PathPattern.Form.Exact(path) if path.startsWith(project) => Some(PathPattern(inCopy(path), copy))
+        case PathPattern.Form.Anchored(root, glob) if root.startsWith(project) =>
+          Some(PathPattern(s"${inCopy(root)}/$glob", copy))
+        case _ => Option.when(rule.pattern.matches(project))(PathPattern(".", copy))
+      rule :: moved.map(pattern => rule.copy(pattern = pattern)).toList
+
 /** A grant the user made for the session, as `/perms` lists it and `/perms revoke` removes it. */
 enum SessionGrant:
   case File(path: Path, access: Access)

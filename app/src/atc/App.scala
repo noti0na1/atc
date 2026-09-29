@@ -51,7 +51,9 @@ final class App(args: Cli.Args, val tui: Tui, resume: Option[SessionSnapshot] = 
   val policy: Policy =
     Policy(
       // The project an isolated session copied is out of reach, whatever the rules grant there.
-      configuration.fileRules(cwd) ++
+      isolatedRoots.fold(configuration.fileRules(cwd))((project, copy) =>
+        FileRule.forCopy(configuration.fileRules(cwd), project, copy)
+      ) ++
         isolatedFrom.map(from =>
           FileRule(PathPattern(".", App.projectOf(from)), Some(Access.None), None, locked = true)
         ),

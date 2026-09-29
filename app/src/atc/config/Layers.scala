@@ -227,11 +227,14 @@ object Configuration:
       denyHosts = (base.denyHosts ++ n.denyHosts).distinct,
     )
 
-  /** The stricter of two sandbox modes (`readonly` < `local` < `full`); an unset
-    * mode means the most permissive one. Both are already validated per layer. */
+  /** The stricter of two sandbox modes, `readonly` < `isolate` < `local` < `full`: isolate
+    * writes a copy and runs any confined command there, which read-only mode does not, and
+    * leaves the project untouched, which local mode does not. An unset mode means the most
+    * permissive one. Both are already validated per layer. */
   private def stricterMode(a: Option[String], b: Option[String]): Option[String] =
     def parsed(o: Option[String]) = o.map(Mode.parse).getOrElse(Mode.Full)
-    Some(Mode.fromOrdinal(parsed(a).ordinal.min(parsed(b).ordinal)).label)
+    val order = List(Mode.ReadOnly, Mode.Isolate, Mode.Local, Mode.Full)
+    Some(List(parsed(a), parsed(b)).minBy(order.indexOf).label)
 
   /** The stricter of two `osSandbox` values: off < auto < required. An unknown
     * value is left for validation to report. */

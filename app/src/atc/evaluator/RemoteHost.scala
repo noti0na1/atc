@@ -2,7 +2,6 @@ package atc.evaluator
 
 import atc.host.ClassifiedImpl
 import atc.lib.*
-import atc.sandbox.ExecutionClock
 
 import java.io.PrintStream
 import java.util.concurrent.atomic.AtomicLong
@@ -45,29 +44,20 @@ private[evaluator] final class RemoteProcess(val id: Int, val commandLine: Strin
   def read(): String = call("read").string()
   def readErr(): String = call("readErr").string()
   def readUntil(regex: String, timeoutMs: Long): String =
-    host.paused(call("readUntil")(_.string(regex).long(timeoutMs)).string())
+    call("readUntil")(_.string(regex).long(timeoutMs)).string()
   def waitFor(timeoutMs: Long): Option[ProcessResult] =
-    val d = host.paused(call("waitFor")(_.long(timeoutMs)))
+    val d = call("waitFor")(_.long(timeoutMs))
     Option.when(d.bool())(ProcessResult(d.int(), d.string(), d.string()))
   def kill(): Unit = call("kill")
 
 private[evaluator] final class RemoteHost(val channel: Channel) extends Interface, Derivations:
-  /** The session's capture stream (what the model sees), and its clock; set once the session exists. */
+  /** The session's capture stream (what the model sees); set once the session exists. */
   @volatile var printStream: PrintStream = System.err
-  @volatile var clock: ExecutionClock | Null = null
 
   private val callbacks = ConcurrentHashMap[java.lang.Long, Long => Unit]()
   private val callbackIds = AtomicLong()
 
   private def call(method: String)(args: Encoder => Unit): Decoder = channel.call(method)(args)
-
-  /** Keep a call that waits for the user, a command or a model out of the snippet's time,
-    * as the host does for an in-process session. */
-  def paused[T](body: => T): T =
-    val c = clock
-    if c != null then c.pause()
-    try body
-    finally if c != null then c.resume()
 
   private def scopeOf(capability: AnyRef): Long = capability match
     case fs: RemoteFileSystem => fs.scope
@@ -112,7 +102,7 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
             failure = t // the original, fatal ones included, stays here
             throw CallbackFailed()
     )
-    try paused(call(method) { e => args(e); e.long(id) })
+    try call(method) { e => args(e); e.long(id) }
     catch case NonFatal(_) if failure != null => throw failure.nn
     finally callbacks.remove(id)
     if failure != null then throw failure.nn
@@ -209,9 +199,9 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   def execOutput(command: String, args: Seq[String])(using Exec, FileSystem): String =
     execOutput(command, args, ExecOptions())
   def execOutput(command: String, args: Seq[String], options: ExecOptions)(using ex: Exec, fs: FileSystem): String =
-    paused(call("execOutput") { e =>
+    call("execOutput") { e =>
       encodeExec(e, ex).long(scopeOf(fs)).string(command).strings(args); encodeOptions(e, options)
-    })
+    }
       .string()
   def execReadOnly(command: String)(using Exec, FileSystem): ProcessResult = execReadOnly(command, Nil, ExecOptions())
   def execReadOnly(command: String, args: Seq[String])(using Exec, FileSystem): ProcessResult =
@@ -229,10 +219,10 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     ex: Exec,
     fs: FileSystem
   ) =
-    decodeResult(paused(call(method) { e =>
+    decodeResult(call(method) { e =>
       encodeExec(e, ex).long(scopeOf(fs)).string(line).strings(args)
       encodeOptions(e, options)
-    }))
+    })
   def spawn(command: String)(using ex: Exec, fs: FileSystem): Process = spawn(command, ExecOptions())
   def spawn(command: String, options: ExecOptions)(using ex: Exec, fs: FileSystem): Process =
     val d = call("spawn") { e => encodeExec(e, ex).long(scopeOf(fs)).string(command); encodeOptions(e, options) }
@@ -264,10 +254,10 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
     headers: Map[String, String],
     net: Network,
   ): Decoder =
-    paused(call("http") { e =>
+    call("http") { e =>
       e.long(scopeOf(net)).string(form).string(method).string(url).optionalString(body).optionalString(contentType)
       e.stringMap(headers)
-    })
+    }
   def httpGet(url: String)(using net: Network): String = http("get", "GET", url, None, None, Map(), net).string()
   def httpGet(url: String, headers: Map[String, String])(using net: Network): String =
     http("get", "GET", url, None, None, headers, net).string()
@@ -338,7 +328,7 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   def ask(question: String)(using UserIO): Option[String] = ask(question, Nil, false)
   def ask(question: String, options: List[String])(using UserIO): Option[String] = ask(question, options, false)
   def ask(question: String, options: List[String], multiple: Boolean)(using UserIO): Option[String] =
-    paused(call("ask")(_.string(question).strings(options).bool(multiple))).optionalString()
+    call("ask")(_.string(question).strings(options).bool(multiple)).optionalString()
   def setTodos(items: List[Todo])(using UserIO): Unit =
     call("setTodos") { e => e.int(items.size); items.foreach(t => e.string(t.text).int(t.status.ordinal)) }
   def todos(using UserIO): List[Todo] =
@@ -369,8 +359,8 @@ private[evaluator] final class RemoteHost(val channel: Channel) extends Interfac
   extension [T](c: Classified[T]) def reveal(using Sealed): T = RemoteClassified.unwrap(c).get
 
   // ── models: the clients and their keys stay in the host ──
-  def chat(message: String)(using UserIO): String = paused(call("chat")(_.string(message))).string()
-  def classifiedChat(message: String): String = paused(call("classifiedChat")(_.string(message))).string()
+  def chat(message: String)(using UserIO): String = call("chat")(_.string(message)).string()
+  def classifiedChat(message: String): String = call("classifiedChat")(_.string(message)).string()
 
 private[evaluator] object RemoteHost:
   val MaxParallel: Int = 8

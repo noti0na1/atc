@@ -800,8 +800,13 @@ a greeting that marks where frames begin. A conversation is one logical call sta
 both processes: the host thread blocked in `eval` serves the evaluator's calls of that
 evaluation, and an evaluator thread blocked in a host call serves the host's callbacks, so a
 `requestFiles` block runs on the thread that interruption and the REPL's stop flag reach.
-Each thread of a `parallel` call is its own conversation. Frames are capped at 64 MiB and
-any malformed frame closes the channel. Host code that prints for the model (`cat`) reaches
+Each thread of a `parallel` call is its own conversation. A thread that stops waiting for a
+reply cancels its conversation, and a cancellation interrupts the thread serving a call of
+it on the other side, so an interrupted `parallel` task stops the host's work for it too.
+Frames are capped at 64 MiB: a larger message fails at its sender and a larger result
+becomes an error, while a malformed frame closes the channel. The host serves at most 64
+calls at once and refuses a call on a conversation of its own that nobody waits in any
+more. Host code that prints for the model (`cat`) reaches
 the evaluator's capture through `printAgent`, in order with the snippet's output; the
 evaluator's own prints come back to the host only to be shown (`HostOutput.show`).
 
@@ -813,13 +818,14 @@ closures run there, and their content crosses only at sinks and as classified re
 compromised evaluator sees every classified value the agent touched, so classified
 confidentiality still rests on the compiler.
 
-The evaluator's `ReplSession` enforces the execution timeout as in-process, pausing its
-clock around calls that wait for the user, a command or a model. Interruption sends a
-cancellation, which raises the stop flag and interrupts the host thread serving the
-evaluation; the host's `clock` subtracts its own pauses from the reported time. A run that
-does not stop within five seconds of an interruption, or that exceeds its limit plus five
-seconds, is ended together with its process; the result says the REPL's definitions are
-gone, and the next tool call starts a new evaluator. `EvaluatorSuite` runs sessions against
+The host keeps the execution timeout, on its own `clock`, which pauses for prompts, commands
+and model calls exactly as for an in-process session; the evaluator's `ReplSession` runs
+without one, on the thread that serves `eval`. At the limit, or on an interruption, the host
+cancels the evaluation: the evaluator raises the stop flag, and the thread serving the
+evaluation is interrupted on both sides, so a command the host runs for it stops too. A
+result after the limit says the run timed out. A run that does not stop within five seconds
+is ended together with its process; the result says the REPL's definitions are gone, and the
+next tool call starts a new evaluator. `EvaluatorSuite` runs sessions against
 a test host and checks the evaluator's own confinement; it is skipped on Windows, where ATC
 does not start an evaluator.
 
@@ -925,7 +931,10 @@ submodules, which `/apply` says.
 
 The copy session's policy adds a locked no-access rule for the original project, so neither
 the file API nor a command reaches it, whatever a global rule grants there; the rule becomes
-a hidden path in the OS sandbox plan. `Policy.copyRoot` sets the copy's bounds: every path
+a hidden path in the OS sandbox plan. A global or `-c` rule that names a path in the
+project, or covers all of it, names the copy's path the same way too (`FileRule.forCopy`), so
+a classified file stays classified in the copy and a grant above the project covers the copy;
+the project's own rules come from the copy's config. `Policy.copyRoot` sets the copy's bounds: every path
 outside it is read-only at most, whatever a rule or grant says, and a write request for one
 is refused without asking, so the copy is the only writable root; inside it, every path the
 rules let the agent read is writable, `.git` included, while locked, hidden and classified
@@ -982,8 +991,11 @@ the offered starter config) are trusted as they are written, and a `/model`, `/e
 `/classifiedmodel` save keeps a trusted project trusted. Other edits, such as a new
 `model`, do not change the fingerprint.
 
-Only explicitly defined project settings narrow a value. `executionTimeoutMs` defaults to
-300000; a JSON `null` clears it and means no limit.
+Only explicitly defined project settings narrow a value. A later `mode` narrows in the order
+`readonly`, `isolate`, `local`, `full`: isolate writes a copy and runs any confined command
+there, so it is less strict than read-only, and leaves the project untouched, so it is
+stricter than local. `executionTimeoutMs` defaults to 300000; a JSON `null` clears it and
+means no limit.
 `Configuration.rules` is the complete rule list; do not build policy from `settings.files`,
 which contains only granting-layer entries. Configuration validation checks modes, limits,
 patterns, model references and provider settings before execution.

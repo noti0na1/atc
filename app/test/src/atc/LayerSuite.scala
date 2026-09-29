@@ -715,7 +715,10 @@ class LayerSuite extends munit.FunSuite:
     assert(auto("""{ "auto": true }""", """{ "auto": false }"""), "a project may not switch it off")
     assert(auto(GrantCwd, """{ "auto": true }"""), "a project may switch it on")
 
-  test("isolate is the strictest mode a project layer can choose"):
+  test("a project layer narrows the mode: read-only, then isolate, then local, then full"):
     def mode(global: String, project: String = "") = World(global = global, project = project).settings.mode
     assertEquals(mode("""{ "mode": "full" }""", """{ "mode": "isolate" }"""), Some("isolate"))
-    assertEquals(mode("""{ "mode": "isolate" }""", """{ "mode": "readonly" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "local" }""", """{ "mode": "isolate" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "isolate" }""", """{ "mode": "local" }"""), Some("isolate"))
+    assertEquals(mode("""{ "mode": "isolate" }""", """{ "mode": "readonly" }"""), Some("read-only"))
+    assertEquals(mode("""{ "mode": "readonly" }""", """{ "mode": "isolate" }"""), Some("read-only"))
